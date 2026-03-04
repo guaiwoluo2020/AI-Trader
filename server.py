@@ -28,16 +28,23 @@ class TradingServer:
         
         print("[信息] 交易服务已初始化")
 
-    def add_trade_instruction(self, instructions: List[TradeInstruction]) -> int:
+    def add_trade_instruction(self, instructions: List[TradeInstruction]) -> dict:
         """
         添加交易指令
-        返回添加的指令数量
+        返回一个字典，包含添加和拒绝的数量。
+
         在此处对缺失的 sl/tp 值进行补全：
           - sl 若未设置保持0.0
           - tp 若未设置则默认 0.005
+
+        同时按照规则进行价格检查：
+          * 买入指令: price 需大于 sl 且小于 tp
+          * 卖出指令: price 需小于 sl 且大于 tp
+        若 sl 或 tp 未设置（<=0），则忽略检查。
         """
         with self.lock:
-            count = 0
+            added = 0
+            rejected = 0
             for instruction in instructions:
                 # 填充默认值
                 if instruction.sl is None:
@@ -45,15 +52,29 @@ class TradingServer:
                 if instruction.tp is None or instruction.tp <= 0.0:
                     instruction.tp = 0.005
 
+                # 验证价格与 SL/TP 关系
+                if instruction.sl > 0 and instruction.tp > 0:
+                    if instruction.action.lower() == 'b':
+                        if not (instruction.price > instruction.sl and instruction.price < instruction.tp):
+                            print(f"[警告] 忽略无效买入指令: {instruction}")
+                            rejected += 1
+                            continue
+                    elif instruction.action.lower() == 's':
+                        if not (instruction.price < instruction.sl and instruction.price > instruction.tp):
+                            print(f"[警告] 忽略无效卖出指令: {instruction}")
+                            rejected += 1
+                            continue
+
                 symbol = instruction.symbol.upper()
                 self.trade_instructions[symbol].append(instruction)
-                count += 1
-            
-            print(f"[信息] 已添加 {count} 条交易指令")
+                added += 1
+
+            print(f"[信息] 已添加 {added} 条交易指令, 拒绝 {rejected} 条")
             for symbol, trades in self.trade_instructions.items():
                 print(f"       {symbol}: {len(trades)} 条待执行")
-            
-            return count
+
+            return {"added": added, "rejected": rejected}
+
 
     def get_trades_by_symbol(self, symbol: str, price: Optional[float] = None) -> List[Dict]:
         """

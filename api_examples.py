@@ -39,6 +39,35 @@ def example_1_basic_trade():
     return result
 
 
+def example_2a_invalid_order():
+    """示例 2a: 包含无效指令的下单示例"""
+    print("\n" + "="*60)
+    print("示例 2a: 发送包含错误价格的订单")
+    print("="*60)
+
+    url = "http://localhost:8000/send_trade_instructions"
+
+    trades = [
+        {
+            "symbol": "eurusd",
+            "action": "b",
+            "mount": 0.01,
+            # 指令价格低于止损，应该被拒绝
+            "price": 1.0000,
+            "sl": 1.0050,
+            "tp": 1.0100
+        }
+    ]
+
+    response = requests.post(url, json=trades)
+    result = response.json()
+
+    print(f"请求: {json.dumps(trades, ensure_ascii=False)}")
+    print(f"响应: {json.dumps(result, indent=2, ensure_ascii=False)}")
+
+    return result
+
+
 # ==================== 示例 2: 批量下单 ====================
 
 def example_2_batch_orders():
@@ -142,7 +171,7 @@ def example_4_query_statistics():
         if positions:
             print(f"  持仓数: {len(positions)}")
             for pos in positions:
-                print(f"    - 票证: {pos.get('ticket')}, 浮盈: ${pos.get('profit'):.2f}}")
+                print(f"    - 票证: {pos.get('ticket')}, 浮盈: ${pos.get('profit'):.2f}")
         
         trades = stat.get('trades', [])
         if trades:
@@ -391,6 +420,7 @@ def main():
     examples = [
         ("基础交易", example_1_basic_trade),
         ("批量下单", example_2_batch_orders),
+        ("错误指令示例", example_2a_invalid_order),
         ("查询指令", example_3_query_pending),
         ("查询统计", example_4_query_statistics),
         ("清空指令", example_5_clear_orders),

@@ -91,6 +91,11 @@ stats = client.get_statistics(count=5)
 ### 方式 C: HTTP请求
 
 > **说明**: 对于 `POST /send_trade_instructions` 接口，若指令中未提供 `tp` 或 `tp<=0`，服务端会自动设置为 `0.005`；`sl`缺失则保留为`0.0`。
+> 
+> **价格验证规则**:
+> - 买入指令必须满足 `sl < price < tp`。
+> - 卖出指令必须满足 `tp < price < sl`。
+> 若同时指定了 sl 与 tp 但不满足条件，该条指令会被拒绝。
 
 ```bash
 # 发送买入订单

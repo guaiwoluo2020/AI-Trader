@@ -58,10 +58,15 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
         }
         ```
         """
-        count = server.add_trade_instruction(instructions)
+        result = server.add_trade_instruction(instructions)
+        added = result.get("added", 0)
+        rejected = result.get("rejected", 0)
+        msg = f"已添加 {added} 条交易指令"
+        if rejected > 0:
+            msg += f"，{rejected} 条因价格不合法被拒绝"
         return {
             "status": "ok",
-            "message": f"已添加 {count} 条交易指令"
+            "message": msg
         }
     
     @router.get("/query_pending_trades")

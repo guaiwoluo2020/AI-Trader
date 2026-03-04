@@ -179,6 +179,11 @@ python test_trading_service.py
 ]
 ```
 
+**新规则**：若同时指定 `sl` 和 `tp`，
+- 买入指令要求 `sl < price < tp`；
+- 卖出指令要求 `tp < price < sl`。
+不满足规则的指令将被服务器拒绝并忽略。
+
 **响应**:
 ```json
 {

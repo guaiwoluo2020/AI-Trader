@@ -85,13 +85,30 @@ class TradingServiceTester:
         print(f"指令内容: {json.dumps(instructions, indent=2, ensure_ascii=False)}")
         
         try:
+            # 首先发送几条合法指令
             response = self.session.post(
                 f"{self.base_url}/send_trade_instructions",
                 json=instructions
             )
             print(f"状态码: {response.status_code}")
             print(f"响应: {json.dumps(response.json(), indent=2, ensure_ascii=False)}")
-            return response.status_code == 200
+            if response.status_code != 200:
+                return False
+            # 再发送一条无效指令，以验证检查逻辑
+            bad = [{
+                "symbol": "eurusd",
+                "action": "b",
+                "mount": 0.01,
+                "price": 1.0000,
+                "sl": 1.0050,   # 价格低于SL
+                "tp": 1.0100
+            }]
+            bad_resp = self.session.post(
+                f"{self.base_url}/send_trade_instructions",
+                json=bad
+            )
+            print("发送无效指令后响应:", bad_resp.status_code, bad_resp.json())
+            return bad_resp.status_code == 200 and "拒绝" in bad_resp.json().get("message", "")
         except Exception as e:
             print(f"错误: {str(e)}")
             return False
