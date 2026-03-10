@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Backups
+*.backup
+
+# IDE
+.claude/
+
+# Node.js
+node_modules/

@@ -5,19 +5,67 @@
 这是一个为MT5 EA提供支持的高性能交易服务，采用FastAPI框架，支持以下功能：
 
 ### 核心功能
-1. **EA接口** - MT5 EA与服务通信
-   - `GET /get_trades` - EA获取待执行的交易指令（按SYMBOL分类）
-   - `POST /send_statistics` - EA发送每分钟的统计数据
 
-2. **交易员接口** - 交易员下发指令和查询数据
-   - `POST /send_trade_instructions` - 下发交易指令
-   - `GET /query_pending_trades` - 查询所有待执行指令
-   - `DELETE /clear_trades` - 清空交易指令
-   - `GET /query_statistics` - 查询统计数据（保留最新10条）
+#### 1. EA接口 - MT5 EA与服务通信
+- `GET /get_trades` - EA获取待执行的交易指令（按SYMBOL分类）
+- `POST /send_statistics` - EA发送每分钟的统计数据
+- `POST /ea/kline/{period}` - EA推送K线数据 (H4/H1/M15/M5/M1)
+- `POST /ea/kline_batch` - EA批量推送多个周期的K线数据
 
-3. **系统接口** - 服务监控和健康检查
-   - `GET /health` - 健康检查
-   - `GET /status` - 服务状态
+#### 2. 行情分析接口
+- `GET /market/kline/{symbol}` - 查询K线数据
+- `GET /market/pivots/{symbol}` - 查询转折点数据
+- `GET /market/status` - 获取行情存储状态
+- `GET /market/thresholds` - 获取各周期接近阈值
+- `WebSocket /ws/market` - 实时转折点提醒推送
+
+#### 3. 交易员接口 - 交易员下发指令和查询数据
+- `POST /send_trade_instructions` - 下发交易指令
+- `GET /query_pending_trades` - 查询所有待执行指令
+- `DELETE /clear_trades` - 清空交易指令
+- `GET /query_statistics` - 查询统计数据（保留最新10条）
+
+#### 4. 系统接口 - 服务监控和健康检查
+- `GET /health` - 健康检查
+- `GET /status` - 服务状态
+
+## 新增功能：转折点检测与提醒
+
+### K线数据接收
+
+EA启动后会推送各周期K线数据：
+
+| 周期 | 历史数据要求 |
+|------|-------------|
+| H4 (4小时) | 最近6个月 |
+| H1 (1小时) | 最近1个月 |
+| M15 (15分钟) | 最近3天 |
+| M5 (5分钟) | 最近24小时 |
+| M1 (1分钟) | 最近1小时 |
+
+### 转折点检测
+
+服务自动检测K线的转折点（高点/低点）：
+- 使用分型识别算法（顶分型/底分型）
+- 默认左右各3根K线确认转折
+
+### 接近阈值
+
+各周期距离转折点的提醒阈值：
+
+| 周期 | 阈值 | 说明 |
+|------|------|------|
+| H4 | 千分之6 | 如GOLD高点5000，当前4980提醒 |
+| H1 | 千分之3 | 如GOLD高点5000，当前4985提醒 |
+| M15 | 千分之1.5 | - |
+| M5 | 千分之0.5 | - |
+| M1 | 千分之0.2 | - |
+
+### 实时提醒
+
+EA调用 `/get_trades` 时携带价格参数，服务自动检查是否接近转折点，返回提醒信息。
+
+同时支持WebSocket推送实时提醒到前端页面。
 
 ## 安装和运行
 

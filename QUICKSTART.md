@@ -43,7 +43,36 @@ curl http://localhost:5858/status
 ### 方式 C: 访问API文档
 打开浏览器访问: [http://localhost:5858/docs](http://localhost:5858/docs)
 
-## 4. 使用交易工具
+## 4. 启动前端界面 (Vue)
+
+### 方式 A: 使用启动脚本 (推荐)
+```bash
+cd frontend
+./start_vue.sh
+```
+
+### 方式 B: 手动启动
+```bash
+cd frontend
+npm install  # 首次运行需要
+npm run dev
+```
+
+### 方式 C: 直接运行
+```bash
+cd frontend
+npx vite --host 0.0.0.0 --port 3001
+```
+
+**前端访问地址**: http://localhost:3001
+
+### 前端功能
+- 📊 **仪表板**: 实时服务状态和关键指标
+- 📋 **交易指令**: 发送和管理交易指令 (带智能价格验证)
+- 📈 **统计数据**: 数据可视化和历史分析
+- ❤️ **服务状态**: 实时监控和健康检查
+
+## 5. 使用交易工具
 
 ### 方式 A: 交互式命令行工具
 ```bash
@@ -118,7 +147,7 @@ curl "http://localhost:5858/query_pending_trades"
 curl "http://localhost:5858/query_statistics?count=5"
 ```
 
-## 5. MT5 EA集成
+## 6. MT5 EA集成
 
 MT5 EA已经配置好，只需确保：
 
@@ -137,7 +166,7 @@ MT5 EA已经配置好，只需确保：
    EA每分钟→ 统计数据 → Python服务 → 交易员查询统计
    ```
 
-## 6. 常见操作
+## 7. 常见操作
 
 ### 发送一个黄金买入单
 
@@ -289,14 +318,99 @@ while True:
     time.sleep(1)
 ```
 
-## 10. 下一步
+## 11. Vue 前端详细说明
+
+### 🎯 技术栈
+- **Vue 3** + Composition API
+- **Vuetify 3** (Material Design)
+- **Vue Router 4**
+- **Axios** (HTTP 客户端)
+- **ECharts** (数据可视化)
+- **Vite** (构建工具)
+
+### 🌟 前端特性
+- ✅ **现代化UI**: Material Design 设计规范
+- ✅ **响应式布局**: 支持桌面和移动设备
+- ✅ **实时更新**: 自动刷新数据和状态
+- ✅ **智能验证**: 交易指令价格自动验证
+- ✅ **数据可视化**: ECharts 图表展示
+- ✅ **中文界面**: 完全本地化
+
+### 🎨 界面功能
+
+#### 仪表板 (Dashboard)
+- 📊 服务状态指示器
+- 📈 关键指标卡片 (待执行指令、统计记录、活跃品种)
+- 🔄 自动数据刷新 (30秒间隔)
+
+#### 交易指令 (Trade Orders)
+- ➕ 交易指令表单 (品种、方向、手数、价格、止损/止盈)
+- ✅ **智能价格验证**:
+  - 买入: `止损 < 执行价格 < 止盈`
+  - 卖出: `止盈 < 执行价格 < 止损`
+- 📋 待执行指令表格
+- 🗑️ 一键清空所有指令
+
+#### 统计数据 (Statistics)
+- 📊 历史数据表格 (时间、品种、价格、类型)
+- 📈 价格趋势线图 (ECharts)
+- 📋 汇总统计 (总记录数、平均价格、最高/最低价)
+
+#### 服务状态 (Status)
+- ❤️ 健康检查状态
+- 📊 系统指标 (运行时间、内存使用等)
+- 🔄 连接状态监控 (后端、MT5)
+- ⏰ 实时更新 (5秒间隔)
+
+### 🚀 快速体验
+
+```bash
+# 启动完整系统
+# 终端1: 启动后端
+python main.py
+
+# 终端2: 启动前端
+cd frontend && ./start_vue.sh
+
+# 访问前端: http://localhost:3001
+```
+
+### 🔧 开发和部署
+
+#### 开发环境
+```bash
+cd frontend
+npm install
+npm run dev  # 开发服务器
+```
+
+#### 生产构建
+```bash
+cd frontend
+npm run build   # 构建生产版本
+npm run preview # 预览构建结果
+```
+
+#### 项目结构
+```
+frontend/
+├── src/
+│   ├── views/          # 页面组件
+│   ├── api/            # API 接口
+│   ├── router/         # 路由配置
+│   └── plugins/        # Vuetify 配置
+├── public/             # 静态资源
+└── README.md           # 详细文档
+```
+
+## 12. 下一步
 
 - 详细API文档: [README.md](README.md)
 - 自动化测试: `python test_trading_service.py`
 - API交互式文档: http://localhost:5858/docs
 - 性能监控: `curl http://localhost:5858/status`
 
-## 11. 后续优化
+## 13. 后续优化
 
 虽然当前HTTP性能足够，但可考虑：
 
@@ -315,6 +429,17 @@ while True:
 
 ## 需要帮助？
 
-查看完整文档: [README.md](README.md)
+查看完整文档:
+- [主项目文档](README.md)
+- [Vue 前端文档](frontend/README.md)
+- API交互式文档: http://localhost:8000/docs
+- 前端界面: http://localhost:3001
 
-祝您交易愉快！🚀
+## 🎉 祝您使用愉快！
+
+现在您拥有了完整的量化交易系统：
+- ⚡ 高性能 Python 后端
+- 🎨 现代化 Vue 前端界面
+- 🤖 智能 MT5 EA 集成
+
+**开始您的量化交易之旅吧！** 🚀

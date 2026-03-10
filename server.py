@@ -9,24 +9,71 @@ from typing import List, Dict, Optional
 import threading
 
 from models import TradeInstruction
+from market.store import MarketStore, normalize_symbol
+from market.pivot_detector import PivotDetector
+from market.monitor import PivotMonitor
+from market.trend_analyzer import TrendAnalyzer
+from market.pending_orders import PendingOrderManager
 
 
 class TradingServer:
     """交易服务主类"""
-    
+
     def __init__(self):
         # 交易指令队列 - 按SYMBOL分类
         # 结构: {"SYMBOL1": [TradeInstruction1, ...], "SYMBOL2": [...]}
         self.trade_instructions = defaultdict(list)
-        
+
+        # 平仓指令队列 - 按SYMBOL分类
+        # 结构: {"SYMBOL1": [ticket1, ticket2, ...], ...}
+        self.close_position_instructions = defaultdict(list)
+
         # 统计数据历史 - 保留最新10条
         # 结构: deque([{stat_data1}, {stat_data2}, ...], maxlen=10)
         self.statistics_history = deque(maxlen=10)
-        
+
         # 线程锁 - 确保线程安全
         self.lock = threading.RLock()
-        
+
+        # ==================== 行情模块 ====================
+        # K线存储
+        self.market_store = MarketStore()
+        # 转折点检测器
+        self.pivot_detector = PivotDetector()
+        # 待确认订单管理器（需要在 PivotMonitor 之前初始化）
+        self.pending_orders = PendingOrderManager()
+        # 设置订单确认回调
+        self.pending_orders.set_confirm_callback(self._on_order_confirmed)
+        # 转折点监控器
+        self.pivot_monitor = PivotMonitor(self.market_store, self.pivot_detector, self.pending_orders)
+        # 趋势分析器
+        self.trend_analyzer = TrendAnalyzer()
+
         print("[信息] 交易服务已初始化")
+
+    def _on_order_confirmed(self, order: Dict):
+        """
+        订单确认回调 - 将确认的订单加入交易队列
+        """
+        print(f"[TradingServer] _on_order_confirmed 被调用，订单: {order}")
+        try:
+            # 创建交易指令
+            instruction = TradeInstruction(
+                symbol=order.get('symbol', ''),
+                action=order.get('action', 'b'),
+                mount=order.get('mount', 0.01),
+                price=order.get('price', 0),
+                sl=order.get('sl', 0),
+                tp=order.get('tp', 0)
+            )
+            print(f"[TradingServer] 创建交易指令: symbol={instruction.symbol}, action={instruction.action}, mount={instruction.mount}, price={instruction.price}, sl={instruction.sl}, tp={instruction.tp}")
+            # 添加到交易队列
+            result = self.add_trade_instruction([instruction])
+            print(f"[TradingServer] 订单已加入交易队列: {result}")
+        except Exception as e:
+            print(f"[TradingServer] 加入交易队列失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     def add_trade_instruction(self, instructions: List[TradeInstruction]) -> dict:
         """
@@ -76,59 +123,46 @@ class TradingServer:
             return {"added": added, "rejected": rejected}
 
 
-    def get_trades_by_symbol(self, symbol: str, price: Optional[float] = None) -> List[Dict]:
+    def get_trades_by_symbol(self, symbol: str, price: Optional[float] = None) -> Dict:
         """
         获取指定SYMBOL的交易指令并删除
-        根据价格条件过滤指令：
-          - 买入指令（action='b'）：如果指令价格 > 当前价格，缓存（等待价格下跌到指令价格）
-          - 卖出指令（action='s'）：如果指令价格 < 当前价格，缓存（等待价格上涨到指令价格）
-        返回指令列表（JSON格式）
+
+        同时检查价格是否接近转折点，如果有则添加到返回结果中
+
+        返回: {"trades": [...], "pivot_alerts": [...]}
         """
+        # 先检查转折点
+        pivot_alerts = []
+        if price is not None:
+            # 统一转换为大写进行检测
+            symbol_upper = symbol.upper()
+            pivot_alerts = self.pivot_monitor.check_and_alert(symbol_upper, price)
+            if pivot_alerts:
+                print(f"[信息] {symbol_upper} 当前价格 {price} 接近转折点")
+
         with self.lock:
             symbol = symbol.upper()
             if symbol not in self.trade_instructions or len(self.trade_instructions[symbol]) == 0:
-                return []
-            
-            # 获取所有指令
+                return {"trades": [], "pivot_alerts": pivot_alerts}
+
+            # 获取所有指令并直接返回（不再进行价格过滤）
             trades = self.trade_instructions[symbol]
-            result = []
-            cached_trades = []
-            
-            for t in trades:
-                should_send = True
-                
-                # 如果提供了价格，进行条件检查
-                if price is not None:
-                    if t.action.lower() == 'b':
-                        # 买入指令：如果指令价格 > 当前价格，则缓存
-                        if t.price > price:
-                            should_send = False
-                            cached_trades.append(t)
-                    elif t.action.lower() == 's':
-                        # 卖出指令：如果指令价格 < 当前价格，则缓存
-                        if t.price < price:
-                            should_send = False
-                            cached_trades.append(t)
-                
-                if should_send:
-                    result.append({
-                        "symbol": t.symbol.lower(),
-                        "action": t.action.lower(),
-                        "mount": t.mount,
-                        "price": t.price,
-                        "sl": t.sl,
-                        "tp": t.tp
-                    })
-            
-            # 更新指令队列：移除已发送的，保留已缓存的
-            self.trade_instructions[symbol] = cached_trades
-            
+            result = [{
+                "symbol": t.symbol,
+                "action": t.action.lower(),
+                "mount": t.mount,
+                "price": t.price,
+                "sl": t.sl,
+                "tp": t.tp
+            } for t in trades]
+
+            # 清空指令队列
+            self.trade_instructions[symbol] = []
+
             if len(result) > 0:
-                print(f"[信息] 推送了 {len(result)} 条 {symbol} 指令给EA (当前价格: {price})")
-            if len(cached_trades) > 0:
-                print(f"[信息] 缓存了 {len(cached_trades)} 条 {symbol} 指令，等待价格条件满足")
-            
-            return result
+                print(f"[信息] 推送了 {len(result)} 条 {symbol} 指令给EA")
+
+            return {"trades": result, "pivot_alerts": pivot_alerts}
 
     def save_statistics(self, stat_data: dict) -> None:
         """
@@ -157,7 +191,7 @@ class TradingServer:
             for symbol, trades in self.trade_instructions.items():
                 result[symbol] = [
                     {
-                        "symbol": t.symbol.lower(),
+                        "symbol": t.symbol,
                         "action": t.action.lower(),
                         "mount": t.mount,
                         "price": t.price,
@@ -187,3 +221,24 @@ class TradingServer:
                     del self.trade_instructions[symbol]
                 print(f"[信息] 已清空 {symbol} 的交易指令，共 {count} 条")
                 return count
+
+    def add_close_position_instruction(self, symbol: str, ticket: int) -> None:
+        """
+        添加平仓指令
+        """
+        with self.lock:
+            symbol = symbol.upper()
+            self.close_position_instructions[symbol].append(ticket)
+            print(f"[信息] 添加平仓指令: {symbol} ticket={ticket}")
+
+    def get_close_position_instructions(self, symbol: str) -> List[int]:
+        """
+        获取并清空平仓指令
+        """
+        with self.lock:
+            symbol = symbol.upper()
+            tickets = self.close_position_instructions.get(symbol, [])
+            self.close_position_instructions[symbol] = []
+            if tickets:
+                print(f"[信息] 返回平仓指令: {symbol} tickets={tickets}")
+            return tickets

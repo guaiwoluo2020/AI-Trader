@@ -20,6 +20,7 @@ from server import TradingServer
 from routes_ea import create_ea_routes
 from routes_trader import create_trader_routes
 from routes_system import create_system_routes
+from routes_market import create_market_routes
 
 
 def create_app():
@@ -31,8 +32,26 @@ def create_app():
     # 创建 FastAPI 应用
     app = FastAPI(
         title="高频交易服务 (HFT Trading Service)",
-        description="连接 MT5 EA 和交易指令源的高性能交易中心",
-        version="1.0.0"
+        description="""
+连接 MT5 EA 和交易指令源的高性能交易中心
+
+## 功能模块
+
+### 交易指令
+- EA获取交易指令
+- 交易员下发交易指令
+- 查询待执行指令
+
+### 行情分析
+- K线数据接收与存储 (H4/H1/M15/M5/M1)
+- 转折点自动检测
+- 实时转折点提醒 (WebSocket)
+
+### 系统监控
+- 健康检查
+- 服务状态查询
+        """,
+        version="2.0.0"
     )
     
     # 添加 CORS 中间件
@@ -48,6 +67,13 @@ def create_app():
     app.include_router(create_ea_routes(server))
     app.include_router(create_trader_routes(server))
     app.include_router(create_system_routes(server))
+    app.include_router(create_market_routes(
+        server.market_store,
+        server.pivot_detector,
+        server.pivot_monitor,
+        server.trend_analyzer,
+        server.pending_orders
+    ))
     
     return app
 
