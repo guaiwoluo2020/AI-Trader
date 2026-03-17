@@ -11,19 +11,12 @@ from typing import List, Dict, Optional
 import threading
 
 
-def normalize_symbol(symbol: str) -> str:
-    """
-    标准化品种名称（保持原样）
-    """
-    return symbol if symbol else ""
-
-
 class KlineData:
     """K线数据结构"""
 
     def __init__(self, symbol: str, period: str, timestamp, open_price: float,
                  high: float, low: float, close: float, volume: float = 0):
-        self.symbol = normalize_symbol(symbol)
+        self.symbol = symbol
         self.period = period  # H4, H1, M15, M5, M1
         self.timestamp = timestamp
         self.open = open_price
@@ -67,6 +60,15 @@ class MarketStore:
         'M1': 100     # 1分钟，1小时60根
     }
 
+    # 各周期时间间隔（秒）
+    PERIOD_INTERVALS = {
+        'H4': 4 * 60 * 60,    # 4小时
+        'H1': 1 * 60 * 60,    # 1小时
+        'M15': 15 * 60,       # 15分钟
+        'M5': 5 * 60,         # 5分钟
+        'M1': 1 * 60          # 1分钟
+    }
+
     def __init__(self):
         # 存储结构: {SYMBOL: {PERIOD: [KlineData, ...]}}
         self._klines = defaultdict(lambda: defaultdict(list))
@@ -75,6 +77,10 @@ class MarketStore:
         # 标记每个symbol每个周期是否已收到全量数据
         # 结构: {SYMBOL: {PERIOD: True/False}}
         self._initialized = defaultdict(lambda: defaultdict(bool))
+
+        # 记录每个symbol的M1数据最后更新时间（本地时间，用于判断数据是否过期）
+        # 结构: {SYMBOL: datetime}
+        self._m1_update_time = {}
 
         print("[MarketStore] K线存储已初始化")
 
@@ -92,19 +98,23 @@ class MarketStore:
         Returns:
             {"status": "ok", "count": N, "is_full": bool}
         """
-        symbol = normalize_symbol(symbol)
         period = period.upper()
 
         if period not in self.PERIODS:
             return {"status": "error", "message": f"不支持的周期: {period}"}
 
         with self._lock:
+            # 注意：EA推送全量时会按顺序推送所有周期（H4→H1→M15→M5→M1）
+            # 每个周期单独推送，is_full=true
+            # 所以这里只清空当前周期的数据，其他周期等待各自的推送
             if is_full:
-                # 全量数据，直接覆盖
+                # 全量数据，清空该品种当前周期的历史数据
                 self._klines[symbol][period] = []
+                print(f"[MarketStore] 收到 {symbol} {period} 全量数据，清空该周期历史数据")
 
             # 解析并存储K线数据
             new_count = 0
+            update_count = 0  # 记录更新的数据条数
             for k in klines:
                 kline = KlineData(
                     symbol=symbol,
@@ -131,6 +141,7 @@ class MarketStore:
                 if found_idx >= 0:
                     # 更新已有数据
                     existing[found_idx] = kline
+                    update_count += 1
                 else:
                     # 添加新数据
                     existing.append(kline)
@@ -149,6 +160,10 @@ class MarketStore:
             # 标记已初始化
             self._initialized[symbol][period] = True
 
+            # 如果是M1数据，更新最后更新时间（有新数据或更新数据都算）
+            if period == 'M1' and (new_count > 0 or update_count > 0):
+                self._m1_update_time[symbol] = datetime.now()
+
             total = len(self._klines[symbol][period])
             print(f"[MarketStore] {symbol} {period} 保存了 {new_count} 条新数据, 当前共 {total} 条")
 
@@ -161,7 +176,6 @@ class MarketStore:
 
     def get_klines(self, symbol: str, period: str, count: int = 100) -> List[Dict]:
         """获取K线数据"""
-        symbol = normalize_symbol(symbol)
         period = period.upper()
 
         with self._lock:
@@ -170,7 +184,6 @@ class MarketStore:
 
     def get_all_klines(self, symbol: str, period: str) -> List[Dict]:
         """获取所有K线数据"""
-        symbol = normalize_symbol(symbol)
         period = period.upper()
 
         with self._lock:
@@ -178,17 +191,16 @@ class MarketStore:
 
     def get_latest_price(self, symbol: str) -> Optional[float]:
         """获取最新价格（从K线的最新close，优先M1，依次尝试其他周期）"""
-        symbol = normalize_symbol(symbol)
-
         with self._lock:
-            # 尝试找到匹配的symbol（支持带#后缀的symbol）
+            # 尝试找到匹配的symbol
             actual_symbol = None
             if symbol in self._klines:
                 actual_symbol = symbol
             else:
-                # 尝试添加#后缀
+                # 尝试模糊匹配（去除#后缀）
+                symbol_base = symbol.replace('#', '')
                 for s in self._klines:
-                    if s.upper().startswith(symbol.upper()):
+                    if s.replace('#', '') == symbol_base:
                         actual_symbol = s
                         break
 
@@ -204,18 +216,15 @@ class MarketStore:
 
     def is_initialized(self, symbol: str, period: str) -> bool:
         """检查某个周期的数据是否已初始化"""
-        symbol = normalize_symbol(symbol)
         period = period.upper()
         return self._initialized[symbol][period]
 
     def check_all_initialized(self, symbol: str) -> bool:
         """检查所有周期是否都已初始化"""
-        symbol = normalize_symbol(symbol)
         return all(self._initialized[symbol][p] for p in self.PERIODS)
 
     def clear_symbol(self, symbol: str):
         """清除某个Symbol的数据"""
-        symbol = normalize_symbol(symbol)
         with self._lock:
             if symbol in self._klines:
                 del self._klines[symbol]
@@ -257,3 +266,189 @@ class MarketStore:
         if isinstance(ts, datetime):
             return ts.strftime("%Y-%m-%d %H:%M:%S")
         return str(ts)
+
+    def get_latest_kline_time(self, symbol: str, period: str = 'M1') -> Optional[datetime]:
+        """
+        获取指定品种和周期的最新K线时间戳
+
+        Args:
+            symbol: 品种名称
+            period: 周期，默认M1
+
+        Returns:
+            最新K线时间戳，如果没有数据返回None
+        """
+        period = period.upper()
+
+        with self._lock:
+            klines = self._klines[symbol][period]
+            if not klines:
+                return None
+
+            latest_ts = klines[-1].timestamp
+            if isinstance(latest_ts, datetime):
+                return latest_ts
+            else:
+                # 尝试解析字符串时间戳（支持多种格式）
+                ts_str = str(latest_ts)
+                for fmt in ["%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M", "%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
+                    try:
+                        return datetime.strptime(ts_str, fmt)
+                    except:
+                        continue
+                return None
+
+    def check_m1_updated_within(self, symbol: str, seconds: int = 180) -> Dict:
+        """
+        检查M1 K线是否在指定秒数内更新
+
+        Args:
+            symbol: 品种名称
+            seconds: 秒数，默认180秒（3分钟）
+
+        Returns:
+            {
+                "has_data": bool,  # 是否有M1数据
+                "latest_time": datetime,  # 最新K线时间（MT5服务器时间）
+                "update_time": datetime,  # 服务端收到更新的时间（本地时间）
+                "seconds_ago": int,  # 距今多少秒（基于本地更新时间）
+                "is_stale": bool,  # 是否过期（超过指定秒数）
+                "market_status": str  # 市场状态: "active", "stale", "closed"
+            }
+        """
+        with self._lock:
+            # 检查是否有M1数据
+            has_m1_data = len(self._klines[symbol]['M1']) > 0
+
+            if not has_m1_data:
+                return {
+                    "has_data": False,
+                    "latest_time": None,
+                    "update_time": None,
+                    "seconds_ago": None,
+                    "is_stale": True,
+                    "market_status": "closed"  # 无数据，可能休市
+                }
+
+            # 获取最新K线时间（MT5服务器时间，仅用于显示）
+            latest_time = self.get_latest_kline_time(symbol, 'M1')
+
+            # 获取服务端收到更新的时间（本地时间，用于判断过期）
+            update_time = self._m1_update_time.get(symbol)
+
+            if update_time is None:
+                # 有数据但没有更新时间记录，说明是服务重启前的旧数据
+                # 这种情况也认为是休市，等下次推送数据时再处理
+                return {
+                    "has_data": True,
+                    "latest_time": latest_time,
+                    "update_time": None,
+                    "seconds_ago": None,
+                    "is_stale": True,
+                    "market_status": "closed"  # 无新数据推送，可能休市
+                }
+
+            now = datetime.now()
+            seconds_ago = int((now - update_time).total_seconds())
+
+            if seconds_ago > seconds:
+                market_status = "stale"  # 数据过期
+            else:
+                market_status = "active"  # 活跃
+
+            return {
+                "has_data": True,
+                "latest_time": latest_time,
+                "update_time": update_time,
+                "seconds_ago": seconds_ago,
+                "is_stale": seconds_ago > seconds,
+                "market_status": market_status
+            }
+
+    def check_kline_continuity(self, symbol: str, period: str, new_klines: List[Dict]) -> Dict:
+        """
+        检查增量K线数据是否连续
+
+        Args:
+            symbol: 品种名称
+            period: 周期
+            new_klines: 新推送的K线数据列表
+
+        Returns:
+            {
+                "is_continuous": bool,  # 是否连续
+                "gap_count": int,       # 缺失的K线数量
+                "last_existing_time": datetime,  # 现有数据最后时间
+                "first_new_time": datetime,      # 新数据最早时间
+                "expected_gap": int     # 期望的间隔（周期数）
+            }
+        """
+        period = period.upper()
+
+        if not new_klines:
+            return {"is_continuous": True, "gap_count": 0}
+
+        # 获取周期时间间隔（秒）
+        interval = self.PERIOD_INTERVALS.get(period, 60)
+        # 允许的间隔倍数（现有数据+1周期）
+        max_allowed_gap = interval * 2  # 允许最多1个周期的间隔
+
+        with self._lock:
+            existing = self._klines[symbol][period]
+            if not existing:
+                # 没有历史数据，需要检查是否初始化
+                return {"is_continuous": True, "gap_count": 0}
+
+            # 获取现有数据最后时间
+            last_existing = existing[-1]
+            last_existing_time = self._parse_timestamp(last_existing.timestamp)
+            if last_existing_time is None:
+                return {"is_continuous": True, "gap_count": 0}
+
+            # 获取新数据最早时间（新数据可能有多条，取最早的）
+            first_new_time = None
+            for k in new_klines:
+                ts = self._parse_timestamp(k.get('timestamp') or k.get('time'))
+                if ts:
+                    if first_new_time is None or ts < first_new_time:
+                        first_new_time = ts
+
+            if first_new_time is None:
+                return {"is_continuous": True, "gap_count": 0}
+
+            # 计算时间差
+            time_diff = (first_new_time - last_existing_time).total_seconds()
+
+            # 如果新数据时间早于或等于现有数据，是更新操作，算连续
+            if time_diff <= 0:
+                return {
+                    "is_continuous": True,
+                    "gap_count": 0,
+                    "last_existing_time": last_existing_time,
+                    "first_new_time": first_new_time
+                }
+
+            # 计算间隔的周期数
+            gap_periods = int(time_diff / interval)
+
+            return {
+                "is_continuous": gap_periods <= 1,  # 允许最多1个周期的间隔
+                "gap_count": max(0, gap_periods - 1),  # 缺失的周期数
+                "last_existing_time": last_existing_time,
+                "first_new_time": first_new_time,
+                "expected_gap": gap_periods
+            }
+
+    def _parse_timestamp(self, ts) -> Optional[datetime]:
+        """解析时间戳为datetime对象"""
+        if ts is None:
+            return None
+        if isinstance(ts, datetime):
+            return ts
+        ts_str = str(ts)
+        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M", "%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
+            try:
+                return datetime.strptime(ts_str, fmt)
+            except:
+                continue
+        return None

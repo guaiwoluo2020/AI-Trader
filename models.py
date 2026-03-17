@@ -16,6 +16,7 @@ class TradeInstruction(BaseModel):
     price: float  # 指令执行价格（买入时为买入价，卖出时为卖出价）
     sl: Optional[float] = 0.0  # 止损点, 可以缺省
     tp: Optional[float] = 0.0  # 止盈点, 可以缺省，若未指定将在服务端设置为0.005
+    description: Optional[str] = ""  # 订单描述（策略名称）
 
 
 class StatisticData(BaseModel):

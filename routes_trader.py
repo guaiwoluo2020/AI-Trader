@@ -96,7 +96,6 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
         """
         all_trades = server.get_all_pending_trades()
         if symbol:
-            symbol = symbol.upper()
             result = {symbol: all_trades.get(symbol, [])}
         else:
             result = all_trades

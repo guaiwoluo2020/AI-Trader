@@ -6,6 +6,7 @@
 
 import sys
 import os
+import asyncio
 import uvloop
 import uvicorn
 from fastapi import FastAPI
@@ -13,7 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # 使用 uvloop 加速
 asyncio_policy = uvloop.EventLoopPolicy()
-import asyncio
 asyncio.set_event_loop_policy(asyncio_policy)
 
 from server import TradingServer
@@ -21,14 +21,16 @@ from routes_ea import create_ea_routes
 from routes_trader import create_trader_routes
 from routes_system import create_system_routes
 from routes_market import create_market_routes
+from routes_position import create_position_routes
+from routes_news import create_news_routes
 
 
 def create_app():
     """创建并配置 FastAPI 应用"""
-    
+
     # 初始化服务
     server = TradingServer()
-    
+
     # 创建 FastAPI 应用
     app = FastAPI(
         title="高频交易服务 (HFT Trading Service)",
@@ -53,7 +55,7 @@ def create_app():
         """,
         version="2.0.0"
     )
-    
+
     # 添加 CORS 中间件
     app.add_middleware(
         CORSMiddleware,
@@ -62,7 +64,7 @@ def create_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     # 注册路由
     app.include_router(create_ea_routes(server))
     app.include_router(create_trader_routes(server))
@@ -72,9 +74,36 @@ def create_app():
         server.pivot_detector,
         server.pivot_monitor,
         server.trend_analyzer,
-        server.pending_orders
+        server.pending_orders,
+        server.llm_analyzer
     ))
-    
+    app.include_router(create_position_routes())
+    app.include_router(create_news_routes())
+
+    # 启动时设置事件循环
+    @app.on_event("startup")
+    async def startup_event():
+        loop = asyncio.get_running_loop()
+        server.llm_analyzer.set_event_loop(loop)
+        server.pivot_monitor.set_event_loop(loop)
+
+        # 设置系统日志的事件循环
+        from market.system_log import get_system_log
+        system_log = get_system_log()
+        system_log.set_event_loop(loop)
+
+        # 记录系统启动日志
+        system_log.add_log("system_startup", message="服务已启动")
+
+        # 启动新闻监控后台任务
+        from market.news_monitor import get_news_monitor
+        news_monitor = get_news_monitor()
+        news_monitor.set_event_loop(loop)
+        asyncio.create_task(news_monitor.run())
+
+        print("[Startup] 事件循环已设置")
+        print("[Startup] 新闻监控已启动")
+
     return app
 
 

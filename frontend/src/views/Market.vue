@@ -6,25 +6,78 @@
       </v-col>
     </v-row>
 
+    <!-- 最新快讯 -->
+    <v-row v-if="latestFlashNews">
+      <v-col cols="12">
+        <v-alert
+          :type="latestFlashNews.importance >= 2 ? 'warning' : 'info'"
+          dense
+          class="mb-2"
+          dismissible
+          @input="latestFlashNews = null"
+        >
+          <div class="d-flex align-center">
+            <v-icon small class="mr-2">mdi-lightning-bolt</v-icon>
+            <v-chip v-if="latestFlashNews.speaker" color="primary" x-small class="mr-2">
+              {{ latestFlashNews.speaker }}
+            </v-chip>
+            <span class="text-body-2">{{ latestFlashNews.content }}</span>
+            <v-spacer></v-spacer>
+            <span class="text-caption grey--text ml-2">{{ formatNewsTime(latestFlashNews.time) }}</span>
+          </div>
+          <!-- 影响分析 -->
+          <div v-if="latestFlashNews.impact && Object.keys(latestFlashNews.impact).length > 0" class="mt-1">
+            <v-chip
+              v-for="(impact, symbol) in latestFlashNews.impact"
+              :key="symbol"
+              :color="getImpactColor(impact.direction)"
+              x-small
+              class="mr-1"
+            >
+              {{ symbol }}: {{ impact.direction }}
+            </v-chip>
+          </div>
+        </v-alert>
+      </v-col>
+    </v-row>
+
     <!-- 转折点提醒通知 -->
     <v-row v-if="pivotAlerts.length > 0">
       <v-col cols="12">
         <v-alert
           v-for="(alert, index) in pivotAlerts"
           :key="index"
-          :type="getAlertType(alert)"
+          :type="alert.direction === 'high' ? 'warning' : 'info'"
           dismissible
           class="mb-2"
           @input="removeAlert(index)"
         >
           <div class="d-flex flex-wrap align-center">
-            <strong>{{ alert.symbol }} {{ alert.period }}</strong>
-            <span class="ml-2">
-              {{ alert.is_breakthrough ? '已突破' : '接近' }}{{ alert.direction === 'high' ? '高点' : '低点' }}
-            </span>
-            <v-chip small class="ml-2">{{ alert.pivot_price }}</v-chip>
-            <span class="ml-2">当前价格: {{ alert.current_price }}</span>
-            <span v-if="!alert.is_breakthrough" class="ml-2">距离: {{ alert.distance_pct }}%</span>
+            <strong>{{ alert.symbol }}</strong>
+            <v-chip small :color="alert.direction === 'high' ? 'error' : 'success'" class="ml-2">
+              接近{{ alert.direction === 'high' ? '高点' : '低点' }}
+            </v-chip>
+            <v-chip small :color="getPivotPeriodColor(alert.period)" class="ml-2">
+              {{ alert.period }}
+            </v-chip>
+          </div>
+          <div class="mt-1">
+            <span class="text-caption">转折点: <strong>{{ alert.pivot_price }}</strong></span>
+            <span class="text-caption ml-4">当前价格: <strong>{{ alert.current_price }}</strong></span>
+            <span class="text-caption ml-4">距离: <strong>{{ (alert.distance_pct * 100).toFixed(2) }}%</strong></span>
+          </div>
+
+          <!-- 显示各周期信息（如果有合并数据） -->
+          <div v-if="alert.periods && alert.periods.length > 0" class="mt-2">
+            <v-chip
+              v-for="p in alert.periods"
+              :key="p.period"
+              x-small
+              class="mr-1 mb-1"
+              :color="getPivotPeriodColor(p.period)"
+            >
+              {{ p.period }}: {{ p.price }} ({{ p.distance_pct }}%)
+            </v-chip>
           </div>
 
           <!-- 如果有待确认订单，显示订单信息和操作按钮 -->
@@ -33,12 +86,160 @@
               <v-icon small color="primary" class="mr-1">mdi-file-document-edit</v-icon>
               自动生成交易指令
             </div>
+
+            <!-- AI与技术信号比较 -->
+            <div v-if="alert.pending_order.ai_driven" class="mb-2">
+              <div class="d-flex align-center mb-1">
+                <span class="text-caption mr-2">技术信号:</span>
+                <v-chip :color="alert.pending_order.tech_action === '买入' ? 'success' : 'error'" x-small>
+                  {{ alert.pending_order.tech_action }}
+                </v-chip>
+                <span class="text-caption mx-2">AI建议:</span>
+                <v-chip :color="alert.pending_order.ai_direction === '买入' ? 'success' : 'error'" x-small>
+                  {{ alert.pending_order.ai_direction }}
+                </v-chip>
+              </div>
+            </div>
+
+            <!-- AI冲突警告 -->
+            <v-alert v-if="alert.pending_order.ai_conflict" type="warning" dense class="mb-2">
+              <div class="d-flex align-center">
+                <v-icon small class="mr-1">mdi-alert-circle</v-icon>
+                <strong>AI与技术信号冲突！以AI方向为准</strong>
+              </div>
+              <div v-if="alert.pending_order.ai_reason" class="text-caption mt-1">
+                AI理由: {{ alert.pending_order.ai_reason }}
+              </div>
+            </v-alert>
+
+            <!-- AI一致提示 -->
+            <v-alert v-if="alert.pending_order.ai_aligned" type="success" dense class="mb-2">
+              <div class="d-flex align-center">
+                <v-icon small class="mr-1">mdi-check-circle</v-icon>
+                <strong>AI与技术信号一致</strong>
+              </div>
+              <div v-if="alert.pending_order.ai_reason" class="text-caption mt-1">
+                AI理由: {{ alert.pending_order.ai_reason }}
+              </div>
+            </v-alert>
+
             <div class="mb-2">
               <v-chip :color="alert.pending_order.action === 'b' ? 'success' : 'error'" x-small class="mr-2">
                 {{ alert.pending_order.action === 'b' ? '买入' : '卖出' }}
               </v-chip>
               <span class="mr-3">价格: {{ alert.pending_order.price?.toFixed(2) }}</span>
             </div>
+            <!-- 可编辑字段 -->
+            <v-row dense class="mb-2">
+              <v-col cols="3">
+                <v-text-field
+                  v-model.number="alert.pending_order.mount"
+                  label="手数"
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  dense
+                  hide-details
+                  outlined
+                ></v-text-field>
+              </v-col>
+              <v-col cols="3">
+                <v-text-field
+                  v-model.number="alert.pending_order.sl"
+                  label="止损"
+                  type="number"
+                  step="0.01"
+                  dense
+                  hide-details
+                  outlined
+                ></v-text-field>
+              </v-col>
+              <v-col cols="3">
+                <v-text-field
+                  v-model.number="alert.pending_order.tp"
+                  label="止盈"
+                  type="number"
+                  step="0.01"
+                  dense
+                  hide-details
+                  outlined
+                  :hint="alert.pending_order.ai_aligned ? 'AI建议' : ''"
+                  persistent-hint
+                ></v-text-field>
+              </v-col>
+              <v-col cols="3" class="d-flex align-center">
+                <v-btn
+                  color="success"
+                  small
+                  class="mr-1"
+                  :loading="confirmingOrderId === alert.pending_order.order_id"
+                  @click="confirmAlertOrder(alert.pending_order, index)"
+                >
+                  <v-icon left small>mdi-check</v-icon>
+                  确认
+                </v-btn>
+                <v-btn
+                  color="error"
+                  small
+                  outlined
+                  :loading="rejectingOrderId === alert.pending_order.order_id"
+                  @click="rejectAlertOrder(alert.pending_order.order_id, index)"
+                >
+                  放弃
+                </v-btn>
+              </v-col>
+            </v-row>
+            <div class="text-caption grey--text mb-1">
+              {{ alert.pending_order.reason }}
+            </div>
+            <div class="text-caption grey--text">
+              <v-icon small>mdi-clock-outline</v-icon>
+              3分钟内未操作将自动移除
+            </div>
+          </div>
+        </v-alert>
+      </v-col>
+    </v-row>
+
+    <!-- AI入场价提醒通知 -->
+    <v-row v-if="aiEntryAlerts.length > 0">
+      <v-col cols="12">
+        <v-alert
+          v-for="(alert, index) in aiEntryAlerts"
+          :key="'ai-'+index"
+          type="info"
+          dismissible
+          class="mb-2"
+          @input="removeAiEntryAlert(index)"
+        >
+          <div class="d-flex flex-wrap align-center">
+            <v-icon small color="white" class="mr-1">mdi-robot</v-icon>
+            <strong>{{ alert.symbol }} {{ alert.period }}</strong>
+            <span class="ml-2">AI建议入场</span>
+            <v-chip small class="ml-2" :color="alert.direction === 'buy' ? 'success' : 'error'">
+              {{ alert.direction === 'buy' ? '买入' : '卖出' }}
+            </v-chip>
+            <span class="ml-2">入场价: {{ alert.entry_price }}</span>
+            <span class="ml-2">当前价: {{ alert.current_price }}</span>
+            <span class="ml-2">差距: {{ alert.price_diff_pct }}%</span>
+          </div>
+
+          <!-- 如果有待确认订单，显示订单信息和操作按钮 -->
+          <div v-if="alert.pending_order" class="mt-3 pa-2 grey lighten-4 rounded">
+            <div class="text-subtitle-2 font-weight-bold mb-2">
+              <v-icon small color="primary" class="mr-1">mdi-file-document-edit</v-icon>
+              AI交易建议
+            </div>
+
+            <div class="mb-2">
+              <v-chip :color="alert.pending_order.action === 'b' ? 'success' : 'error'" x-small class="mr-2">
+                {{ alert.pending_order.action === 'b' ? '买入' : '卖出' }}
+              </v-chip>
+              <span class="mr-3">入场价: {{ alert.pending_order.price?.toFixed(2) }}</span>
+              <span class="mr-3">止损: {{ alert.pending_order.sl }}</span>
+              <span class="mr-3">止盈: {{ alert.pending_order.tp }}</span>
+            </div>
+
             <!-- 可编辑字段 -->
             <v-row dense class="mb-2">
               <v-col cols="3">
@@ -81,7 +282,7 @@
                   small
                   class="mr-1"
                   :loading="confirmingOrderId === alert.pending_order.order_id"
-                  @click="confirmAlertOrder(alert.pending_order, index)"
+                  @click="confirmAiEntryOrder(alert.pending_order, index)"
                 >
                   <v-icon left small>mdi-check</v-icon>
                   确认
@@ -91,14 +292,15 @@
                   small
                   outlined
                   :loading="rejectingOrderId === alert.pending_order.order_id"
-                  @click="rejectAlertOrder(alert.pending_order.order_id, index)"
+                  @click="rejectAiEntryOrder(alert.pending_order.order_id, index)"
                 >
                   放弃
                 </v-btn>
               </v-col>
             </v-row>
             <div class="text-caption grey--text mb-1">
-              {{ alert.pending_order.reason }}
+              <v-icon small class="mr-1">mdi-lightbulb</v-icon>
+              {{ alert.reason }}
             </div>
             <div class="text-caption grey--text">
               <v-icon small>mdi-clock-outline</v-icon>
@@ -109,93 +311,150 @@
       </v-col>
     </v-row>
 
-    <!-- 控制面板 -->
-    <v-row>
-      <v-col cols="12" md="6">
-        <v-select
-          v-model="selectedSymbol"
-          :items="symbols"
-          label="交易品种"
-          outlined
-          dense
-          @change="onSymbolChange"
-        ></v-select>
-      </v-col>
-      <v-col cols="12" md="6">
-        <v-select
-          v-model="selectedPeriod"
-          :items="periods"
-          label="K线周期"
-          outlined
-          dense
-          @change="onPeriodChange"
-        ></v-select>
-      </v-col>
-    </v-row>
-
-    <!-- 当前持仓 -->
-    <v-row>
+    <!-- 关键点位订单提醒 -->
+    <v-row v-if="keyLevelAlerts.length > 0">
       <v-col cols="12">
-        <v-card>
-          <v-card-title>
-            <v-icon class="mr-2">mdi-briefcase</v-icon>
-            当前持仓
-          </v-card-title>
-          <v-card-text>
-            <div v-if="positions.length > 0">
-              <v-simple-table>
-                <template v-slot:default>
-                  <thead>
-                    <tr>
-                      <th>品种</th>
-                      <th>订单号</th>
-                      <th>方向</th>
-                      <th>手数</th>
-                      <th>开仓价</th>
-                      <th>当前价</th>
-                      <th>盈亏</th>
-                      <th>止损距离</th>
-                      <th>止盈距离</th>
-                      <th>操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="pos in positions" :key="pos.ticket">
-                      <td>{{ pos.symbol }}</td>
-                      <td>{{ pos.ticket }}</td>
-                      <td>
-                        <v-chip :color="pos.type === 'BUY' ? 'success' : 'error'" x-small>
-                          {{ pos.type === 'BUY' ? '买入' : '卖出' }}
-                        </v-chip>
-                      </td>
-                      <td>{{ pos.volume }}</td>
-                      <td>{{ pos.priceOpen?.toFixed(2) }}</td>
-                      <td>{{ pos.currentPrice?.toFixed(2) }}</td>
-                      <td :class="pos.profit >= 0 ? 'success--text' : 'error--text'">
-                        {{ pos.profit >= 0 ? '+' : '' }}{{ pos.profit?.toFixed(2) }}
-                      </td>
-                      <td>{{ pos.distanceSL?.toFixed(2) || '-' }}</td>
-                      <td>{{ pos.distanceTP?.toFixed(2) || '-' }}</td>
-                      <td>
-                        <v-btn
-                          color="error"
-                          x-small
-                          :loading="closingTicket === pos.ticket"
-                          @click="closePosition(pos)"
-                        >
-                          平仓
-                        </v-btn>
-                      </td>
-                    </tr>
-                  </tbody>
+        <v-alert
+          v-for="(alert, index) in keyLevelAlerts"
+          :key="'key-'+index"
+          type="success"
+          dismissible
+          class="mb-2"
+          @input="removeKeyLevelAlert(index)"
+        >
+          <div class="d-flex flex-wrap align-center">
+            <v-icon small color="white" class="mr-1">mdi-chart-line</v-icon>
+            <strong>{{ alert.symbol }}</strong>
+            <v-chip small :color="alert.action === 'b' ? 'success' : 'error'" class="ml-2">
+              {{ alert.action_text }}
+            </v-chip>
+            <span class="ml-2">关键点位策略</span>
+          </div>
+          <div class="mt-1">
+            <span class="text-caption">关键位: <strong>{{ alert.key_level }}</strong></span>
+            <span class="text-caption ml-4">入场价: <strong>{{ alert.price?.toFixed(2) }}</strong></span>
+            <span class="text-caption ml-4">距离: <strong>{{ alert.distance_pct }}%</strong></span>
+          </div>
+
+          <!-- 如果有待确认订单，显示订单信息和操作按钮 -->
+          <div v-if="alert.pending_order" class="mt-3 pa-2 grey lighten-4 rounded">
+            <div class="text-subtitle-2 font-weight-bold mb-2">
+              <v-icon small color="primary" class="mr-1">mdi-file-document-edit</v-icon>
+              关键点位交易建议
+            </div>
+
+            <div class="mb-2">
+              <v-chip :color="alert.pending_order.action === 'b' ? 'success' : 'error'" x-small class="mr-2">
+                {{ alert.pending_order.action === 'b' ? '买入' : '卖出' }}
+              </v-chip>
+              <span class="mr-3">入场价: {{ alert.pending_order.price?.toFixed(2) }}</span>
+              <span class="mr-3">止损: {{ alert.pending_order.sl }}</span>
+              <span class="mr-3">止盈: {{ alert.pending_order.tp }}</span>
+            </div>
+
+            <!-- AI方向对比 -->
+            <div class="mb-2 pa-2 white rounded">
+              <div class="text-caption font-weight-bold mb-1">
+                <v-icon small class="mr-1">mdi-robot</v-icon>
+                AI方向对比
+              </div>
+              <div v-if="alert.pending_order.ai_directions && Object.keys(alert.pending_order.ai_directions).length > 0" class="d-flex flex-wrap align-center">
+                <span class="text-caption mr-2">关键点位: <strong :class="alert.pending_order.action === 'b' ? 'success--text' : 'error--text'">{{ alert.pending_order.key_level_direction_text }}</strong></span>
+                <template v-for="(dirInfo, period) in alert.pending_order.ai_directions" :key="period">
+                  <v-chip
+                    :color="dirInfo.direction === 'buy' ? 'success' : 'error'"
+                    x-small
+                    outlined
+                    class="mr-1"
+                  >
+                    {{ period }}: {{ dirInfo.text }}
+                  </v-chip>
                 </template>
-              </v-simple-table>
+              </div>
+              <div v-else class="text-caption grey--text">
+                关键点位: <strong :class="alert.pending_order.action === 'b' ? 'success--text' : 'error--text'">{{ alert.pending_order.key_level_direction_text }}</strong>
+                <span class="ml-2">AI暂无分析数据</span>
+              </div>
+              <div v-if="alert.pending_order.recommendation" class="mt-1">
+                <v-chip
+                  :color="alert.pending_order.recommendation_color || 'grey'"
+                  x-small
+                  dark
+                >
+                  <v-icon x-small left>mdi-lightbulb</v-icon>
+                  {{ alert.pending_order.recommendation }}
+                </v-chip>
+              </div>
             </div>
-            <div v-else class="text-center py-4 grey--text">
-              当前无持仓
+
+            <!-- 可编辑字段 -->
+            <v-row dense class="mb-2">
+              <v-col cols="3">
+                <v-text-field
+                  v-model.number="alert.pending_order.mount"
+                  label="手数"
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  dense
+                  hide-details
+                  outlined
+                ></v-text-field>
+              </v-col>
+              <v-col cols="3">
+                <v-text-field
+                  v-model.number="alert.pending_order.sl"
+                  label="止损"
+                  type="number"
+                  step="0.01"
+                  dense
+                  hide-details
+                  outlined
+                ></v-text-field>
+              </v-col>
+              <v-col cols="3">
+                <v-text-field
+                  v-model.number="alert.pending_order.tp"
+                  label="止盈"
+                  type="number"
+                  step="0.01"
+                  dense
+                  hide-details
+                  outlined
+                ></v-text-field>
+              </v-col>
+              <v-col cols="3" class="d-flex align-center">
+                <v-btn
+                  color="success"
+                  small
+                  class="mr-1"
+                  :loading="confirmingOrderId === alert.pending_order.order_id"
+                  @click="confirmKeyLevelOrder(alert.pending_order, index)"
+                >
+                  <v-icon left small>mdi-check</v-icon>
+                  确认
+                </v-btn>
+                <v-btn
+                  color="error"
+                  small
+                  outlined
+                  :loading="rejectingOrderId === alert.pending_order.order_id"
+                  @click="rejectKeyLevelOrder(alert.pending_order.order_id, index)"
+                >
+                  放弃
+                </v-btn>
+              </v-col>
+            </v-row>
+            <div class="text-caption grey--text mb-1">
+              <v-icon small class="mr-1">mdi-lightbulb</v-icon>
+              {{ alert.reason }}
             </div>
-          </v-card-text>
-        </v-card>
+            <div class="text-caption grey--text">
+              <v-icon small>mdi-clock-outline</v-icon>
+              3分钟内未操作将自动移除
+            </div>
+          </div>
+        </v-alert>
       </v-col>
     </v-row>
 
@@ -213,255 +472,228 @@
       </v-col>
     </v-row>
 
-    <!-- 趋势分析 -->
+    <!-- 大模型趋势分析 -->
     <v-row>
       <v-col cols="12">
         <v-card>
           <v-card-title>
-            <v-icon class="mr-2">mdi-trending-up</v-icon>
-            趋势分析
+            <v-icon class="mr-2">mdi-robot</v-icon>
+            AI趋势分析
+            <v-spacer></v-spacer>
+            <!-- 分析状态指示器 -->
+            <v-chip v-if="llmAnalyzing" small color="primary" class="mr-2">
+              <v-progress-circular indeterminate size="12" width="2" class="mr-1"></v-progress-circular>
+              {{ llmAnalysisStatus || '分析中...' }}
+            </v-chip>
+            <v-chip v-else-if="llmStatus.enabled" small color="success" class="mr-2">已启用</v-chip>
+            <v-chip v-else small color="grey">未配置</v-chip>
           </v-card-title>
           <v-card-text>
-            <v-row v-if="trendData.resonance">
-              <!-- 共振状态 -->
-              <v-col cols="12" md="4">
-                <v-card outlined>
-                  <v-card-text class="text-center">
-                    <div class="text-h6 mb-2">多周期共振</div>
-                    <v-chip
-                      :color="getResonanceColor(trendData.resonance.resonance)"
-                      size="large"
-                    >
-                      {{ trendData.resonance.signal }}
-                    </v-chip>
-                    <div class="mt-2 text-caption">
-                      趋势强度: {{ trendData.resonance.strength }}%
+            <!-- 分析时间 -->
+            <div v-if="llmStatus.last_analysis_time" class="text-caption grey--text mb-3">
+              上次分析: {{ llmStatus.last_analysis_time }}
+            </div>
+
+            <!-- 无数据提示 -->
+            <div v-if="!llmAnalysis || Object.keys(llmAnalysis).length === 0" class="text-center py-6">
+              <v-icon size="48" color="grey lighten-1">mdi-robot-outline</v-icon>
+              <p class="mt-3 grey--text">
+                <template v-if="llmAnalyzing">
+                  {{ llmAnalysisStatus || '正在分析...' }}
+                </template>
+                <template v-else>
+                  {{ llmStatus.enabled ? '等待分析完成...' : '请先配置大模型API' }}
+                </template>
+              </p>
+              <!-- 分析进度条 -->
+              <v-progress-linear v-if="llmAnalyzing" indeterminate color="primary" class="mt-2"></v-progress-linear>
+            </div>
+
+            <!-- 分析结果 -->
+            <div v-else>
+              <v-expansion-panels>
+                <v-expansion-panel v-for="(data, symbol) in llmAnalysis" :key="symbol">
+                  <v-expansion-panel-header>
+                    <div class="d-flex align-center">
+                      <strong class="mr-3">{{ symbol }}</strong>
+                      <v-chip
+                        v-if="data.analysis && data.analysis.overall_trend"
+                        :color="getTrendChipColor(data.analysis.overall_trend.direction)"
+                        small
+                      >
+                        {{ data.analysis.overall_trend.direction }}
+                      </v-chip>
+                      <!-- 休市状态 -->
+                      <v-chip
+                        v-if="data.market_status === 'closed'"
+                        color="grey"
+                        small
+                        class="ml-2"
+                      >
+                        <v-icon left x-small>mdi-pause-circle</v-icon>
+                        休市中
+                      </v-chip>
+                      <!-- 数据未更新 -->
+                      <v-chip
+                        v-else-if="data.data_stale"
+                        color="warning"
+                        small
+                        class="ml-2"
+                      >
+                        <v-icon left x-small>mdi-alert</v-icon>
+                        数据未更新
+                      </v-chip>
                     </div>
-                  </v-card-text>
-                </v-card>
-              </v-col>
+                  </v-expansion-panel-header>
+                  <v-expansion-panel-content>
+                    <!-- 休市提示 -->
+                    <v-alert
+                      v-if="data.market_status === 'closed'"
+                      type="info"
+                      dense
+                      class="mb-3"
+                    >
+                      <div class="d-flex align-center">
+                        <v-icon small class="mr-2">mdi-pause-circle</v-icon>
+                        <span>
+                          休市中，暂无行情数据。下次开市时将自动更新分析。
+                        </span>
+                      </div>
+                    </v-alert>
+                    <!-- 数据过期提示 -->
+                    <v-alert
+                      v-else-if="data.data_stale"
+                      type="warning"
+                      dense
+                      class="mb-3"
+                    >
+                      <div class="d-flex align-center">
+                        <v-icon small class="mr-2">mdi-clock-alert</v-icon>
+                        <span>
+                          行情数据已 {{ data.stale_seconds || '?' }} 秒未更新，当前显示上次分析结果。
+                          <span class="text-caption">({{ data.analyzed_at }})</span>
+                        </span>
+                      </div>
+                    </v-alert>
 
-              <!-- 各周期趋势 -->
-              <v-col cols="12" md="8">
-                <v-row>
-                  <v-col
-                    v-for="(state, period) in trendData.resonance.periods"
-                    :key="period"
-                    cols="12"
-                    sm="6"
-                    md="4"
-                  >
-                    <v-card outlined class="trend-card">
-                      <v-card-text class="pa-2">
-                        <div class="d-flex justify-space-between align-center mb-1">
-                          <span class="text-subtitle-2 font-weight-bold">{{ period }}</span>
-                          <v-chip
-                            :color="getTrendColor(state.trend)"
-                            x-small
-                          >
-                            {{ getTrendLabel(state.trend) }}
-                          </v-chip>
-                        </div>
-                        <div class="text-caption">
-                          <span class="grey--text">强度:</span> {{ state.strength }}%
-                          <span class="ml-2 grey--text">ADX:</span> {{ state.adx }}
-                        </div>
-                        <div class="text-caption">
-                          <span class="grey--text">MA10:</span> {{ state.ma_fast?.toFixed(2) }}
-                          <span class="ml-2 grey--text">MA20:</span> {{ state.ma_slow?.toFixed(2) }}
-                        </div>
-                        <div class="text-caption mt-1 reason-text" :title="state.reason">
-                          <v-icon x-small color="info" class="mr-1">mdi-information-outline</v-icon>
-                          {{ state.reason || '分析中...' }}
-                        </div>
-                      </v-card-text>
-                    </v-card>
-                  </v-col>
-                </v-row>
-              </v-col>
-            </v-row>
-            <div v-else class="text-center py-4 grey--text">
-              暂无趋势分析数据
-            </div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
+                    <!-- 各周期趋势（休市时可能没有分析结果）-->
+                    <div v-if="data.analysis && data.analysis.trend_analysis" class="mb-4">
+                      <div class="text-subtitle-2 mb-2">各周期趋势</div>
+                      <v-simple-table dense>
+                        <template v-slot:default>
+                          <thead>
+                            <tr>
+                              <th>周期</th>
+                              <th>AI趋势</th>
+                              <th>置信度</th>
+                              <th>AI说明</th>
+                              <th>技术趋势</th>
+                              <th>技术说明</th>
+                              <th>结论</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(trend, period) in data.analysis.trend_analysis" :key="period">
+                              <td><strong>{{ period }}</strong></td>
+                              <td>
+                                <v-chip :color="getTrendChipColor(trend.trend)" x-small>
+                                  {{ trend.trend }}
+                                </v-chip>
+                              </td>
+                              <td>
+                                <span class="text-caption">{{ trend.confidence }}%</span>
+                              </td>
+                              <td class="text-caption grey--text" style="max-width: 180px;">
+                                {{ trend.reason }}
+                              </td>
+                              <td>
+                                <v-chip
+                                  v-if="getTechTrend(symbol, period)"
+                                  :color="getTrendColor(getTechTrend(symbol, period).trend)"
+                                  x-small
+                                >
+                                  {{ getTrendLabel(getTechTrend(symbol, period).trend) }}
+                                </v-chip>
+                                <span v-else class="grey--text text-caption">-</span>
+                              </td>
+                              <td class="text-caption grey--text" style="max-width: 180px;">
+                                <div v-if="getTechTrend(symbol, period)" :title="getTechTrend(symbol, period).reason">
+                                  {{ getTechTrend(symbol, period).reason }}
+                                </div>
+                                <span v-else>-</span>
+                              </td>
+                              <td>
+                                <v-chip
+                                  :color="getConclusionColor(symbol, period, trend)"
+                                  x-small
+                                >
+                                  {{ getConclusion(symbol, period, trend) }}
+                                </v-chip>
+                              </td>
+                            </tr>
+                          </tbody>
+                        </template>
+                      </v-simple-table>
+                    </div>
 
-    <!-- 交易配置 -->
-    <v-row>
-      <v-col cols="12">
-        <v-card>
-          <v-card-title>
-            <v-icon class="mr-2">mdi-cog</v-icon>
-            自动交易配置
-          </v-card-title>
-          <v-card-text>
-            <v-row align="center">
-              <v-col cols="12">
-                <v-switch
-                  v-model="tradeConfig.enabled"
-                  label="启用自动生成"
-                  @change="saveTradeConfig"
-                ></v-switch>
-              </v-col>
-            </v-row>
+                    <!-- 关键价位 -->
+                    <div v-if="data.analysis && data.analysis.key_levels" class="mb-4">
+                      <div class="text-subtitle-2 mb-2">关键价位</div>
+                      <v-row>
+                        <v-col cols="6">
+                          <div class="text-caption grey--text">压力位</div>
+                          <div v-for="(level, i) in data.analysis.key_levels.resistance" :key="'r'+i">
+                            <v-chip color="error" x-small class="mr-1">{{ level }}</v-chip>
+                          </div>
+                        </v-col>
+                        <v-col cols="6">
+                          <div class="text-caption grey--text">支撑位</div>
+                          <div v-for="(level, i) in data.analysis.key_levels.support" :key="'s'+i">
+                            <v-chip color="success" x-small class="mr-1">{{ level }}</v-chip>
+                          </div>
+                        </v-col>
+                      </v-row>
+                    </div>
 
-            <!-- 品种配置表格 -->
-            <div class="text-subtitle-2 mt-2 mb-2">品种配置</div>
-            <v-simple-table dense>
-              <template v-slot:default>
-                <thead>
-                  <tr>
-                    <th>品种</th>
-                    <th>手数</th>
-                    <th>止损偏移(点)</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(config, symbol) in tradeConfig.symbol_config" :key="symbol">
-                    <td>
-                      <strong>{{ symbol }}</strong>
-                    </td>
-                    <td>
-                      <v-text-field
-                        v-model.number="config.volume"
-                        type="number"
-                        step="0.01"
-                        min="0.01"
-                        dense
-                        hide-details
-                        style="width: 80px"
-                      ></v-text-field>
-                    </td>
-                    <td>
-                      <v-text-field
-                        v-model.number="config.sl_offset"
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        dense
-                        hide-details
-                        style="width: 80px"
-                      ></v-text-field>
-                    </td>
-                    <td>
-                      <v-btn x-small color="primary" @click="saveTradeConfig">保存</v-btn>
-                    </td>
-                  </tr>
-                </tbody>
-              </template>
-            </v-simple-table>
+                    <!-- 交易建议 -->
+                    <div v-if="data.analysis && data.analysis.trade_suggestions && data.analysis.trade_suggestions.length > 0">
+                      <div class="text-subtitle-2 mb-2">交易建议</div>
+                      <v-simple-table dense>
+                        <template v-slot:default>
+                          <thead>
+                            <tr>
+                              <th>周期</th>
+                              <th>方向</th>
+                              <th>入场价</th>
+                              <th>止损</th>
+                              <th>止盈</th>
+                              <th>理由</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(suggestion, i) in data.analysis.trade_suggestions" :key="i">
+                              <td>{{ suggestion.period }}</td>
+                              <td>
+                                <v-chip :color="suggestion.direction === 'buy' ? 'success' : 'error'" x-small>
+                                  {{ suggestion.direction === 'buy' ? '买入' : '卖出' }}
+                                </v-chip>
+                              </td>
+                              <td>{{ suggestion.entry_price }}</td>
+                              <td>{{ suggestion.stop_loss }}</td>
+                              <td>{{ suggestion.take_profit }}</td>
+                              <td class="text-caption">{{ suggestion.reason }}</td>
+                            </tr>
+                          </tbody>
+                        </template>
+                      </v-simple-table>
+                    </div>
 
-            <!-- 添加新品种配置 -->
-            <v-row class="mt-3" align="center">
-              <v-col cols="4">
-                <v-select
-                  v-model="newSymbol"
-                  :items="availableSymbols"
-                  label="选择品种"
-                  dense
-                  hide-details
-                  @change="onSymbolSelect"
-                ></v-select>
-              </v-col>
-              <v-col cols="3">
-                <v-text-field
-                  v-model.number="newVolume"
-                  label="手数"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  dense
-                  hide-details
-                ></v-text-field>
-              </v-col>
-              <v-col cols="3">
-                <v-text-field
-                  v-model.number="newSlOffset"
-                  label="止损偏移"
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  dense
-                  hide-details
-                ></v-text-field>
-              </v-col>
-              <v-col cols="2">
-                <v-btn small color="success" @click="addSymbolConfig">添加</v-btn>
-              </v-col>
-            </v-row>
-
-            <div class="text-caption grey--text mt-3">
-              <v-icon small>mdi-information</v-icon>
-              M1周期接近转折点时自动生成交易指令。止损偏移为固定点数，如GOLD设0.5表示止损在转折点±0.5点。
-            </div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
-
-    <!-- K线图表 -->
-    <v-row>
-      <v-col cols="12">
-        <v-card>
-          <v-card-title>
-            <v-icon class="mr-2">mdi-chart-candlestick</v-icon>
-            K线图表 - {{ selectedSymbol }} {{ selectedPeriod }}
-          </v-card-title>
-          <v-card-text>
-            <div v-if="klines.length === 0 && !loading" class="text-center py-10">
-              <v-icon size="64" color="grey lighten-1">mdi-chart-box-outline</v-icon>
-              <p class="mt-4 grey--text">暂无K线数据，请等待EA推送数据</p>
-            </div>
-            <div v-else ref="chartContainer" style="height: 400px;"></div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
-
-    <!-- 行情状态 -->
-    <v-row>
-      <v-col cols="12">
-        <v-card>
-          <v-card-title>
-            <v-icon class="mr-2">mdi-information</v-icon>
-            数据状态
-          </v-card-title>
-          <v-card-text>
-            <v-simple-table v-if="marketStatus.store">
-              <template v-slot:default>
-                <thead>
-                  <tr>
-                    <th>品种</th>
-                    <th>周期</th>
-                    <th>K线数量</th>
-                    <th>已初始化</th>
-                    <th>转折点数量</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template v-for="(symbolData, symbol) in marketStatus.store">
-                    <tr v-for="(periodData, period) in symbolData" :key="`${symbol}-${period}`">
-                      <td>{{ symbol }}</td>
-                      <td>{{ period }}</td>
-                      <td>{{ periodData.count }}</td>
-                      <td>
-                        <v-chip x-small :color="periodData.initialized ? 'success' : 'warning'">
-                          {{ periodData.initialized ? '是' : '否' }}
-                        </v-chip>
-                      </td>
-                      <td>
-                        {{ (marketStatus.pivots && marketStatus.pivots[symbol] && marketStatus.pivots[symbol][period]) ? marketStatus.pivots[symbol][period].pivot_count : 0 }}
-                      </td>
-                    </tr>
-                  </template>
-                </tbody>
-              </template>
-            </v-simple-table>
-            <div v-else class="text-center py-4 grey--text">
-              暂无状态数据
+                    <div class="text-caption grey--text mt-2">
+                      分析时间: {{ data.analyzed_at }}
+                    </div>
+                  </v-expansion-panel-content>
+                </v-expansion-panel>
+              </v-expansion-panels>
             </div>
           </v-card-text>
         </v-card>
@@ -476,55 +708,27 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { marketAPI } from '@/api/market'
-import * as echarts from 'echarts'
 
 export default {
   name: 'Market',
   setup() {
     // 数据
-    const selectedSymbol = ref('')
-    const selectedPeriod = ref('H1')
-    const symbols = ref([])
-    const periods = ref([
-      { title: '4小时', value: 'H4' },
-      { title: '1小时', value: 'H1' },
-      { title: '15分钟', value: 'M15' },
-      { title: '5分钟', value: 'M5' },
-      { title: '1分钟', value: 'M1' }
-    ])
-
-    const klines = ref([])
     const allPivots = ref([])
     const marketStatus = ref({})
     const thresholds = ref({})
     const pivotAlerts = ref([])
+    const aiEntryAlerts = ref([])
+    const keyLevelAlerts = ref([])  // 关键点位订单提醒
     const loading = ref(false)
     const showError = ref(false)
-
-    // 持仓数据
-    const positions = ref([])
-    const closingTicket = ref(null)
     const errorMessage = ref('')
 
     // 趋势分析相关
     const trendData = ref({})
     const loadingTrend = ref(false)
     const pendingOrders = ref([])
-
-    // 交易配置
-    const tradeConfig = ref({
-      enabled: true,
-      default_volume: 0.01,
-      default_sl_offset: 0.05,
-      symbol_config: {}
-    })
-
-    // 添加新品种
-    const newSymbol = ref('')
-    const newVolume = ref(0.01)
-    const newSlOffset = ref(0.05)
 
     // 订单确认/放弃状态
     const confirmingOrderId = ref(null)
@@ -533,8 +737,16 @@ export default {
     // WebSocket
     const ws = ref(null)
     const wsConnected = ref(false)
-    const chartContainer = ref(null)
-    let chartInstance = null
+
+    // 大模型分析
+    const llmStatus = ref({ enabled: false })
+    const llmAnalysis = ref({})
+    const llmAnalyzing = ref(false)
+    const llmAnalysisStatus = ref('')
+
+    // 最新快讯
+    const latestFlashNews = ref(null)
+    const newsWs = ref(null)
 
     // 计算属性
     const highPivots = computed(() => {
@@ -551,56 +763,7 @@ export default {
         .slice(0, 20)
     })
 
-    // 可用品种列表（已连接但未配置的）
-    const availableSymbols = computed(() => {
-      const configured = Object.keys(tradeConfig.value.symbol_config || {})
-      return symbols.value.filter(s => !configured.includes(s))
-    })
-
     // 方法
-    const loadData = async () => {
-      if (!selectedSymbol.value) return
-      loading.value = true
-      try {
-        // 加载K线数据
-        const klineData = await marketAPI.getKlines(selectedSymbol.value, selectedPeriod.value, 200)
-        klines.value = klineData.data || []
-
-        // 加载转折点数据
-        const pivotData = await marketAPI.getPivots(selectedSymbol.value)
-        if (pivotData.data) {
-          const pivots = []
-          for (const period in pivotData.data) {
-            pivotData.data[period].forEach(p => {
-              pivots.push({ ...p, period })
-            })
-          }
-          allPivots.value = pivots
-        }
-
-        // 更新图表
-        await nextTick()
-        renderChart()
-
-      } catch (err) {
-        showError.value = true
-        errorMessage.value = `加载数据失败: ${err.message}`
-      } finally {
-        loading.value = false
-      }
-    }
-
-    // 交易品种变化时，同时加载K线和趋势
-    const onSymbolChange = () => {
-      loadData()
-      loadTrend()
-    }
-
-    // K线周期变化时，加载K线数据
-    const onPeriodChange = () => {
-      loadData()
-    }
-
     const loadStatus = async () => {
       try {
         const status = await marketAPI.getStatus()
@@ -619,20 +782,6 @@ export default {
       }
     }
 
-    const loadSymbols = async () => {
-      try {
-        const data = await marketAPI.getSymbols()
-        symbols.value = data.symbols || []
-        // 如果有数据且当前未选择，自动选择第一个
-        if (symbols.value.length > 0 && !selectedSymbol.value) {
-          selectedSymbol.value = symbols.value[0]
-          loadData()
-        }
-      } catch (err) {
-        console.error('加载品种列表失败:', err)
-      }
-    }
-
     const connectWebSocket = () => {
       ws.value = marketAPI.createWebSocket(
         // onMessage
@@ -644,8 +793,46 @@ export default {
             if (pivotAlerts.value.length > 10) {
               pivotAlerts.value.pop()
             }
+          } else if (data.type === 'ai_entry_alert') {
+            // AI入场价提醒
+            console.log('收到AI入场价提醒:', data)
+            aiEntryAlerts.value.unshift(data)
+            // 只保留最近10条
+            if (aiEntryAlerts.value.length > 10) {
+              aiEntryAlerts.value.pop()
+            }
+          } else if (data.type === 'key_level_alert') {
+            // 关键点位订单提醒
+            console.log('收到关键点位订单提醒:', data)
+            keyLevelAlerts.value.unshift(data)
+            // 只保留最近10条
+            if (keyLevelAlerts.value.length > 10) {
+              keyLevelAlerts.value.pop()
+            }
           } else if (data.type === 'connected') {
             wsConnected.value = true
+          } else if (data.type === 'llm_analysis_status') {
+            // 大模型分析状态更新（流式）
+            console.log('收到分析状态更新:', data)
+            if (data.status === 'analyzing' || data.status === 'streaming') {
+              llmAnalyzing.value = true
+              llmAnalysisStatus.value = data.message
+            } else if (data.status === 'stale') {
+              // 数据过期，停止加载状态
+              llmAnalyzing.value = false
+              llmAnalysisStatus.value = data.message
+            } else if (data.status === 'error') {
+              llmAnalyzing.value = false
+              llmAnalysisStatus.value = data.message
+            }
+          } else if (data.type === 'llm_analysis_update') {
+            // 大模型分析更新，刷新分析结果
+            console.log('收到大模型分析更新通知:', data)
+            llmAnalyzing.value = false
+            llmAnalysisStatus.value = ''
+            loadLLMAnalysis()
+            loadLLMStatus()
+            loadTrend()
           }
         },
         // onError
@@ -669,104 +856,15 @@ export default {
       )
     }
 
-    const renderChart = () => {
-      if (!chartContainer.value || klines.value.length === 0) return
-
-      if (chartInstance) {
-        chartInstance.dispose()
+    const getThresholdLabel = (period) => {
+      const threshold = thresholds.value[period]
+      if (threshold) {
+        return `±${threshold.percent}`
       }
-
-      chartInstance = echarts.init(chartContainer.value)
-
-      const data = klines.value
-      const dates = data.map(k => k.timestamp)
-      const ohlc = data.map(k => [k.open, k.close, k.low, k.high])
-
-      // 获取当前周期的转折点
-      const periodPivots = allPivots.value.filter(p => p.period === selectedPeriod.value)
-      const highMarkers = periodPivots
-        .filter(p => p.direction === 'high')
-        .map(p => ({
-          coord: [p.timestamp, p.price],
-          name: '高点',
-          itemStyle: { color: '#ef5350' }
-        }))
-      const lowMarkers = periodPivots
-        .filter(p => p.direction === 'low')
-        .map(p => ({
-          coord: [p.timestamp, p.price],
-          name: '低点',
-          itemStyle: { color: '#26a69a' }
-        }))
-
-      const option = {
-        tooltip: {
-          trigger: 'axis',
-          axisPointer: { type: 'cross' }
-        },
-        legend: {
-          data: ['K线', 'MA5', 'MA10', 'MA20']
-        },
-        grid: {
-          left: '10%',
-          right: '10%',
-          bottom: '15%'
-        },
-        xAxis: {
-          type: 'category',
-          data: dates,
-          scale: true,
-          boundaryGap: false,
-          axisLine: { onZero: false },
-          splitLine: { show: false },
-          min: 'dataMin',
-          max: 'dataMax'
-        },
-        yAxis: {
-          scale: true,
-          splitArea: { show: true }
-        },
-        dataZoom: [
-          {
-            type: 'inside',
-            start: 50,
-            end: 100
-          },
-          {
-            show: true,
-            type: 'slider',
-            top: '90%',
-            start: 50,
-            end: 100
-          }
-        ],
-        series: [
-          {
-            name: 'K线',
-            type: 'candlestick',
-            data: ohlc,
-            itemStyle: {
-              color: '#ef5350',
-              color0: '#26a69a',
-              borderColor: '#ef5350',
-              borderColor0: '#26a69a'
-            },
-            markPoint: {
-              data: [...highMarkers, ...lowMarkers],
-              symbolSize: 30,
-              label: {
-                show: true,
-                fontSize: 10
-              }
-            }
-          }
-        ]
-      }
-
-      chartInstance.setOption(option)
+      return period
     }
 
-    const getPivotColor = (period) => {
+    const getPivotPeriodColor = (period) => {
       const colors = {
         'H4': 'red',
         'H1': 'orange',
@@ -777,29 +875,99 @@ export default {
       return colors[period] || 'grey'
     }
 
-    const getThresholdLabel = (period) => {
-      const threshold = thresholds.value[period]
-      if (threshold) {
-        return `±${threshold.percent}`
+    const getTechTrend = (symbol, period) => {
+      const normalized = symbol.replace('#', '').toUpperCase()
+      const symbolVariants = [normalized, normalized + '#', symbol]
+      for (const s of symbolVariants) {
+        // 后端返回的数据结构是 resonance.periods
+        if (trendData.value[s]?.resonance?.periods?.[period]) {
+          return trendData.value[s].resonance.periods[period]
+        }
       }
-      return period
+      return null
     }
 
-    const getAlertType = (alert) => {
-      // 突破用 error 类型（红色），接近用 warning（黄色）
-      if (alert.is_breakthrough) {
-        return 'error'
+    // 判断AI趋势和技术趋势是否冲突
+    const hasConflict = (symbol, period, aiTrend) => {
+      const techTrend = getTechTrend(symbol, period)
+      if (!techTrend) return false
+
+      const aiDir = getTrendDirection(aiTrend.trend)
+      const techDir = techTrend.trend
+
+      // 如果一个看涨一个看跌，则是冲突
+      if ((aiDir === 'up' && techDir === 'down') || (aiDir === 'down' && techDir === 'up')) {
+        return true
       }
-      return 'warning'
+      return false
+    }
+
+    // 获取趋势方向
+    const getTrendDirection = (trend) => {
+      if (!trend) return 'unknown'
+      const t = trend.toLowerCase()
+      if (t.includes('上涨') || t.includes('上升') || t === 'up') return 'up'
+      if (t.includes('下跌') || t.includes('下降') || t === 'down') return 'down'
+      return 'sideways'
+    }
+
+    // 获取结论
+    const getConclusion = (symbol, period, aiTrend) => {
+      const techTrend = getTechTrend(symbol, period)
+      const aiDir = getTrendDirection(aiTrend.trend)
+      const techDir = techTrend?.trend || 'unknown'
+
+      if (hasConflict(symbol, period, aiTrend)) {
+        return '谨慎观望'
+      }
+
+      if (aiDir === techDir) {
+        if (aiDir === 'up') return '看涨'
+        if (aiDir === 'down') return '看跌'
+        return '震荡'
+      }
+
+      // AI有判断但技术分析无明确趋势
+      if (techDir === 'sideways' || techDir === 'unknown') {
+        return aiDir === 'up' ? '偏多' : aiDir === 'down' ? '偏空' : '震荡'
+      }
+
+      return '待观察'
+    }
+
+    // 获取结论颜色
+    const getConclusionColor = (symbol, period, aiTrend) => {
+      if (hasConflict(symbol, period, aiTrend)) {
+        return 'warning'
+      }
+      const conclusion = getConclusion(symbol, period, aiTrend)
+      if (conclusion === '看涨') return 'success'
+      if (conclusion === '看跌') return 'error'
+      if (conclusion === '偏多') return 'success lighten-2'
+      if (conclusion === '偏空') return 'error lighten-2'
+      return 'grey'
     }
 
     // 趋势分析相关方法
     const loadTrend = async () => {
-      if (!selectedSymbol.value) return
+      // 加载所有已分析品种的趋势数据
+      const symbols = Object.keys(llmAnalysis.value)
+      if (symbols.length === 0) return
+
       loadingTrend.value = true
       try {
-        const data = await marketAPI.getTrend(selectedSymbol.value)
-        trendData.value = data
+        // 并行加载所有品种的趋势
+        const promises = symbols.map(symbol => marketAPI.getTrend(symbol))
+        const results = await Promise.all(promises)
+
+        // 合并结果
+        results.forEach((data, index) => {
+          if (data) {
+            const symbol = symbols[index]
+            trendData.value[symbol] = data
+            console.log(`[Market] 加载 ${symbol} 技术趋势:`, data.resonance?.signal)
+          }
+        })
       } catch (err) {
         console.error('加载趋势分析失败:', err)
       } finally {
@@ -816,107 +984,111 @@ export default {
       }
     }
 
-    const loadTradeConfig = async () => {
+    // 大模型分析相关
+    const loadLLMStatus = async () => {
       try {
-        const data = await marketAPI.getTradeConfig()
-        if (data.config) {
-          tradeConfig.value = {
-            enabled: data.config.enabled,
-            default_volume: data.config.default_volume,
-            default_sl_offset: data.config.default_sl_offset,
-            symbol_config: data.config.symbol_config || {}
-          }
-        }
-      } catch (err) {
-        console.error('加载交易配置失败:', err)
-      }
-    }
-
-    // 加载持仓数据
-    const loadPositions = async () => {
-      try {
-        const data = await marketAPI.getStatistics(1)
-        if (data.statistics && data.statistics.length > 0) {
-          const latest = data.statistics[0]
-          // 处理持仓数据，添加当前价格
-          if (latest.positions && latest.positions.length > 0) {
-            positions.value = latest.positions.map(pos => ({
-              ...pos,
-              symbol: latest.symbol,
-              currentPrice: latest.bidPrice // 简化处理
-            }))
-          } else {
-            positions.value = []
-          }
-        }
-      } catch (err) {
-        console.error('加载持仓数据失败:', err)
-      }
-    }
-
-    // 平仓
-    const closePosition = async (pos) => {
-      closingTicket.value = pos.ticket
-      try {
-        const data = await marketAPI.closePosition(pos.ticket, pos.symbol)
+        const data = await marketAPI.getLLMStatus()
         if (data.status === 'ok') {
-          // 刷新持仓
-          await loadPositions()
-        } else {
-          errorMessage.value = data.message || '平仓失败'
-          showError.value = true
+          llmStatus.value = data.data
         }
       } catch (err) {
-        errorMessage.value = `平仓失败: ${err.message}`
-        showError.value = true
-      } finally {
-        closingTicket.value = null
+        console.error('获取大模型状态失败:', err)
       }
     }
 
-    const saveTradeConfig = async () => {
+    const loadLLMAnalysis = async () => {
       try {
-        const data = await marketAPI.updateTradeConfig({
-          enabled: tradeConfig.value.enabled,
-          default_volume: tradeConfig.value.default_volume,
-          default_sl_offset: tradeConfig.value.default_sl_offset,
-          symbol_config: tradeConfig.value.symbol_config
-        })
-        if (data.status !== 'ok') {
-          errorMessage.value = data.message || '保存配置失败'
-          showError.value = true
+        const data = await marketAPI.getLLMAnalysis()
+        if (data.status === 'ok') {
+          llmAnalysis.value = data.data || {}
         }
       } catch (err) {
-        errorMessage.value = `保存配置失败: ${err.message}`
-        showError.value = true
+        console.error('获取大模型分析失败:', err)
       }
     }
 
-    const addSymbolConfig = () => {
-      if (!newSymbol.value) return
-      const symbol = newSymbol.value
-      tradeConfig.value.symbol_config[symbol] = {
-        volume: newVolume.value || 0.01,
-        sl_offset: newSlOffset.value || 0.05
+    // 获取最新快讯
+    const fetchLatestFlashNews = async () => {
+      try {
+        const response = await fetch('/api/news/flash?count=1')
+        const data = await response.json()
+        if (data.status === 'ok' && data.data && data.data.length > 0) {
+          latestFlashNews.value = data.data[0]
+        }
+      } catch (err) {
+        console.error('获取快讯失败:', err)
       }
-      saveTradeConfig()
-      // 清空输入
-      newSymbol.value = ''
-      newVolume.value = 0.01
-      newSlOffset.value = 0.05
     }
 
-    const onSymbolSelect = (symbol) => {
-      // 如果该品种已有配置，加载出来
-      if (symbol && tradeConfig.value.symbol_config && tradeConfig.value.symbol_config[symbol]) {
-        const config = tradeConfig.value.symbol_config[symbol]
-        newVolume.value = config.volume || 0.01
-        newSlOffset.value = config.sl_offset || 0.05
-      } else {
-        // 没有配置则使用默认值
-        newVolume.value = tradeConfig.value.default_volume || 0.01
-        newSlOffset.value = tradeConfig.value.default_sl_offset || 0.05
+    // 连接新闻WebSocket
+    const connectNewsWebSocket = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${protocol}//${window.location.host}/api/news/ws`
+
+      newsWs.value = new WebSocket(wsUrl)
+
+      newsWs.value.onopen = () => {
+        console.log('[Market] 新闻WebSocket已连接')
       }
+
+      newsWs.value.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'flash_news' && data.news) {
+            // 更新最新快讯
+            latestFlashNews.value = data.news
+          } else if (data.type === 'connected') {
+            // 连接成功
+            console.log('[Market] 新闻WebSocket连接确认')
+          }
+        } catch (err) {
+          console.error('[Market] 解析新闻WebSocket消息失败:', err)
+        }
+      }
+
+      newsWs.value.onerror = (err) => {
+        console.error('[Market] 新闻WebSocket错误:', err)
+      }
+
+      newsWs.value.onclose = () => {
+        console.log('[Market] 新闻WebSocket断开，5秒后重连...')
+        setTimeout(() => {
+          if (!newsWs.value || newsWs.value.readyState === WebSocket.CLOSED) {
+            connectNewsWebSocket()
+          }
+        }, 5000)
+      }
+    }
+
+    // 格式化快讯时间
+    const formatNewsTime = (timeStr) => {
+      if (!timeStr) return ''
+      const date = new Date(timeStr)
+      return date.toLocaleString('zh-CN', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    }
+
+    // 获取影响颜色
+    const getImpactColor = (direction) => {
+      if (direction === '利好') return 'success'
+      if (direction === '利空') return 'error'
+      return 'info'
+    }
+
+    const getTrendChipColor = (trend) => {
+      if (!trend) return 'grey'
+      const trendLower = trend.toLowerCase()
+      if (trendLower.includes('上涨') || trendLower === 'up' || trendLower === 'buy') {
+        return 'success'
+      }
+      if (trendLower.includes('下跌') || trendLower === 'down' || trendLower === 'sell') {
+        return 'error'
+      }
+      return 'warning'
     }
 
     const confirmOrder = async (orderId) => {
@@ -1001,10 +1173,98 @@ export default {
       }
     }
 
-    const getResonanceColor = (resonance) => {
-      if (resonance === 'up') return 'success'
-      if (resonance === 'down') return 'error'
-      return 'grey'
+    // AI入场价提醒操作
+    const removeAiEntryAlert = (index) => {
+      aiEntryAlerts.value.splice(index, 1)
+    }
+
+    const confirmAiEntryOrder = async (order, alertIndex) => {
+      confirmingOrderId.value = order.order_id
+      try {
+        const data = await marketAPI.confirmOrderWithUpdate(order.order_id, {
+          mount: order.mount,
+          sl: order.sl,
+          tp: order.tp
+        })
+        if (data.status === 'ok') {
+          aiEntryAlerts.value.splice(alertIndex, 1)
+          await loadPendingOrders()
+        } else {
+          errorMessage.value = data.message || '确认订单失败'
+          showError.value = true
+        }
+      } catch (err) {
+        errorMessage.value = `确认订单失败: ${err.message}`
+        showError.value = true
+      } finally {
+        confirmingOrderId.value = null
+      }
+    }
+
+    const rejectAiEntryOrder = async (orderId, alertIndex) => {
+      rejectingOrderId.value = orderId
+      try {
+        const data = await marketAPI.rejectOrder(orderId)
+        if (data.status === 'ok') {
+          aiEntryAlerts.value.splice(alertIndex, 1)
+          await loadPendingOrders()
+        } else {
+          errorMessage.value = data.message || '放弃订单失败'
+          showError.value = true
+        }
+      } catch (err) {
+        errorMessage.value = `放弃订单失败: ${err.message}`
+        showError.value = true
+      } finally {
+        rejectingOrderId.value = null
+      }
+    }
+
+    // 关键点位订单提醒操作
+    const removeKeyLevelAlert = (index) => {
+      keyLevelAlerts.value.splice(index, 1)
+    }
+
+    const confirmKeyLevelOrder = async (order, alertIndex) => {
+      confirmingOrderId.value = order.order_id
+      try {
+        const data = await marketAPI.confirmOrderWithUpdate(order.order_id, {
+          mount: order.mount,
+          sl: order.sl,
+          tp: order.tp
+        })
+        if (data.status === 'ok') {
+          keyLevelAlerts.value.splice(alertIndex, 1)
+          await loadPendingOrders()
+        } else {
+          errorMessage.value = data.message || '确认订单失败'
+          showError.value = true
+        }
+      } catch (err) {
+        errorMessage.value = `确认订单失败: ${err.message}`
+        showError.value = true
+      } finally {
+        confirmingOrderId.value = null
+      }
+    }
+
+    const rejectKeyLevelOrder = async (orderId, alertIndex) => {
+      rejectingOrderId.value = orderId
+      try {
+        const data = await marketAPI.rejectOrder(orderId)
+        if (data.status === 'ok') {
+          keyLevelAlerts.value.splice(alertIndex, 1)
+          await loadPendingOrders()
+        } else {
+          errorMessage.value = data.message || '放弃订单失败'
+          showError.value = true
+        }
+      } catch (err) {
+        errorMessage.value = `放弃订单失败: ${err.message}`
+        showError.value = true
+      } finally {
+        rejectingOrderId.value = null
+      }
     }
 
     const getTrendColor = (trend) => {
@@ -1022,32 +1282,23 @@ export default {
 
     // 生命周期
     onMounted(() => {
-      loadSymbols()
       loadStatus()
       loadThresholds()
       loadPendingOrders()
-      loadTradeConfig()
-      loadPositions()
+      loadLLMStatus()
+      loadLLMAnalysis()
       connectWebSocket()
+      // 快讯相关
+      fetchLatestFlashNews()
+      connectNewsWebSocket()
 
-      // 定时刷新状态、品种列表和趋势分析
+      // 定时刷新
       const statusInterval = setInterval(() => {
         loadStatus()
-        loadSymbols()
         loadPendingOrders()
-        loadPositions()
-        // 自动刷新趋势分析
-        if (selectedSymbol.value) {
-          loadTrend()
-        }
+        loadLLMAnalysis()
+        loadTrend()
       }, 10000)
-
-      // 窗口大小变化时重新渲染图表
-      window.addEventListener('resize', () => {
-        if (chartInstance) {
-          chartInstance.resize()
-        }
-      })
 
       // 清理
       onUnmounted(() => {
@@ -1055,18 +1306,13 @@ export default {
         if (ws.value) {
           ws.value.close()
         }
-        if (chartInstance) {
-          chartInstance.dispose()
+        if (newsWs.value) {
+          newsWs.value.close()
         }
       })
     })
 
     return {
-      selectedSymbol,
-      selectedPeriod,
-      symbols,
-      periods,
-      klines,
       allPivots,
       highPivots,
       lowPivots,
@@ -1077,13 +1323,8 @@ export default {
       showError,
       errorMessage,
       wsConnected,
-      chartContainer,
-      loadData,
-      onSymbolChange,
-      onPeriodChange,
-      getPivotColor,
       getThresholdLabel,
-      getAlertType,
+      getPivotPeriodColor,
       // 趋势分析相关
       trendData,
       loadingTrend,
@@ -1091,29 +1332,41 @@ export default {
       loadTrend,
       confirmOrder,
       rejectOrder,
-      getResonanceColor,
       getTrendColor,
       getTrendLabel,
-      // 交易配置
-      tradeConfig,
-      saveTradeConfig,
-      availableSymbols,
-      newSymbol,
-      newVolume,
-      newSlOffset,
-      addSymbolConfig,
-      onSymbolSelect,
       // 提醒订单操作
       confirmingOrderId,
       rejectingOrderId,
       removeAlert,
       confirmAlertOrder,
       rejectAlertOrder,
-      // 持仓相关
-      positions,
-      closingTicket,
-      loadPositions,
-      closePosition
+      // AI入场价提醒
+      aiEntryAlerts,
+      removeAiEntryAlert,
+      confirmAiEntryOrder,
+      rejectAiEntryOrder,
+      // 关键点位订单提醒
+      keyLevelAlerts,
+      removeKeyLevelAlert,
+      confirmKeyLevelOrder,
+      rejectKeyLevelOrder,
+      // 大模型分析
+      llmStatus,
+      llmAnalysis,
+      llmAnalyzing,
+      llmAnalysisStatus,
+      loadLLMStatus,
+      loadLLMAnalysis,
+      getTrendChipColor,
+      // 技术分析与AI分析整合
+      getTechTrend,
+      hasConflict,
+      getConclusion,
+      getConclusionColor,
+      // 快讯相关
+      latestFlashNews,
+      formatNewsTime,
+      getImpactColor
     }
   }
 }

@@ -143,6 +143,92 @@ export const marketAPI = {
   async closePosition(ticket, symbol) {
     const response = await api.post('/close_position', { ticket, symbol })
     return response.data
+  },
+
+  // ==================== 大模型分析 ====================
+
+  // 获取大模型分析结果
+  async getLLMAnalysis(symbol = null) {
+    const params = symbol ? { symbol } : {}
+    const response = await api.get('/llm/analysis', { params })
+    return response.data
+  },
+
+  // 获取大模型分析器状态
+  async getLLMStatus() {
+    const response = await api.get('/llm/status')
+    return response.data
+  },
+
+  // 获取大模型配置
+  async getLLMConfig() {
+    const response = await api.get('/llm/config')
+    return response.data
+  },
+
+  // 手动触发大模型分析
+  async triggerLLMAnalysis() {
+    const response = await api.post('/llm/trigger')
+    return response.data
+  },
+
+  // 配置大模型参数
+  async configureLLM(config) {
+    const response = await api.post('/llm/configure', config)
+    return response.data
+  },
+
+  // 获取已配置品种的K线数据状态
+  async getConfiguredSymbols() {
+    const response = await api.get('/market/configured_symbols')
+    return response.data
+  },
+
+  // 获取系统运行日志
+  async getSystemLogs(count = 50, eventTypes = null, symbol = null) {
+    const params = { count }
+    if (eventTypes && eventTypes.length > 0) {
+      params.event_type = eventTypes.join(',')
+    }
+    if (symbol) params.symbol = symbol
+    const response = await api.get('/system/logs', { params })
+    return response.data
+  },
+
+  // 清空系统日志
+  async clearSystemLogs() {
+    const response = await api.delete('/system/logs')
+    return response.data
+  },
+
+  // ==================== 仓位管理 ====================
+
+  // 获取持仓数据
+  async getPositions(symbol = null) {
+    const params = symbol ? { symbol } : {}
+    const response = await api.get('/positions', { params })
+    return response.data
+  },
+
+  // 获取持仓汇总
+  async getPositionsSummary(symbol = null) {
+    const params = symbol ? { symbol } : {}
+    const response = await api.get('/positions/summary', { params })
+    return response.data
+  },
+
+  // ==================== 交易历史 ====================
+
+  // 获取交易历史
+  async getTradeHistory() {
+    const response = await api.get('/trade_history')
+    return response.data
+  },
+
+  // 获取交易历史统计
+  async getTradeHistoryStatistics() {
+    const response = await api.get('/trade_history/statistics')
+    return response.data
   }
 }
 

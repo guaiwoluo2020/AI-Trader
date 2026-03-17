@@ -18,3 +18,11 @@ __pycache__/
 
 # Node.js
 node_modules/
+# Environment
+.env
+
+# Data
+data/
+
+# Build
+frontend/dist/

@@ -10,7 +10,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 import threading
 
-from .store import KlineData, normalize_symbol
+from .store import KlineData
 
 
 class TrendAnalyzer:
@@ -35,7 +35,40 @@ class TrendAnalyzer:
         # 趋势转换历史
         self._trend_changes = defaultdict(list)
 
+        # 统计数据历史引用（用于获取价差）
+        self._statistics_history = None
+
         print("[TrendAnalyzer] 趋势分析器已初始化")
+
+    def set_statistics_history(self, statistics_history):
+        """设置统计数据历史引用（用于获取价差）"""
+        self._statistics_history = statistics_history
+
+    def _get_symbol_spread(self, symbol: str) -> Optional[float]:
+        """
+        获取指定品种的最新价差
+
+        Args:
+            symbol: 品种名称
+
+        Returns:
+            价差（金额），如果没有返回None
+        """
+        if not self._statistics_history:
+            return None
+
+        symbol_normalized = symbol.replace('#', '')
+
+        # 从最新的统计数据中查找该品种的价差
+        for stat in reversed(list(self._statistics_history)):
+            stat_symbol = stat.get('symbol', '')
+            stat_normalized = stat_symbol.replace('#', '')
+            if stat_normalized == symbol_normalized:
+                spread = stat.get('spread')
+                if spread is not None and spread > 0:
+                    return spread
+
+        return None
 
     def analyze_trend(self, symbol: str, period: str, klines: List[KlineData]) -> Dict:
         """
@@ -120,7 +153,7 @@ class TrendAnalyzer:
             strength = int(adx)
 
         # 检查趋势转换
-        symbol_key = normalize_symbol(symbol)
+        symbol_key = symbol
         change_signal = False
         previous_trend = None
 
@@ -170,7 +203,7 @@ class TrendAnalyzer:
                 "signal": str
             }
         """
-        symbol_key = normalize_symbol(symbol)
+        symbol_key = symbol
 
         with self._lock:
             states = dict(self._trend_states[symbol_key])
@@ -221,19 +254,15 @@ class TrendAnalyzer:
 
     def get_trend_state(self, symbol: str, period: str = None) -> Dict:
         """获取趋势状态"""
-        symbol_key = normalize_symbol(symbol)
-
         with self._lock:
             if period:
-                return self._trend_states[symbol_key].get(period, {})
-            return dict(self._trend_states[symbol_key])
+                return self._trend_states[symbol].get(period, {})
+            return dict(self._trend_states[symbol])
 
     def get_trend_changes(self, symbol: str, count: int = 10) -> List[Dict]:
         """获取趋势转换历史"""
-        symbol_key = normalize_symbol(symbol)
-
         with self._lock:
-            return self._trend_changes[symbol_key][-count:]
+            return self._trend_changes[symbol][-count:]
 
     def _calculate_ma(self, data: List[float], period: int) -> float:
         """计算移动平均线"""
@@ -324,8 +353,6 @@ class TrendAnalyzer:
         Returns:
             交易建议 或 None
         """
-        symbol_key = normalize_symbol(symbol)
-
         # 获取趋势状态
         resonance = self.analyze_resonance(symbol)
 
@@ -377,7 +404,7 @@ class TrendAnalyzer:
             return None
 
         return {
-            "symbol": symbol_key,
+            "symbol": symbol,
             "action": action,
             "price": current_price,
             "sl": round(sl, 4),
