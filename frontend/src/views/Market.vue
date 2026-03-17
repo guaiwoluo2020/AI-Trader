@@ -41,6 +41,55 @@
       </v-col>
     </v-row>
 
+    <!-- 重要财经事件提醒 -->
+    <v-row v-if="topCalendarEvent">
+      <v-col cols="12">
+        <v-alert
+          type="error"
+          dense
+          class="mb-2"
+          dismissible
+          @input="topCalendarEvent = null"
+        >
+          <div class="d-flex align-center">
+            <v-icon small class="mr-2">mdi-calendar-alert</v-icon>
+            <v-chip color="error" x-small class="mr-2">
+              重要性 {{ topCalendarEvent.importance }}
+            </v-chip>
+            <v-chip :color="getCurrencyColor(topCalendarEvent.currency)" x-small class="mr-2">
+              {{ topCalendarEvent.currency }}
+            </v-chip>
+            <span class="text-body-2 font-weight-medium">{{ topCalendarEvent.name }}</span>
+            <v-spacer></v-spacer>
+            <span class="text-caption grey--text ml-2">
+              {{ formatEventTime(topCalendarEvent.publish_time) }}
+            </span>
+          </div>
+          <!-- 预测值和实际值 -->
+          <div class="mt-1 d-flex align-center">
+            <span class="text-caption mr-3" v-if="topCalendarEvent.forecast">
+              预测: <strong>{{ topCalendarEvent.forecast }}</strong>
+            </span>
+            <span class="text-caption mr-3" v-if="topCalendarEvent.previous">
+              前值: <strong>{{ topCalendarEvent.previous }}</strong>
+            </span>
+            <span class="text-caption success--text" v-if="topCalendarEvent.actual">
+              实际: <strong>{{ topCalendarEvent.actual }}</strong>
+            </span>
+          </div>
+          <!-- 结果标签 -->
+          <div v-if="topCalendarEvent.result" class="mt-1">
+            <v-chip
+              :color="getEventResultColor(topCalendarEvent.result)"
+              x-small
+            >
+              {{ getEventResultLabel(topCalendarEvent.result) }}
+            </v-chip>
+          </div>
+        </v-alert>
+      </v-col>
+    </v-row>
+
     <!-- 转折点提醒通知 -->
     <v-row v-if="pivotAlerts.length > 0">
       <v-col cols="12">
@@ -748,6 +797,9 @@ export default {
     const latestFlashNews = ref(null)
     const newsWs = ref(null)
 
+    // 最高等级财经事件
+    const topCalendarEvent = ref(null)
+
     // 计算属性
     const highPivots = computed(() => {
       return allPivots.value
@@ -1079,6 +1131,73 @@ export default {
       return 'info'
     }
 
+    // 获取最高重要性财经事件
+    const fetchTopCalendarEvent = async () => {
+      try {
+        const response = await fetch('/api/news/upcoming?hours=24')
+        const data = await response.json()
+        if (data.status === 'ok' && data.data && data.data.length > 0) {
+          // 按重要性排序，选择最高重要性的事件
+          const sortedEvents = data.data
+            .filter(e => e.name && e.name.length > 2) // 过滤无效名称
+            .sort((a, b) => {
+              // 先按重要性排序（高到低）
+              if (b.importance !== a.importance) return b.importance - a.importance
+              // 同重要性按时间排序（近到远）
+              return new Date(a.publish_time) - new Date(b.publish_time)
+            })
+          if (sortedEvents.length > 0) {
+            topCalendarEvent.value = sortedEvents[0]
+          }
+        }
+      } catch (err) {
+        console.error('获取财经事件失败:', err)
+      }
+    }
+
+    // 格式化事件时间
+    const formatEventTime = (timeStr) => {
+      if (!timeStr) return ''
+      const date = new Date(timeStr)
+      return date.toLocaleString('zh-CN', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    }
+
+    // 获取货币颜色
+    const getCurrencyColor = (currency) => {
+      const colors = {
+        'USD': 'green',
+        'EUR': 'blue',
+        'GBP': 'purple',
+        'JPY': 'red',
+        'AUD': 'orange',
+        'CAD': 'teal',
+        'CHF': 'indigo',
+        'CNY': 'deep-orange'
+      }
+      return colors[currency] || 'grey'
+    }
+
+    // 获取事件结果颜色
+    const getEventResultColor = (result) => {
+      if (result === 'better') return 'success'
+      if (result === 'worse') return 'error'
+      if (result === 'in_line') return 'info'
+      return 'grey'
+    }
+
+    // 获取事件结果标签
+    const getEventResultLabel = (result) => {
+      if (result === 'better') return '好于预期'
+      if (result === 'worse') return '差于预期'
+      if (result === 'in_line') return '符合预期'
+      return '未知'
+    }
+
     const getTrendChipColor = (trend) => {
       if (!trend) return 'grey'
       const trendLower = trend.toLowerCase()
@@ -1291,6 +1410,8 @@ export default {
       // 快讯相关
       fetchLatestFlashNews()
       connectNewsWebSocket()
+      // 财经事件
+      fetchTopCalendarEvent()
 
       // 定时刷新
       const statusInterval = setInterval(() => {
@@ -1366,7 +1487,13 @@ export default {
       // 快讯相关
       latestFlashNews,
       formatNewsTime,
-      getImpactColor
+      getImpactColor,
+      // 财经事件相关
+      topCalendarEvent,
+      formatEventTime,
+      getCurrencyColor,
+      getEventResultColor,
+      getEventResultLabel
     }
   }
 }

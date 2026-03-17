@@ -1525,7 +1525,8 @@ void SendCalendarToPython()
 
 //+------------------------------------------------------------------+
 //| JSON字符串转义                                                    |
-//| 转义所有JSON无效的控制字符(0x00-0x1F)                              |
+//| 转义所有JSON无效的控制字符(0x00-0x1F)和非ASCII字符                  |
+//| 非ASCII字符使用\uXXXX格式转义，确保Unicode正确传递                  |
 //+------------------------------------------------------------------+
 string EscapeJsonString(string str)
   {
@@ -1544,15 +1545,22 @@ string EscapeJsonString(string str)
          case 0x08: result += "\\b"; break;  // backspace
          case 0x0C: result += "\\f"; break;  // form feed
          default:
-           // 转义所有其他控制字符 (0x00-0x1F)
-           if(ch < 32)
+           // 转义所有控制字符 (0x00-0x1F) 和 DEL (0x7F)
+           if(ch < 32 || ch == 0x7F)
              {
               // 使用 \uXXXX 格式转义
               result += "\\u" + StringFormat("%04X", ch);
              }
+           else if(ch < 128)
+             {
+              // ASCII 字符直接添加
+              result += CharToString((uchar)ch);
+             }
            else
              {
-              result += CharToString((uchar)ch);
+              // 非ASCII字符(如中文)使用 \uXXXX 格式转义
+              // 这样可以避免 StringToCharArray 的编码问题
+              result += "\\u" + StringFormat("%04X", ch);
              }
         }
      }

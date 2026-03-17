@@ -274,14 +274,14 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
 
             print(f"[calendar] 收到请求, 数据长度: {len(raw_text)} 字节")
 
-            # 清理所有控制字符 (0x00-0x1F, 除了 \t \n \r)
-            # 保留 tab(0x09), LF(0x0A), CR(0x0D)
+            # 清理所有控制字符 (0x00-0x1F 和 0x7F)
+            # JSON字符串值中不能包含任何原始控制字符
             def clean_control_chars(text):
                 # 使用正则表达式一次性清理所有控制字符
-                # 除了 tab(0x09), LF(0x0A), CR(0x0D)
+                # 包括 TAB(0x09), LF(0x0A), CR(0x0D), DEL(0x7F) 在内
+                # 因为 JSON 字符串值中这些字符必须转义，不能直接出现
                 import re
-                # 匹配所有控制字符 (0x00-0x1F) 除了 \t \n \r
-                pattern = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+                pattern = re.compile(r'[\x00-\x1f\x7f]')
                 cleaned = pattern.sub('', text)
                 removed_count = len(text) - len(cleaned)
                 if removed_count > 0:

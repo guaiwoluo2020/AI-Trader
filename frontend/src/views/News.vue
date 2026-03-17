@@ -87,6 +87,8 @@
                 v-model="selectedImportance"
                 :items="importanceOptions"
                 label="重要性筛选"
+                item-title="text"
+                item-value="value"
                 outlined
                 dense
                 hide-details
@@ -95,9 +97,11 @@
             </v-col>
             <v-col cols="12" md="4">
               <v-select
-                v-model="selectedCountry"
-                :items="countryOptions"
-                label="国家筛选"
+                v-model="selectedCurrency"
+                :items="currencyOptions"
+                label="货币筛选"
+                item-title="text"
+                item-value="value"
                 outlined
                 dense
                 hide-details
@@ -281,7 +285,7 @@
                       </v-chip>
                       <span class="font-weight-medium">{{ event.name }}</span>
                     </div>
-                    <v-chip small>{{ event.country }}</v-chip>
+                    <v-chip small>{{ event.currency }}</v-chip>
                   </div>
 
                   <div class="text-caption text-grey mb-2">
@@ -356,7 +360,7 @@ export default {
     const symbolEvents = ref([])
 
     const selectedImportance = ref(null)
-    const selectedCountry = ref(null)
+    const selectedCurrency = ref(null)
     const selectedSymbol = ref('GOLD')
 
     const ws = ref(null)
@@ -373,13 +377,27 @@ export default {
       { text: '低影响', value: 1 }
     ]
 
-    const countryOptions = [
-      { text: '美国 (US)', value: 'US' },
-      { text: '日本 (JP)', value: 'JP' },
-      { text: '欧洲 (EU)', value: 'EU' },
-      { text: '英国 (UK)', value: 'UK' },
-      { text: '中国 (CN)', value: 'CN' }
-    ]
+    // 货币选项（动态生成）
+    const currencyOptions = computed(() => {
+      const currencies = new Set()
+      calendar.value.forEach(e => {
+        if (e.currency) currencies.add(e.currency)
+      })
+      const currencyNames = {
+        'USD': '美元 (USD)',
+        'EUR': '欧元 (EUR)',
+        'GBP': '英镑 (GBP)',
+        'JPY': '日元 (JPY)',
+        'AUD': '澳元 (AUD)',
+        'CAD': '加元 (CAD)',
+        'CHF': '瑞郎 (CHF)',
+        'NZD': '纽元 (NZD)'
+      }
+      return Array.from(currencies).sort().map(c => ({
+        text: currencyNames[c] || c,
+        value: c
+      }))
+    })
 
     const symbolOptions = [
       { text: '黄金 (GOLD)', value: 'GOLD' },
@@ -392,7 +410,7 @@ export default {
     const calendarHeaders = [
       { text: '重要性', value: 'importance', width: 100 },
       { text: '事件', value: 'name', width: 200 },
-      { text: '国家', value: 'country', width: 80 },
+      { text: '货币', value: 'currency', width: 80 },
       { text: '发布时间', value: 'publish_time', width: 150 },
       { text: '数值', value: 'values', width: 120 },
       { text: '结果', value: 'result', width: 100 },
@@ -406,8 +424,8 @@ export default {
         items = items.filter(e => e.importance === selectedImportance.value)
       }
 
-      if (selectedCountry.value) {
-        items = items.filter(e => e.country === selectedCountry.value)
+      if (selectedCurrency.value) {
+        items = items.filter(e => e.currency === selectedCurrency.value)
       }
 
       return items
@@ -634,10 +652,10 @@ export default {
       flashNews,
       symbolEvents,
       selectedImportance,
-      selectedCountry,
+      selectedCurrency,
       selectedSymbol,
       importanceOptions,
-      countryOptions,
+      currencyOptions,
       symbolOptions,
       calendarHeaders,
       filteredCalendar,

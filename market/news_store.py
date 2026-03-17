@@ -10,6 +10,66 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import threading
 from dataclasses import dataclass, field
+import re
+
+
+# MT5中表示无效值的特殊数值
+MT5_INVALID_VALUE = -9223372036854775808.0
+
+
+def _clean_invalid_value(value: str) -> str:
+    """清理MT5返回的无效值"""
+    if not value:
+        return ""
+    try:
+        # 检查是否是无效值
+        num = float(value)
+        if num == MT5_INVALID_VALUE or num < -1e15:
+            return ""
+        # 格式化有效数值
+        if num == int(num):
+            return str(int(num))
+        return value
+    except (ValueError, TypeError):
+        return value
+
+
+def _clean_text(text: str) -> str:
+    """清理文本中的控制字符和无效Unicode"""
+    if not text:
+        return ""
+    # 移除控制字符 (0x00-0x1F 和 0x7F)
+    cleaned = re.sub(r'[\x00-\x1f\x7f]', '', text)
+    # 移除不可打印字符（保留ASCII、中文等常用字符）
+    # 保留：ASCII (0x20-0x7E), 中文 (0x4E00-0x9FFF), 其他常用Unicode
+    result = []
+    for char in cleaned:
+        code = ord(char)
+        if (0x20 <= code <= 0x7E or  # ASCII可打印字符
+            0x4E00 <= code <= 0x9FFF or  # CJK统一汉字
+            0x3000 <= code <= 0x303F or  # CJK标点
+            0xFF00 <= code <= 0xFFEF or  # 全角字符
+            code > 0x9FFF):  # 其他Unicode字符
+            result.append(char)
+    return ''.join(result)
+
+
+def _is_valid_name(name: str) -> bool:
+    """检查名称是否有效（不是乱码）"""
+    if not name or len(name) < 2:
+        return False
+    # 计算可打印字符的比例
+    printable_count = 0
+    for char in name:
+        code = ord(char)
+        if (0x20 <= code <= 0x7E or  # ASCII可打印字符
+            0x4E00 <= code <= 0x9FFF or  # CJK统一汉字
+            0x3000 <= code <= 0x303F or  # CJK标点
+            0xFF00 <= code <= 0xFFEF):  # 全角字符
+            printable_count += 1
+    # 如果可打印字符比例低于70%，认为是乱码
+    ratio = printable_count / len(name) if name else 0
+    return ratio >= 0.7
 
 
 @dataclass
@@ -167,18 +227,24 @@ class NewsStore:
                 if publish_time < expiry_threshold:
                     continue
 
+                # 清理并检查名称有效性
+                cleaned_name = _clean_text(event_data.get('name', ''))
+                if not _is_valid_name(cleaned_name):
+                    # 名称无效（乱码），跳过此事件
+                    continue
+
                 # 创建事件对象
                 event = CalendarEvent(
                     id=event_id,
-                    name=event_data.get('name', ''),
-                    name_en=event_data.get('name_en', ''),
-                    country=event_data.get('country', ''),
+                    name=cleaned_name,
+                    name_en=_clean_text(event_data.get('name_en', '')),
+                    country=_clean_text(event_data.get('country', '')),
                     currency=event_data.get('currency', ''),
                     importance=event_data.get('importance', 0),
                     publish_time=publish_time,
-                    forecast=event_data.get('forecast', ''),
-                    previous=event_data.get('previous', ''),
-                    actual=event_data.get('actual', ''),
+                    forecast=_clean_invalid_value(event_data.get('forecast', '')),
+                    previous=_clean_invalid_value(event_data.get('previous', '')),
+                    actual=_clean_invalid_value(event_data.get('actual', '')),
                     unit=event_data.get('unit', ''),
                     symbols=event_data.get('symbols', []),
                     event_type=event_data.get('event_type', '')
