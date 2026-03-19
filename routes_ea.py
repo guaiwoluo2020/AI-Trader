@@ -309,11 +309,11 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
                 print("[calendar] 警告: events数组为空")
                 return {"status": "ok", "message": "无数据需要更新", "count": 0}
 
-            from market.news_store import get_news_store
-            news_store = get_news_store()
+            from market.market_event_monitor import get_market_event_monitor
+            monitor = get_market_event_monitor()
 
             # 更新财经日历
-            updated_count = news_store.update_calendar_from_mt5(events)
+            updated_count = monitor.update_calendar_from_mt5(events)
 
             # 记录日志 - MT5上报财经日历
             system_log = get_system_log()
@@ -322,7 +322,7 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
                 {
                     "events_received": len(events),
                     "events_updated": updated_count,
-                    "total_events": news_store.get_status().get('calendar_events', 0)
+                    "total_events": monitor.calendar_store.get_status().get('total_events', 0)
                 },
                 message=f"MT5上报财经日历: 收到{len(events)}条, 更新{updated_count}条"
             )
@@ -372,11 +372,11 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
             if not event_id:
                 return {"status": "error", "message": "缺少事件ID"}
 
-            from market.news_store import get_news_store
-            news_store = get_news_store()
+            from market.market_event_monitor import get_market_event_monitor
+            monitor = get_market_event_monitor()
 
             # 获取事件
-            event = news_store.get_event_by_id(event_id)
+            event = monitor.calendar_store.get_event_by_id(event_id)
             if not event:
                 return {"status": "error", "message": f"未找到事件: {event_id}"}
 
@@ -453,7 +453,6 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
         }
         ```
         """
-        import json as json_module
         try:
             data = await request.json()
             deals = data.get('deals', [])
@@ -463,11 +462,8 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
             if not deals:
                 return {"status": "ok", "message": "无数据需要更新", "count": 0}
 
-            from market.trade_history_store import get_trade_history_store
-            store = get_trade_history_store()
-
-            # 更新交易历史
-            new_count = store.update_from_ea(deals)
+            # 使用新的交易历史服务
+            new_count = server.trade_history_service.process_deals(deals)
 
             # 记录日志
             system_log = get_system_log()
@@ -476,7 +472,7 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
                 {
                     "deals_received": len(deals),
                     "deals_new": new_count,
-                    "total_deals": len(store.get_all_deals())
+                    "total_deals": len(server.trade_history_store.get())
                 },
                 message=f"交易历史上报: 收到{len(deals)}条, 新增{new_count}条"
             )

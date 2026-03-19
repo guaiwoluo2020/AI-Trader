@@ -229,6 +229,46 @@ export const marketAPI = {
   async getTradeHistoryStatistics() {
     const response = await api.get('/trade_history/statistics')
     return response.data
+  },
+
+  // ==================== 策略配置 ====================
+
+  // 获取所有策略配置
+  async getStrategies() {
+    const response = await api.get('/strategy')
+    return response.data
+  },
+
+  // 获取品种策略配置
+  async getStrategy(symbol) {
+    const response = await api.get(`/strategy/${encodeURIComponent(symbol)}`)
+    return response.data
+  },
+
+  // 更新品种策略配置
+  async updateStrategy(symbol, data) {
+    const response = await api.post(`/strategy/${encodeURIComponent(symbol)}`, data)
+    return response.data
+  },
+
+  // 删除品种策略配置
+  async deleteStrategy(symbol) {
+    const response = await api.delete(`/strategy/${encodeURIComponent(symbol)}`)
+    return response.data
+  },
+
+  // 获取决策历史
+  async getDecisions(symbol = null, count = 20) {
+    const params = { count }
+    if (symbol) params.symbol = symbol
+    const response = await api.get('/strategy/decisions', { params })
+    return response.data
+  },
+
+  // 手动触发策略决策
+  async triggerStrategyDecision(symbol) {
+    const response = await api.post(`/strategy/trigger/${encodeURIComponent(symbol)}`)
+    return response.data
   }
 }
 

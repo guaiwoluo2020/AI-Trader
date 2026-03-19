@@ -70,22 +70,21 @@ def create_app():
     app.include_router(create_trader_routes(server))
     app.include_router(create_system_routes(server))
     app.include_router(create_market_routes(
-        server.market_store,
-        server.pivot_detector,
-        server.pivot_monitor,
-        server.trend_analyzer,
-        server.pending_orders,
-        server.llm_analyzer
+        server.kline_store,
+        server.kline_service,
+        server.pivot_service,
+        server.tech_service,
+        server.pending_order_service,
+        trading_server=server
     ))
-    app.include_router(create_position_routes())
+    app.include_router(create_position_routes(trading_server=server))
     app.include_router(create_news_routes())
 
     # 启动时设置事件循环
     @app.on_event("startup")
     async def startup_event():
         loop = asyncio.get_running_loop()
-        server.llm_analyzer.set_event_loop(loop)
-        server.pivot_monitor.set_event_loop(loop)
+        server.set_event_loop(loop)
 
         # 设置系统日志的事件循环
         from market.system_log import get_system_log
@@ -95,14 +94,14 @@ def create_app():
         # 记录系统启动日志
         system_log.add_log("system_startup", message="服务已启动")
 
-        # 启动新闻监控后台任务
-        from market.news_monitor import get_news_monitor
-        news_monitor = get_news_monitor()
-        news_monitor.set_event_loop(loop)
-        asyncio.create_task(news_monitor.run())
+        # 启动市场事件监控后台任务
+        from market.market_event_monitor import get_market_event_monitor
+        monitor = get_market_event_monitor()
+        monitor.set_event_loop(loop)
+        asyncio.create_task(monitor.run())
 
         print("[Startup] 事件循环已设置")
-        print("[Startup] 新闻监控已启动")
+        print("[Startup] 市场事件监控已启动")
 
     return app
 

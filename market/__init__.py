@@ -4,9 +4,39 @@
 行情分析模块
 """
 
-from .store import MarketStore
-from .pivot_detector import PivotDetector
-from .monitor import PivotMonitor
-from .trend_analyzer import TrendAnalyzer
+# 数据模型
+from .models import (
+    KlineData, PivotPoint,
+    LLMConfig, LLMAnalysisResult,
+    TechTrendState, TechTrendChange, TechResonanceResult, TechTradeSuggestion
+)
 
-__all__ = ['MarketStore', 'PivotDetector', 'PivotMonitor', 'TrendAnalyzer']
+# 存储层
+from .store import KlineStore, PivotStore, LLMStore, TechStore
+
+# 服务层
+from .services import KlineService, PivotService, LLMService, TechService
+
+# 其他模块
+from .llm_analyzer import LLMAnalyzer
+from .trade_config import TradeConfig
+
+# 兼容旧代码的别名
+MarketStore = KlineStore
+PivotDetector = PivotService
+TrendAnalyzer = TechService
+
+__all__ = [
+    # 数据模型
+    'KlineData', 'PivotPoint',
+    'LLMConfig', 'LLMAnalysisResult',
+    'TechTrendState', 'TechTrendChange', 'TechResonanceResult', 'TechTradeSuggestion',
+    # 存储层
+    'KlineStore', 'PivotStore', 'LLMStore', 'TechStore',
+    # 服务层
+    'KlineService', 'PivotService', 'LLMService', 'TechService',
+    # 其他模块
+    'LLMAnalyzer', 'TradeConfig',
+    # 兼容别名
+    'MarketStore', 'PivotDetector', 'TrendAnalyzer'
+]

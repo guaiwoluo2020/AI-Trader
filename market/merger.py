@@ -8,7 +8,7 @@ K线合并模块
 from typing import List, Dict, Optional
 from datetime import datetime
 
-from .store import KlineData
+from .models import KlineData
 
 
 class KlineMerger:

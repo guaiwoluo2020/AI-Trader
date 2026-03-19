@@ -1,6 +1,6 @@
 <template>
   <v-app>
-    <v-app-bar app color="primary" dark>
+    <v-app-bar color="primary" dark>
       <v-app-bar-nav-icon @click="drawer = !drawer"></v-app-bar-nav-icon>
       <v-toolbar-title>AITrader</v-toolbar-title>
       <v-spacer></v-spacer>
@@ -9,20 +9,16 @@
       </v-btn>
     </v-app-bar>
 
-    <v-navigation-drawer v-model="drawer" app>
+    <v-navigation-drawer v-model="drawer">
       <v-list>
         <v-list-item
           v-for="item in menuItems"
           :key="item.title"
           :to="item.path"
+          :prepend-icon="item.icon"
+          :title="item.title"
           link
         >
-          <v-list-item-icon>
-            <v-icon>{{ item.icon }}</v-icon>
-          </v-list-item-icon>
-          <v-list-item-content>
-            <v-list-item-title>{{ item.title }}</v-list-item-title>
-          </v-list-item-content>
         </v-list-item>
       </v-list>
     </v-navigation-drawer>

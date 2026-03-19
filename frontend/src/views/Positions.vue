@@ -62,11 +62,11 @@
         <!-- 持仓列表 -->
         <v-card-text>
           <v-btn color="primary" small class="mb-3" @click="loadPositions" :loading="loading">
-            <v-icon left small>mdi-refresh</v-icon>
+            <v-icon start small>mdi-refresh</v-icon>
             刷新
           </v-btn>
 
-          <v-simple-table v-if="positions.length > 0">
+          <v-table v-if="positions.length > 0">
             <template v-slot:default>
               <thead>
                 <tr>
@@ -87,7 +87,7 @@
                   <td>{{ pos.ticket }}</td>
                   <td><strong>{{ pos.symbol }}</strong></td>
                   <td>
-                    <v-chip x-small :color="pos.type === 'BUY' ? 'success' : 'error'">
+                    <v-chip size="x-small" :color="pos.type === 'BUY' ? 'success' : 'error'">
                       {{ pos.type === 'BUY' ? '买入' : '卖出' }}
                     </v-chip>
                   </td>
@@ -100,14 +100,14 @@
                   <td>{{ pos.distance_tp || '-' }}</td>
                   <td>{{ formatTime(pos.updated_at) }}</td>
                   <td>
-                    <v-btn x-small color="error" outlined @click="closePosition(pos)">
+                    <v-btn size="x-small" color="error" outlined @click="closePosition(pos)">
                       平仓
                     </v-btn>
                   </td>
                 </tr>
               </tbody>
             </template>
-          </v-simple-table>
+          </v-table>
           <div v-else class="text-center grey--text py-8">
             <v-icon large>mdi-folder-open-outline</v-icon>
             <div class="mt-2">暂无持仓</div>
@@ -119,7 +119,7 @@
       <v-tab-item>
         <v-card-text>
           <v-btn color="primary" small class="mb-3" @click="loadTradeHistory" :loading="historyLoading">
-            <v-icon left small>mdi-refresh</v-icon>
+            <v-icon start small>mdi-refresh</v-icon>
             刷新
           </v-btn>
 
@@ -242,7 +242,7 @@
 
           <!-- 成交列表 -->
           <div class="text-subtitle-1 font-weight-bold mb-2">成交记录</div>
-          <v-simple-table v-if="tradeDeals.length > 0" fixed-header height="400">
+          <v-table v-if="tradeDeals.length > 0" fixed-header height="400">
             <template v-slot:default>
               <thead>
                 <tr>
@@ -263,12 +263,12 @@
                   <td>{{ deal.ticket }}</td>
                   <td><strong>{{ deal.symbol }}</strong></td>
                   <td>
-                    <v-chip x-small :color="deal.type === 0 ? 'success' : 'error'">
+                    <v-chip size="x-small" :color="deal.type === 0 ? 'success' : 'error'">
                       {{ deal.type_text }}
                     </v-chip>
                   </td>
                   <td>
-                    <v-chip x-small outlined :color="deal.entry === 1 ? 'warning' : 'info'">
+                    <v-chip size="x-small" outlined :color="deal.entry === 1 ? 'warning' : 'info'">
                       {{ deal.entry_text }}
                     </v-chip>
                   </td>
@@ -280,16 +280,16 @@
                   <td>{{ deal.commission.toFixed(2) }}</td>
                   <td>{{ deal.time }}</td>
                   <td>
-                    <v-chip v-if="deal.order_source === '自动'" x-small color="primary">
+                    <v-chip v-if="deal.order_source === '自动'" size="x-small" color="primary">
                       {{ deal.comment }}
                     </v-chip>
-                    <v-chip v-else-if="deal.order_source === '止损触发'" x-small color="error" outlined>
+                    <v-chip v-else-if="deal.order_source === '止损触发'" size="x-small" color="error" outlined>
                       {{ deal.comment }}
                     </v-chip>
-                    <v-chip v-else-if="deal.order_source === '止盈触发'" x-small color="success" outlined>
+                    <v-chip v-else-if="deal.order_source === '止盈触发'" size="x-small" color="success" outlined>
                       {{ deal.comment }}
                     </v-chip>
-                    <v-chip v-else-if="deal.order_source === '强制平仓'" x-small color="error" dark>
+                    <v-chip v-else-if="deal.order_source === '强制平仓'" size="x-small" color="error" dark>
                       {{ deal.comment }}
                     </v-chip>
                     <span v-else class="grey--text">{{ deal.order_source }}</span>
@@ -297,7 +297,7 @@
                 </tr>
               </tbody>
             </template>
-          </v-simple-table>
+          </v-table>
           <div v-else class="text-center grey--text py-8">
             <v-icon large>mdi-history</v-icon>
             <div class="mt-2">暂无历史交易数据</div>

@@ -23,10 +23,10 @@ def create_news_routes():
 
         返回指定日期或所有日期的财经事件
         """
-        from market.news_monitor import get_news_monitor
-        news_monitor = get_news_monitor()
+        from market.market_event_monitor import get_market_event_monitor
+        monitor = get_market_event_monitor()
 
-        calendar = news_monitor.get_calendar(date)
+        calendar = monitor.get_calendar(date)
 
         return {
             "status": "ok",
@@ -44,10 +44,10 @@ def create_news_routes():
 
         默认返回未来24小时内的重要财经事件
         """
-        from market.news_monitor import get_news_monitor
-        news_monitor = get_news_monitor()
+        from market.market_event_monitor import get_market_event_monitor
+        monitor = get_market_event_monitor()
 
-        events = news_monitor.get_upcoming_events(hours)
+        events = monitor.get_upcoming_events(hours)
 
         return {
             "status": "ok",
@@ -65,10 +65,10 @@ def create_news_routes():
 
         返回最近的有影响的快讯（关键人物讲话、重要事件）
         """
-        from market.news_monitor import get_news_monitor
-        news_monitor = get_news_monitor()
+        from market.market_event_monitor import get_market_event_monitor
+        monitor = get_market_event_monitor()
 
-        news_list = news_monitor.get_recent_news(count)
+        news_list = monitor.get_recent_news(count)
 
         return {
             "status": "ok",
@@ -81,10 +81,10 @@ def create_news_routes():
         """
         获取新闻模块状态
         """
-        from market.news_monitor import get_news_monitor
-        news_monitor = get_news_monitor()
+        from market.market_event_monitor import get_market_event_monitor
+        monitor = get_market_event_monitor()
 
-        status = news_monitor.get_status()
+        status = monitor.get_status()
 
         return {
             "status": "ok",
@@ -94,25 +94,24 @@ def create_news_routes():
     @router.websocket("/ws")
     async def news_websocket(websocket: WebSocket):
         """
-        新闻WebSocket推送
+        市场事件WebSocket推送
 
         推送内容类型:
-        - event_reminder: 事件发布前提醒
-        - event_result: 事件发布结果
-        - flash_news: 重要快讯
+        - calendar_event_reminder: 财经日历事件发布前提醒
         - calendar_update: 日历更新
+        - flash_news: 重要快讯
         """
-        from market.news_monitor import get_news_monitor
-        news_monitor = get_news_monitor()
+        from market.market_event_monitor import get_market_event_monitor
+        monitor = get_market_event_monitor()
 
         await websocket.accept()
-        news_monitor.add_ws_client(websocket)
+        monitor.ws_manager.add_client(websocket)
 
         try:
             # 发送欢迎消息
             await websocket.send_json({
                 "type": "connected",
-                "message": "已连接到新闻推送服务"
+                "message": "已连接到市场事件推送服务"
             })
 
             # 保持连接，等待客户端消息或断开
@@ -127,9 +126,9 @@ def create_news_routes():
         except WebSocketDisconnect:
             pass
         except Exception as e:
-            print(f"[NewsWebSocket] 连接异常: {e}")
+            print(f"[MarketEventWebSocket] 连接异常: {e}")
         finally:
-            news_monitor.remove_ws_client(websocket)
+            monitor.ws_manager.remove_client(websocket)
 
     @router.get("/impact/{symbol}")
     async def get_symbol_impact(symbol: str):
@@ -138,7 +137,7 @@ def create_news_routes():
 
         返回影响该品种的即将发布事件
         """
-        from market.news_monitor import get_news_monitor
+        from market.market_event_monitor import get_market_event_monitor
         from market.event_config import WATCH_SYMBOLS
 
         if symbol not in WATCH_SYMBOLS:
@@ -148,8 +147,8 @@ def create_news_routes():
                 "supported_symbols": WATCH_SYMBOLS
             }
 
-        news_monitor = get_news_monitor()
-        events = news_monitor.get_upcoming_events(72)  # 未来3天
+        monitor = get_market_event_monitor()
+        events = monitor.get_upcoming_events(72)  # 未来3天
 
         # 过滤相关事件
         related_events = [
@@ -162,6 +161,38 @@ def create_news_routes():
             "symbol": symbol,
             "count": len(related_events),
             "data": related_events
+        }
+
+    @router.post("/calendar/clear")
+    async def clear_calendar():
+        """
+        清空财经日历数据
+
+        清空后需要EA重新推送日历数据（会应用时区转换）
+        """
+        from market.market_event_monitor import get_market_event_monitor
+        monitor = get_market_event_monitor()
+        monitor.clear_calendar()
+
+        return {
+            "status": "ok",
+            "message": "财经日历数据已清空，请让EA重新推送日历数据"
+        }
+
+    @router.delete("/calendar")
+    async def clear_calendar_delete():
+        """
+        清空财经日历数据 (DELETE方法)
+
+        清空后需要EA重新推送日历数据（会应用时区转换）
+        """
+        from market.market_event_monitor import get_market_event_monitor
+        monitor = get_market_event_monitor()
+        monitor.clear_calendar()
+
+        return {
+            "status": "ok",
+            "message": "财经日历数据已清空，请让EA重新推送日历数据"
         }
 
     return router
