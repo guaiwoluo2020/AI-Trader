@@ -1,499 +1,537 @@
-# 高性能行情分析交易服务
+# 高频交易服务 (HFT Trading Service)
 
-## 功能介绍
+一个为MT5 EA提供支持的高性能交易服务，采用FastAPI框架，集成行情分析、信号生成、策略决策、风险管理等功能。
 
-这是一个为MT5 EA提供支持的高性能交易服务，采用FastAPI框架，支持以下功能：
+## 目录
+
+- [功能特性](#功能特性)
+- [系统架构](#系统架构)
+- [快速开始](#快速开始)
+- [配置说明](#配置说明)
+- [API文档](#api文档)
+- [前端界面](#前端界面)
+- [开发指南](#开发指南)
+
+---
+
+## 功能特性
 
 ### 核心功能
 
-#### 1. EA接口 - MT5 EA与服务通信
-- `GET /get_trades` - EA获取待执行的交易指令（按SYMBOL分类）
-- `POST /send_statistics` - EA发送每分钟的统计数据
-- `POST /ea/kline/{period}` - EA推送K线数据 (H4/H1/M15/M5/M1)
-- `POST /ea/kline_batch` - EA批量推送多个周期的K线数据
+#### 1. K线数据管理
+- 支持多周期K线数据接收 (H4/H1/M15/M5/M1)
+- 增量/全量数据校验与存储
+- 数据时效性检查（自动识别休市状态）
 
-#### 2. 行情分析接口
-- `GET /market/kline/{symbol}` - 查询K线数据
-- `GET /market/pivots/{symbol}` - 查询转折点数据
-- `GET /market/status` - 获取行情存储状态
-- `GET /market/thresholds` - 获取各周期接近阈值
-- `WebSocket /ws/market` - 实时转折点提醒推送
+#### 2. 转折点检测
+- 基于分型识别算法自动检测高低点
+- 多周期转折点联动分析
+- 接近阈值提醒（可配置各周期阈值）
 
-#### 3. 交易员接口 - 交易员下发指令和查询数据
-- `POST /send_trade_instructions` - 下发交易指令
-- `GET /query_pending_trades` - 查询所有待执行指令
-- `DELETE /clear_trades` - 清空交易指令
-- `GET /query_statistics` - 查询统计数据（保留最新10条）
+#### 3. 信号系统
+- **Pivot信号**: 转折点触发信号（支持M1/M5/M15/H1/H4周期）
+- **KeyLevel信号**: 关键点位触发信号
+- **AI Entry信号**: LLM分析入场信号
+- 支持周期级别启用/禁用和权重配置
 
-#### 4. 系统接口 - 服务监控和健康检查
-- `GET /health` - 健康检查
-- `GET /status` - 服务状态
+#### 4. 策略决策
+- 多信号综合分析
+- 周期级别权重配置
+- 一致性要求设置（任一/多数/全部）
+- 自动止损止盈计算
+- 风险回报比验证
 
-## 新增功能：转折点检测与提醒
+#### 5. 风险管理
+- 账户风险百分比控制
+- 最大持仓数量限制
+- 同向持仓限制
+- 动态止损范围验证
 
-### K线数据接收
+#### 6. LLM分析
+- OpenAI兼容API支持
+- 多周期趋势分析
+- 关键支撑/阻力位识别
+- 交易建议生成
 
-EA启动后会推送各周期K线数据：
+#### 7. 新闻与事件
+- 金十数据快讯抓取
+- 财经日历事件
+- 市场事件监控
 
-| 周期 | 历史数据要求 |
-|------|-------------|
-| H4 (4小时) | 最近6个月 |
-| H1 (1小时) | 最近1个月 |
-| M15 (15分钟) | 最近3天 |
-| M5 (5分钟) | 最近24小时 |
-| M1 (1分钟) | 最近1小时 |
+---
 
-### 转折点检测
+## 系统架构
 
-服务自动检测K线的转折点（高点/低点）：
-- 使用分型识别算法（顶分型/底分型）
-- 默认左右各3根K线确认转折
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        前端 (Vue.js + Vuetify)                   │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
+│  │  Market  │ │Settings  │ │Positions │ │  News    │ │  Log   │ │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬────┘ │
+└───────┼────────────┼────────────┼────────────┼────────────┼──────┘
+        │            │            │            │            │
+        └────────────┴────────────┴─────┬──────┴────────────┘
+                                       │
+                              ┌────────▼────────┐
+                              │   FastAPI 服务   │
+                              │   (Port 8000)   │
+                              └────────┬────────┘
+                                       │
+        ┌──────────────────────────────┼──────────────────────────────┐
+        │                              │                              │
+        ▼                              ▼                              ▼
+┌───────────────┐            ┌───────────────┐            ┌───────────────┐
+│   行情模块     │            │   信号/策略    │            │   新闻模块     │
+│               │            │               │            │               │
+│ • KlineStore  │            │ • SignalService│            │ • FlashNews   │
+│ • KlineService│            │ • StrategySvc │            │ • Calendar    │
+│ • PivotService│            │ • RiskManager │            │ • NewsCrawler │
+│ • TechService │            │ • PendingOrder│            │               │
+└───────┬───────┘            └───────┬───────┘            └───────────────┘
+        │                            │
+        │                    ┌───────┴───────┐
+        │                    │               │
+        ▼                    ▼               ▼
+┌───────────────┐    ┌───────────────┐ ┌───────────────┐
+│   LLM分析     │    │   信号生成器   │ │   存储层       │
+│               │    │               │ │               │
+│ • LLMService  │    │ • PivotSignal │ │ • JSON文件    │
+│ • LLMAnalyzer │    │ • KeyLevel    │ │ • 内存缓存    │
+│               │    │ • AI Entry    │ │               │
+└───────────────┘    └───────────────┘ └───────────────┘
+        │
+        ▼
+┌───────────────┐
+│   MT5 EA      │
+│               │
+│ • K线推送     │
+│ • 统计上报    │
+│ • 获取指令    │
+│ • 执行交易    │
+└───────────────┘
+```
 
-### 接近阈值
+### 模块结构
 
-各周期距离转折点的提醒阈值：
+```
+.
+├── main.py                 # 服务入口
+├── server.py               # TradingServer 核心类
+├── routes_*.py             # API路由模块
+│   ├── routes_ea.py        # EA接口
+│   ├── routes_market.py    # 行情/策略接口
+│   ├── routes_position.py  # 持仓接口
+│   ├── routes_news.py      # 新闻接口
+│   ├── routes_trader.py    # 交易员接口
+│   └── routes_system.py    # 系统接口
+├── market/                 # 核心模块
+│   ├── models/             # 数据模型
+│   │   ├── kline.py        # K线模型
+│   │   ├── pivot.py        # 转折点模型
+│   │   ├── trading_signal.py    # 信号模型
+│   │   ├── trading_strategy.py  # 策略模型
+│   │   ├── pending_order.py     # 待确认订单
+│   │   └── ...
+│   ├── services/           # 业务服务
+│   │   ├── kline_service.py     # K线服务
+│   │   ├── pivot_service.py     # 转折点服务
+│   │   ├── signal/              # 信号生成器
+│   │   │   ├── signal_service.py
+│   │   │   ├── pivot_signal.py
+│   │   │   ├── key_level_signal.py
+│   │   │   └── ai_entry_signal.py
+│   │   ├── strategy/            # 策略服务
+│   │   │   ├── strategy_service.py
+│   │   │   └── risk_manager.py
+│   │   └── llm_service.py       # LLM分析服务
+│   ├── store/              # 数据存储
+│   │   ├── kline_store.py
+│   │   ├── pivot_store.py
+│   │   ├── signal_store.py
+│   │   ├── strategy_store.py
+│   │   └── ...
+│   ├── llm_analyzer.py     # LLM分析调度器
+│   ├── market_event_monitor.py # 市场事件监控
+│   ├── trade_config.py     # 交易配置
+│   └── system_log.py       # 系统日志
+├── data/                   # 数据文件目录
+│   ├── strategy_config.json
+│   ├── trade_config.json
+│   └── ...
+└── frontend/               # Vue.js前端
+    └── src/
+        ├── views/          # 页面组件
+        │   ├── Market.vue      # 行情分析
+        │   ├── Settings.vue    # 系统设置
+        │   ├── Positions.vue   # 持仓管理
+        │   ├── News.vue        # 新闻资讯
+        │   └── SystemLog.vue   # 系统日志
+        └── api/             # API封装
+            └── market.js
+```
 
-| 周期 | 阈值 | 说明 |
-|------|------|------|
-| H4 | 千分之6 | 如GOLD高点5000，当前4980提醒 |
-| H1 | 千分之3 | 如GOLD高点5000，当前4985提醒 |
-| M15 | 千分之1.5 | - |
-| M5 | 千分之0.5 | - |
-| M1 | 千分之0.2 | - |
+---
 
-### 实时提醒
-
-EA调用 `/get_trades` 时携带价格参数，服务自动检查是否接近转折点，返回提醒信息。
-
-同时支持WebSocket推送实时提醒到前端页面。
-
-## 安装和运行
+## 快速开始
 
 ### 环境要求
-- Python 3.7+
-- 依赖包：
-  ```bash
-  pip install fastapi uvicorn uvloop pydantic requests
-  ```
+
+- Python 3.9+
+- Node.js 18+ (前端开发)
+
+### 安装依赖
+
+```bash
+# Python依赖
+pip install fastapi uvicorn uvloop pydantic requests aiohttp openai
+
+# 前端依赖
+cd frontend
+npm install
+```
 
 ### 启动服务
+
 ```bash
-python trading_server.py
+# 启动后端服务 (端口8000)
+python3 main.py
+
+# 启动前端开发服务 (端口5173)
+cd frontend
+npm run dev
+
+# 构建前端生产版本
+npm run build
 ```
 
-输出示例：
-```
-============================================================
-启动行情分析交易服务
-============================================================
-[INFO] 服务将运行在 http://localhost:5858
-[INFO] API文档: http://localhost:5858/docs
-[INFO] 备用文档: http://localhost:5858/redoc
-============================================================
-```
+### 验证服务
 
-### 运行测试
 ```bash
-python test_trading_service.py
+# 健康检查
+curl http://localhost:8000/health
+
+# 查看API文档
+open http://localhost:8000/docs
 ```
 
-## API 详细说明
+---
 
-### 1. EA - 获取交易指令
+## 配置说明
 
-**端点**: `GET /get_trades?symbol=gold&price=2035.50`
+### 交易配置 (data/trade_config.json)
 
-**描述**: EA调用此接口获取待执行的交易指令。支持基于当前价格的条件过滤。
-
-**请求参数**:
-| 参数 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| symbol | string | 是 | 交易品种，如 "gold", "eurusd" |
-| price | float | 否 | 当前市场价格，用于执行条件过滤 |
-
-**价格条件过滤逻辑**:
-- **买入指令** (`action='b'`)：若指令的执行价格 `price > 当前价格`，则指令被缓存，暂不下发（等待价格跌到指令价格）
-- **卖出指令** (`action='s'`)：若指令的执行价格 `price < 当前价格`，则指令被缓存，暂不下发（等待价格涨到指令价格）
-- 满足条件的指令会被推送给EA并删除
-- 不满足条件的指令保留在内存中，等待下次价格更新时重新评估
-
-**返回值** (JSON数组):
 ```json
-[
-    {
-        "symbol": "gold",
-        "action": "b",           // b=买入, s=卖出
-        "mount": 0.01,           // 手数
-        "price": 2030.00,        // 指令的执行价格
-        "sl": 5000,              // 止损点
-        "tp": 5100               // 止盈点
-    },
-    {
-        "symbol": "gold",
-        "action": "s",
-        "mount": 0.02,
-        "price": 2035.00,
-        "sl": 2035,
-        "tp": 2025
+{
+  "enabled": true,
+  "default_volume": 0.01,
+  "default_sl_offset": 0.05,
+  "mt5_timezone_offset": -6.0,
+  "symbol_config": {
+    "GOLD#": {
+      "volume": 0.01,
+      "sl_offset": 3,
+      "key_levels": "5000,5100,5200",
+      "key_level_threshold": 0.0008
     }
-]
-```
-
-**流程**:
-1. EA每100毫秒调用此接口，携带当前SYMBOL和市场价格
-2. 服务基于价格条件过滤该SYMBOL的所有待执行指令
-3. 返回满足条件的指令列表
-4. 已推送的指令会被删除，未满足条件的指令保留在内存中
-5. 如果没有符合条件的指令，返回空数组 `[]`
-
-### 2. EA - 发送统计数据
-
-**端点**: `POST /send_statistics`
-
-**描述**: EA每分钟调用此接口发送统计数据。服务自动保留最新10条数据。
-
-**请求体** (JSON):
-```json
-{
-    "timestamp": "2026-03-04 14:30:00",
-    "tickCount": 1234,           // 该分钟内TICK总数
-    "bidPrice": 2035.50,         // 买价
-    "askPrice": 2035.60,         // 卖价
-    "balance": 50000.00,         // 账户余额
-    "equity": 51234.56,          // 账户权益
-    "marginLevel": 98.50,        // 预付款比例（%）
-    "positions": [               // 持仓信息
-        {
-            "ticket": 123456,
-            "volume": 0.01,
-            "priceOpen": 2030.00,
-            "type": "BUY",
-            "profit": 55.60,
-            "distanceSL": 30.50,  // 距离止损的点数
-            "distanceTP": 35.40   // 距离止盈的点数
-        }
-    ],
-    "trades": [                  // 该分钟的交易记录
-        {
-            "time": "2026-03-04 14:30:00",
-            "action": "BUY",
-            "symbol": "GOLD",
-            "volume": 0.01,
-            "price": 2030.00,
-            "sl": 2000,
-            "tp": 2100
-        }
-    ]
+  }
 }
 ```
 
-**响应**:
+### 策略配置 (data/strategy_config.json)
+
 ```json
 {
-    "status": "success",
-    "message": "统计数据已记录"
-}
-```
-
-### 3. 交易员 - 下发交易指令
-
-**端点**: `POST /send_trade_instructions`
-
-**描述**: 交易员通过此接口下发交易指令。指令保存在内存中，等待EA获取。
-
-> **注意**: 如果交易指令中未提供 `tp` 或者 `tp<=0`，
-> 服务端会自动将`tp`设为 **0.005**。
-> `sl` 缺失保持为 `0.0`（EA端还有后续处理）。
-
-**请求体** (JSON数组):
-```json
-[
-    {
-        "symbol": "gold",
-        "action": "b",
-        "mount": 0.01,
-        "price": 2030.00,       // 指令的买入价格（用于价格过滤）
-        "sl": 5000,
-        "tp": 5100
-    },
-    {
-        "symbol": "eurusd",
-        "action": "s",
-        "mount": 0.02,
-        "price": 1.0900,        // 指令的卖出价格（用于价格过滤）
-        "sl": 1.0950,
-        "tp": 1.0850
-    }
-]
-```
-
-**新规则**：若同时指定 `sl` 和 `tp`，
-- 买入指令要求 `sl < price < tp`；
-- 卖出指令要求 `tp < price < sl`。
-不满足规则的指令将被服务器拒绝并忽略。
-
-**响应**:
-```json
-{
-    "status": "success",
-    "count": 2,
-    "message": "已添加 2 条交易指令"
-}
-```
-
-**使用示例 (curl)**:
-```bash
-curl -X POST "http://localhost:5858/send_trade_instructions" \
-     -H "Content-Type: application/json" \
-     -d '[
-       {"symbol":"gold","action":"b","mount":0.01,"sl":5000,"tp":5100},
-       {"symbol":"eurusd","action":"s","mount":0.02,"sl":1.0950,"tp":1.0850}
-     ]'
-```
-
-### 4. 交易员 - 查询待执行指令
-
-**端点**: `GET /query_pending_trades`
-
-**描述**: 查询所有待执行的交易指令（不删除）。
-
-**请求参数**: 无
-
-**响应**:
-```json
-{
-    "status": "success",
-    "total": 5,
-    "data": {
-        "GOLD": [
-            {
-                "symbol": "gold",
-                "action": "b",
-                "mount": 0.01,
-                "sl": 5000,
-                "tp": 5100
-            },
-            {
-                "symbol": "gold",
-                "action": "s",
-                "mount": 0.02,
-                "sl": 2035,
-                "tp": 2025
-            }
-        ],
-        "EURUSD": [
-            {
-                "symbol": "eurusd",
-                "action": "s",
-                "mount": 0.02,
-                "sl": 1.0950,
-                "tp": 1.0850
-            }
-        ]
-    }
-}
-```
-
-### 5. 交易员 - 查询统计数据
-
-**端点**: `GET /query_statistics?count=10`
-
-**描述**: 查询最新的统计数据。服务自动保留最新10条，可指定返回数量。
-
-**请求参数**:
-| 参数 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| count | int | 否 | 10 | 返回最新N条数据（最多100条） |
-
-**响应**:
-```json
-{
-    "status": "success",
-    "count": 3,
-    "data": [
-        {
-            "timestamp": "2026-03-04 14:30",
-            "tickCount": 1234,
-            "bidPrice": 2035.50,
-            "askPrice": 2035.60,
-            "balance": 50000.00,
-            "equity": 51234.56,
-            "marginLevel": 98.50,
-            "positions": [...],
-            "trades": [...]
+  "strategies": {
+    "GOLD#": {
+      "enabled": true,
+      "signal_config": {
+        "pivot": {
+          "enabled": true,
+          "periods": {
+            "M1": {"enabled": true, "weight": 15},
+            "M5": {"enabled": true, "weight": 20},
+            "M15": {"enabled": false, "weight": 25},
+            "H1": {"enabled": false, "weight": 20},
+            "H4": {"enabled": false, "weight": 20}
+          }
         },
-        {...},
-        {...}
-    ]
+        "key_level": {
+          "enabled": true,
+          "weight": 40
+        },
+        "ai_entry": {
+          "enabled": true,
+          "periods": {
+            "M5": {"enabled": true, "weight": 20},
+            "M15": {"enabled": true, "weight": 30},
+            "H1": {"enabled": true, "weight": 25}
+          }
+        }
+      },
+      "min_confidence": 50,
+      "consistency_requirement": "majority",
+      "min_risk_reward": 1.0,
+      "max_positions": 3,
+      "max_same_direction": 2
+    }
+  }
 }
 ```
 
-### 6. 交易员 - 清空交易指令
+### LLM配置
 
-**端点**: `DELETE /clear_trades?symbol=gold`
+通过API或前端设置：
 
-**描述**: 清空指定SYMBOL的待执行指令，或清空所有指令。
+```bash
+curl -X POST http://localhost:8000/llm/configure \
+  -H "Content-Type: application/json" \
+  -d '{
+    "api_key": "your-api-key",
+    "api_base": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini"
+  }'
+```
 
-**请求参数**:
-| 参数 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| symbol | string | 否 | 指定品种。不指定则清空所有 |
+---
 
-**响应**:
+## API文档
+
+### EA接口
+
+#### 获取交易指令
+```
+GET /get_trades?symbol=GOLD#&price=4850.00
+```
+
+返回该品种待执行的交易指令列表。
+
+#### 推送K线数据
+```
+POST /ea/kline/{period}
+POST /ea/kline_batch
+```
+
+**请求体示例**:
 ```json
 {
-    "status": "success",
-    "cleared": 3,
-    "message": "已清空 3 条交易指令"
+  "symbol": "GOLD#",
+  "is_full": false,
+  "klines": [
+    {
+      "time": "2026-03-19 10:00:00",
+      "open": 4850.00,
+      "high": 4855.00,
+      "low": 4848.00,
+      "close": 4852.00,
+      "volume": 1000
+    }
+  ]
 }
 ```
 
-### 7. 系统 - 健康检查
+**返回码说明**:
+- `200`: 成功
+- `400 (code: 8888)`: 需要全量数据（数据不连续或未初始化）
 
-**端点**: `GET /health`
+#### 发送统计数据
+```
+POST /send_statistics
+```
 
-**描述**: 检查服务是否正常运行。
+### 行情接口
 
-**响应**:
+#### 查询K线数据
+```
+GET /market/kline/{symbol}?period=M5&count=100
+```
+
+#### 查询转折点
+```
+GET /market/pivots/{symbol}?period=M5&direction=high&count=50
+```
+
+#### 获取行情状态
+```
+GET /market/status
+GET /market/configured_symbols
+```
+
+### 策略接口
+
+#### 获取策略配置
+```
+GET /strategy
+GET /strategy/{symbol}
+```
+
+#### 更新策略配置
+```
+POST /strategy/{symbol}
+```
+
+**请求体示例**:
 ```json
 {
-    "status": "healthy",
-    "service": "Trading Analysis Server",
-    "timestamp": "2026-03-04T14:30:45.123456"
+  "enabled": true,
+  "signal_config": {
+    "pivot": {
+      "enabled": true,
+      "periods": {
+        "M5": {"enabled": true, "weight": 25}
+      }
+    }
+  },
+  "min_confidence": 60
 }
 ```
 
-### 8. 系统 - 服务状态
-
-**端点**: `GET /status`
-
-**描述**: 获取实时的服务状态信息。
-
-**响应**:
-```json
-{
-    "status": "running",
-    "pending_trades": {
-        "GOLD": 2,
-        "EURUSD": 1
-    },
-    "total_pending": 3,
-    "statistics_records": 5,
-    "timestamp": "2026-03-04T14:30:45.123456"
-}
+#### 获取决策历史
+```
+GET /strategy/decisions?symbol=GOLD#&count=20
 ```
 
-## 工作流程
+#### 手动触发决策
+```
+POST /strategy/trigger/{symbol}
+```
+
+### 持仓接口
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    交易员/分析系统                           │
-└──────────────────────────┬──────────────────────────────────┘
-                          │
-        ┌─────────────────┼─────────────────┐
-        │                 │                 │
-        ▼                 ▼                 ▼
-  下发指令         查询待执行           查询统计数据
-  (POST)            (GET)                (GET)
-        │                 │                 │
-        └─────────────────┼─────────────────┘
-                          │
-                 ┌────────▼────────┐
-                 │  Python服务     │
-                 │  (internal)     │
-                 └────────┬────────┘
-                          │
-        ┌─────────────────┼─────────────────┐
-        │                 │                 │
-        ▼                 ▼                 ▼
-  GET /get_trades  POST /send_statistics  健康检查
-  (每100毫秒)        (每分钟)              (GET)
-        │                 │                 │
-        └─────────────────┼─────────────────┘
-                          │
-┌─────────────────────────▼──────────────────────────────────┐
-│                      MT5 EA                                 │
-│  - 接收交易指令                                             │
-│  - 执行买卖操作                                             │
-│  - 监控持仓风险                                             │
-│  - 统计TICK数据                                             │
-└─────────────────────────────────────────────────────────────┘
+GET /positions
+GET /positions/summary
+POST /close_position
 ```
+
+### 新闻接口
+
+```
+GET /api/news/flash?count=10
+GET /api/news/calendar?date=2026-03-19
+```
+
+### WebSocket接口
+
+#### 转折点提醒
+```
+ws://localhost:8000/ws/market
+```
+
+#### 新闻推送
+```
+ws://localhost:8000/api/news/ws
+```
+
+---
+
+## 前端界面
+
+### 行情分析 (Market)
+- 多周期K线展示
+- 转折点标注
+- AI趋势分析
+- 交易决策提醒
+- 待确认订单操作
+
+### 系统设置 (Settings)
+- 自动交易开关
+- 品种配置管理
+- 策略配置（信号权重、仓位管理、止损止盈）
+- LLM配置
+- 品种数据状态
+
+### 持仓管理 (Positions)
+- 实时持仓列表
+- 盈亏统计
+- 一键平仓
+
+### 新闻资讯 (News)
+- 快讯列表
+- 财经日历
+- 事件提醒
+
+### 系统日志 (SystemLog)
+- 操作日志
+- 事件筛选
+- 日志清空
+
+---
+
+## 开发指南
+
+### 信号生成器扩展
+
+在 `market/services/signal/` 目录下创建新的信号生成器：
+
+```python
+from market.models import TradingSignal, SignalSource
+
+class MySignalGenerator:
+    def __call__(self, symbol: str, current_price: float) -> List[TradingSignal]:
+        # 实现信号生成逻辑
+        signals = []
+        # ...
+        return signals
+```
+
+注册到 SignalService：
+
+```python
+signal_service.register_generator("my_signal", MySignalGenerator())
+```
+
+### 策略参数说明
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| enabled | bool | 是否启用策略 |
+| signal_config | dict | 信号源周期级别配置 |
+| min_confidence | int | 最低置信度阈值 (0-100) |
+| consistency_requirement | str | 一致性要求 (any/majority/all) |
+| min_risk_reward | float | 最小风险回报比 |
+| max_positions | int | 最大持仓数量 |
+| max_same_direction | int | 同向最大持仓 |
+| fixed_volume | float | 固定手数 |
+| risk_percent | float | 账户风险百分比 |
+
+### 数据存储
+
+所有配置和数据存储在 `data/` 目录：
+- `strategy_config.json` - 策略配置
+- `trade_config.json` - 交易配置
+- `kline_*.json` - K线缓存
+- `pivot_*.json` - 转折点缓存
+- `llm_*.json` - LLM分析结果
+
+---
 
 ## 性能特性
 
-### 高性能设计
-- **FastAPI框架**: 基于Starlette和Pydantic，性能优异
-- **异步处理**: 完全异步，支持高并发请求
-- **多Worker进程**: 默认4个worker，可根据CPU核心数调整
+- **FastAPI框架**: 高性能异步框架
 - **UVloop**: 使用高性能事件循环
-- **线程安全**: 内存数据使用线程锁保护
+- **线程安全**: 核心数据使用锁保护
+- **内存缓存**: 热数据内存缓存
+- **增量更新**: K线支持增量推送
 
-### 并发能力
-- 支持数千并发连接
-- 平均响应时间 < 10ms
-- 内存指令队列，无数据库I/O
-
-## 数据持久化说明
-
-### 当前特性
-- ✓ 交易指令保存在内存中（推送后删除）
-- ✓ 统计数据保量最新10条
-- ✗ 无数据持久化到磁盘
-
-### 如需持久化
-可选方案：
-1. 添加SQLite数据库支持
-2. 添加CSV日志输出
-3. 集成Redis缓存
+---
 
 ## 常见问题
 
-### Q: 指令为什么被删除了？
-A: 设计就是这样的。EA获取指令后，立即删除，确保不会重复执行。如果需要保留历史，服务已在统计数据的`trades`字段中记录。
+### Q: 为什么某个品种没有AI趋势分析？
+A: AI分析只处理有K线数据的活跃品种。检查EA是否正确推送该品种的K线数据。
 
-### Q: 指令丢失怎么办？
-A: 
-1. 所有指令都在`/query_pending_trades`可见
-2. 已推送指令会记录在统计数据中
-3. 可以查看服务日志追踪
+### Q: 返回码8888是什么意思？
+A: 表示服务端需要全量K线数据，通常是因为：
+- 首次连接，没有历史数据
+- 增量数据不连续，存在缺失
 
-### Q: 如何处理超过10条的统计数据？
-A: 服务自动删除最早的数据，保留最新10条。可在代码中修改`maxlen=10`来改变保留数量。
-
-### Q: 支持多SYMBOL吗？
-A: 完全支持。指令按SYMBOL分类，EA可以只获取自己需要的品种。
-
-## 扩展建议
-
-### 短期改进
-1. 添加数据持久化（SQLite/PostgreSQL）
-2. 添加WebSocket支持（实时推送）
-3. 添加认证和日志审计
-
-### 长期规划
-1. 集成实时行情数据
-2. 添加风险分析引擎
-3. 支持历史数据分析
-4. 添加监控和告警系统
-
-## 维护和监控
-
-### 查看日志
-```bash
-# 服务会输出所有操作日志
-# [信息] 已添加 XXX 条交易指令
-# [信息] 推送了 XXX 条 SYMBOL 指令给EA
+### Q: 如何调试信号生成？
+A: 查看服务日志，信号生成器会打印详细信息：
+```
+[PivotSignalGenerator] 生成信号: buy @ 4850.00, SL=4840.00, TP=4870.00
 ```
 
-### 检查服务状态
-```bash
-curl http://localhost:5858/status
-```
-
-### 性能监控
-- 监控`total_pending`数量，不应该持续增加
-- 监控`statistics_records`数量，应该≤10
+---
 
 ## 许可证
 
