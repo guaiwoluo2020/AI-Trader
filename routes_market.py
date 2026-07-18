@@ -5,13 +5,14 @@
 包括K线数据接收、查询、WebSocket推送等
 """
 
-from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import json
 import random
 
+from auth import require_auth
 from market.models import KlineData
 from market.store import KlineStore
 from market.services import KlineService, PivotService, TechService, PendingOrderService
@@ -39,6 +40,7 @@ def create_market_routes(
         trading_server: TradingServer 实例
     """
     router = APIRouter()
+    protected_router = APIRouter(dependencies=[Depends(require_auth)])
 
     # 增量K线日志打印概率 (5%)
     KLINE_LOG_PROBABILITY = 0.05
@@ -207,7 +209,7 @@ def create_market_routes(
 
     # ==================== 查询接口 ====================
 
-    @router.get("/market/kline/{symbol}")
+    @protected_router.get("/market/kline/{symbol}")
     async def get_kline(
         symbol: str,
         period: str = Query("M5", description="周期: H4/H1/M15/M5/M1"),
@@ -225,7 +227,7 @@ def create_market_routes(
             "data": klines
         }
 
-    @router.get("/market/pivots/{symbol}")
+    @protected_router.get("/market/pivots/{symbol}")
     async def get_pivots(
         symbol: str,
         period: str = Query(None, description="周期，不指定则返回全部"),
@@ -256,7 +258,7 @@ def create_market_routes(
                 "data": result
             }
 
-    @router.get("/market/symbols")
+    @protected_router.get("/market/symbols")
     async def get_symbols() -> Dict:
         """获取所有已存储数据的symbol列表"""
         symbols = kline_service.get_symbols()
@@ -266,7 +268,7 @@ def create_market_routes(
             "count": len(symbols)
         }
 
-    @router.get("/market/configured_symbols")
+    @protected_router.get("/market/configured_symbols")
     async def get_configured_symbols() -> Dict:
         """获取配置的品种列表及其数据状态"""
         config = TradeConfig.get_instance()
@@ -300,7 +302,7 @@ def create_market_routes(
             "count": len(symbols_status)
         }
 
-    @router.get("/market/status")
+    @protected_router.get("/market/status")
     async def get_market_status() -> Dict:
         """获取行情存储状态"""
         store_status = kline_service.get_status()
@@ -316,7 +318,7 @@ def create_market_routes(
             "server": server_status
         }
 
-    @router.get("/market/thresholds")
+    @protected_router.get("/market/thresholds")
     async def get_thresholds() -> Dict:
         """获取各周期的接近阈值"""
         thresholds = pivot_service.THRESHOLDS
@@ -335,7 +337,7 @@ def create_market_routes(
 
     # ==================== 趋势分析接口 ====================
 
-    @router.get("/trend/{symbol}")
+    @protected_router.get("/trend/{symbol}")
     async def get_trend(symbol: str) -> Dict:
         """获取单个品种的趋势分析"""
         for period in ['H4', 'H1', 'M15', 'M5', 'M1']:
@@ -351,7 +353,7 @@ def create_market_routes(
             "trend_changes": changes
         }
 
-    @router.post("/trend/generate_order/{symbol}")
+    @protected_router.post("/trend/generate_order/{symbol}")
     async def generate_trade_order(symbol: str) -> Dict:
         """基于趋势分析生成交易建议"""
         for period in ['H4', 'H1', 'M15', 'M5', 'M1']:
@@ -381,7 +383,7 @@ def create_market_routes(
 
     # ==================== 待确认订单接口 ====================
 
-    @router.get("/pending_orders")
+    @protected_router.get("/pending_orders")
     async def get_pending_orders(symbol: Optional[str] = None) -> Dict:
         """获取待确认订单列表"""
         orders = pending_order_service.get_orders_dict(symbol)
@@ -391,7 +393,7 @@ def create_market_routes(
             "orders": orders
         }
 
-    @router.post("/pending_orders/{order_id}/confirm")
+    @protected_router.post("/pending_orders/{order_id}/confirm")
     async def confirm_pending_order(order_id: str, request: Request = None) -> Dict:
         """确认待确认订单"""
         update_data = {}
@@ -436,7 +438,7 @@ def create_market_routes(
             "order": order.to_dict()
         }
 
-    @router.post("/pending_orders/{order_id}/reject")
+    @protected_router.post("/pending_orders/{order_id}/reject")
     async def reject_pending_order(order_id: str) -> Dict:
         """拒绝待确认订单"""
         order = pending_order_service.reject_order(order_id)
@@ -458,7 +460,7 @@ def create_market_routes(
 
     # ==================== 交易配置接口 ====================
 
-    @router.get("/trade_config")
+    @protected_router.get("/trade_config")
     async def get_trade_config() -> Dict:
         """获取交易配置"""
         config = TradeConfig.get_instance()
@@ -467,7 +469,7 @@ def create_market_routes(
             "config": config.to_dict()
         }
 
-    @router.post("/trade_config")
+    @protected_router.post("/trade_config")
     async def update_trade_config(request: Request) -> Dict:
         """更新交易配置"""
         config = TradeConfig.get_instance()
@@ -485,7 +487,7 @@ def create_market_routes(
 
     # ==================== 策略决策接口 ====================
 
-    @router.get("/strategy")
+    @protected_router.get("/strategy")
     async def get_all_strategies() -> Dict:
         """获取所有策略配置"""
         if not trading_server:
@@ -498,7 +500,7 @@ def create_market_routes(
             "strategies": [s.to_dict() for s in strategies]
         }
 
-    @router.get("/strategy/decisions")
+    @protected_router.get("/strategy/decisions")
     async def get_decisions(symbol: Optional[str] = None, count: int = 20) -> Dict:
         """获取决策历史"""
         if not trading_server:
@@ -511,7 +513,7 @@ def create_market_routes(
             "decisions": decisions
         }
 
-    @router.get("/strategy/{symbol}")
+    @protected_router.get("/strategy/{symbol}")
     async def get_strategy(symbol: str) -> Dict:
         """获取品种策略配置"""
         if not trading_server:
@@ -523,7 +525,7 @@ def create_market_routes(
             "strategy": strategy.to_dict()
         }
 
-    @router.post("/strategy/{symbol}")
+    @protected_router.post("/strategy/{symbol}")
     async def update_strategy(symbol: str, request: Request) -> Dict:
         """更新品种策略配置"""
         if not trading_server:
@@ -540,7 +542,7 @@ def create_market_routes(
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    @router.delete("/strategy/{symbol}")
+    @protected_router.delete("/strategy/{symbol}")
     async def delete_strategy(symbol: str) -> Dict:
         """删除品种策略配置"""
         if not trading_server:
@@ -551,7 +553,7 @@ def create_market_routes(
             return {"status": "ok", "message": "策略配置已删除"}
         return {"status": "error", "message": "策略配置不存在"}
 
-    @router.post("/strategy/trigger/{symbol}")
+    @protected_router.post("/strategy/trigger/{symbol}")
     async def trigger_strategy_decision(symbol: str) -> Dict:
         """手动触发策略决策"""
         if not trading_server:
@@ -569,7 +571,7 @@ def create_market_routes(
 
     # ==================== 系统日志接口 ====================
 
-    @router.get("/system/logs")
+    @protected_router.get("/system/logs")
     async def get_system_logs(count: int = 50, event_type: str = None,
                                symbol: str = None) -> Dict:
         """获取系统运行日志"""
@@ -586,7 +588,7 @@ def create_market_routes(
             "logs": logs
         }
 
-    @router.delete("/system/logs")
+    @protected_router.delete("/system/logs")
     async def clear_system_logs() -> Dict:
         """清空系统日志"""
         system_log = get_system_log()
@@ -634,7 +636,7 @@ def create_market_routes(
 
     # ==================== 大模型分析接口 ====================
 
-    @router.get("/llm/analysis")
+    @protected_router.get("/llm/analysis")
     async def get_llm_analysis(symbol: Optional[str] = None) -> Dict:
         """获取大模型分析结果"""
         if not trading_server:
@@ -646,7 +648,7 @@ def create_market_routes(
             "data": result
         }
 
-    @router.get("/llm/status")
+    @protected_router.get("/llm/status")
     async def get_llm_status() -> Dict:
         """获取大模型分析器状态"""
         if not trading_server:
@@ -657,7 +659,7 @@ def create_market_routes(
             "data": trading_server.get_llm_status()
         }
 
-    @router.get("/llm/config")
+    @protected_router.get("/llm/config")
     async def get_llm_config() -> Dict:
         """获取大模型配置"""
         if not trading_server:
@@ -668,7 +670,7 @@ def create_market_routes(
             "config": trading_server.get_llm_config()
         }
 
-    @router.post("/llm/trigger")
+    @protected_router.post("/llm/trigger")
     async def trigger_llm_analysis() -> Dict:
         """手动触发大模型分析"""
         if not trading_server:
@@ -676,7 +678,7 @@ def create_market_routes(
 
         return trading_server.trigger_llm_analysis()
 
-    @router.post("/llm/configure")
+    @protected_router.post("/llm/configure")
     async def configure_llm(request: Request) -> Dict:
         """配置大模型参数"""
         if not trading_server:
@@ -693,4 +695,5 @@ def create_market_routes(
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    router.include_router(protected_router)
     return router

@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { clearAuthSession, getAuthToken, setAuthSession } from '../auth'
 
 const api = axios.create({
   baseURL: 'http://localhost:8000',
@@ -11,7 +12,10 @@ const api = axios.create({
 // 请求拦截器
 api.interceptors.request.use(
   (config) => {
-    // 可以在这里添加认证token等
+    const token = getAuthToken()
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
     return config
   },
   (error) => {
@@ -26,9 +30,35 @@ api.interceptors.response.use(
   },
   (error) => {
     console.error('API Error:', error)
+    if (error.response?.status === 401) {
+      clearAuthSession()
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
     return Promise.reject(error)
   }
 )
+
+export const authAPI = {
+  async login(credentials) {
+    const response = await api.post('/auth/login', credentials)
+    setAuthSession({
+      token: response.data.token,
+      user: response.data.user,
+    })
+    return response.data
+  },
+
+  async me() {
+    const response = await api.get('/auth/me')
+    return response.data
+  },
+
+  logout() {
+    clearAuthSession()
+  },
+}
 
 export const tradingAPI = {
   // 健康检查

@@ -30,3 +30,22 @@ class StatisticData(BaseModel):
     marginLevel: float  # 预付款比例
     positions: list  # 持仓信息
     trades: list  # 交易记录
+
+
+class LoginRequest(BaseModel):
+    """登录请求"""
+    username: str
+    password: str
+
+
+class AuthUserInfo(BaseModel):
+    """当前登录用户信息"""
+    username: str
+
+
+class LoginResponse(BaseModel):
+    """登录响应"""
+    status: str
+    token: str
+    expires_in: int
+    user: AuthUserInfo

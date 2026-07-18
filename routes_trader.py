@@ -4,8 +4,9 @@
 交易员相关的接口路由
 """
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from typing import Optional, List, Dict
+from auth import require_auth
 from models import TradeInstruction
 from server import TradingServer
 
@@ -14,7 +15,7 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
     """
     创建交易员相关路由
     """
-    router = APIRouter()
+    router = APIRouter(dependencies=[Depends(require_auth)])
     
     @router.post("/send_trade_instructions")
     async def send_trade_instructions(instructions: List[TradeInstruction]) -> Dict:

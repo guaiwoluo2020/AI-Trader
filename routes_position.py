@@ -4,9 +4,10 @@
 仓位管理相关的接口路由
 """
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from typing import Dict, Optional
 
+from auth import require_auth
 from market.system_log import get_system_log
 
 
@@ -18,6 +19,7 @@ def create_position_routes(trading_server=None) -> APIRouter:
         trading_server: TradingServer 实例
     """
     router = APIRouter()
+    protected_router = APIRouter(dependencies=[Depends(require_auth)])
 
     @router.post("/ea/positions")
     async def receive_positions(request: Request) -> Dict:
@@ -72,7 +74,7 @@ def create_position_routes(trading_server=None) -> APIRouter:
             print(f"[PositionAPI] 接收持仓数据异常: {e}")
             return {"status": "error", "message": str(e)}
 
-    @router.get("/positions")
+    @protected_router.get("/positions")
     async def get_positions(symbol: Optional[str] = None) -> Dict:
         """
         获取持仓数据
@@ -87,7 +89,7 @@ def create_position_routes(trading_server=None) -> APIRouter:
             "positions": positions
         }
 
-    @router.get("/positions/summary")
+    @protected_router.get("/positions/summary")
     async def get_positions_summary(symbol: Optional[str] = None) -> Dict:
         """
         获取持仓汇总
@@ -101,7 +103,7 @@ def create_position_routes(trading_server=None) -> APIRouter:
             **summary
         }
 
-    @router.get("/positions/{symbol}/{ticket}")
+    @protected_router.get("/positions/{symbol}/{ticket}")
     async def get_position(symbol: str, ticket: int) -> Dict:
         """
         获取单个持仓详情
@@ -175,7 +177,7 @@ def create_position_routes(trading_server=None) -> APIRouter:
             print(f"[PositionAPI] 接收交易历史异常: {e}")
             return {"status": "error", "message": str(e)}
 
-    @router.get("/trade_history")
+    @protected_router.get("/trade_history")
     async def get_trade_history(symbol: Optional[str] = None) -> Dict:
         """
         获取交易历史数据
@@ -192,7 +194,7 @@ def create_position_routes(trading_server=None) -> APIRouter:
             "statistics": statistics
         }
 
-    @router.get("/trade_history/statistics")
+    @protected_router.get("/trade_history/statistics")
     async def get_trade_history_statistics(symbol: Optional[str] = None) -> Dict:
         """
         获取交易历史统计
@@ -207,4 +209,5 @@ def create_position_routes(trading_server=None) -> APIRouter:
             **statistics
         }
 
+    router.include_router(protected_router)
     return router

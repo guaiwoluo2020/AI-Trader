@@ -5,16 +5,23 @@
 财经日历、快讯查询和WebSocket推送
 """
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from typing import Optional
+
+from auth import require_auth
 
 
 def create_news_routes():
     """创建新闻相关路由"""
     router = APIRouter(prefix="/api/news", tags=["新闻"])
+    protected_router = APIRouter(
+        prefix="/api/news",
+        tags=["新闻"],
+        dependencies=[Depends(require_auth)],
+    )
 
-    @router.get("/calendar")
+    @protected_router.get("/calendar")
     async def get_calendar(
         date: Optional[str] = Query(None, description="日期，格式: 2026-03-15，不传返回所有")
     ):
@@ -35,7 +42,7 @@ def create_news_routes():
             "data": calendar
         }
 
-    @router.get("/upcoming")
+    @protected_router.get("/upcoming")
     async def get_upcoming(
         hours: int = Query(24, description="未来多少小时内的事件")
     ):
@@ -56,7 +63,7 @@ def create_news_routes():
             "data": events
         }
 
-    @router.get("/flash")
+    @protected_router.get("/flash")
     async def get_flash_news(
         count: int = Query(20, description="获取数量，默认20")
     ):
@@ -76,7 +83,7 @@ def create_news_routes():
             "data": news_list
         }
 
-    @router.get("/status")
+    @protected_router.get("/status")
     async def get_status():
         """
         获取新闻模块状态
@@ -130,7 +137,7 @@ def create_news_routes():
         finally:
             monitor.ws_manager.remove_client(websocket)
 
-    @router.get("/impact/{symbol}")
+    @protected_router.get("/impact/{symbol}")
     async def get_symbol_impact(symbol: str):
         """
         获取特定品种的相关事件
@@ -163,7 +170,7 @@ def create_news_routes():
             "data": related_events
         }
 
-    @router.post("/calendar/clear")
+    @protected_router.post("/calendar/clear")
     async def clear_calendar():
         """
         清空财经日历数据
@@ -179,7 +186,7 @@ def create_news_routes():
             "message": "财经日历数据已清空，请让EA重新推送日历数据"
         }
 
-    @router.delete("/calendar")
+    @protected_router.delete("/calendar")
     async def clear_calendar_delete():
         """
         清空财经日历数据 (DELETE方法)
@@ -195,4 +202,5 @@ def create_news_routes():
             "message": "财经日历数据已清空，请让EA重新推送日历数据"
         }
 
+    router.include_router(protected_router)
     return router

@@ -4,8 +4,9 @@
 系统相关的接口路由
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from typing import Dict
+from auth import require_auth
 from server import TradingServer
 
 
@@ -14,6 +15,7 @@ def create_system_routes(server: TradingServer) -> APIRouter:
     创建系统相关路由
     """
     router = APIRouter()
+    protected_router = APIRouter(dependencies=[Depends(require_auth)])
     
     @router.get("/health")
     async def health_check() -> Dict:
@@ -29,7 +31,7 @@ def create_system_routes(server: TradingServer) -> APIRouter:
         """
         return {"status": "ok"}
     
-    @router.get("/status")
+    @protected_router.get("/status")
     async def get_status() -> Dict:
         """
         获取服务状态
@@ -56,4 +58,5 @@ def create_system_routes(server: TradingServer) -> APIRouter:
             "symbols": symbols
         }
     
+    router.include_router(protected_router)
     return router

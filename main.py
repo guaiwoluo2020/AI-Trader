@@ -18,6 +18,7 @@ asyncio.set_event_loop_policy(asyncio_policy)
 
 from server import TradingServer
 from routes_ea import create_ea_routes
+from routes_auth import create_auth_routes
 from routes_trader import create_trader_routes
 from routes_system import create_system_routes
 from routes_market import create_market_routes
@@ -66,6 +67,7 @@ def create_app():
     )
 
     # 注册路由
+    app.include_router(create_auth_routes())
     app.include_router(create_ea_routes(server))
     app.include_router(create_trader_routes(server))
     app.include_router(create_system_routes(server))
