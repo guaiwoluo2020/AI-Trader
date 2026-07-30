@@ -26,7 +26,7 @@
 //+------------------------------------------------------------------+
 
 // Python 服务配置
-input string InpServerUrl = "http://127.0.0.1:8000"; // WebRequest 白名单中的服务地址
+input string InpServerUrl = "http://182.92.119.121/api"; // WebRequest 白名单中的服务地址
 input long InpWebUserId = 0;       // 高级用法：手工绑定 user_id
 input string InpEaToken = "";      // 高级用法：手工绑定 EA token
 string g_pythonServer = "";
@@ -589,7 +589,7 @@ void RequestTradesFromPython()
    else if(responseCode == -1)
      {
       Print("WebRequest is disabled! Please enable WebRequest in MT5 Options -> Expert Advisors");
-      Print("Make sure 'localhost' is added to the WebRequest allowed list");
+      Print("Make sure 'http://182.92.119.121' is added to the WebRequest allowed list");
      }
   }
 
