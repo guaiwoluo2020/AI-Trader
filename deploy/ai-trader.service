@@ -1,0 +1,20 @@
+[Unit]
+Description=AI-Trader FastAPI Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-trader
+Group=ai-trader
+WorkingDirectory=/opt/ai-trader
+EnvironmentFile=/etc/ai-trader.env
+ExecStart=/opt/ai-trader/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

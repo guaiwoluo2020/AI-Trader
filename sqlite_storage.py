@@ -53,6 +53,8 @@ class UserRecord:
     username: str
     password_hash: str
     salt: str
+    role: str
+    token_version: int
     created_at: int
     updated_at: int
 
@@ -205,6 +207,29 @@ class SQLiteStorage:
                 self._ensure_column(conn, "trading_accounts", "mt5_server", "TEXT")
                 self._ensure_column(conn, "trading_accounts", "ea_version", "TEXT")
                 self._ensure_column(conn, "trading_accounts", "activated_at", "INTEGER")
+                self._ensure_column(
+                    conn,
+                    "users",
+                    "role",
+                    "TEXT NOT NULL DEFAULT 'user'",
+                )
+                self._ensure_column(
+                    conn,
+                    "users",
+                    "token_version",
+                    "INTEGER NOT NULL DEFAULT 1",
+                )
+                admin_username = _get_env_default_admin_username().strip().lower()
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET role = CASE
+                        WHEN lower(username) = ? THEN 'admin'
+                        ELSE 'user'
+                    END
+                    """,
+                    (admin_username,),
+                )
                 conn.commit()
 
             self._initialized = True
@@ -276,30 +301,71 @@ class UserRepository:
 
     def get_by_username(self, username: str) -> Optional[UserRecord]:
         row = self.storage.fetchone(
-            "SELECT id, username, password_hash, salt, created_at, updated_at FROM users WHERE username = ?",
+            """
+            SELECT id, username, password_hash, salt, role, token_version,
+                   created_at, updated_at
+            FROM users
+            WHERE username = ?
+            """,
             (username,),
         )
         return self._row_to_user(row)
 
     def get_by_id(self, user_id: int) -> Optional[UserRecord]:
         row = self.storage.fetchone(
-            "SELECT id, username, password_hash, salt, created_at, updated_at FROM users WHERE id = ?",
+            """
+            SELECT id, username, password_hash, salt, role, token_version,
+                   created_at, updated_at
+            FROM users
+            WHERE id = ?
+            """,
             (user_id,),
         )
         return self._row_to_user(row)
 
-    def create_user(self, username: str, password_hash: str, salt: str) -> UserRecord:
+    def create_user(
+        self,
+        username: str,
+        password_hash: str,
+        salt: str,
+        role: str = "user",
+    ) -> UserRecord:
         now = _now_ts()
         self.storage.execute(
             """
-            INSERT INTO users(username, password_hash, salt, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?)
+            INSERT INTO users(
+                username, password_hash, salt, role, token_version,
+                created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, 1, ?, ?)
             """,
-            (username, password_hash, salt, now, now),
+            (username, password_hash, salt, role, now, now),
         )
         user = self.get_by_username(username)
         if user is None:
             raise RuntimeError(f"创建用户失败: {username}")
+        return user
+
+    def update_password(
+        self,
+        user_id: int,
+        password_hash: str,
+        salt: str,
+    ) -> UserRecord:
+        now = _now_ts()
+        self.storage.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, salt = ?,
+                token_version = token_version + 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (password_hash, salt, now, user_id),
+        )
+        user = self.get_by_id(user_id)
+        if user is None:
+            raise RuntimeError("更新密码后未找到用户")
         return user
 
     def count(self) -> int:
@@ -313,7 +379,13 @@ class UserRepository:
             return user
 
         salt, password_hash = password_hash_builder(_get_env_default_admin_password())
-        return self.create_user(username, password_hash, salt)
+        role = (
+            "admin"
+            if username.strip().lower()
+            == _get_env_default_admin_username().strip().lower()
+            else "user"
+        )
+        return self.create_user(username, password_hash, salt, role=role)
 
     @staticmethod
     def _row_to_user(row: Optional[sqlite3.Row]) -> Optional[UserRecord]:
@@ -324,6 +396,8 @@ class UserRepository:
             username=row["username"],
             password_hash=row["password_hash"],
             salt=row["salt"],
+            role=row["role"],
+            token_version=int(row["token_version"]),
             created_at=int(row["created_at"]),
             updated_at=int(row["updated_at"]),
         )
@@ -998,6 +1072,12 @@ def bootstrap_runtime_storage(password_hash_builder) -> UserRecord:
                         username=user["username"],
                         password_hash=user["password_hash"],
                         salt=user["salt"],
+                        role=(
+                            "admin"
+                            if user["username"].strip().lower()
+                            == _get_env_default_admin_username().strip().lower()
+                            else "user"
+                        ),
                     )
                 except Exception:
                     continue

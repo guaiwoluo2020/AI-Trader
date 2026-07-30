@@ -2,7 +2,7 @@
   <v-container fluid>
     <v-row>
       <v-col cols="12">
-        <h1 class="mb-4">行情分析</h1>
+        <h1 class="mb-4">信号推荐</h1>
       </v-col>
     </v-row>
 
@@ -95,8 +95,8 @@
       <v-col cols="12">
         <v-alert
           v-for="(alert, index) in decisionAlerts"
-          :key="index"
-          :type="alert.action === 'buy' ? 'success' : 'warning'"
+          :key="alert.decision_id || index"
+          :type="alert.rejected ? 'warning' : alert.action === 'buy' ? 'success' : 'error'"
           dismissible
           class="mb-2"
           @input="removeDecisionAlert(index)"
@@ -104,8 +104,18 @@
           <div class="d-flex flex-wrap align-center">
             <v-icon small class="mr-1">mdi-chart-line</v-icon>
             <strong>{{ alert.symbol }}</strong>
-            <v-chip small :color="alert.action === 'buy' ? 'success' : 'error'" class="ml-2">
-              {{ alert.action === 'buy' ? '买入' : '卖出' }}
+            <v-chip
+              small
+              :color="alert.rejected ? 'warning' : alert.action === 'buy' ? 'success' : 'error'"
+              class="ml-2"
+            >
+              {{
+                alert.rejected
+                  ? `风控拦截 · ${alert.action === 'buy' ? '买入' : '卖出'}`
+                  : alert.action === 'buy'
+                    ? '买入'
+                    : '卖出'
+              }}
             </v-chip>
             <v-chip v-if="alert.confidence" small color="primary" class="ml-2">
               置信度: {{ alert.confidence }}%
@@ -113,9 +123,9 @@
           </div>
 
           <div class="mt-2">
-            <span class="text-caption mr-4">入场价: <strong>{{ alert.price?.toFixed(2) }}</strong></span>
-            <span class="text-caption mr-4">止损: <strong>{{ alert.sl?.toFixed(2) }}</strong></span>
-            <span class="text-caption mr-4">止盈: <strong>{{ alert.tp?.toFixed(2) }}</strong></span>
+            <span class="text-caption mr-4">入场价: <strong>{{ formatTradePrice(alert.price) }}</strong></span>
+            <span class="text-caption mr-4">止损: <strong>{{ formatTradePrice(alert.sl) }}</strong></span>
+            <span class="text-caption mr-4">止盈: <strong>{{ formatTradePrice(alert.tp) }}</strong></span>
             <span v-if="alert.risk_reward_ratio" class="text-caption">
               盈亏比: <strong>{{ alert.risk_reward_ratio }}</strong>
             </span>
@@ -143,6 +153,20 @@
               {{ isSignalExpanded(index) ? '收起' : `+${alert.signals.length - 3} 更多` }}
               <v-icon end small>{{ isSignalExpanded(index) ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
             </v-btn>
+          </div>
+
+          <div v-if="alert.rejected" class="mt-3 pa-2 amber lighten-5 rounded">
+            <div class="text-subtitle-2 font-weight-bold mb-1">
+              <v-icon small color="warning" class="mr-1">mdi-shield-alert</v-icon>
+              当前信号不可确认
+            </div>
+            <div class="text-caption grey--text text--darken-1">
+              {{
+                alert.risk_warnings.length
+                  ? alert.risk_warnings.join('；')
+                  : alert.reason
+              }}
+            </div>
           </div>
 
           <!-- 待确认订单操作 -->
@@ -493,6 +517,10 @@
 <script>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { marketAPI } from '@/api/market'
+import {
+  formatTradePrice,
+  normalizeTradingDecision,
+} from '@/utils/trading-decision'
 
 export default {
   name: 'Market',
@@ -519,6 +547,10 @@ export default {
     // WebSocket
     const ws = ref(null)
     const wsConnected = ref(false)
+    let wsReconnectTimer = null
+    let newsReconnectTimer = null
+    let statusInterval = null
+    let isUnmounted = false
 
     // 大模型分析
     const llmStatus = ref({ enabled: false })
@@ -574,6 +606,13 @@ export default {
     }
 
     const connectWebSocket = () => {
+      if (
+        isUnmounted ||
+        ws.value?.readyState === WebSocket.OPEN ||
+        ws.value?.readyState === WebSocket.CONNECTING
+      ) {
+        return
+      }
       ws.value = marketAPI.createWebSocket(
         // onMessage
         (data) => {
@@ -581,32 +620,14 @@ export default {
             // 策略层产生的交易决策
             console.log('收到交易决策:', data)
             const decision = data.data
-            // 转换为统一的 alert 格式
-            const alert = {
-              type: 'trading_decision',
-              decision_id: decision.decision_id,
-              symbol: decision.symbol,
-              action: decision.action,
-              price: decision.entry_price,
-              sl: decision.sl,
-              tp: decision.tp,
-              volume: decision.volume,
-              reason: decision.decision_reason,
-              confidence: decision.confidence_score,
-              signals: decision.signals || [],
-              signal_summary: decision.signal_summary || {},
-              risk_reward_ratio: decision.risk_reward_ratio,
-              timestamp: decision.timestamp || new Date().toISOString(),
-              pending_order: {
-                order_id: decision.decision_id,
-                action: decision.action === 'buy' ? 'b' : 's',
-                price: decision.entry_price,
-                sl: decision.sl,
-                tp: decision.tp,
-                mount: decision.volume,
-                reason: decision.decision_reason
-              }
+            if (
+              decisionAlerts.value.some(
+                (alert) => alert.decision_id === decision.decision_id
+              )
+            ) {
+              return
             }
+            const alert = normalizeTradingDecision(decision)
             decisionAlerts.value.unshift(alert)
             if (decisionAlerts.value.length > 10) {
               decisionAlerts.value.pop()
@@ -663,12 +684,13 @@ export default {
         // onClose
         () => {
           wsConnected.value = false
-          // 5秒后重连
-          setTimeout(() => {
-            if (!wsConnected.value) {
+          ws.value = null
+          if (!isUnmounted) {
+            clearTimeout(wsReconnectTimer)
+            wsReconnectTimer = setTimeout(() => {
               connectWebSocket()
-            }
-          }, 5000)
+            }, 5000)
+          }
         }
       )
     }
@@ -863,6 +885,13 @@ export default {
 
     // 连接新闻WebSocket
     const connectNewsWebSocket = () => {
+      if (
+        isUnmounted ||
+        newsWs.value?.readyState === WebSocket.OPEN ||
+        newsWs.value?.readyState === WebSocket.CONNECTING
+      ) {
+        return
+      }
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsUrl = `${protocol}//${window.location.host}/api/news/ws`
 
@@ -892,12 +921,14 @@ export default {
       }
 
       newsWs.value.onclose = () => {
-        console.log('[Market] 新闻WebSocket断开，5秒后重连...')
-        setTimeout(() => {
-          if (!newsWs.value || newsWs.value.readyState === WebSocket.CLOSED) {
+        newsWs.value = null
+        if (!isUnmounted) {
+          console.log('[Market] 新闻WebSocket断开，5秒后重连...')
+          clearTimeout(newsReconnectTimer)
+          newsReconnectTimer = setTimeout(() => {
             connectNewsWebSocket()
-          }
-        }, 5000)
+          }, 5000)
+        }
       }
     }
 
@@ -1167,7 +1198,7 @@ export default {
       fetchTopCalendarEvent()
 
       // 定时刷新
-      const statusInterval = setInterval(() => {
+      statusInterval = setInterval(() => {
         loadStatus()
         loadPendingOrders()
         loadLLMStatus()
@@ -1175,16 +1206,17 @@ export default {
         loadTrend()
       }, 10000)
 
-      // 清理
-      onUnmounted(() => {
-        clearInterval(statusInterval)
-        if (ws.value) {
-          ws.value.close()
-        }
-        if (newsWs.value) {
-          newsWs.value.close()
-        }
-      })
+    })
+
+    onUnmounted(() => {
+      isUnmounted = true
+      clearInterval(statusInterval)
+      clearTimeout(wsReconnectTimer)
+      clearTimeout(newsReconnectTimer)
+      ws.value?.close()
+      newsWs.value?.close()
+      ws.value = null
+      newsWs.value = null
     })
 
     return {
@@ -1217,6 +1249,7 @@ export default {
       rejectDecisionOrder,
       getSignalSourceColor,
       formatTime,
+      formatTradePrice,
       // 信号显示
       formatSignalLabel,
       getVisibleSignals,

@@ -1,9 +1,10 @@
 import axios from 'axios'
 import { getAuthToken } from '../auth'
 import { applyAuthToRequestConfig, handleAuthError } from './auth-helpers.js'
+import { API_BASE_URL, getMarketWebSocketUrl } from './runtime.js'
 
 const api = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL: API_BASE_URL,
   timeout: 10000,
   headers: {
     'Content-Type': 'application/json',
@@ -60,7 +61,7 @@ export const marketAPI = {
 
   // 创建WebSocket连接
   createWebSocket(onMessage, onError, onOpen, onClose) {
-    const ws = new WebSocket('ws://localhost:8000/ws/market')
+    const ws = new WebSocket(getMarketWebSocketUrl())
 
     ws.onopen = () => {
       const token = getAuthToken()

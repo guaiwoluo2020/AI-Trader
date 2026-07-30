@@ -105,6 +105,7 @@
 <script>
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { marketAPI } from '@/api/market'
+import { getMarketWebSocketUrl } from '@/api/runtime'
 
 export default {
   name: 'SystemLog',
@@ -176,7 +177,7 @@ export default {
     }
 
     const connectWebSocket = () => {
-      ws = new WebSocket('ws://localhost:8000/ws/market')
+      ws = new WebSocket(getMarketWebSocketUrl())
 
       ws.onopen = () => {
         wsConnected.value = true

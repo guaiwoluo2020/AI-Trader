@@ -11,7 +11,11 @@ from datetime import datetime
 
 from auth import AuthManager, reset_auth_manager
 from background_scheduler import SharedTaskScheduler
-from market.models import PendingOrder, TradingInstruction as StoredTradingInstruction
+from market.models import (
+    PendingOrder,
+    TradingDecision,
+    TradingInstruction as StoredTradingInstruction,
+)
 from models import TradeInstruction
 from sqlite_storage import (
     RuntimeStateRepository,
@@ -332,6 +336,39 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         ).list_entities("trading_instruction")
         self.assertEqual(rows[0]["status"], "sent")
         restarted.close()
+
+    def test_strategy_decision_broadcast_contains_real_pending_order_id(self):
+        account, _ = TradingAccountRepository().create_or_rotate_default(
+            self.admin.user_id
+        )
+        manager = TradingEngineManager()
+        engine = manager.get_engine(self.admin.user_id, account.account_id)
+        decision = TradingDecision(
+            symbol="GOLD#",
+            strategy_id="strategy-gold",
+            action="buy",
+            entry_price=3300.0,
+            sl=3290.0,
+            tp=3320.0,
+            volume=0.01,
+            decision_reason="test signal",
+        )
+        broadcasts = []
+        engine._signal_service.generate_signals = lambda symbol, price: [object()]
+        engine.strategy_service.make_decision = lambda symbol, price: decision
+        engine._broadcast_decision = lambda current: broadcasts.append(
+            current.to_dict()
+        )
+
+        result = engine.process_price("GOLD#", 3300.0)
+
+        self.assertIsNotNone(result["pending_order"])
+        self.assertEqual(
+            broadcasts[0]["order_id"],
+            result["pending_order"]["order_id"],
+        )
+        self.assertNotEqual(broadcasts[0]["order_id"], decision.decision_id)
+        manager.close_all()
 
     def test_binding_migrates_persisted_temporary_runtime_data(self):
         manager = TradingEngineManager()

@@ -32,6 +32,8 @@ class AuthUser:
     """认证后的用户"""
     user_id: int
     username: str
+    role: str = "user"
+    token_version: int = 1
 
 
 class UsernameAlreadyExistsError(ValueError):
@@ -76,6 +78,24 @@ class AuthManager:
         )
         return digest.hex()
 
+    @staticmethod
+    def _validate_password(password: str) -> None:
+        if len(password) < 8 or len(password) > 128:
+            raise ValueError("密码长度需为 8-128 位")
+        if not any(ch.isalpha() for ch in password) or not any(
+            ch.isdigit() for ch in password
+        ):
+            raise ValueError("密码必须同时包含字母和数字")
+
+    @staticmethod
+    def _to_auth_user(record) -> AuthUser:
+        return AuthUser(
+            user_id=record.user_id,
+            username=record.username,
+            role=record.role,
+            token_version=record.token_version,
+        )
+
     def authenticate(self, username: str, password: str) -> Optional[AuthUser]:
         with self._lock:
             requested_username = username.strip()
@@ -85,19 +105,14 @@ class AuthManager:
             if user:
                 actual = self._hash_password(password, user.salt)
                 if hmac.compare_digest(user.password_hash, actual):
-                    return AuthUser(user_id=user.user_id, username=user.username)
+                    return self._to_auth_user(user)
         return None
 
     def register(self, username: str, password: str) -> AuthUser:
         normalized_username = username.strip().lower()
         if not re.fullmatch(r"[a-z0-9_-]{3,32}", normalized_username):
             raise ValueError("用户名需为 3-32 位，仅支持字母、数字、下划线和短横线")
-        if len(password) < 8 or len(password) > 128:
-            raise ValueError("密码长度需为 8-128 位")
-        if not any(ch.isalpha() for ch in password) or not any(
-            ch.isdigit() for ch in password
-        ):
-            raise ValueError("密码必须同时包含字母和数字")
+        self._validate_password(password)
 
         with self._lock:
             if self.user_repo.get_by_username(normalized_username):
@@ -109,11 +124,44 @@ class AuthManager:
                     normalized_username,
                     password_hash,
                     salt,
+                    role="user",
                 )
             except sqlite3.IntegrityError as exc:
                 raise UsernameAlreadyExistsError("用户名已被注册") from exc
 
-        return AuthUser(user_id=record.user_id, username=record.username)
+        return self._to_auth_user(record)
+
+    def change_password(
+        self,
+        user_id: int,
+        current_password: str,
+        new_password: str,
+    ) -> AuthUser:
+        self._validate_password(new_password)
+
+        with self._lock:
+            record = self.user_repo.get_by_id(user_id)
+            if record is None:
+                raise ValueError("用户不存在")
+
+            actual = self._hash_password(current_password, record.salt)
+            if not hmac.compare_digest(record.password_hash, actual):
+                raise ValueError("当前密码不正确")
+
+            if hmac.compare_digest(
+                record.password_hash,
+                self._hash_password(new_password, record.salt),
+            ):
+                raise ValueError("新密码不能与当前密码相同")
+
+            salt, password_hash = self._build_password_credentials(new_password)
+            updated = self.user_repo.update_password(
+                user_id,
+                password_hash,
+                salt,
+            )
+
+        return self._to_auth_user(updated)
 
     def create_token(self, user: AuthUser) -> str:
         with self._lock:
@@ -123,6 +171,7 @@ class AuthManager:
             "sub": user.username,
             "exp": int(time.time()) + self.token_ttl_seconds,
             "nonce": secrets.token_hex(8),
+            "ver": user.token_version,
         }
         payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         encoded_payload = base64.urlsafe_b64encode(payload_bytes).decode("utf-8").rstrip("=")
@@ -181,7 +230,12 @@ class AuthManager:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="用户不存在或已被删除",
             )
-        return AuthUser(user_id=user.user_id, username=user.username)
+        if int(payload.get("ver", 1)) != user.token_version:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="登录状态已失效，请重新登录",
+            )
+        return self._to_auth_user(user)
 
 
 _AUTH_MANAGER: Optional[AuthManager] = None

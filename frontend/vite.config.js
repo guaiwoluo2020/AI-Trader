@@ -12,14 +12,16 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      '/api/news': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        ws: true
+      },
       '/api': {
         target: 'http://localhost:8000',
-        changeOrigin: true
-        // 不要重写路径，保持 /api 前缀
-      },
-      '/ws': {
-        target: 'ws://localhost:8000',
-        ws: true
+        changeOrigin: true,
+        ws: true,
+        rewrite: (path) => path.replace(/^\/api/, '')
       }
     }
   }

@@ -342,11 +342,6 @@ class TradingServer:
             # 记录决策历史
             self._decision_history.append(decision)
 
-            result["decision"] = decision.to_dict()
-
-            # 广播决策
-            self._broadcast_decision(decision)
-
             # 3. 自动执行决策（如果允许）
             if decision.action != "none" and decision.status != "rejected":
                 order_id = self.strategy_service.execute_decision(decision)
@@ -360,6 +355,10 @@ class TradingServer:
                         "sl": decision.sl,
                         "tp": decision.tp
                     }
+
+            # 创建待确认订单后再序列化和广播，确保携带真实 order_id。
+            result["decision"] = decision.to_dict()
+            self._broadcast_decision(decision)
 
         return result
 

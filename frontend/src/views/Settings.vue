@@ -20,6 +20,7 @@
                 <v-switch
                   v-model="tradeConfig.enabled"
                   label="启用自动生成"
+                  color="success"
                   @change="saveTradeConfig"
                 ></v-switch>
               </v-col>
@@ -199,6 +200,7 @@
                       <v-switch
                         v-model="strategy.enabled"
                         label="启用策略"
+                        color="success"
                         dense
                         hide-details
                         @change="updateStrategy(strategy)"
@@ -530,6 +532,97 @@
       </v-col>
     </v-row>
 
+    <!-- 账户与安全 -->
+    <v-row v-if="!isStrategyPage">
+      <v-col cols="12">
+        <v-card>
+          <v-card-title>
+            <v-icon class="mr-2">mdi-account-lock</v-icon>
+            账户与安全
+          </v-card-title>
+          <v-card-text>
+            <v-row>
+              <v-col cols="12" md="6">
+                <div class="text-subtitle-2 mb-3">当前账户</div>
+                <v-list density="compact" class="account-summary">
+                  <v-list-item title="用户名" :subtitle="currentUser.username">
+                    <template #prepend>
+                      <v-icon>mdi-account-outline</v-icon>
+                    </template>
+                  </v-list-item>
+                  <v-list-item title="用户角色">
+                    <template #prepend>
+                      <v-icon>mdi-shield-account</v-icon>
+                    </template>
+                    <template #subtitle>
+                      <v-chip
+                        size="small"
+                        :color="currentUser.role === 'admin' ? 'primary' : 'grey'"
+                        variant="tonal"
+                      >
+                        {{ roleLabel }}
+                      </v-chip>
+                    </template>
+                  </v-list-item>
+                </v-list>
+              </v-col>
+
+              <v-col cols="12" md="6">
+                <div class="text-subtitle-2 mb-3">修改密码</div>
+                <v-form @submit.prevent="changePassword">
+                  <v-text-field
+                    v-model="passwordForm.current_password"
+                    label="当前密码"
+                    prepend-inner-icon="mdi-lock-outline"
+                    :type="showCurrentPassword ? 'text' : 'password'"
+                    :append-inner-icon="showCurrentPassword ? 'mdi-eye-off' : 'mdi-eye'"
+                    variant="outlined"
+                    density="compact"
+                    :disabled="passwordSaving"
+                    @click:append-inner="showCurrentPassword = !showCurrentPassword"
+                  />
+                  <v-text-field
+                    v-model="passwordForm.new_password"
+                    label="新密码"
+                    prepend-inner-icon="mdi-lock-reset"
+                    :type="showNewPassword ? 'text' : 'password'"
+                    :append-inner-icon="showNewPassword ? 'mdi-eye-off' : 'mdi-eye'"
+                    variant="outlined"
+                    density="compact"
+                    hint="8-128 位，必须同时包含字母和数字"
+                    persistent-hint
+                    :disabled="passwordSaving"
+                    @click:append-inner="showNewPassword = !showNewPassword"
+                  />
+                  <v-text-field
+                    v-model="passwordForm.confirm_password"
+                    label="确认新密码"
+                    prepend-inner-icon="mdi-lock-check-outline"
+                    :type="showConfirmPassword ? 'text' : 'password'"
+                    :append-inner-icon="showConfirmPassword ? 'mdi-eye-off' : 'mdi-eye'"
+                    variant="outlined"
+                    density="compact"
+                    :error-messages="passwordMismatch ? '两次输入的新密码不一致' : ''"
+                    :disabled="passwordSaving"
+                    @click:append-inner="showConfirmPassword = !showConfirmPassword"
+                  />
+                  <v-btn
+                    type="submit"
+                    color="primary"
+                    :loading="passwordSaving"
+                    :disabled="!canChangePassword"
+                  >
+                    <v-icon start>mdi-lock-reset</v-icon>
+                    修改密码
+                  </v-btn>
+                </v-form>
+              </v-col>
+            </v-row>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+
     <!-- 大模型配置 -->
     <v-row v-if="!isStrategyPage">
       <v-col cols="12">
@@ -613,6 +706,8 @@
 <script>
 import { ref, computed, onMounted } from 'vue'
 import { marketAPI } from '@/api/market'
+import { authAPI } from '@/api/trading'
+import { authState } from '@/auth'
 
 export default {
   name: 'Settings',
@@ -658,6 +753,75 @@ export default {
     })
     const showApiKey = ref(false)
     const llmSaving = ref(false)
+
+    // 账户与安全
+    const currentUser = computed(() => authState.user || {
+      username: '未登录',
+      role: 'user'
+    })
+    const roleLabel = computed(() =>
+      currentUser.value.role === 'admin' ? '管理员' : '普通用户'
+    )
+    const passwordForm = ref({
+      current_password: '',
+      new_password: '',
+      confirm_password: ''
+    })
+    const showCurrentPassword = ref(false)
+    const showNewPassword = ref(false)
+    const showConfirmPassword = ref(false)
+    const passwordSaving = ref(false)
+    const passwordMismatch = computed(() =>
+      Boolean(passwordForm.value.confirm_password) &&
+      passwordForm.value.new_password !== passwordForm.value.confirm_password
+    )
+    const newPasswordValid = computed(() => {
+      const password = passwordForm.value.new_password
+      return (
+        password.length >= 8 &&
+        password.length <= 128 &&
+        /[a-z]/i.test(password) &&
+        /\d/.test(password)
+      )
+    })
+    const canChangePassword = computed(() =>
+      Boolean(passwordForm.value.current_password) &&
+      newPasswordValid.value &&
+      !passwordMismatch.value &&
+      passwordForm.value.new_password === passwordForm.value.confirm_password
+    )
+
+    const changePassword = async () => {
+      if (!canChangePassword.value) return
+
+      passwordSaving.value = true
+      try {
+        const data = await authAPI.changePassword({
+          current_password: passwordForm.value.current_password,
+          new_password: passwordForm.value.new_password
+        })
+        successMessage.value = data.message || '密码修改成功'
+        showSuccess.value = true
+        passwordForm.value = {
+          current_password: '',
+          new_password: '',
+          confirm_password: ''
+        }
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '密码修改失败'
+        showError.value = true
+      } finally {
+        passwordSaving.value = false
+      }
+    }
+
+    const loadCurrentUser = async () => {
+      try {
+        await authAPI.me()
+      } catch (err) {
+        console.error('加载当前用户信息失败:', err)
+      }
+    }
 
     // 可用品种列表（已连接但未配置的）
     const availableSymbols = computed(() => {
@@ -1012,6 +1176,7 @@ export default {
         loadStrategies()
         return
       }
+      loadCurrentUser()
       loadLLMConfig()
     })
 
@@ -1029,6 +1194,16 @@ export default {
       errorMessage,
       showSuccess,
       successMessage,
+      currentUser,
+      roleLabel,
+      passwordForm,
+      showCurrentPassword,
+      showNewPassword,
+      showConfirmPassword,
+      passwordSaving,
+      passwordMismatch,
+      canChangePassword,
+      changePassword,
       saveTradeConfig,
       addSymbolConfig,
       removeSymbolConfig,

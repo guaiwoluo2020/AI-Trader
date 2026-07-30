@@ -259,15 +259,31 @@ class StrategyService:
         if not position_check.get("allowed", True) or not risk_check.get("allowed", True):
             # 即使被拒绝也要设置冷却，避免频繁推送
             self._set_cooldown(symbol)
+            warnings = (
+                position_check.get("warnings", [])
+                + risk_check.get("warnings", [])
+            )
+            rejection_reason = "；".join(warnings) or "风控检查未通过"
             decision = TradingDecision(
                 symbol=symbol,
                 strategy_id=strategy.strategy_id,
-                action="none",
+                action=action,
                 decision_type="rejected",
                 signals=[s.to_dict() for s in signals],
                 signal_summary=analysis,
-                decision_reason="风控检查未通过",
-                confidence_score=0,
+                entry_price=entry_price,
+                sl=round(sl, 2),
+                tp=round(tp, 2),
+                volume=volume,
+                risk_points=round(risk_points, 2),
+                reward_points=round(reward_points, 2),
+                risk_reward_ratio=round(rr_ratio, 2),
+                decision_reason=f"风控拦截: {rejection_reason}",
+                confidence_score=(
+                    analysis["buy_weighted_score"]
+                    if action == "buy"
+                    else analysis["sell_weighted_score"]
+                ),
                 position_check=position_check,
                 risk_check=risk_check,
                 status="rejected",
@@ -419,7 +435,7 @@ class StrategyService:
         Returns:
             订单ID 或 None
         """
-        if decision.action == "none":
+        if decision.action == "none" or decision.status == "rejected":
             return None
 
         if not self._pending_order_service:

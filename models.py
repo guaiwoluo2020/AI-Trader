@@ -44,10 +44,17 @@ class RegisterRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    """修改当前用户密码"""
+    current_password: str
+    new_password: str
+
+
 class AuthUserInfo(BaseModel):
     """当前登录用户信息"""
     user_id: int
     username: str
+    role: str
 
 
 class LoginResponse(BaseModel):
@@ -57,3 +64,12 @@ class LoginResponse(BaseModel):
     expires_in: int
     user: AuthUserInfo
     next_path: str
+
+
+class ChangePasswordResponse(BaseModel):
+    """修改密码响应"""
+    status: str
+    message: str
+    token: str
+    expires_in: int
+    user: AuthUserInfo

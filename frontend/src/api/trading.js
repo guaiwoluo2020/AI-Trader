@@ -1,9 +1,10 @@
 import axios from 'axios'
-import { clearAuthSession, setAuthSession } from '../auth'
+import { clearAuthSession, getAuthToken, setAuthSession } from '../auth'
 import { applyAuthToRequestConfig, handleAuthError } from './auth-helpers.js'
+import { API_BASE_URL } from './runtime.js'
 
 const api = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL: API_BASE_URL,
   timeout: 10000,
   headers: {
     'Content-Type': 'application/json',
@@ -50,6 +51,19 @@ export const authAPI = {
 
   async me() {
     const response = await api.get('/auth/me')
+    setAuthSession({
+      token: getAuthToken(),
+      user: response.data.user,
+    })
+    return response.data
+  },
+
+  async changePassword(passwords) {
+    const response = await api.post('/auth/change-password', passwords)
+    setAuthSession({
+      token: response.data.token,
+      user: response.data.user,
+    })
     return response.data
   },
 

@@ -50,6 +50,7 @@ class AuthRoutesTestCase(unittest.TestCase):
         self.assertIn("/auth/login", paths)
         self.assertIn("/auth/register", paths)
         self.assertIn("/auth/me", paths)
+        self.assertIn("/auth/change-password", paths)
 
     def test_login_and_fetch_current_user(self):
         user = self.auth_manager.authenticate("admin", "admin123456")
@@ -59,14 +60,47 @@ class AuthRoutesTestCase(unittest.TestCase):
         verified = self.auth_manager.verify_token(token)
         self.assertGreater(verified.user_id, 0)
         self.assertEqual(verified.username, "admin")
+        self.assertEqual(verified.role, "admin")
 
     def test_register_creates_login_ready_user(self):
         user = self.auth_manager.register(" New_Trader ", "TradePass2026")
 
         self.assertEqual("new_trader", user.username)
+        self.assertEqual("user", user.role)
         self.assertIsNotNone(
             self.auth_manager.authenticate("NEW_TRADER", "TradePass2026")
         )
+
+    def test_change_password_revokes_old_token_and_preserves_role(self):
+        user = self.auth_manager.register("new_trader", "TradePass2026")
+        old_token = self.auth_manager.create_token(user)
+
+        updated = self.auth_manager.change_password(
+            user.user_id,
+            "TradePass2026",
+            "NewTradePass2027",
+        )
+
+        self.assertEqual(updated.role, "user")
+        self.assertIsNone(
+            self.auth_manager.authenticate("new_trader", "TradePass2026")
+        )
+        self.assertIsNotNone(
+            self.auth_manager.authenticate("new_trader", "NewTradePass2027")
+        )
+        with self.assertRaises(HTTPException) as context:
+            self.auth_manager.verify_token(old_token)
+        self.assertEqual(context.exception.status_code, 401)
+
+    def test_change_password_rejects_incorrect_current_password(self):
+        user = self.auth_manager.register("new_trader", "TradePass2026")
+
+        with self.assertRaisesRegex(ValueError, "当前密码不正确"):
+            self.auth_manager.change_password(
+                user.user_id,
+                "WrongPass2026",
+                "NewTradePass2027",
+            )
 
     def test_register_rejects_duplicate_username(self):
         self.auth_manager.register("new_trader", "TradePass2026")

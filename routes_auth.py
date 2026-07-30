@@ -17,7 +17,14 @@ from auth import (
     get_auth_manager,
     require_auth,
 )
-from models import AuthUserInfo, LoginRequest, LoginResponse, RegisterRequest
+from models import (
+    AuthUserInfo,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
+    LoginRequest,
+    LoginResponse,
+    RegisterRequest,
+)
 from sqlite_storage import EAActivationRepository, TradingAccountRepository
 from trading_engine_manager import TradingEngineManager
 
@@ -47,7 +54,7 @@ def create_auth_routes(
             status="ok",
             token=auth_manager.create_token(user),
             expires_in=auth_manager.token_ttl_seconds,
-            user=AuthUserInfo(user_id=user.user_id, username=user.username),
+            user=_user_info(user),
             next_path=(
                 "/"
                 if EAActivationRepository().has_downloaded(user.user_id)
@@ -79,7 +86,7 @@ def create_auth_routes(
             status="ok",
             token=auth_manager.create_token(user),
             expires_in=auth_manager.token_ttl_seconds,
-            user=AuthUserInfo(user_id=user.user_id, username=user.username),
+            user=_user_info(user),
             next_path="/mt5-setup",
         )
 
@@ -87,11 +94,37 @@ def create_auth_routes(
     async def me(user: AuthUser = Depends(require_auth)):
         return {
             "status": "ok",
-            "user": AuthUserInfo(
-                user_id=user.user_id,
-                username=user.username,
-            ).model_dump(),
+            "user": _user_info(user).model_dump(),
         }
+
+    @router.post(
+        "/change-password",
+        response_model=ChangePasswordResponse,
+    )
+    async def change_password(
+        payload: ChangePasswordRequest,
+        user: AuthUser = Depends(require_auth),
+    ) -> ChangePasswordResponse:
+        auth_manager = get_auth_manager()
+        try:
+            updated_user = auth_manager.change_password(
+                user.user_id,
+                payload.current_password,
+                payload.new_password,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        return ChangePasswordResponse(
+            status="ok",
+            message="密码修改成功",
+            token=auth_manager.create_token(updated_user),
+            expires_in=auth_manager.token_ttl_seconds,
+            user=_user_info(updated_user),
+        )
 
     @router.get("/mt5-binding")
     async def get_mt5_binding(user: AuthUser = Depends(require_auth)):
@@ -177,6 +210,14 @@ def _account_payload(account):
         "created_at": account.created_at,
         "updated_at": account.updated_at,
     }
+
+
+def _user_info(user: AuthUser) -> AuthUserInfo:
+    return AuthUserInfo(
+        user_id=user.user_id,
+        username=user.username,
+        role=user.role,
+    )
 
 
 def _ea_artifact_path() -> Path:

@@ -45,7 +45,7 @@ export default {
       { title: '仪表盘', path: '/', icon: 'mdi-view-dashboard' },
       { title: '连接 MT5', path: '/mt5-setup', icon: 'mdi-connection' },
       { title: '交易指令', path: '/trades', icon: 'mdi-format-list-bulleted' },
-      { title: '行情分析', path: '/market', icon: 'mdi-chart-candlestick' },
+      { title: '信号推荐', path: '/market', icon: 'mdi-lightning-bolt' },
       { title: '仓位管理', path: '/positions', icon: 'mdi-chart-box' },
       { title: '财经日历', path: '/news', icon: 'mdi-newspaper-variant-outline' },
       { title: '统计数据', path: '/statistics', icon: 'mdi-chart-line' },
