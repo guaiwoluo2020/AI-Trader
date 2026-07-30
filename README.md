@@ -1,538 +1,259 @@
-# 高频交易服务 (HFT Trading Service)
+# AITrader
 
-一个为MT5 EA提供支持的高性能交易服务，采用FastAPI框架，集成行情分析、信号生成、策略决策、风险管理等功能。
+### 面向 MT5 的多用户 AI 交易决策与执行平台
 
-## 目录
+AITrader 把 **MT5 行情接入、AI 多周期研判、可配置策略、风险控制、人工确认和交易执行** 串成一条完整链路。
 
-- [功能特性](#功能特性)
-- [系统架构](#系统架构)
-- [快速开始](#快速开始)
-- [配置说明](#配置说明)
-- [API文档](#api文档)
-- [前端界面](#前端界面)
-- [开发指南](#开发指南)
+每位用户拥有独立的配置、EA 绑定、交易引擎与运行状态，既适合个人研究，也为后续 SaaS 化提供了基础。
 
----
+<p>
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.104-009688?logo=fastapi&logoColor=white">
+  <img alt="Vue" src="https://img.shields.io/badge/Vue-3-42B883?logo=vuedotjs&logoColor=white">
+  <img alt="SQLite" src="https://img.shields.io/badge/SQLite-Multi--user-003B57?logo=sqlite&logoColor=white">
+  <img alt="MetaTrader 5" src="https://img.shields.io/badge/MetaTrader-5-0696D7">
+</p>
 
-## 功能特性
+> [!IMPORTANT]
+> 本项目用于技术研究、策略验证与个人学习，不构成任何投资建议。自动交易具有风险，请先在 MT5 模拟账户中充分测试。
 
-### 核心功能
+## 为什么是 AITrader
 
-#### 1. K线数据管理
-- 支持多周期K线数据接收 (H4/H1/M15/M5/M1)
-- 增量/全量数据校验与存储
-- 数据时效性检查（自动识别休市状态）
+传统 EA 通常把行情、策略和执行写在同一个脚本里，策略调整困难，也不便于引入 AI 或多人使用。AITrader 将这些能力拆分为独立服务：
 
-#### 2. 转折点检测
-- 基于分型识别算法自动检测高低点
-- 多周期转折点联动分析
-- 接近阈值提醒（可配置各周期阈值）
+- **轻量接入**：用户下载已编译的专属 `.ex5`，放入 MT5 指定目录即可激活，无需 MetaEditor 编译。
+- **AI + 技术信号**：同时分析 H4、H1、M15、M5、M1，并融合 Pivot、KeyLevel 与 AI Entry 信号。
+- **人机协同**：策略命中后先生成待确认订单，用户可修改手数、止损和止盈，再决定是否发送给 MT5。
+- **风险优先**：支持持仓上限、同向限制、风险回报比、单日风险、订单上限与亏损熔断。
+- **多用户隔离**：登录用户拥有独立配置、账户绑定、指令队列、持仓统计和运行状态。
+- **全链路可视化**：从行情与 AI 结论，到指令执行、当前持仓和历史统计，都可以在 Web 端查看。
 
-#### 3. 信号系统
-- **Pivot信号**: 转折点触发信号（支持M1/M5/M15/H1/H4周期）
-- **KeyLevel信号**: 关键点位触发信号
-- **AI Entry信号**: LLM分析入场信号
-- 支持周期级别启用/禁用和权重配置
+## 产品界面
 
-#### 4. 策略决策
-- 多信号综合分析
-- 周期级别权重配置
-- 一致性要求设置（任一/多数/全部）
-- 自动止损止盈计算
-- 风险回报比验证
+### AI 多周期趋势研判
 
-#### 5. 风险管理
-- 账户风险百分比控制
-- 最大持仓数量限制
-- 同向持仓限制
-- 动态止损范围验证
+系统按周期展示 AI 趋势、置信度、判断依据和技术指标结论，帮助用户快速理解不同级别的市场结构。
 
-#### 6. LLM分析
-- OpenAI兼容API支持
-- 多周期趋势分析
-- 关键支撑/阻力位识别
-- 交易建议生成
+![AI 多周期趋势分析](docs/images/ai-trend-analysis.jpg)
 
-#### 7. 新闻与事件
-- 金十数据快讯抓取
-- 财经日历事件
-- 市场事件监控
+### 关键价位与交易建议
 
----
+AI 分析结果可以输出方向、入场价、止损、止盈和判断理由，并与技术信号一起进入策略决策。
 
-## 系统架构
+![AI 关键价位与交易建议](docs/images/ai-trade-suggestions.jpg)
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        前端 (Vue.js + Vuetify)                   │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
-│  │  Market  │ │Settings  │ │Positions │ │  News    │ │  Log   │ │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬────┘ │
-└───────┼────────────┼────────────┼────────────┼────────────┼──────┘
-        │            │            │            │            │
-        └────────────┴────────────┴─────┬──────┴────────────┘
-                                       │
-                              ┌────────▼────────┐
-                              │   FastAPI 服务   │
-                              │   (Port 8000)   │
-                              └────────┬────────┘
-                                       │
-        ┌──────────────────────────────┼──────────────────────────────┐
-        │                              │                              │
-        ▼                              ▼                              ▼
-┌───────────────┐            ┌───────────────┐            ┌───────────────┐
-│   行情模块     │            │   信号/策略    │            │   新闻模块     │
-│               │            │               │            │               │
-│ • KlineStore  │            │ • SignalService│            │ • FlashNews   │
-│ • KlineService│            │ • StrategySvc │            │ • Calendar    │
-│ • PivotService│            │ • RiskManager │            │ • NewsCrawler │
-│ • TechService │            │ • PendingOrder│            │               │
-└───────┬───────┘            └───────┬───────┘            └───────────────┘
-        │                            │
-        │                    ┌───────┴───────┐
-        │                    │               │
-        ▼                    ▼               ▼
-┌───────────────┐    ┌───────────────┐ ┌───────────────┐
-│   LLM分析     │    │   信号生成器   │ │   存储层       │
-│               │    │               │ │               │
-│ • LLMService  │    │ • PivotSignal │ │ • JSON文件    │
-│ • LLMAnalyzer │    │ • KeyLevel    │ │ • 内存缓存    │
-│               │    │ • AI Entry    │ │               │
-└───────────────┘    └───────────────┘ └───────────────┘
-        │
-        ▼
-┌───────────────┐
-│   MT5 EA      │
-│               │
-│ • K线推送     │
-│ • 统计上报    │
-│ • 获取指令    │
-│ • 执行交易    │
-└───────────────┘
+### 可配置的策略与风控
+
+每个交易品种可以独立配置启用周期、信号权重、最低置信度、一致性要求、仓位和止盈止损规则。
+
+![策略配置](docs/images/strategy-configuration.jpg)
+
+### 人工确认后再执行
+
+策略触发后生成待确认订单。用户可以核对信号来源，调整交易参数，然后确认发送或直接拒绝。
+
+![待确认订单](docs/images/pending-order-review.jpg)
+
+### 持仓与统计复盘
+
+平台汇总当前持仓、方向、盈亏和交易数量，并支持按品种查看历史成交表现。
+
+![当前持仓](docs/images/positions-overview.jpg)
+
+![历史成交统计](docs/images/trade-statistics.jpg)
+
+## 交易闭环
+
+```mermaid
+flowchart LR
+    A["MT5 EA<br/>行情与账户上报"] --> B["FastAPI<br/>用户与账户鉴权"]
+    B --> C["多周期行情分析"]
+    C --> D["Pivot / KeyLevel / AI Entry"]
+    D --> E["策略聚合与风险检查"]
+    E --> F["待确认订单"]
+    F -->|确认并可修改参数| G["交易指令队列"]
+    F -->|拒绝或超时| H["结束"]
+    G --> I["MT5 EA 轮询并执行"]
+    I --> J["持仓、成交与统计回传"]
+    J --> B
 ```
 
-### 模块结构
+1. MT5 EA 上报多周期 K 线、账户信息、持仓和成交记录。
+2. 后端完成 Pivot、关键价位、技术指标及 AI 趋势分析。
+3. 策略服务按品种配置聚合信号，并执行仓位与风险检查。
+4. 命中条件后生成待确认订单，默认保留 3 分钟。
+5. 用户确认后，订单转换为绑定账户专属的交易指令。
+6. EA 拉取指令并在 MT5 执行，结果回传平台用于监控和统计。
 
-```
-.
-├── main.py                 # 服务入口
-├── server.py               # TradingServer 核心类
-├── routes_*.py             # API路由模块
-│   ├── routes_ea.py        # EA接口
-│   ├── routes_market.py    # 行情/策略接口
-│   ├── routes_position.py  # 持仓接口
-│   ├── routes_news.py      # 新闻接口
-│   ├── routes_trader.py    # 交易员接口
-│   └── routes_system.py    # 系统接口
-├── market/                 # 核心模块
-│   ├── models/             # 数据模型
-│   │   ├── kline.py        # K线模型
-│   │   ├── pivot.py        # 转折点模型
-│   │   ├── trading_signal.py    # 信号模型
-│   │   ├── trading_strategy.py  # 策略模型
-│   │   ├── pending_order.py     # 待确认订单
-│   │   └── ...
-│   ├── services/           # 业务服务
-│   │   ├── kline_service.py     # K线服务
-│   │   ├── pivot_service.py     # 转折点服务
-│   │   ├── signal/              # 信号生成器
-│   │   │   ├── signal_service.py
-│   │   │   ├── pivot_signal.py
-│   │   │   ├── key_level_signal.py
-│   │   │   └── ai_entry_signal.py
-│   │   ├── strategy/            # 策略服务
-│   │   │   ├── strategy_service.py
-│   │   │   └── risk_manager.py
-│   │   └── llm_service.py       # LLM分析服务
-│   ├── store/              # 数据存储
-│   │   ├── kline_store.py
-│   │   ├── pivot_store.py
-│   │   ├── signal_store.py
-│   │   ├── strategy_store.py
-│   │   └── ...
-│   ├── llm_analyzer.py     # LLM分析调度器
-│   ├── market_event_monitor.py # 市场事件监控
-│   ├── trade_config.py     # 交易配置
-│   └── system_log.py       # 系统日志
-├── data/                   # 数据文件目录
-│   ├── strategy_config.json
-│   ├── trade_config.json
-│   └── ...
-└── frontend/               # Vue.js前端
-    └── src/
-        ├── views/          # 页面组件
-        │   ├── Market.vue      # 行情分析
-        │   ├── Settings.vue    # 系统设置
-        │   ├── Positions.vue   # 持仓管理
-        │   ├── News.vue        # 新闻资讯
-        │   └── SystemLog.vue   # 系统日志
-        └── api/             # API封装
-            └── market.js
+## MT5 EA 接入
+
+新用户注册后会进入 MT5 接入引导页。平台基于一次性激活码生成专属文件名，用户不需要在文件中填写账号、Token 或其他凭证。
+
+![MT5 EA 安装引导](docs/images/mt5-ea-setup.jpg)
+
+安装步骤：
+
+1. 在“连接 MT5”页面下载 `mt5TerminalEA_<激活码>.ex5`。
+2. 在 MT5 中选择“文件 → 打开数据文件夹”。
+3. 将文件放入 `MQL5/Experts/AITrader/`。
+4. 在 MT5 设置中允许 WebRequest，并将 EA 挂载到图表。
+5. EA 首次通信时消费一次性激活码，自动绑定当前 Web 用户与 MT5 账户。
+
+激活码默认 **10 分钟内有效且仅可使用一次**。已下载过 EA 的用户再次登录时会直接进入仪表盘。
+
+## 多用户架构
+
+```text
+Vue 3 + Vuetify
+        |
+        | Bearer Token
+        v
+FastAPI API
+        |
+        +-- AuthManager                 用户注册、登录与会话
+        +-- TradingAccountRepository    用户与 MT5 账户绑定
+        +-- TradingEngineManager        按用户/账户创建隔离引擎
+        +-- UserConfigRepository        LLM、交易与策略配置
+        +-- RuntimeStateRepository      指令、持仓、统计与风控状态
+        |
+        v
+SQLite
+        ^
+        |
+mt5TerminalEA.ex5
 ```
 
----
+当前多用户边界包括：
+
+- 用户认证与 Token 会话
+- MT5 账户及 EA 激活绑定
+- 大模型、自动交易和品种策略配置
+- 交易指令、待确认订单、持仓、成交与统计
+- 每日风险占用、订单计数和亏损熔断状态
+
+行情数据作为公共市场数据共享，不按用户重复存储。
+
+## 技术栈
+
+| 层级 | 技术 |
+| --- | --- |
+| 前端 | Vue 3、Vue Router、Vuetify、ECharts、Axios、Vite |
+| 后端 | Python、FastAPI、Uvicorn、uvloop、Pydantic |
+| 存储 | SQLite |
+| 交易终端 | MetaTrader 5、MQL5 EA |
+| AI | OpenAI-compatible API |
+| 通信 | REST API、WebSocket、MT5 WebRequest |
 
 ## 快速开始
 
 ### 环境要求
 
 - Python 3.9+
-- Node.js 18+ (前端开发)
+- Node.js 18+
+- npm
+- MetaTrader 5（需要验证 EA 连接与交易执行时）
+- macOS 或 Linux（当前后端使用 `uvloop`）
 
-### 安装依赖
+### 1. 获取代码
 
 ```bash
-# Python依赖
-pip install fastapi uvicorn uvloop pydantic requests aiohttp openai
-
-# 前端依赖
-cd frontend
-npm install
+git clone git@github.com:guaiwoluo2020/AI-Trader.git
+cd AI-Trader
 ```
 
-### 启动服务
+### 2. 启动后端
 
 ```bash
-# 启动后端服务 (端口8000)
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 python3 main.py
+```
 
-# 启动前端开发服务 (端口5173)
+后端默认地址为 `http://127.0.0.1:8000`，交互式 API 文档位于 `http://127.0.0.1:8000/docs`。
+
+### 3. 启动前端
+
+```bash
 cd frontend
+npm install
 npm run dev
+```
 
-# 构建前端生产版本
+前端默认地址为 `http://127.0.0.1:5173`。
+
+### 4. 注册并连接 MT5
+
+1. 打开前端注册新用户。
+2. 按页面引导下载专属 EA。
+3. 将 EA 放入 `MQL5/Experts/AITrader/` 并刷新导航器。
+4. 为 MT5 WebRequest 允许后端地址。
+5. 将 EA 挂载到需要接入的品种图表。
+
+## 常用环境变量
+
+| 变量 | 用途 | 默认值 |
+| --- | --- | --- |
+| `AI_TRADER_DB_FILE` | SQLite 数据库路径 | `data/ai_trader.db` |
+| `AI_TRADER_PUBLIC_BASE_URL` | EA 访问的后端公开地址 | `http://127.0.0.1:8000` |
+| `AI_TRADER_MT5_EA_EX5` | 已编译 EA 文件路径 | `dist/mt5TerminalEA.ex5` |
+| `AI_TRADER_AUTH_TOKEN_TTL` | Web 登录 Token 有效期 | 使用代码默认值 |
+| `AI_TRADER_ENGINE_IDLE_SECONDS` | 空闲交易引擎回收时间 | 使用代码默认值 |
+| `AI_TRADER_TASK_WORKERS` | 后台任务工作线程数 | 使用代码默认值 |
+| `AI_TRADER_DAILY_ORDER_LIMIT` | 每日订单上限 | `20` |
+| `AI_TRADER_DAILY_LOSS_LIMIT` | 每日亏损熔断百分比 | `5` |
+
+生产部署时请设置安全的管理员账号与密码，并将 `AI_TRADER_PUBLIC_BASE_URL` 改为 EA 实际可访问的 HTTPS 地址。
+
+## 项目结构
+
+```text
+AI-Trader/
+├── main.py                         FastAPI 应用入口
+├── server.py                       单账户交易引擎组装
+├── trading_engine_manager.py       多用户/多账户引擎管理
+├── auth.py                         用户认证与 Token
+├── ea_auth.py                      EA 请求鉴权
+├── sqlite_storage.py               SQLite 数据访问层
+├── routes_auth.py                  注册、登录、EA 下载与绑定
+├── routes_ea.py                    EA 行情、账户、指令接口
+├── routes_market.py                行情、AI、信号、策略接口
+├── routes_position.py              持仓与成交统计接口
+├── routes_system.py                用户配置与运行状态接口
+├── market/
+│   ├── models/                     领域模型
+│   ├── services/                   行情、信号、策略、风控、LLM
+│   └── store/                      行情与运行状态存储
+├── frontend/
+│   ├── src/views/                  Vue 页面
+│   ├── src/api/                    API 客户端
+│   └── tests/                      前端结构与路由测试
+├── dist/mt5TerminalEA.ex5          已编译 EA 发布文件
+└── mt5TerminalEA.mq5               EA 源码
+```
+
+## 测试与构建
+
+```bash
+# 后端测试
+python3 -m unittest discover -p "test_*.py"
+
+# 前端测试
+cd frontend
+node --test tests/*.test.mjs
+
+# 前端生产构建
 npm run build
 ```
 
-### 验证服务
+## 路线图
 
-```bash
-# 健康检查
-curl http://localhost:8000/health
+- 完善 SaaS 租户、套餐与权限模型
+- 增加策略回测和参数对比
+- 提供 Docker 化部署与数据库迁移工具
+- 扩展更多交易终端与行情源
+- 增加通知、审计和可观测性能力
 
-# 查看API文档
-open http://localhost:8000/docs
-```
+## 风险声明
 
----
-
-## 配置说明
-
-### 交易配置 (data/trade_config.json)
-
-```json
-{
-  "enabled": true,
-  "default_volume": 0.01,
-  "default_sl_offset": 0.05,
-  "mt5_timezone_offset": -6.0,
-  "symbol_config": {
-    "GOLD#": {
-      "volume": 0.01,
-      "sl_offset": 3,
-      "key_levels": "5000,5100,5200",
-      "key_level_threshold": 0.0008
-    }
-  }
-}
-```
-
-### 策略配置 (data/strategy_config.json)
-
-```json
-{
-  "strategies": {
-    "GOLD#": {
-      "enabled": true,
-      "signal_config": {
-        "pivot": {
-          "enabled": true,
-          "periods": {
-            "M1": {"enabled": true, "weight": 15},
-            "M5": {"enabled": true, "weight": 20},
-            "M15": {"enabled": false, "weight": 25},
-            "H1": {"enabled": false, "weight": 20},
-            "H4": {"enabled": false, "weight": 20}
-          }
-        },
-        "key_level": {
-          "enabled": true,
-          "weight": 40
-        },
-        "ai_entry": {
-          "enabled": true,
-          "periods": {
-            "M5": {"enabled": true, "weight": 20},
-            "M15": {"enabled": true, "weight": 30},
-            "H1": {"enabled": true, "weight": 25}
-          }
-        }
-      },
-      "min_confidence": 50,
-      "consistency_requirement": "majority",
-      "min_risk_reward": 1.0,
-      "max_positions": 3,
-      "max_same_direction": 2
-    }
-  }
-}
-```
-
-### LLM配置
-
-通过API或前端设置：
-
-```bash
-curl -X POST http://localhost:8000/llm/configure \
-  -H "Content-Type: application/json" \
-  -d '{
-    "api_key": "your-api-key",
-    "api_base": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini"
-  }'
-```
-
----
-
-## API文档
-
-### EA接口
-
-#### 获取交易指令
-```
-GET /get_trades?symbol=GOLD#&price=4850.00
-```
-
-返回该品种待执行的交易指令列表。
-
-#### 推送K线数据
-```
-POST /ea/kline/{period}
-POST /ea/kline_batch
-```
-
-**请求体示例**:
-```json
-{
-  "symbol": "GOLD#",
-  "is_full": false,
-  "klines": [
-    {
-      "time": "2026-03-19 10:00:00",
-      "open": 4850.00,
-      "high": 4855.00,
-      "low": 4848.00,
-      "close": 4852.00,
-      "volume": 1000
-    }
-  ]
-}
-```
-
-**返回码说明**:
-- `200`: 成功
-- `400 (code: 8888)`: 需要全量数据（数据不连续或未初始化）
-
-#### 发送统计数据
-```
-POST /send_statistics
-```
-
-### 行情接口
-
-#### 查询K线数据
-```
-GET /market/kline/{symbol}?period=M5&count=100
-```
-
-#### 查询转折点
-```
-GET /market/pivots/{symbol}?period=M5&direction=high&count=50
-```
-
-#### 获取行情状态
-```
-GET /market/status
-GET /market/configured_symbols
-```
-
-### 策略接口
-
-#### 获取策略配置
-```
-GET /strategy
-GET /strategy/{symbol}
-```
-
-#### 更新策略配置
-```
-POST /strategy/{symbol}
-```
-
-**请求体示例**:
-```json
-{
-  "enabled": true,
-  "signal_config": {
-    "pivot": {
-      "enabled": true,
-      "periods": {
-        "M5": {"enabled": true, "weight": 25}
-      }
-    }
-  },
-  "min_confidence": 60
-}
-```
-
-#### 获取决策历史
-```
-GET /strategy/decisions?symbol=GOLD#&count=20
-```
-
-#### 手动触发决策
-```
-POST /strategy/trigger/{symbol}
-```
-
-### 持仓接口
-
-```
-GET /positions
-GET /positions/summary
-POST /close_position
-```
-
-### 新闻接口
-
-```
-GET /api/news/flash?count=10
-GET /api/news/calendar?date=2026-03-19
-```
-
-### WebSocket接口
-
-#### 转折点提醒
-```
-ws://localhost:8000/ws/market
-```
-
-#### 新闻推送
-```
-ws://localhost:8000/api/news/ws
-```
-
----
-
-## 前端界面
-
-### 行情分析 (Market)
-- 多周期K线展示
-- 转折点标注
-- AI趋势分析
-- 交易决策提醒
-- 待确认订单操作
-
-### 系统设置 (Settings)
-- 自动交易开关
-- 品种配置管理
-- 策略配置（信号权重、仓位管理、止损止盈）
-- LLM配置
-- 品种数据状态
-
-### 持仓管理 (Positions)
-- 实时持仓列表
-- 盈亏统计
-- 一键平仓
-
-### 新闻资讯 (News)
-- 快讯列表
-- 财经日历
-- 事件提醒
-
-### 系统日志 (SystemLog)
-- 操作日志
-- 事件筛选
-- 日志清空
-
----
-
-## 开发指南
-
-### 信号生成器扩展
-
-在 `market/services/signal/` 目录下创建新的信号生成器：
-
-```python
-from market.models import TradingSignal, SignalSource
-
-class MySignalGenerator:
-    def __call__(self, symbol: str, current_price: float) -> List[TradingSignal]:
-        # 实现信号生成逻辑
-        signals = []
-        # ...
-        return signals
-```
-
-注册到 SignalService：
-
-```python
-signal_service.register_generator("my_signal", MySignalGenerator())
-```
-
-### 策略参数说明
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| enabled | bool | 是否启用策略 |
-| signal_config | dict | 信号源周期级别配置 |
-| min_confidence | int | 最低置信度阈值 (0-100) |
-| consistency_requirement | str | 一致性要求 (any/majority/all) |
-| min_risk_reward | float | 最小风险回报比 |
-| max_positions | int | 最大持仓数量 |
-| max_same_direction | int | 同向最大持仓 |
-| fixed_volume | float | 固定手数 |
-| risk_percent | float | 账户风险百分比 |
-
-### 数据存储
-
-所有配置和数据存储在 `data/` 目录：
-- `strategy_config.json` - 策略配置
-- `trade_config.json` - 交易配置
-- `kline_*.json` - K线缓存
-- `pivot_*.json` - 转折点缓存
-- `llm_*.json` - LLM分析结果
-
----
-
-## 性能特性
-
-- **FastAPI框架**: 高性能异步框架
-- **UVloop**: 使用高性能事件循环
-- **线程安全**: 核心数据使用锁保护
-- **内存缓存**: 热数据内存缓存
-- **增量更新**: K线支持增量推送
-
----
-
-## 常见问题
-
-### Q: 为什么某个品种没有AI趋势分析？
-A: AI分析只处理有K线数据的活跃品种。检查EA是否正确推送该品种的K线数据。
-
-### Q: 返回码8888是什么意思？
-A: 表示服务端需要全量K线数据，通常是因为：
-- 首次连接，没有历史数据
-- 增量数据不连续，存在缺失
-
-### Q: 如何调试信号生成？
-A: 查看服务日志，信号生成器会打印详细信息：
-```
-[PivotSignalGenerator] 生成信号: buy @ 4850.00, SL=4840.00, TP=4870.00
-```
-
----
-
-## 许可证
-
-MIT License
+AI 输出可能存在延迟、错误或不确定性，历史表现也不代表未来结果。请始终设置合理的仓位、止损与每日风险限制，并在理解策略逻辑和执行链路后再考虑连接真实账户。
