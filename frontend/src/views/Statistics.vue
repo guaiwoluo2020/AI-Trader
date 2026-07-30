@@ -52,7 +52,7 @@
             平均价格
           </v-card-title>
           <v-card-text>
-            <div class="text-h4">{{ averagePrice.toFixed(5) }}</div>
+            <div class="text-h4 price-value">{{ averagePrice.toFixed(2) }}</div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -64,7 +64,7 @@
             最高价格
           </v-card-title>
           <v-card-text>
-            <div class="text-h4">{{ maxPrice.toFixed(5) }}</div>
+            <div class="text-h4 price-value">{{ maxPrice.toFixed(2) }}</div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -76,7 +76,7 @@
             最低价格
           </v-card-title>
           <v-card-text>
-            <div class="text-h4">{{ minPrice.toFixed(5) }}</div>
+            <div class="text-h4 price-value">{{ minPrice.toFixed(2) }}</div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -306,3 +306,12 @@ export default {
   },
 }
 </script>
+
+<style scoped>
+.price-value {
+  white-space: nowrap;
+  font-size: clamp(1.25rem, 2.1vw, 2.125rem) !important;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+</style>

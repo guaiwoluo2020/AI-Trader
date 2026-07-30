@@ -7,6 +7,7 @@ import TradeOrders from '../views/TradeOrders.vue'
 import Statistics from '../views/Statistics.vue'
 import Market from '../views/Market.vue'
 import Settings from '../views/Settings.vue'
+import StrategySettings from '../views/StrategySettings.vue'
 import SystemLog from '../views/SystemLog.vue'
 import Positions from '../views/Positions.vue'
 import News from '../views/News.vue'
@@ -65,6 +66,12 @@ const routes = [
     path: '/news',
     name: 'News',
     component: News,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/strategy-settings',
+    name: 'StrategySettings',
+    component: StrategySettings,
     meta: { requiresAuth: true }
   },
   {

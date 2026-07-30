@@ -49,7 +49,8 @@ export default {
       { title: '仓位管理', path: '/positions', icon: 'mdi-chart-box' },
       { title: '财经日历', path: '/news', icon: 'mdi-newspaper-variant-outline' },
       { title: '统计数据', path: '/statistics', icon: 'mdi-chart-line' },
-      { title: '系统设置', path: '/settings', icon: 'mdi-cog' },
+      { title: '策略配置', path: '/strategy-settings', icon: 'mdi-tune-variant' },
+      { title: '用户配置', path: '/settings', icon: 'mdi-account-cog' },
       { title: '运行日志', path: '/logs', icon: 'mdi-text-box-outline' },
     ]
     const showShell = computed(() => !route.meta.public)

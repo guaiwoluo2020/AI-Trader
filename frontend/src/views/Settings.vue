@@ -2,12 +2,12 @@
   <v-container fluid>
     <v-row>
       <v-col cols="12">
-        <h1 class="mb-4">系统设置</h1>
+        <h1 class="mb-4">{{ pageTitle }}</h1>
       </v-col>
     </v-row>
 
     <!-- 自动交易配置 -->
-    <v-row>
+    <v-row v-if="isStrategyPage">
       <v-col cols="12">
         <v-card>
           <v-card-title>
@@ -169,7 +169,7 @@
     </v-row>
 
     <!-- 策略配置 -->
-    <v-row class="mt-4">
+    <v-row v-if="isStrategyPage" class="mt-4">
       <v-col cols="12">
         <v-card>
           <v-card-title>
@@ -531,7 +531,7 @@
     </v-row>
 
     <!-- 大模型配置 -->
-    <v-row class="mt-4">
+    <v-row v-if="!isStrategyPage">
       <v-col cols="12">
         <v-card>
           <v-card-title>
@@ -598,67 +598,6 @@
       </v-col>
     </v-row>
 
-    <!-- 品种数据状态 -->
-    <v-row class="mt-4">
-      <v-col cols="12">
-        <v-card>
-          <v-card-title>
-            <v-icon class="mr-2">mdi-chart-line</v-icon>
-            品种数据状态
-            <v-btn icon small class="ml-2" @click="loadSymbolStatus" :loading="symbolStatusLoading">
-              <v-icon small>mdi-refresh</v-icon>
-            </v-btn>
-          </v-card-title>
-          <v-card-text>
-            <v-table dense v-if="symbolStatus.length > 0">
-              <template v-slot:default>
-                <thead>
-                  <tr>
-                    <th>品种</th>
-                    <th>数据状态</th>
-                    <th>M1数量</th>
-                    <th>最新M1时间</th>
-                    <th>距上次更新</th>
-                    <th>市场状态</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="item in symbolStatus" :key="item.symbol">
-                    <td><strong>{{ item.symbol }}</strong></td>
-                    <td>
-                      <v-chip size="x-small" :color="item.has_data ? 'success' : 'error'">
-                        {{ item.has_data ? '有数据' : '无数据' }}
-                      </v-chip>
-                    </td>
-                    <td>{{ item.m1_count || 0 }}</td>
-                    <td>{{ item.latest_m1_time || '-' }}</td>
-                    <td>
-                      <span v-if="item.seconds_ago !== null">{{ item.seconds_ago }}秒前</span>
-                      <span v-else>-</span>
-                    </td>
-                    <td>
-                      <v-chip size="x-small" :color="getMarketStatusColor(item.market_status)">
-                        {{ getMarketStatusText(item.market_status) }}
-                      </v-chip>
-                    </td>
-                  </tr>
-                </tbody>
-              </template>
-            </v-table>
-            <div v-else class="text-center grey--text py-4">
-              <v-icon large>mdi-database-off</v-icon>
-              <div class="mt-2">暂无已配置的品种</div>
-            </div>
-
-            <div class="text-caption grey--text mt-3">
-              <v-icon small>mdi-information</v-icon>
-              显示交易配置中的品种K线数据状态。M1数据超过3分钟未更新视为休市。
-            </div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
-
     <!-- 错误提示 -->
     <v-snackbar v-model="showError" color="error" timeout="5000" location="top">
       {{ errorMessage }}
@@ -677,7 +616,16 @@ import { marketAPI } from '@/api/market'
 
 export default {
   name: 'Settings',
-  setup() {
+  props: {
+    mode: {
+      type: String,
+      default: 'system'
+    }
+  },
+  setup(props) {
+    const isStrategyPage = computed(() => props.mode === 'strategy')
+    const pageTitle = computed(() => isStrategyPage.value ? '策略配置' : '用户配置')
+
     // 交易配置
     const tradeConfig = ref({
       enabled: true,
@@ -710,10 +658,6 @@ export default {
     })
     const showApiKey = ref(false)
     const llmSaving = ref(false)
-
-    // 品种数据状态
-    const symbolStatus = ref([])
-    const symbolStatusLoading = ref(false)
 
     // 可用品种列表（已连接但未配置的）
     const availableSymbols = computed(() => {
@@ -857,41 +801,6 @@ export default {
         showError.value = true
       } finally {
         llmSaving.value = false
-      }
-    }
-
-    // 加载品种数据状态
-    const loadSymbolStatus = async () => {
-      symbolStatusLoading.value = true
-      try {
-        const data = await marketAPI.getConfiguredSymbols()
-        if (data.status === 'ok') {
-          symbolStatus.value = data.symbols || []
-        }
-      } catch (err) {
-        console.error('加载品种状态失败:', err)
-      } finally {
-        symbolStatusLoading.value = false
-      }
-    }
-
-    // 获取市场状态颜色
-    const getMarketStatusColor = (status) => {
-      switch (status) {
-        case 'active': return 'success'
-        case 'stale': return 'warning'
-        case 'closed': return 'error'
-        default: return 'grey'
-      }
-    }
-
-    // 获取市场状态文本
-    const getMarketStatusText = (status) => {
-      switch (status) {
-        case 'active': return '活跃'
-        case 'stale': return '数据过期'
-        case 'closed': return '休市中'
-        default: return '未知'
       }
     }
 
@@ -1097,14 +1006,18 @@ export default {
     }
 
     onMounted(() => {
-      loadSymbols()
-      loadTradeConfig()
+      if (isStrategyPage.value) {
+        loadSymbols()
+        loadTradeConfig()
+        loadStrategies()
+        return
+      }
       loadLLMConfig()
-      loadSymbolStatus()
-      loadStrategies()
     })
 
     return {
+      isStrategyPage,
+      pageTitle,
       tradeConfig,
       newSymbol,
       newVolume,
@@ -1125,12 +1038,6 @@ export default {
       showApiKey,
       llmSaving,
       saveLLMConfig,
-      // 品种数据状态
-      symbolStatus,
-      symbolStatusLoading,
-      loadSymbolStatus,
-      getMarketStatusColor,
-      getMarketStatusText,
       // 策略配置
       strategies,
       strategiesLoading,
