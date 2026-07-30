@@ -21,7 +21,7 @@ class TradingInstructionService:
     # ==================== 创建指令 ====================
 
     def create_instruction(self, symbol: str, action: str, price: float,
-                          mount: float, sl: float = 0.0, tp: float = 0.005,
+                          mount: float, sl: float = 0.0, tp: float = 0.0,
                           reason: str = "", description: str = "",
                           source: str = "", order_id: str = None) -> str:
         """
@@ -82,7 +82,7 @@ class TradingInstructionService:
             if data.get('sl') is None:
                 data['sl'] = 0.0
             if data.get('tp') is None or data.get('tp', 0) <= 0:
-                data['tp'] = 0.005
+                data['tp'] = 0.0
 
             self.create_instruction_from_dict(data)
             count += 1

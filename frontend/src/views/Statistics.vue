@@ -1,18 +1,43 @@
 <template>
   <v-container fluid>
     <v-row>
-      <v-col cols="12">
-        <h1 class="mb-4">统计数据分析</h1>
+      <v-col cols="12" md="7">
+        <h1 class="mb-1">统计数据分析</h1>
+        <div class="text-medium-emphasis mb-4">查看 EA 行情采样与近 24 小时成交统计</div>
+      </v-col>
+      <v-col cols="12" md="5">
+        <v-select
+          v-model="selectedSymbol"
+          :items="symbolOptions"
+          label="交易品种"
+          prepend-inner-icon="mdi-chart-candlestick"
+          variant="outlined"
+          density="comfortable"
+          hide-details
+          @update:model-value="loadStatistics"
+        />
       </v-col>
     </v-row>
 
     <!-- 汇总统计 -->
     <v-row>
-      <v-col cols="12" md="3">
+      <v-col cols="12" sm="6" md="3">
+        <v-card color="primary" variant="tonal">
+          <v-card-title class="d-flex align-center">
+            <v-icon class="me-2">mdi-swap-horizontal-bold</v-icon>
+            交易次数（近24小时）
+          </v-card-title>
+          <v-card-text>
+            <div class="text-h4">{{ totalTrades }}</div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+
+      <v-col cols="12" sm="6" md="3">
         <v-card>
           <v-card-title class="d-flex align-center">
             <v-icon class="me-2">mdi-counter</v-icon>
-            总记录数
+            当前样本数
           </v-card-title>
           <v-card-text>
             <div class="text-h4">{{ totalRecords }}</div>
@@ -20,7 +45,7 @@
         </v-card>
       </v-col>
 
-      <v-col cols="12" md="3">
+      <v-col cols="12" sm="6" md="2">
         <v-card>
           <v-card-title class="d-flex align-center">
             <v-icon class="me-2">mdi-trending-up</v-icon>
@@ -32,7 +57,7 @@
         </v-card>
       </v-col>
 
-      <v-col cols="12" md="3">
+      <v-col cols="12" sm="6" md="2">
         <v-card>
           <v-card-title class="d-flex align-center">
             <v-icon class="me-2">mdi-chart-line</v-icon>
@@ -44,7 +69,7 @@
         </v-card>
       </v-col>
 
-      <v-col cols="12" md="3">
+      <v-col cols="12" sm="6" md="2">
         <v-card>
           <v-card-title class="d-flex align-center">
             <v-icon class="me-2">mdi-chart-line-variant</v-icon>
@@ -61,7 +86,9 @@
     <v-row>
       <v-col cols="12">
         <v-card>
-          <v-card-title>价格趋势图</v-card-title>
+          <v-card-title>
+            {{ selectedSymbol || '全部品种' }}价格趋势
+          </v-card-title>
           <v-card-text>
             <div ref="chartContainer" style="width: 100%; height: 400px;"></div>
           </v-card-text>
@@ -85,6 +112,10 @@
             >
               <template v-slot:item.bidPrice="{ item }">
                 {{ item.bidPrice.toFixed(2) }}
+              </template>
+
+              <template v-slot:item.timestamp="{ item }">
+                {{ formatTime(item.timestamp) }}
               </template>
 
               <template v-slot:item.askPrice="{ item }">
@@ -112,9 +143,10 @@
 </template>
 
 <script>
-import { ref, onMounted, nextTick } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { tradingAPI } from '@/api/trading'
+import { normalizeStatisticsForView } from '@/utils/statistics-view-data'
 
 export default {
   name: 'Statistics',
@@ -124,12 +156,20 @@ export default {
     const loading = ref(false)
     const error = ref('')
     const statistics = ref([])
+    const selectedSymbol = ref('')
+    const availableSymbols = ref([])
     const itemsPerPage = ref(10)
+    let refreshTimer = null
 
+    const totalTrades = ref(0)
     const totalRecords = ref(0)
     const averagePrice = ref(0)
     const maxPrice = ref(0)
     const minPrice = ref(0)
+    const symbolOptions = computed(() => [
+      { title: '全部品种', value: '' },
+      ...availableSymbols.value.map(symbol => ({ title: symbol, value: symbol })),
+    ])
 
     const tableHeaders = [
       { title: '时间', key: 'timestamp', width: '20%' },
@@ -144,8 +184,20 @@ export default {
       try {
         loading.value = true
         error.value = ''
-        const data = await tradingAPI.getStatistics()
-        statistics.value = data.statistics || []
+        const [data, tradeStatistics] = await Promise.all([
+          tradingAPI.getStatistics(selectedSymbol.value),
+          tradingAPI.getTradeHistoryStatistics(selectedSymbol.value),
+        ])
+        statistics.value = normalizeStatisticsForView(data.statistics || [])
+        totalTrades.value = Number(tradeStatistics.total_count || 0)
+        const discoveredSymbols = [
+          ...(data.symbols || []),
+          ...Object.keys(tradeStatistics.symbols || {}),
+        ]
+        availableSymbols.value = [...new Set([
+          ...availableSymbols.value,
+          ...discoveredSymbols,
+        ])].sort()
 
         // 计算统计信息
         if (statistics.value.length > 0) {
@@ -220,13 +272,18 @@ export default {
 
     const formatTime = (timestamp) => {
       if (!timestamp) return ''
-      return new Date(timestamp * 1000).toLocaleString('zh-CN')
+      return new Date(timestamp).toLocaleString('zh-CN')
     }
 
     onMounted(() => {
       loadStatistics()
       // 每30秒自动刷新
-      setInterval(loadStatistics, 30000)
+      refreshTimer = setInterval(loadStatistics, 30000)
+    })
+
+    onBeforeUnmount(() => {
+      if (refreshTimer) clearInterval(refreshTimer)
+      if (chart.value) chart.value.dispose()
     })
 
     return {
@@ -234,7 +291,10 @@ export default {
       loading,
       error,
       statistics,
+      selectedSymbol,
+      symbolOptions,
       itemsPerPage,
+      totalTrades,
       totalRecords,
       averagePrice,
       maxPrice,

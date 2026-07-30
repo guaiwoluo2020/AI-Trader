@@ -2,14 +2,15 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { isAuthenticated } from '../auth'
 import Dashboard from '../views/Dashboard.vue'
 import Login from '../views/Login.vue'
+import Register from '../views/Register.vue'
 import TradeOrders from '../views/TradeOrders.vue'
 import Statistics from '../views/Statistics.vue'
-import Status from '../views/Status.vue'
 import Market from '../views/Market.vue'
 import Settings from '../views/Settings.vue'
 import SystemLog from '../views/SystemLog.vue'
 import Positions from '../views/Positions.vue'
 import News from '../views/News.vue'
+import Mt5Setup from '../views/Mt5Setup.vue'
 
 const routes = [
   {
@@ -19,9 +20,21 @@ const routes = [
     meta: { public: true }
   },
   {
+    path: '/register',
+    name: 'Register',
+    component: Register,
+    meta: { public: true }
+  },
+  {
     path: '/',
     name: 'Dashboard',
     component: Dashboard,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/mt5-setup',
+    name: 'Mt5Setup',
+    component: Mt5Setup,
     meta: { requiresAuth: true }
   },
   {
@@ -34,12 +47,6 @@ const routes = [
     path: '/statistics',
     name: 'Statistics',
     component: Statistics,
-    meta: { requiresAuth: true }
-  },
-  {
-    path: '/status',
-    name: 'Status',
-    component: Status,
     meta: { requiresAuth: true }
   },
   {

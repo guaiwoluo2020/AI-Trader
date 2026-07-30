@@ -114,7 +114,7 @@ Failed to send statistics. Response code: 500
    ```
 
 2. 确认端口匹配
-   - EA配置: `wangxxGold.mq5` 第22行
+   - EA配置: `mt5TerminalEA.mq5` 第22行
    - 后端配置: `main.py` 第67行 (8000) 或 `trading_server.py` 第494行 (5858)
 
 ### 问题3: URL not in allowed list

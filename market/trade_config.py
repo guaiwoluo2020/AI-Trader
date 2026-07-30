@@ -6,12 +6,7 @@
 
 from typing import Dict, List
 import threading
-import json
-import os
-
-
-# 配置文件路径
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'trade_config.json')
+from sqlite_storage import TradeConfigRepository, bootstrap_runtime_storage
 
 
 class TradeConfig:
@@ -26,7 +21,12 @@ class TradeConfig:
     _instance = None
     _lock = threading.Lock()
 
-    def __init__(self):
+    def __init__(self, user_id: int = None):
+        self._repo = TradeConfigRepository()
+        self._user_id = user_id
+        if self._user_id is None:
+            runtime_user = bootstrap_runtime_storage(self._build_password_credentials)
+            self._user_id = runtime_user.user_id
         self.enabled = True  # 是否启用自动生成
 
         # 默认配置
@@ -44,32 +44,40 @@ class TradeConfig:
             "OILCASH#": {"volume": 0.01, "sl_offset": 0.05},
         }
 
-        # 启动时自动加载配置文件
-        self._load_from_file()
+        # 启动时自动加载配置
+        self._load_from_storage()
 
-    def _load_from_file(self):
-        """从配置文件加载配置"""
+    @staticmethod
+    def _build_password_credentials(password: str):
+        import hashlib
+        import secrets
+
+        salt = secrets.token_hex(16)
+        password_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            100_000,
+        ).hex()
+        return salt, password_hash
+
+    def _load_from_storage(self):
+        """从 SQLite 加载配置"""
         try:
-            if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.update(data)
-                print(f"[TradeConfig] 已从配置文件加载: mt5_timezone_offset={self.mt5_timezone_offset}")
-            else:
-                print(f"[TradeConfig] 配置文件不存在: {CONFIG_FILE}，使用默认配置")
+            data = self._repo.get_config(self._user_id)
+            self.update(data)
+            print(f"[TradeConfig] 已从 SQLite 加载: mt5_timezone_offset={self.mt5_timezone_offset}")
         except Exception as e:
-            print(f"[TradeConfig] 加载配置文件失败: {e}，使用默认配置")
+            print(f"[TradeConfig] 加载配置失败: {e}，使用默认配置")
 
     def save_to_file(self):
-        """保存配置到文件"""
+        """保存配置到 SQLite"""
         try:
-            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
-            print(f"[TradeConfig] 配置已保存到: {CONFIG_FILE}")
+            self._repo.save_config(self._user_id, self.to_dict())
+            print("[TradeConfig] 配置已保存到 SQLite")
             return True
         except Exception as e:
-            print(f"[TradeConfig] 保存配置文件失败: {e}")
+            print(f"[TradeConfig] 保存配置失败: {e}")
             return False
 
     @classmethod

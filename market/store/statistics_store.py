@@ -8,8 +8,8 @@ from collections import deque, defaultdict
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import threading
-
 from ..models.statistics import StatisticsData
+from sqlite_storage import RuntimeStateRepository
 
 
 class StatisticsStore:
@@ -21,7 +21,13 @@ class StatisticsStore:
     2. 获取账户信息
     """
 
-    def __init__(self, max_per_symbol: int = 10, max_total: int = 100):
+    def __init__(
+        self,
+        max_per_symbol: int = 10,
+        max_total: int = 100,
+        user_id: int = None,
+        account_id: int = None,
+    ):
         """
         Args:
             max_per_symbol: 每个品种保留的最大记录数
@@ -35,6 +41,16 @@ class StatisticsStore:
 
         # 线程锁
         self._lock = threading.RLock()
+        self._persisted_account_info: Optional[Dict] = None
+        self._repository = (
+            RuntimeStateRepository(user_id, account_id)
+            if user_id is not None
+            else None
+        )
+        if self._repository:
+            snapshots = self._repository.list_entities("account_snapshot")
+            if snapshots:
+                self._persisted_account_info = snapshots[-1]
 
         print(f"[StatisticsStore] 统计数据存储已初始化 (max_per_symbol={max_per_symbol}, max_total={max_total})")
 
@@ -43,6 +59,25 @@ class StatisticsStore:
         with self._lock:
             self._by_symbol[data.symbol].append(data)
             self._all_data.append(data)
+            if self._repository:
+                self._persisted_account_info = {
+                    "balance": data.balance,
+                    "equity": data.equity,
+                    "margin_level": data.margin_level,
+                    "free_margin": data.free_margin,
+                    "margin": data.margin,
+                    "updated_at": (
+                        data.timestamp.isoformat()
+                        if data.timestamp
+                        else datetime.now().isoformat()
+                    ),
+                }
+                self._repository.upsert_entity(
+                    "account_snapshot",
+                    "latest",
+                    self._persisted_account_info,
+                    status="active",
+                )
 
     def get_latest(self, symbol: str = None) -> Optional[StatisticsData]:
         """获取最新的统计数据"""
@@ -78,7 +113,7 @@ class StatisticsStore:
         """获取账户信息"""
         latest = self.get_latest(symbol)
         if not latest:
-            return {
+            return self._persisted_account_info or {
                 "balance": 0,
                 "equity": 0,
                 "margin_level": 0
@@ -86,7 +121,9 @@ class StatisticsStore:
         return {
             "balance": latest.balance,
             "equity": latest.equity,
-            "margin_level": latest.margin_level
+            "margin_level": latest.margin_level,
+            "free_margin": latest.free_margin,
+            "margin": latest.margin,
         }
 
     def get_all_recent(self, count: int = 10) -> List[StatisticsData]:
@@ -99,6 +136,9 @@ class StatisticsStore:
         with self._lock:
             self._by_symbol.clear()
             self._all_data.clear()
+            self._persisted_account_info = None
+            if self._repository:
+                self._repository.delete_entities("account_snapshot")
 
     def get_status(self) -> Dict:
         """获取存储状态"""
@@ -108,3 +148,26 @@ class StatisticsStore:
                 "symbol_count": len(self._by_symbol),
                 "symbols": list(self._by_symbol.keys())
             }
+
+    def set_scope(self, user_id: int, account_id: int) -> None:
+        if self._repository:
+            self._repository.migrate_scope(account_id)
+            self._repository.set_scope(user_id, account_id)
+            return
+        self._repository = RuntimeStateRepository(user_id, account_id)
+        latest = self.get_latest()
+        if latest:
+            self._persisted_account_info = {
+                "balance": latest.balance,
+                "equity": latest.equity,
+                "margin_level": latest.margin_level,
+                "free_margin": latest.free_margin,
+                "margin": latest.margin,
+                "updated_at": latest.timestamp.isoformat(),
+            }
+            self._repository.upsert_entity(
+                "account_snapshot",
+                "latest",
+                self._persisted_account_info,
+                status="active",
+            )

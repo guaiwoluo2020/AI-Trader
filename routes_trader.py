@@ -6,19 +6,22 @@
 
 from fastapi import APIRouter, Depends, Query
 from typing import Optional, List, Dict
-from auth import require_auth
+from auth import AuthUser, require_auth
 from models import TradeInstruction
-from server import TradingServer
+from trading_engine_manager import TradingEngineManager
 
 
-def create_trader_routes(server: TradingServer) -> APIRouter:
+def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
     """
     创建交易员相关路由
     """
-    router = APIRouter(dependencies=[Depends(require_auth)])
+    router = APIRouter()
     
     @router.post("/send_trade_instructions")
-    async def send_trade_instructions(instructions: List[TradeInstruction]) -> Dict:
+    async def send_trade_instructions(
+        instructions: List[TradeInstruction],
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         交易员发送交易指令
         
@@ -59,6 +62,7 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
         }
         ```
         """
+        server = engine_manager.get_engine_for_user(user.user_id)
         result = server.add_trade_instruction(instructions)
         added = result.get("added", 0)
         rejected = result.get("rejected", 0)
@@ -71,7 +75,10 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
         }
     
     @router.get("/query_pending_trades")
-    async def query_pending_trades(symbol: Optional[str] = Query(None)) -> Dict:
+    async def query_pending_trades(
+        symbol: Optional[str] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         查询待执行的交易指令
         
@@ -95,6 +102,7 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
         }
         ```
         """
+        server = engine_manager.get_engine_for_user(user.user_id)
         all_trades = server.get_all_pending_trades()
         if symbol:
             result = {symbol: all_trades.get(symbol, [])}
@@ -105,7 +113,9 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
     
     @router.get("/query_statistics")
     async def query_statistics(
-        count: int = Query(10, description="获取最新的统计数据条数（最多10条）")
+        count: int = Query(10, description="获取最新的统计数据条数（最多10条）"),
+        symbol: Optional[str] = Query(None, description="交易品种"),
+        user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
         查询统计数据历史
@@ -133,11 +143,20 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
         ```
         """
         count = min(count, 10)
-        stats = server.get_latest_statistics(count)
-        return {"statistics": stats}
+        server = engine_manager.get_engine_for_user(user.user_id)
+        stats = server.get_latest_statistics(count, symbol)
+        available_symbols = server.statistics_store.get_status()["symbols"]
+        return {
+            "statistics": stats,
+            "symbols": sorted(available_symbols),
+            "selected_symbol": symbol,
+        }
     
     @router.delete("/clear_trades")
-    async def clear_trades(symbol: Optional[str] = Query(None)) -> Dict:
+    async def clear_trades(
+        symbol: Optional[str] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         清空交易指令
         
@@ -152,6 +171,7 @@ def create_trader_routes(server: TradingServer) -> APIRouter:
         }
         ```
         """
+        server = engine_manager.get_engine_for_user(user.user_id)
         count = server.clear_trades(symbol)
         return {
             "status": "ok",

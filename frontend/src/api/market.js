@@ -1,4 +1,6 @@
 import axios from 'axios'
+import { getAuthToken } from '../auth'
+import { applyAuthToRequestConfig, handleAuthError } from './auth-helpers.js'
 
 const api = axios.create({
   baseURL: 'http://localhost:8000',
@@ -7,6 +9,16 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+api.interceptors.request.use(
+  (config) => applyAuthToRequestConfig(config),
+  (error) => Promise.reject(error)
+)
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => handleAuthError(error)
+)
 
 export const marketAPI = {
   // 获取所有symbol列表
@@ -51,6 +63,12 @@ export const marketAPI = {
     const ws = new WebSocket('ws://localhost:8000/ws/market')
 
     ws.onopen = () => {
+      const token = getAuthToken()
+      if (!token) {
+        ws.close(1008, 'Authentication required')
+        return
+      }
+      ws.send(JSON.stringify({ type: 'auth', token }))
       console.log('WebSocket 连接成功')
       if (onOpen) onOpen()
     }

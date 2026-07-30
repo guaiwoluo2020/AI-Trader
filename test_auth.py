@@ -10,24 +10,35 @@ import unittest
 
 from fastapi import HTTPException
 
-from auth import AuthManager, require_auth, reset_auth_manager
+from auth import (
+    AuthManager,
+    UsernameAlreadyExistsError,
+    require_auth,
+    reset_auth_manager,
+)
 from main import create_app
+from sqlite_storage import reset_storage
 
 
 class AuthRoutesTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.auth_file = os.path.join(self.temp_dir.name, "auth-users.json")
+        self.db_file = os.path.join(self.temp_dir.name, "ai-trader.db")
 
         os.environ["AI_TRADER_AUTH_FILE"] = self.auth_file
+        os.environ["AI_TRADER_DB_FILE"] = self.db_file
         os.environ["AI_TRADER_DEFAULT_ADMIN_USERNAME"] = "admin"
         os.environ["AI_TRADER_DEFAULT_ADMIN_PASSWORD"] = "admin123456"
+        reset_storage()
         reset_auth_manager()
         self.auth_manager = AuthManager(self.auth_file)
 
     def tearDown(self):
         reset_auth_manager()
+        reset_storage()
         os.environ.pop("AI_TRADER_AUTH_FILE", None)
+        os.environ.pop("AI_TRADER_DB_FILE", None)
         os.environ.pop("AI_TRADER_DEFAULT_ADMIN_USERNAME", None)
         os.environ.pop("AI_TRADER_DEFAULT_ADMIN_PASSWORD", None)
         self.temp_dir.cleanup()
@@ -37,6 +48,7 @@ class AuthRoutesTestCase(unittest.TestCase):
         paths = {route.path for route in app.routes}
         self.assertIn("/health", paths)
         self.assertIn("/auth/login", paths)
+        self.assertIn("/auth/register", paths)
         self.assertIn("/auth/me", paths)
 
     def test_login_and_fetch_current_user(self):
@@ -45,7 +57,26 @@ class AuthRoutesTestCase(unittest.TestCase):
 
         token = self.auth_manager.create_token(user)
         verified = self.auth_manager.verify_token(token)
+        self.assertGreater(verified.user_id, 0)
         self.assertEqual(verified.username, "admin")
+
+    def test_register_creates_login_ready_user(self):
+        user = self.auth_manager.register(" New_Trader ", "TradePass2026")
+
+        self.assertEqual("new_trader", user.username)
+        self.assertIsNotNone(
+            self.auth_manager.authenticate("NEW_TRADER", "TradePass2026")
+        )
+
+    def test_register_rejects_duplicate_username(self):
+        self.auth_manager.register("new_trader", "TradePass2026")
+
+        with self.assertRaises(UsernameAlreadyExistsError):
+            self.auth_manager.register("NEW_TRADER", "AnotherPass2026")
+
+    def test_register_rejects_weak_password(self):
+        with self.assertRaisesRegex(ValueError, "同时包含字母和数字"):
+            self.auth_manager.register("new_trader", "passwordonly")
 
     def test_trader_routes_require_auth(self):
         with self.assertRaises(HTTPException) as context:

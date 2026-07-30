@@ -10,12 +10,20 @@ import threading
 from collections import defaultdict
 
 from ..models import PendingOrder
+from sqlite_storage import RuntimeStateRepository
 
 
 class PendingOrderStore:
     """待确认订单存储（只负责数据CRUD）"""
 
-    def __init__(self, timeout_seconds: int = 180):
+    ENTITY_TYPE = "pending_order"
+
+    def __init__(
+        self,
+        timeout_seconds: int = 180,
+        user_id: int = None,
+        account_id: int = None,
+    ):
         # 按品种分类的订单: {symbol: [PendingOrder, ...]}
         self._orders_by_symbol: Dict[str, List[PendingOrder]] = defaultdict(list)
 
@@ -27,6 +35,20 @@ class PendingOrderStore:
 
         # 超时时间
         self.timeout_seconds = timeout_seconds
+        self._repository = (
+            RuntimeStateRepository(user_id, account_id)
+            if user_id is not None
+            else None
+        )
+        if self._repository:
+            for data in self._repository.list_entities(
+                self.ENTITY_TYPE,
+                statuses=["pending"],
+            ):
+                order = PendingOrder.from_dict(data)
+                self._orders_by_symbol[order.symbol].append(order)
+                self._orders_by_id[order.order_id] = order
+            self.cleanup_expired()
 
         print("[PendingOrderStore] 待确认订单存储已初始化")
 
@@ -50,6 +72,7 @@ class PendingOrderStore:
             # 存储到两个字典
             self._orders_by_symbol[order.symbol].append(order)
             self._orders_by_id[order.order_id] = order
+            self._persist(order)
 
             print(f"[PendingOrderStore] 添加订单: {order.order_id} {order.symbol} {order.action}")
             return order.order_id
@@ -123,6 +146,7 @@ class PendingOrderStore:
 
             # 标记确认
             order.confirm()
+            self._persist(order)
 
             print(f"[PendingOrderStore] 订单已确认: {order_id}")
             return order
@@ -151,6 +175,7 @@ class PendingOrderStore:
 
             # 标记拒绝
             order.reject()
+            self._persist(order)
 
             print(f"[PendingOrderStore] 订单已拒绝: {order_id}")
             return order
@@ -172,6 +197,7 @@ class PendingOrderStore:
             for order_id, order in self._orders_by_id.items():
                 if order.is_expired() and order.status == "pending":
                     order.mark_expired()
+                    self._persist(order)
                     expired_orders.append(order)
                     expired_ids.append(order_id)
 
@@ -196,6 +222,8 @@ class PendingOrderStore:
             count = len(self._orders_by_id)
             self._orders_by_symbol.clear()
             self._orders_by_id.clear()
+            if self._repository:
+                self._repository.delete_entities(self.ENTITY_TYPE)
             print(f"[PendingOrderStore] 已清空所有订单: {count}条")
             return count
 
@@ -210,3 +238,22 @@ class PendingOrderStore:
                 "pending_count": pending_count,
                 "symbols": list(self._orders_by_symbol.keys()),
             }
+
+    def set_scope(self, user_id: int, account_id: int) -> None:
+        if self._repository:
+            self._repository.migrate_scope(account_id)
+            self._repository.set_scope(user_id, account_id)
+        else:
+            self._repository = RuntimeStateRepository(user_id, account_id)
+        for order in self._orders_by_id.values():
+            self._persist(order)
+
+    def _persist(self, order: PendingOrder) -> None:
+        if self._repository:
+            self._repository.upsert_entity(
+                self.ENTITY_TYPE,
+                order.order_id,
+                order.to_dict(),
+                symbol=order.symbol,
+                status=order.status,
+            )

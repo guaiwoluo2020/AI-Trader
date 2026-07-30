@@ -6,16 +6,17 @@
 
 from fastapi import APIRouter, Depends
 from typing import Dict
-from auth import require_auth
-from server import TradingServer
+from auth import AuthUser, require_auth
+from status_payload import build_system_status_payload
+from trading_engine_manager import TradingEngineManager
 
 
-def create_system_routes(server: TradingServer) -> APIRouter:
+def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
     """
     创建系统相关路由
     """
     router = APIRouter()
-    protected_router = APIRouter(dependencies=[Depends(require_auth)])
+    protected_router = APIRouter()
     
     @router.get("/health")
     async def health_check() -> Dict:
@@ -29,10 +30,10 @@ def create_system_routes(server: TradingServer) -> APIRouter:
         }
         ```
         """
-        return {"status": "ok"}
+        return {"status": "ok", "ok": True}
     
     @protected_router.get("/status")
-    async def get_status() -> Dict:
+    async def get_status(user: AuthUser = Depends(require_auth)) -> Dict:
         """
         获取服务状态
         
@@ -46,17 +47,20 @@ def create_system_routes(server: TradingServer) -> APIRouter:
         }
         ```
         """
+        server = engine_manager.get_engine_for_user(user.user_id)
+        pending_trades = server.get_all_pending_trades()
         total_instructions = sum(
-            len(trades) for trades in server.trade_instructions.values()
+            len(trades) for trades in pending_trades.values()
         )
-        symbols = list(server.trade_instructions.keys())
-        
-        return {
-            "status": "ok",
-            "pending_instructions": total_instructions,
-            "statistics_records": len(server.statistics_history),
-            "symbols": symbols
-        }
+        symbols = list(pending_trades.keys())
+        latest_statistics = server.statistics_service.get_latest()
+
+        return build_system_status_payload(
+            pending_instructions=total_instructions,
+            statistics_records=len(server.statistics_history),
+            symbols=symbols,
+            latest_statistics=latest_statistics,
+        )
     
     router.include_router(protected_router)
     return router

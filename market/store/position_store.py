@@ -10,6 +10,7 @@ from typing import List, Dict, Optional
 import threading
 
 from ..models.position import PositionData
+from sqlite_storage import RuntimeStateRepository
 
 
 class PositionStore:
@@ -19,13 +20,28 @@ class PositionStore:
     EA通过 /ea/positions 上报持仓数据
     """
 
-    def __init__(self):
+    ENTITY_TYPE = "position"
+
+    def __init__(self, user_id: int = None, account_id: int = None):
         # 存储结构: {symbol: {ticket: PositionData}}
         self._positions: Dict[str, Dict[int, PositionData]] = defaultdict(dict)
         self._lock = threading.RLock()
 
         # 最后更新时间
         self._last_update_time: Dict[str, datetime] = {}
+        self._repository = (
+            RuntimeStateRepository(user_id, account_id)
+            if user_id is not None
+            else None
+        )
+        if self._repository:
+            for data in self._repository.list_entities(self.ENTITY_TYPE):
+                position = PositionData.from_dict(data)
+                self._positions[position.symbol][position.ticket] = position
+                self._last_update_time[position.symbol] = max(
+                    position.updated_at,
+                    self._last_update_time.get(position.symbol, datetime.min),
+                )
 
         print("[PositionStore] 持仓存储已初始化")
 
@@ -50,12 +66,15 @@ class PositionStore:
                 # 使用持仓数据中的symbol（可能与上报品种不同）
                 pos_symbol = pos.symbol or symbol
                 self._positions[pos_symbol][pos.ticket] = pos
+                self._persist(pos)
 
             # 删除已平仓的持仓
             closed_tickets = current_tickets - new_tickets
             for ticket in closed_tickets:
                 if ticket in self._positions[symbol]:
                     del self._positions[symbol][ticket]
+                    if self._repository:
+                        self._repository.delete_entity(self.ENTITY_TYPE, str(ticket))
 
             # 更新最后更新时间
             self._last_update_time[symbol] = datetime.now()
@@ -94,6 +113,8 @@ class PositionStore:
         with self._lock:
             if ticket in self._positions[symbol]:
                 del self._positions[symbol][ticket]
+                if self._repository:
+                    self._repository.delete_entity(self.ENTITY_TYPE, str(ticket))
                 return True
             return False
 
@@ -140,6 +161,8 @@ class PositionStore:
         with self._lock:
             if symbol in self._positions:
                 del self._positions[symbol]
+            if self._repository:
+                self._repository.delete_entities(self.ENTITY_TYPE, symbol)
             if symbol in self._last_update_time:
                 del self._last_update_time[symbol]
 
@@ -152,3 +175,22 @@ class PositionStore:
                 "symbol_count": len([s for s in self._positions if self._positions[s]]),
                 "symbols": self.get_symbols()
             }
+
+    def set_scope(self, user_id: int, account_id: int) -> None:
+        if self._repository:
+            self._repository.migrate_scope(account_id)
+            self._repository.set_scope(user_id, account_id)
+        else:
+            self._repository = RuntimeStateRepository(user_id, account_id)
+        for position in self.get():
+            self._persist(position)
+
+    def _persist(self, position: PositionData) -> None:
+        if self._repository:
+            self._repository.upsert_entity(
+                self.ENTITY_TYPE,
+                str(position.ticket),
+                position.to_dict(),
+                symbol=position.symbol,
+                status="open",
+            )

@@ -10,12 +10,15 @@ import threading
 from collections import defaultdict
 
 from ..models import TradingInstruction
+from sqlite_storage import RuntimeStateRepository
 
 
 class TradingInstructionStore:
     """交易指令存储（只负责数据CRUD）"""
 
-    def __init__(self):
+    ENTITY_TYPE = "trading_instruction"
+
+    def __init__(self, user_id: int = None, account_id: int = None):
         # 按品种分类的指令: {symbol: [TradingInstruction, ...]}
         self._instructions_by_symbol: Dict[str, List[TradingInstruction]] = defaultdict(list)
 
@@ -24,6 +27,20 @@ class TradingInstructionStore:
 
         # 线程锁
         self._lock = threading.RLock()
+        self._repository = (
+            RuntimeStateRepository(user_id, account_id)
+            if user_id is not None
+            else None
+        )
+        if self._repository:
+            for data in self._repository.list_entities(
+                self.ENTITY_TYPE,
+                statuses=["pending"],
+            ):
+                instruction = TradingInstruction.from_dict(data)
+                symbol = instruction.symbol.upper()
+                self._instructions_by_symbol[symbol].append(instruction)
+                self._instructions_by_id[instruction.instruction_id] = instruction
 
         print("[TradingInstructionStore] 交易指令存储已初始化")
 
@@ -45,6 +62,7 @@ class TradingInstructionStore:
             # 存储到两个字典
             self._instructions_by_symbol[symbol].append(instruction)
             self._instructions_by_id[instruction.instruction_id] = instruction
+            self._persist(instruction)
 
             print(f"[TradingInstructionStore] 添加指令: {instruction.instruction_id} {symbol} {instruction.action}")
             return instruction.instruction_id
@@ -145,6 +163,7 @@ class TradingInstructionStore:
                     inst.status = "sent"
                     inst.sent_at = datetime.now()
                     result.append(inst.to_dict())  # 返回给EA的格式
+                    self._persist(inst)
                     del self._instructions_by_id[inst.instruction_id]
                 else:
                     remaining.append(inst)
@@ -173,6 +192,8 @@ class TradingInstructionStore:
                 i for i in self._instructions_by_symbol[symbol] if i.instruction_id != instruction_id
             ]
             del self._instructions_by_id[instruction_id]
+            if self._repository:
+                self._repository.delete_entity(self.ENTITY_TYPE, instruction_id)
 
             return instruction
 
@@ -189,6 +210,8 @@ class TradingInstructionStore:
 
             if symbol in self._instructions_by_symbol:
                 del self._instructions_by_symbol[symbol]
+            if self._repository:
+                self._repository.delete_entities(self.ENTITY_TYPE, symbol)
 
             print(f"[TradingInstructionStore] 清空 {symbol} 指令: {count}条")
             return count
@@ -199,6 +222,8 @@ class TradingInstructionStore:
             count = len(self._instructions_by_id)
             self._instructions_by_symbol.clear()
             self._instructions_by_id.clear()
+            if self._repository:
+                self._repository.delete_entities(self.ENTITY_TYPE)
             print(f"[TradingInstructionStore] 已清空所有指令: {count}条")
             return count
 
@@ -223,3 +248,22 @@ class TradingInstructionStore:
                 "total_instructions": len(self._instructions_by_id),
                 "symbols": symbols_count,
             }
+
+    def set_scope(self, user_id: int, account_id: int) -> None:
+        if self._repository:
+            self._repository.migrate_scope(account_id)
+            self._repository.set_scope(user_id, account_id)
+        else:
+            self._repository = RuntimeStateRepository(user_id, account_id)
+        for instruction in self._instructions_by_id.values():
+            self._persist(instruction)
+
+    def _persist(self, instruction: TradingInstruction) -> None:
+        if self._repository:
+            self._repository.upsert_entity(
+                self.ENTITY_TYPE,
+                instruction.instruction_id,
+                instruction.to_full_dict(),
+                symbol=instruction.symbol.upper(),
+                status=instruction.status,
+            )

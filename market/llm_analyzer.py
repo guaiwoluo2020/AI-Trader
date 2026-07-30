@@ -12,9 +12,6 @@ from datetime import datetime
 from typing import Dict, Set, Optional
 
 from .services import LLMService
-from .system_log import get_system_log
-
-
 class LLMAnalyzer:
     """LLM 分析器（调度 + WebSocket 广播）"""
 
@@ -30,10 +27,9 @@ class LLMAnalyzer:
 
         # 主事件循环引用
         self._main_loop = None
+        self._analysis_lock = threading.Lock()
 
-        # 启动定时分析线程
         if self.llm_service.is_enabled():
-            self._start_analyze_thread()
             print("[LLMAnalyzer] 大模型分析器已初始化（已启用）")
         else:
             print("[LLMAnalyzer] 大模型分析器已初始化（未配置API Key，功能禁用）")
@@ -43,26 +39,10 @@ class LLMAnalyzer:
         self._main_loop = loop
         print(f"[LLMAnalyzer] 已设置主事件循环")
 
-    def _start_analyze_thread(self):
-        """启动定时分析线程"""
-        def analyze_loop():
-            import time
-            time.sleep(5)  # 等待服务启动
-            print("[LLMAnalyzer] 分析线程启动，开始第一次分析...")
-
-            while True:
-                try:
-                    self._run_analysis()
-                except Exception as e:
-                    print(f"[LLMAnalyzer] 分析异常: {e}")
-                    import traceback
-                    traceback.print_exc()
-
-                threading.Event().wait(self.ANALYZE_INTERVAL)
-
-        thread = threading.Thread(target=analyze_loop, daemon=True)
-        thread.start()
-        print("[LLMAnalyzer] 分析线程已创建")
+    def stop(self):
+        """清理 WebSocket 客户端。"""
+        with self._ws_lock:
+            self._ws_clients.clear()
 
     def _run_analysis(self):
         """执行分析"""
@@ -73,40 +53,59 @@ class LLMAnalyzer:
             if response:
                 self._broadcast_analysis_update()
 
-        self.llm_service.run_analysis(on_status=on_status, on_complete=on_complete)
+        return self.llm_service.run_analysis(
+            on_status=on_status,
+            on_complete=on_complete,
+        )
+
+    def run_scheduled_analysis(self) -> bool:
+        """由共享调度器触发，避免同一账户并发分析。"""
+        if not self.llm_service.is_enabled():
+            return False
+        if not self._analysis_lock.acquire(blocking=False):
+            return False
+        try:
+            self._run_analysis()
+            return True
+        finally:
+            self._analysis_lock.release()
 
     # ==================== 手动触发 ====================
 
     def trigger_analysis(self) -> Dict:
-        """手动触发分析"""
+        """在后台线程中手动触发分析，避免阻塞 HTTP 请求。"""
         if not self.llm_service.is_enabled():
             return {"status": "error", "message": "大模型分析未启用"}
 
-        try:
+        if not self._analysis_lock.acquire(blocking=False):
+            return {"status": "busy", "message": "大模型分析正在进行中"}
+
+        self.llm_service.llm_store.set_analysis_status("queued", "分析任务已提交")
+
+        def run_in_background():
             print("[LLMAnalyzer] 手动触发分析...")
-            result = self.llm_service.run_analysis(
-                on_status=lambda s, m: self._broadcast_analysis_status(s, m),
-                on_complete=lambda r: self._broadcast_analysis_update()
-            )
-            return {
-                "status": "ok",
-                "message": "分析完成",
-                "analyzed_at": self.llm_service.llm_store.get_last_analysis_time()
-            }
-        except Exception as e:
-            print(f"[LLMAnalyzer] 手动触发分析失败: {e}")
-            return {"status": "error", "message": str(e)}
+            try:
+                self._run_analysis()
+            except Exception as e:
+                message = f"分析任务异常: {e}"
+                self.llm_service.llm_store.set_analysis_status("error", message)
+                self._broadcast_analysis_status("error", message)
+                print(f"[LLMAnalyzer] 手动触发分析失败: {e}")
+            finally:
+                self._analysis_lock.release()
+
+        threading.Thread(
+            target=run_in_background,
+            name="llm-manual-analysis",
+            daemon=True,
+        ).start()
+        return {"status": "accepted", "message": "分析任务已提交"}
 
     # ==================== 配置 ====================
 
     def configure(self, api_key: str = None, api_base: str = None, model: str = None) -> Dict:
         """配置 LLM 参数"""
         result = self.llm_service.configure(api_key, api_base, model)
-
-        # 如果从禁用变为启用，启动分析线程
-        if result.get("enabled") and not hasattr(self, '_thread_started'):
-            self._start_analyze_thread()
-            self._thread_started = True
 
         return result
 

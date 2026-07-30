@@ -7,22 +7,26 @@
 from fastapi import APIRouter, Depends, Request
 from typing import Dict, Optional
 
-from auth import require_auth
-from market.system_log import get_system_log
+from auth import AuthUser, require_auth
+from ea_auth import EAIdentity, require_ea_auth
+from trading_engine_manager import TradingEngineManager
 
 
-def create_position_routes(trading_server=None) -> APIRouter:
+def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     """
     创建仓位管理路由
 
     Args:
-        trading_server: TradingServer 实例
+        engine_manager: 多账户交易引擎管理器
     """
     router = APIRouter()
-    protected_router = APIRouter(dependencies=[Depends(require_auth)])
+    protected_router = APIRouter()
 
     @router.post("/ea/positions")
-    async def receive_positions(request: Request) -> Dict:
+    async def receive_positions(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
         """
         EA推送持仓数据
 
@@ -53,11 +57,12 @@ def create_position_routes(trading_server=None) -> APIRouter:
                 return {"status": "error", "message": "缺少品种信息"}
 
             # 使用新的持仓服务
+            trading_server = engine_manager.get_engine_for_ea(identity)
             result = trading_server.position_service.update_positions(symbol, positions)
 
             # 记录日志
             if positions:
-                system_log = get_system_log()
+                system_log = trading_server.system_log
                 system_log.add_log(
                     "position_update",
                     {
@@ -75,13 +80,17 @@ def create_position_routes(trading_server=None) -> APIRouter:
             return {"status": "error", "message": str(e)}
 
     @protected_router.get("/positions")
-    async def get_positions(symbol: Optional[str] = None) -> Dict:
+    async def get_positions(
+        symbol: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         获取持仓数据
 
         参数:
         - symbol: 可选，指定品种；不提供则返回所有
         """
+        trading_server = engine_manager.get_engine_for_user(user.user_id)
         positions = trading_server.position_service.get_positions(symbol)
         return {
             "status": "ok",
@@ -90,13 +99,17 @@ def create_position_routes(trading_server=None) -> APIRouter:
         }
 
     @protected_router.get("/positions/summary")
-    async def get_positions_summary(symbol: Optional[str] = None) -> Dict:
+    async def get_positions_summary(
+        symbol: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         获取持仓汇总
 
         参数:
         - symbol: 可选，指定品种；不提供则返回所有
         """
+        trading_server = engine_manager.get_engine_for_user(user.user_id)
         summary = trading_server.position_service.get_summary(symbol)
         return {
             "status": "ok",
@@ -104,10 +117,15 @@ def create_position_routes(trading_server=None) -> APIRouter:
         }
 
     @protected_router.get("/positions/{symbol}/{ticket}")
-    async def get_position(symbol: str, ticket: int) -> Dict:
+    async def get_position(
+        symbol: str,
+        ticket: int,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         获取单个持仓详情
         """
+        trading_server = engine_manager.get_engine_for_user(user.user_id)
         position = trading_server.position_service.get_position(symbol, ticket)
         if not position:
             return {"status": "error", "message": "持仓不存在"}
@@ -119,7 +137,10 @@ def create_position_routes(trading_server=None) -> APIRouter:
     # ==================== 交易历史接口 ====================
 
     @router.post("/ea/trade_history")
-    async def receive_trade_history(request: Request) -> Dict:
+    async def receive_trade_history(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
         """
         EA推送交易历史数据
 
@@ -153,10 +174,11 @@ def create_position_routes(trading_server=None) -> APIRouter:
                 return {"status": "ok", "message": "无数据", "count": 0}
 
             # 使用新的交易历史服务
+            trading_server = engine_manager.get_engine_for_ea(identity)
             new_count = trading_server.trade_history_service.process_deals(deals)
 
             # 记录日志
-            system_log = get_system_log()
+            system_log = trading_server.system_log
             system_log.add_log(
                 "trade_history_update",
                 {
@@ -178,13 +200,17 @@ def create_position_routes(trading_server=None) -> APIRouter:
             return {"status": "error", "message": str(e)}
 
     @protected_router.get("/trade_history")
-    async def get_trade_history(symbol: Optional[str] = None) -> Dict:
+    async def get_trade_history(
+        symbol: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         获取交易历史数据
 
         参数:
         - symbol: 可选，指定品种
         """
+        trading_server = engine_manager.get_engine_for_user(user.user_id)
         deals = trading_server.trade_history_service.get_deals(symbol)
         statistics = trading_server.trade_history_service.get_statistics(symbol)
 
@@ -195,13 +221,17 @@ def create_position_routes(trading_server=None) -> APIRouter:
         }
 
     @protected_router.get("/trade_history/statistics")
-    async def get_trade_history_statistics(symbol: Optional[str] = None) -> Dict:
+    async def get_trade_history_statistics(
+        symbol: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         获取交易历史统计
 
         参数:
         - symbol: 可选，指定品种
         """
+        trading_server = engine_manager.get_engine_for_user(user.user_id)
         statistics = trading_server.trade_history_service.get_statistics(symbol)
 
         return {

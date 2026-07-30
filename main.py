@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 asyncio_policy = uvloop.EventLoopPolicy()
 asyncio.set_event_loop_policy(asyncio_policy)
 
-from server import TradingServer
+from auth import get_auth_manager
 from routes_ea import create_ea_routes
 from routes_auth import create_auth_routes
 from routes_trader import create_trader_routes
@@ -24,13 +24,15 @@ from routes_system import create_system_routes
 from routes_market import create_market_routes
 from routes_position import create_position_routes
 from routes_news import create_news_routes
+from trading_engine_manager import TradingEngineManager
 
 
 def create_app():
     """创建并配置 FastAPI 应用"""
 
-    # 初始化服务
-    server = TradingServer()
+    # 初始化多账户交易引擎
+    get_auth_manager()
+    engine_manager = TradingEngineManager()
 
     # 创建 FastAPI 应用
     app = FastAPI(
@@ -64,29 +66,28 @@ def create_app():
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[
+            "Content-Disposition",
+            "X-EA-Filename",
+            "X-EA-Activation-Expires-At",
+        ],
     )
 
     # 注册路由
-    app.include_router(create_auth_routes())
-    app.include_router(create_ea_routes(server))
-    app.include_router(create_trader_routes(server))
-    app.include_router(create_system_routes(server))
-    app.include_router(create_market_routes(
-        server.kline_store,
-        server.kline_service,
-        server.pivot_service,
-        server.tech_service,
-        server.pending_order_service,
-        trading_server=server
-    ))
-    app.include_router(create_position_routes(trading_server=server))
+    app.include_router(create_auth_routes(engine_manager))
+    app.state.engine_manager = engine_manager
+    app.include_router(create_ea_routes(engine_manager))
+    app.include_router(create_trader_routes(engine_manager))
+    app.include_router(create_system_routes(engine_manager))
+    app.include_router(create_market_routes(engine_manager))
+    app.include_router(create_position_routes(engine_manager=engine_manager))
     app.include_router(create_news_routes())
 
     # 启动时设置事件循环
     @app.on_event("startup")
     async def startup_event():
         loop = asyncio.get_running_loop()
-        server.set_event_loop(loop)
+        engine_manager.set_event_loop(loop)
 
         # 设置系统日志的事件循环
         from market.system_log import get_system_log
@@ -100,10 +101,28 @@ def create_app():
         from market.market_event_monitor import get_market_event_monitor
         monitor = get_market_event_monitor()
         monitor.set_event_loop(loop)
-        asyncio.create_task(monitor.run())
+        app.state.market_monitor = monitor
+        app.state.market_monitor_task = asyncio.create_task(monitor.run())
 
         print("[Startup] 事件循环已设置")
         print("[Startup] 市场事件监控已启动")
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        monitor = getattr(app.state, "market_monitor", None)
+        monitor_task = getattr(app.state, "market_monitor_task", None)
+
+        if monitor_task is not None:
+            monitor_task.cancel()
+            await asyncio.gather(monitor_task, return_exceptions=True)
+        if monitor is not None:
+            await monitor.stop()
+
+        engine_manager.close_all()
+
+        from market.system_log import get_system_log
+        get_system_log().add_log("system_shutdown", message="服务已停止")
+        print("[Shutdown] 后台任务与交易引擎已关闭")
 
     return app
 

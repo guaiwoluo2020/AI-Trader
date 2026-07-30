@@ -173,13 +173,17 @@ python3 test_trading_service.py
 - [ ] 单元测试套件
 
 ### 中期 (v2.0)
-- [ ] 数据库持久化
-- [ ] WebSocket 实时推送
-- [ ] 配置管理系统
+- [x] SQLite 账户级运行数据持久化
+- [x] WebSocket 实时推送
+- [x] 多用户配置管理
+- [x] 账户引擎按需启动与空闲回收
+- [x] 共享账户任务调度器
+- [x] 每日风险、订单数、亏损熔断持久化
+- [ ] EA 执行结果回执与失败重试
 
 ### 长期 (v3.0)
 - [ ] 分布式部署支持
-- [ ] 高级风险管理
+- [ ] 风险限额后台管理界面
 - [ ] 机器学习特征支持
 
 ## 技术栈
@@ -193,7 +197,8 @@ python3 test_trading_service.py
 
 ## 已知限制
 
-- 内存数据存储（无持久化）
+- 实时行情与 K 线仍使用内存存储，不做数据库回放
+- EA 拉取指令即视为已下发，尚无执行成功/失败回执
 - 单进程部署（无负载均衡）
 - 基础错误处理（可增强）
 
@@ -227,7 +232,7 @@ python3 test_trading_service.py
 | test_trading_service.py | 测试 | ~270 | API测试套件 |
 | trade_client.py | 工具 | ~310 | 交易工具库 |
 | api_examples.py | 示例 | ~420 | 使用示例 |
-| wangxxGold.mq5 | EA | ~465 | MT5交易机器人 |
+| mt5TerminalEA.mq5 | EA | ~465 | MT5交易机器人 |
 | MIGRATION_GUIDE.md | 文档 | ~200 | 迁移指南 |
 | MODULARIZATION_REPORT.md | 文档 | 本文档 | 完成报告 |
 | start.sh | 脚本 | ~75 | Linux/macOS启动 |

@@ -15,7 +15,7 @@ class TradeInstruction(BaseModel):
     mount: float  # 手数
     price: float  # 指令执行价格（买入时为买入价，卖出时为卖出价）
     sl: Optional[float] = 0.0  # 止损点, 可以缺省
-    tp: Optional[float] = 0.0  # 止盈点, 可以缺省，若未指定将在服务端设置为0.005
+    tp: Optional[float] = 0.0  # 止盈点，可以缺省；0 表示由 EA 按当前价格计算
     description: Optional[str] = ""  # 订单描述（策略名称）
 
 
@@ -38,8 +38,15 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    """注册请求"""
+    username: str
+    password: str
+
+
 class AuthUserInfo(BaseModel):
     """当前登录用户信息"""
+    user_id: int
     username: str
 
 
@@ -49,3 +56,4 @@ class LoginResponse(BaseModel):
     token: str
     expires_in: int
     user: AuthUserInfo
+    next_path: str

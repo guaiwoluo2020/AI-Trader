@@ -29,24 +29,7 @@ class SignalService:
         # 默认冷却时间（秒）
         self.default_cooldown = 180  # 3分钟
 
-        # 启动清理线程
-        self._start_cleanup_thread()
-
         print("[SignalService] 信号服务已初始化")
-
-    def _start_cleanup_thread(self):
-        """启动清理线程"""
-        def cleanup_loop():
-            while True:
-                try:
-                    self.store.cleanup_expired()
-                    self._cleanup_cooldowns()
-                except Exception as e:
-                    print(f"[SignalService] 清理线程异常: {e}")
-                threading.Event().wait(30)
-
-        thread = threading.Thread(target=cleanup_loop, daemon=True)
-        thread.start()
 
     def _cleanup_cooldowns(self):
         """清理过期的冷却记录"""
@@ -192,3 +175,9 @@ class SignalService:
     def clear_all(self) -> int:
         """清空所有信号"""
         return self.store.clear_all()
+
+    def cleanup_expired(self) -> int:
+        """由共享调度器清理过期信号和冷却记录。"""
+        removed = self.store.cleanup_expired()
+        self._cleanup_cooldowns()
+        return removed

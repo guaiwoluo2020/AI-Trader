@@ -83,3 +83,22 @@ class PositionData:
             distance_sl=float(data.get('distanceSL', 0)),
             distance_tp=float(data.get('distanceTP', 0))
         )
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'PositionData':
+        updated_at = data.get("updated_at")
+        if isinstance(updated_at, str):
+            updated_at = datetime.fromisoformat(updated_at)
+        return cls(
+            ticket=int(data.get("ticket", 0)),
+            symbol=data.get("symbol", ""),
+            volume=float(data.get("volume", 0)),
+            price_open=float(data.get("price_open", data.get("priceOpen", 0))),
+            position_type=data.get("type", "BUY").upper(),
+            profit=float(data.get("profit", 0)),
+            sl=float(data.get("sl", 0)),
+            tp=float(data.get("tp", 0)),
+            distance_sl=float(data.get("distance_sl", data.get("distanceSL", 0))),
+            distance_tp=float(data.get("distance_tp", data.get("distanceTP", 0))),
+            updated_at=updated_at,
+        )

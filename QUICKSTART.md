@@ -156,7 +156,7 @@ MT5 EA已经配置好，只需确保：
    - 勾选"WebRequest用于脚本...", 并添加 `localhost:5858` 到允许列表
 
 2. **启动EA**
-   - 在黄金(GOLD)品种的图表上加载 `wangxxGold.mq5`
+   - 在黄金(GOLD)品种的图表上加载 `mt5TerminalEA.mq5`
    - 确保EA显示为 ✓ 启用
 
 3. **工作流程**
@@ -414,9 +414,24 @@ frontend/
 
 虽然当前HTTP性能足够，但可考虑：
 
-1. **增加日志持久化**
-   - 添加SQLite保存历史数据
-   - 支持离线分析
+1. **完善运行数据治理**
+   - 清理历史指令审计数据
+   - 增加 EA 执行结果回执和安全重试
+
+交易指令、待确认订单、持仓、成交历史和账户资金快照已按用户及 MT5
+账户保存到 SQLite；实时行情和 K 线不持久化。
+
+多用户运行参数：
+
+```bash
+export AI_TRADER_ENGINE_IDLE_SECONDS=1800
+export AI_TRADER_TASK_WORKERS=4
+export AI_TRADER_DAILY_ORDER_LIMIT=20
+export AI_TRADER_DAILY_LOSS_LIMIT=5
+```
+
+账户引擎按需创建，空闲后自动回收；LLM 分析、订单清理和信号清理由
+进程级共享调度器统一执行。
 
 2. **添加WebSocket支持**
    - 实时推送行情变化

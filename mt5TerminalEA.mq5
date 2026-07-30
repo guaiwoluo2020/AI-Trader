@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                                     wwxxgold.mq5 |
+//|                                              mt5TerminalEA.mq5 |
 //|                                                     wwananggxxxx |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "wwananggxxxx"
 #property link      "https://www.mql5.com"
-#property version   "2.01"  // <-- 版本号已更新，确认编译的是最新版本
+#property version   "2.03"
 #property strict
 
 //--- 需要访问Web请求权限
@@ -26,7 +26,14 @@
 //+------------------------------------------------------------------+
 
 // Python 服务配置
-string g_pythonServer = "http://127.0.0.1:8000";
+input string InpServerUrl = "http://127.0.0.1:8000"; // WebRequest 白名单中的服务地址
+input long InpWebUserId = 0;       // 高级用法：手工绑定 user_id
+input string InpEaToken = "";      // 高级用法：手工绑定 EA token
+string g_pythonServer = "";
+long g_webUserId = 0;
+string g_eaToken = "";
+string g_activationCode = "";
+string g_credentialsFile = "AITrader_credentials.dat";
 uint g_lastPythonRequestTime = 0;
 uint g_pythonRequestInterval = 100;  // 毫秒
 
@@ -40,6 +47,8 @@ double g_spreadPoints = 0;     // 点差（点数）
 double g_accountBalance = 0;
 double g_accountEquity = 0;
 double g_marginLevel = 0;
+double g_freeMargin = 0;
+double g_margin = 0;
 string g_positionsSummary = "";  // JSON 格式的持仓汇总
 
 // 当日交易记录 - 用于发送到Python
@@ -125,10 +134,193 @@ string URLEncode(string str)
   }
 
 //+------------------------------------------------------------------+
+//| 构建带账户绑定凭证的请求头                                       |
+//+------------------------------------------------------------------+
+string BuildAuthenticatedHeaders()
+  {
+   return "Content-Type: application/json\r\n"
+          + "X-EA-User-ID: " + IntegerToString(g_webUserId) + "\r\n"
+          + "X-EA-Token: " + g_eaToken + "\r\n";
+  }
+
+//+------------------------------------------------------------------+
+//| 从运行文件名读取一次性激活码                                     |
+//+------------------------------------------------------------------+
+string GetActivationCodeFromProgramName()
+  {
+   string programName = MQLInfoString(MQL_PROGRAM_NAME);
+   string prefix = "mt5TerminalEA_";
+   int prefixPos = StringFind(programName, prefix);
+   if(prefixPos != 0)
+      return "";
+
+   string code = StringSubstr(programName, StringLen(prefix));
+   int extensionPos = StringFind(code, ".");
+   if(extensionPos >= 0)
+      code = StringSubstr(code, 0, extensionPos);
+   StringToUpper(code);
+
+   if(StringLen(code) != 12)
+      return "";
+   for(int i = 0; i < StringLen(code); i++)
+     {
+      ushort ch = StringGetCharacter(code, i);
+      bool isLetter = (ch >= 'A' && ch <= 'Z');
+      bool isDigit = (ch >= '2' && ch <= '9');
+      if(!isLetter && !isDigit)
+         return "";
+     }
+   return code;
+  }
+
+//+------------------------------------------------------------------+
+//| 读取当前 MT5 终端保存的凭证                                      |
+//+------------------------------------------------------------------+
+bool LoadCredentials(string expectedActivationCode)
+  {
+   int handle = FileOpen(g_credentialsFile, FILE_READ | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   string savedServer = FileReadString(handle);
+   string savedCode = FileReadString(handle);
+   string savedUserId = FileReadString(handle);
+   string savedToken = FileReadString(handle);
+   FileClose(handle);
+
+   if(savedServer != g_pythonServer || savedCode != expectedActivationCode ||
+      StringLen(savedToken) == 0)
+      return false;
+
+   long userId = (long)StringToInteger(savedUserId);
+   if(userId <= 0)
+      return false;
+
+   g_webUserId = userId;
+   g_eaToken = savedToken;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| 保存凭证到当前 MT5 终端                                          |
+//+------------------------------------------------------------------+
+bool SaveCredentials(string activationCode)
+  {
+   int handle = FileOpen(
+      g_credentialsFile,
+      FILE_WRITE | FILE_TXT | FILE_ANSI
+   );
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   FileWrite(handle, g_pythonServer);
+   FileWrite(handle, activationCode);
+   FileWrite(handle, IntegerToString(g_webUserId));
+   FileWrite(handle, g_eaToken);
+   FileClose(handle);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| 使用文件名中的一次性激活码换取账户凭证                           |
+//+------------------------------------------------------------------+
+bool ActivateEA(string activationCode)
+  {
+   string programName = MQLInfoString(MQL_PROGRAM_NAME);
+   string jsonBody = "{";
+   jsonBody += "\"activation_code\":\"" + activationCode + "\",";
+   jsonBody += "\"mt5_login\":\""
+               + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "\",";
+   jsonBody += "\"mt5_server\":\""
+               + EscapeJsonString(AccountInfoString(ACCOUNT_SERVER)) + "\",";
+   jsonBody += "\"ea_version\":\"2.03\",";
+   jsonBody += "\"program_name\":\"" + EscapeJsonString(programName) + "\"";
+   jsonBody += "}";
+
+   uchar postData[];
+   uchar responseData[];
+   StringToCharArray(jsonBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(postData) > 0)
+      ArrayResize(postData, ArraySize(postData) - 1);
+
+   string responseHeaders = "";
+   ResetLastError();
+   int responseCode = WebRequest(
+      "POST",
+      g_pythonServer + "/ea/activate",
+      "Content-Type: application/json\r\n",
+      10000,
+      postData,
+      responseData,
+      responseHeaders
+   );
+   if(responseCode != 200)
+     {
+      Print(
+         "[EA Activation] Failed. HTTP=", responseCode,
+         ", error=", GetLastError(),
+         ". Check the activation file and WebRequest whitelist."
+      );
+      return false;
+     }
+
+   string responseText = CharArrayToString(
+      responseData, 0, WHOLE_ARRAY, CP_UTF8
+   );
+   long userId = (long)ExtractJsonDouble(responseText, "user_id");
+   string token = ExtractJsonString(responseText, "ea_token");
+   if(userId <= 0 || StringLen(token) == 0)
+     {
+      Print("[EA Activation] Server response did not contain credentials.");
+      return false;
+     }
+
+   g_webUserId = userId;
+   g_eaToken = token;
+   if(!SaveCredentials(activationCode))
+      Print("[EA Activation] Warning: credentials could not be saved locally.");
+   Print("[EA Activation] Account binding completed for user_id=", g_webUserId);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   g_pythonServer = InpServerUrl;
+   while(StringLen(g_pythonServer) > 0 &&
+         StringSubstr(g_pythonServer, StringLen(g_pythonServer) - 1, 1) == "/")
+      g_pythonServer = StringSubstr(g_pythonServer, 0, StringLen(g_pythonServer) - 1);
+
+   g_activationCode = GetActivationCodeFromProgramName();
+   bool credentialsReady = false;
+   if(StringLen(g_activationCode) > 0)
+     {
+      credentialsReady = LoadCredentials(g_activationCode);
+      if(!credentialsReady)
+         credentialsReady = ActivateEA(g_activationCode);
+     }
+   else if(InpWebUserId > 0 && StringLen(InpEaToken) > 0)
+     {
+      g_webUserId = InpWebUserId;
+      g_eaToken = InpEaToken;
+      credentialsReady = true;
+     }
+   else
+     {
+      credentialsReady = LoadCredentials("");
+     }
+
+   if(!credentialsReady)
+     {
+      Print(
+         "EA account binding is missing. Download a personalized EX5 file ",
+         "or set InpWebUserId and InpEaToken manually."
+      );
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
 //--- 初始化交易类
    trade.SetExpertMagicNumber(123456);
 
@@ -207,6 +399,8 @@ void UpdateStatistics()
    g_accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    g_accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    g_marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+   g_freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   g_margin = AccountInfoDouble(ACCOUNT_MARGIN);
   }
 
 //+------------------------------------------------------------------+
@@ -287,7 +481,7 @@ void SendPositionsToPython(bool allSymbols = true)
    jsonBody += "}";
 
    // 发送HTTP POST请求
-   string headers = "Content-Type: application/json\r\n";
+   string headers = BuildAuthenticatedHeaders();
    uchar postData[];
    uchar responseData[];
    string outheaders = "";
@@ -352,7 +546,7 @@ void CheckAndCloseRiskyPositions()
 //+------------------------------------------------------------------+
 void RequestTradesFromPython()
   {
-   string headers = "Content-Type: application/json\r\n";
+   string headers = BuildAuthenticatedHeaders();
    uchar responseData[];
    string response = "";
    string outheaders = "";
@@ -582,7 +776,11 @@ void ExecuteTradeFromJson(string tradeJson)
       return;
      }
 
-   if(symbol != _Symbol)
+   string normalizedSymbol = symbol;
+   string normalizedCurrentSymbol = _Symbol;
+   StringToUpper(normalizedSymbol);
+   StringToUpper(normalizedCurrentSymbol);
+   if(normalizedSymbol != normalizedCurrentSymbol)
      {
       Print("[EA] Symbol不匹配，跳过。收到: ", symbol, " 当前品种: ", _Symbol);
       return;
@@ -632,7 +830,7 @@ double ExtractJsonDouble(string json, string key)
    int endPos = StringFind(json, ",", startPos);
    
    if(endPos == -1) endPos = StringFind(json, "}", startPos);
-   if(endPos == -1) return 0;
+   if(endPos == -1) endPos = StringLen(json);
    
    string valueStr = StringSubstr(json, startPos, endPos - startPos);
    return StringToDouble(valueStr);
@@ -740,6 +938,8 @@ void SendMinuteStatistics()
    statisticJson += "\"balance\":" + DoubleToString(g_accountBalance, 2) + ",";
    statisticJson += "\"equity\":" + DoubleToString(g_accountEquity, 2) + ",";
    statisticJson += "\"marginLevel\":" + DoubleToString(g_marginLevel, 2) + ",";
+   statisticJson += "\"freeMargin\":" + DoubleToString(g_freeMargin, 2) + ",";
+   statisticJson += "\"margin\":" + DoubleToString(g_margin, 2) + ",";
    statisticJson += "\"positions\":" + GetPositionsSummary() + ",";
    statisticJson += "\"trades\":[" + g_tradesOfDay + "]";
    statisticJson += "}";
@@ -756,7 +956,7 @@ void SendMinuteStatistics()
 //+------------------------------------------------------------------+
 void SendToPythonServer(string jsonData)
   {
-   string headers = "Content-Type: application/json\r\n";
+   string headers = BuildAuthenticatedHeaders();
    uchar responseData[];
    string outheaders = "";
    int responseCode = 0;
@@ -779,15 +979,12 @@ void SendToPythonServer(string jsonData)
    Print("Sending JSON data size: ", dataSize, " bytes");
    Print("JSON: ", jsonStr);
 
-   // 修正: POST请求需要9个参数 (method, url, headers, cookie, timeout, data, dataSize, result, resultHeaders)
    responseCode = WebRequest(
       "POST",
       g_pythonServer + "/send_statistics",
       headers,
-      "",           // cookie
       5000,         // timeout (5秒)
       postData,
-      dataSize,
       responseData,
       outheaders
    );
@@ -997,7 +1194,7 @@ string BuildKlineJson(ENUM_TIMEFRAMES period, MqlRates &rates[], int count)
 //+------------------------------------------------------------------+
 bool SendKlineToServer(string url, string jsonData)
   {
-   string headers = "Content-Type: application/json\r\n";
+   string headers = BuildAuthenticatedHeaders();
    uchar responseData[];
    uchar postData[];
    string outheaders = "";
@@ -1016,10 +1213,8 @@ bool SendKlineToServer(string url, string jsonData)
       "POST",
       url,
       headers,
-      "",
       10000,  // 10秒超时
       postData,
-      dataSize,
       responseData,
       outheaders
    );
@@ -1300,7 +1495,7 @@ void SendSingleEventToPython(int eventIndex)
    json += "}";
 
    // 发送到Python
-   string headers = "Content-Type: application/json\r\n";
+   string headers = BuildAuthenticatedHeaders();
    uchar postData[];
    uchar responseData[];
    string outheaders = "";
@@ -1314,7 +1509,7 @@ void SendSingleEventToPython(int eventIndex)
      }
 
    string url = g_pythonServer + "/calendar_event_result";
-   responseCode = WebRequest("POST", url, headers, "", 10000, postData, ArraySize(postData), responseData, outheaders);
+   responseCode = WebRequest("POST", url, headers, 10000, postData, responseData, outheaders);
 
    if(responseCode == 200)
      {
@@ -1497,7 +1692,7 @@ void SendCalendarToPython()
    json += "]}";
 
    // 发送到Python
-   string headers = "Content-Type: application/json\r\n";
+   string headers = BuildAuthenticatedHeaders();
    uchar postData[];
    uchar responseData[];
    string outheaders = "";
@@ -1511,7 +1706,7 @@ void SendCalendarToPython()
      }
 
    string url = g_pythonServer + "/calendar";
-   responseCode = WebRequest("POST", url, headers, "", 10000, postData, ArraySize(postData), responseData, outheaders);
+   responseCode = WebRequest("POST", url, headers, 10000, postData, responseData, outheaders);
 
    if(responseCode == 200)
      {
@@ -1709,7 +1904,7 @@ void ReportTradeHistory()
      }
 
    // 发送到Python服务端
-   string headers = "Content-Type: application/json\r\n";
+   string headers = BuildAuthenticatedHeaders();
    uchar postData[];
    uchar responseData[];
    string outheaders = "";
@@ -1723,7 +1918,7 @@ void ReportTradeHistory()
      }
 
    string url = g_pythonServer + "/trade_history";
-   responseCode = WebRequest("POST", url, headers, "", 15000, postData, ArraySize(postData), responseData, outheaders);
+   responseCode = WebRequest("POST", url, headers, 15000, postData, responseData, outheaders);
 
    if(responseCode == 200)
      {

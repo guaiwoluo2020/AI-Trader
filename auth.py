@@ -11,14 +11,17 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 from fastapi import Header, HTTPException, status
+from sqlite_storage import MetaRepository, UserRepository, bootstrap_runtime_storage
 
 
 DEFAULT_TOKEN_TTL_SECONDS = 60 * 60 * 12
@@ -27,18 +30,22 @@ DEFAULT_TOKEN_TTL_SECONDS = 60 * 60 * 12
 @dataclass
 class AuthUser:
     """认证后的用户"""
+    user_id: int
     username: str
 
 
+class UsernameAlreadyExistsError(ValueError):
+    """注册用户名已存在。"""
+
+
 class AuthManager:
-    """本地文件认证管理器"""
+    """SQLite 认证管理器"""
 
     def __init__(self, auth_file: Optional[str] = None):
-        root = Path(__file__).resolve().parent
-        self.auth_file = Path(
+        self.legacy_auth_file = Path(
             auth_file
             or os.getenv("AI_TRADER_AUTH_FILE")
-            or root / ".auth_users.json"
+            or Path(__file__).resolve().parent / ".auth_users.json"
         )
         self.default_username = os.getenv("AI_TRADER_DEFAULT_ADMIN_USERNAME", "admin")
         self.default_password = os.getenv("AI_TRADER_DEFAULT_ADMIN_PASSWORD", "admin123456")
@@ -46,43 +53,18 @@ class AuthManager:
             os.getenv("AI_TRADER_AUTH_TOKEN_TTL", str(DEFAULT_TOKEN_TTL_SECONDS))
         )
         self._lock = threading.RLock()
+        self.meta_repo = MetaRepository()
+        self.user_repo = UserRepository()
         self._ensure_store()
 
     def _ensure_store(self) -> None:
         with self._lock:
-            if self.auth_file.exists():
-                data = self._read_store()
-                if data.get("users"):
-                    return
-            self._write_store(
-                {
-                    "secret": secrets.token_urlsafe(32),
-                    "users": [self._build_user_record(self.default_username, self.default_password)],
-                }
-            )
+            bootstrap_runtime_storage(self._build_password_credentials)
 
-    def _build_user_record(self, username: str, password: str) -> Dict:
+    def _build_password_credentials(self, password: str):
         salt = secrets.token_hex(16)
         password_hash = self._hash_password(password, salt)
-        now = int(time.time())
-        return {
-            "username": username,
-            "password_hash": password_hash,
-            "salt": salt,
-            "created_at": now,
-            "updated_at": now,
-        }
-
-    def _read_store(self) -> Dict:
-        if not self.auth_file.exists():
-            return {}
-        return json.loads(self.auth_file.read_text(encoding="utf-8"))
-
-    def _write_store(self, data: Dict) -> None:
-        self.auth_file.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        return salt, password_hash
 
     @staticmethod
     def _hash_password(password: str, salt: str) -> str:
@@ -96,21 +78,46 @@ class AuthManager:
 
     def authenticate(self, username: str, password: str) -> Optional[AuthUser]:
         with self._lock:
-            store = self._read_store()
-            users = store.get("users", [])
-            for user in users:
-                if user.get("username") != username:
-                    continue
-                expected = user.get("password_hash", "")
-                actual = self._hash_password(password, user.get("salt", ""))
-                if hmac.compare_digest(expected, actual):
-                    return AuthUser(username=username)
+            requested_username = username.strip()
+            user = self.user_repo.get_by_username(requested_username)
+            if user is None and requested_username != requested_username.lower():
+                user = self.user_repo.get_by_username(requested_username.lower())
+            if user:
+                actual = self._hash_password(password, user.salt)
+                if hmac.compare_digest(user.password_hash, actual):
+                    return AuthUser(user_id=user.user_id, username=user.username)
         return None
+
+    def register(self, username: str, password: str) -> AuthUser:
+        normalized_username = username.strip().lower()
+        if not re.fullmatch(r"[a-z0-9_-]{3,32}", normalized_username):
+            raise ValueError("用户名需为 3-32 位，仅支持字母、数字、下划线和短横线")
+        if len(password) < 8 or len(password) > 128:
+            raise ValueError("密码长度需为 8-128 位")
+        if not any(ch.isalpha() for ch in password) or not any(
+            ch.isdigit() for ch in password
+        ):
+            raise ValueError("密码必须同时包含字母和数字")
+
+        with self._lock:
+            if self.user_repo.get_by_username(normalized_username):
+                raise UsernameAlreadyExistsError("用户名已被注册")
+
+            salt, password_hash = self._build_password_credentials(password)
+            try:
+                record = self.user_repo.create_user(
+                    normalized_username,
+                    password_hash,
+                    salt,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise UsernameAlreadyExistsError("用户名已被注册") from exc
+
+        return AuthUser(user_id=record.user_id, username=record.username)
 
     def create_token(self, user: AuthUser) -> str:
         with self._lock:
-            store = self._read_store()
-            secret = store["secret"]
+            secret = self.meta_repo.get("auth_secret") or ""
 
         payload = {
             "sub": user.username,
@@ -136,8 +143,7 @@ class AuthManager:
             ) from exc
 
         with self._lock:
-            store = self._read_store()
-            secret = store.get("secret", "")
+            secret = self.meta_repo.get("auth_secret") or ""
 
         expected_signature = hmac.new(
             secret.encode("utf-8"),
@@ -168,7 +174,14 @@ class AuthManager:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="无效的登录凭证",
             )
-        return AuthUser(username=username)
+
+        user = self.user_repo.get_by_username(username)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="用户不存在或已被删除",
+            )
+        return AuthUser(user_id=user.user_id, username=user.username)
 
 
 _AUTH_MANAGER: Optional[AuthManager] = None

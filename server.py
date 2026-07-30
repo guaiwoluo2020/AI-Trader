@@ -27,6 +27,8 @@ from market.services import PivotSignalGenerator, KeyLevelSignalGenerator, AIEnt
 from market.services import StatisticsService, PositionService, TradeHistoryService
 from market.trade_config import TradeConfig
 from market.llm_analyzer import LLMAnalyzer
+from market.system_log import SystemLog
+from sqlite_storage import RuntimeStateRepository
 
 
 class TradingServer:
@@ -38,15 +40,19 @@ class TradingServer:
     - 对外：只暴露策略服务接口
     """
 
-    def __init__(self):
+    def __init__(self, user_id: int = None, account_id: int = None):
+        self.user_id = user_id
+        self.account_id = account_id
+
         # 线程锁
         self.lock = threading.RLock()
+        self.system_log = SystemLog(user_id=user_id, account_id=account_id)
 
         # ==================== 行情模块（内部） ====================
         # 存储层
         self.kline_store = KlineStore()
         self.pivot_store = PivotStore()
-        self.llm_store = LLMStore()
+        self.llm_store = LLMStore(user_id=user_id)
         self.tech_store = TechStore()
 
         # 服务层
@@ -60,9 +66,18 @@ class TradingServer:
 
         # ==================== 统计/持仓/交易历史模块 ====================
         # 存储层
-        self.statistics_store = StatisticsStore()
-        self.position_store = PositionStore()
-        self.trade_history_store = TradeHistoryStore()
+        self.statistics_store = StatisticsStore(
+            user_id=user_id,
+            account_id=account_id,
+        )
+        self.position_store = PositionStore(
+            user_id=user_id,
+            account_id=account_id,
+        )
+        self.trade_history_store = TradeHistoryStore(
+            user_id=user_id,
+            account_id=account_id,
+        )
 
         # 服务层
         self.statistics_service = StatisticsService(self.statistics_store)
@@ -81,10 +96,13 @@ class TradingServer:
 
         # ==================== 策略层（对外暴露） ====================
         # 存储层
-        self._strategy_store = StrategyStore()
+        self._strategy_store = StrategyStore(user_id=user_id)
 
         # 风险管理器
-        self._risk_manager = RiskManager()
+        self._risk_manager = RiskManager(
+            user_id=user_id,
+            account_id=account_id,
+        )
 
         # 服务层
         self.strategy_service = StrategyService(
@@ -94,15 +112,39 @@ class TradingServer:
         )
 
         # ==================== 交易配置 ====================
-        self.trade_config = TradeConfig.get_instance()
+        self.trade_config = (
+            TradeConfig(user_id=user_id)
+            if user_id is not None
+            else TradeConfig.get_instance()
+        )
 
         # 注册信号生成器
         self._setup_signal_generators()
 
         # ==================== 订单/指令模块 ====================
         # 存储层
-        self.pending_order_store = PendingOrderStore()
-        self.trading_instruction_store = TradingInstructionStore()
+        self.pending_order_store = PendingOrderStore(
+            user_id=user_id,
+            account_id=account_id,
+        )
+        self.trading_instruction_store = TradingInstructionStore(
+            user_id=user_id,
+            account_id=account_id,
+        )
+        self._runtime_repository = (
+            RuntimeStateRepository(user_id, account_id)
+            if user_id is not None
+            else None
+        )
+        self._close_position_instructions = defaultdict(list)
+        if self._runtime_repository:
+            for item in self._runtime_repository.list_entities(
+                "close_instruction",
+                statuses=["pending"],
+            ):
+                self._close_position_instructions[item["symbol"]].append(
+                    int(item["ticket"])
+                )
 
         # 服务层
         self.pending_order_service = PendingOrderService(self.pending_order_store)
@@ -119,6 +161,7 @@ class TradingServer:
 
         # 风险管理器使用统计服务获取账户信息
         self._risk_manager.set_statistics_service(self.statistics_service)
+        self._risk_manager.set_trade_history_service(self.trade_history_service)
 
         # ==================== WebSocket 广播 ====================
         self._ws_clients: Set = set()
@@ -137,7 +180,10 @@ class TradingServer:
         # 统计数据历史兼容（已迁移到 statistics_store）
         self.statistics_history = self.statistics_store._all_data
 
-        print("[TradingServer] 交易服务已初始化")
+        print(
+            f"[TradingServer] 交易服务已初始化 "
+            f"(user_id={self.user_id}, account_id={self.account_id})"
+        )
 
     def _setup_signal_generators(self):
         """设置信号生成器"""
@@ -167,6 +213,7 @@ class TradingServer:
 
         # 同时设置内部模块的事件循环
         self.llm_analyzer.set_event_loop(loop)
+        self.system_log.set_event_loop(loop)
 
     def add_ws_client(self, client):
         """添加WebSocket客户端"""
@@ -174,6 +221,7 @@ class TradingServer:
             self._ws_clients.add(client)
             # 同时注册到内部模块
             self.llm_analyzer.add_ws_client(client)
+            self.system_log.add_ws_client(client)
             print(f"[TradingServer] WebSocket客户端已连接, 当前连接数: {len(self._ws_clients)}")
 
     def remove_ws_client(self, client):
@@ -182,12 +230,33 @@ class TradingServer:
             self._ws_clients.discard(client)
             # 同时从内部模块移除
             self.llm_analyzer.remove_ws_client(client)
+            self.system_log.remove_ws_client(client)
             print(f"[TradingServer] WebSocket客户端已断开, 当前连接数: {len(self._ws_clients)}")
 
     def get_ws_client_count(self) -> int:
         """获取WebSocket客户端数量"""
         with self._ws_lock:
             return len(self._ws_clients)
+
+    def close(self):
+        """停止账户引擎的后台任务并清理连接。"""
+        self.llm_analyzer.stop()
+        self.system_log.close()
+        with self._ws_lock:
+            self._ws_clients.clear()
+
+    def can_evict(self) -> bool:
+        """有长连接的账户引擎不能被空闲回收。"""
+        return self.get_ws_client_count() == 0
+
+    def cleanup_pending_orders(self) -> int:
+        return self.pending_order_service.cleanup_expired()
+
+    def cleanup_signals(self) -> int:
+        return self._signal_service.cleanup_expired()
+
+    def run_scheduled_llm_analysis(self) -> bool:
+        return self.llm_analyzer.run_scheduled_analysis()
 
     def _broadcast(self, data: Dict):
         """广播数据到所有WebSocket客户端"""
@@ -304,6 +373,12 @@ class TradingServer:
         self._broadcast_pending_order(order)
 
         try:
+            self._risk_manager.record_confirmed_order(
+                order.order_id,
+                order.symbol,
+                order.mount,
+                abs(order.price - order.sl),
+            )
             # 创建交易指令
             instruction_id = self.trading_instruction_service.create_from_pending_order(order)
             print(f"[TradingServer] 交易指令已创建: {instruction_id}")
@@ -353,7 +428,7 @@ class TradingServer:
 
         for instruction in instructions:
             sl = instruction.sl if instruction.sl is not None else 0.0
-            tp = instruction.tp if instruction.tp is not None and instruction.tp > 0 else 0.005
+            tp = instruction.tp if instruction.tp is not None and instruction.tp > 0 else 0.0
 
             # 验证止损止盈
             if sl > 0 and tp > 0:
@@ -389,9 +464,17 @@ class TradingServer:
         """保存统计数据"""
         self.statistics_service.process_statistics(stat_data)
 
-    def get_latest_statistics(self, count: int = 10) -> List[Dict]:
-        """获取最新的统计数据"""
-        stats = self.statistics_store.get_all_recent(count)
+    def get_latest_statistics(
+        self,
+        count: int = 10,
+        symbol: Optional[str] = None,
+    ) -> List[Dict]:
+        """获取最新的统计数据，可按品种筛选。"""
+        stats = (
+            self.statistics_store.get_by_symbol(symbol, count)
+            if symbol
+            else self.statistics_store.get_all_recent(count)
+        )
         return [s.to_dict() for s in stats]
 
     # ==================== 指令管理 ====================
@@ -413,21 +496,59 @@ class TradingServer:
     def add_close_position_instruction(self, symbol: str, ticket: int) -> None:
         """添加平仓指令"""
         with self.lock:
-            if not hasattr(self, '_close_position_instructions'):
-                self._close_position_instructions = defaultdict(list)
-            self._close_position_instructions[symbol].append(ticket)
+            ticket = int(ticket)
+            if ticket not in self._close_position_instructions[symbol]:
+                self._close_position_instructions[symbol].append(ticket)
+            if self._runtime_repository:
+                self._runtime_repository.upsert_entity(
+                    "close_instruction",
+                    str(ticket),
+                    {"symbol": symbol, "ticket": ticket, "status": "pending"},
+                    symbol=symbol,
+                    status="pending",
+                )
             print(f"[TradingServer] 添加平仓指令: {symbol} ticket={ticket}")
 
     def get_close_position_instructions(self, symbol: str) -> List[int]:
         """获取并清空平仓指令"""
         with self.lock:
-            if not hasattr(self, '_close_position_instructions'):
-                return []
             tickets = self._close_position_instructions.get(symbol, [])
             self._close_position_instructions[symbol] = []
+            if self._runtime_repository:
+                for ticket in tickets:
+                    self._runtime_repository.upsert_entity(
+                        "close_instruction",
+                        str(ticket),
+                        {"symbol": symbol, "ticket": ticket, "status": "sent"},
+                        symbol=symbol,
+                        status="sent",
+                    )
             if tickets:
                 print(f"[TradingServer] 返回平仓指令: {symbol} tickets={tickets}")
             return tickets
+
+    def set_scope(self, user_id: int, account_id: int) -> None:
+        """将绑定前的临时运行数据迁移到正式 MT5 账户。"""
+        self.user_id = int(user_id)
+        self.account_id = int(account_id)
+        for store in (
+            self.statistics_store,
+            self.position_store,
+            self.trade_history_store,
+            self.pending_order_store,
+            self.trading_instruction_store,
+        ):
+            store.set_scope(self.user_id, self.account_id)
+        self._risk_manager.set_scope(self.user_id, self.account_id)
+        if self._runtime_repository:
+            self._runtime_repository.migrate_scope(self.account_id)
+            self._runtime_repository.set_scope(self.user_id, self.account_id)
+        else:
+            self._runtime_repository = RuntimeStateRepository(
+                self.user_id,
+                self.account_id,
+            )
+        self.system_log.set_scope(self.user_id, self.account_id)
 
     # ==================== 决策历史 ====================
 

@@ -5,27 +5,63 @@ EA 相关的接口路由
 """
 
 import random
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional, List, Dict
+from auth import AuthUser, require_auth
+from ea_auth import EAIdentity, require_ea_auth
 from models import TradeInstruction
-from server import TradingServer
-from market.system_log import get_system_log
+from sqlite_storage import EAActivationRepository
+from trading_engine_manager import TradingEngineManager
 
 
 # 统计数据日志打印概率 (5%)
 STATISTICS_LOG_PROBABILITY = 0.05
 
 
-def create_ea_routes(server: TradingServer) -> APIRouter:
+def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
     """
     创建 EA 相关路由
     """
     router = APIRouter()
 
+    @router.post("/ea/activate")
+    async def activate_ea(request: Request) -> Dict:
+        """用下载文件名中的一次性激活码换取 EA 账户凭证。"""
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="激活请求格式无效",
+            ) from exc
+
+        result = EAActivationRepository().consume(
+            str(data.get("activation_code", "")),
+            mt5_login=str(data.get("mt5_login", "")),
+            mt5_server=str(data.get("mt5_server", "")),
+            ea_version=str(data.get("ea_version", "")),
+            program_name=str(data.get("program_name", "")),
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="激活码无效、已使用或已过期",
+            )
+
+        account, ea_token = result
+        engine_manager.bind_account(account.user_id, account.account_id)
+        return {
+            "status": "ok",
+            "user_id": account.user_id,
+            "account_id": account.account_id,
+            "ea_token": ea_token,
+        }
+
     @router.get("/get_trades")
     async def get_trades(
         symbol: str = Query(..., description="交易品种"),
-        price: Optional[float] = Query(None, description="当前中间价")
+        price: Optional[float] = Query(None, description="当前中间价"),
+        identity: EAIdentity = Depends(require_ea_auth),
     ) -> Dict:
         """
         获取指定SYMBOL的交易指令
@@ -63,9 +99,8 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
         }
         ```
         """
+        server = engine_manager.get_engine_for_ea(identity)
         result = server.get_trades_by_symbol(symbol, price)
-        # 添加平仓指令
-        result["close_tickets"] = server.get_close_position_instructions(symbol)
 
         # 如果结果不为空，记录到运行日志
         trades = result.get("trades", [])
@@ -74,7 +109,7 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
 
         if trades or close_tickets:
             import json
-            system_log = get_system_log()
+            system_log = server.system_log
 
             # 打印完整返回数据
             print(f"[EA API] 返回给EA的数据: {json.dumps(result, ensure_ascii=False)}")
@@ -121,7 +156,10 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
         return result
 
     @router.post("/send_statistics")
-    async def send_statistics(request: Request) -> Dict:
+    async def send_statistics(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
         """
         接收 EA 发送的统计数据
 
@@ -152,12 +190,13 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
         import json
         try:
             data = await request.json()
+            server = engine_manager.get_engine_for_ea(identity)
             server.save_statistics(data)
 
             # 随机打印日志 (5%概率)
             if random.random() < STATISTICS_LOG_PROBABILITY:
                 symbol = data.get('symbol', 'UNKNOWN')
-                system_log = get_system_log()
+                system_log = server.system_log
                 system_log.add_log(
                     "ea_statistics",
                     {
@@ -179,7 +218,10 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
             return {"status": "error", "message": str(e)}
 
     @router.post("/close_position")
-    async def close_position(request: Request) -> Dict:
+    async def close_position(
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         平仓指令
 
@@ -208,12 +250,13 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
                 return {"status": "error", "message": "缺少订单号"}
 
             # 添加平仓指令到队列
+            server = engine_manager.get_engine_for_user(user.user_id)
             server.add_close_position_instruction(symbol, ticket)
 
             print(f"[EA API] 平仓指令已添加: {symbol} ticket={ticket}")
 
             # 记录日志
-            system_log = get_system_log()
+            system_log = server.system_log
             system_log.add_log(
                 "close_position",
                 {"ticket": ticket},
@@ -228,7 +271,10 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
             return {"status": "error", "message": str(e)}
 
     @router.post("/calendar")
-    async def send_calendar(request: Request) -> Dict:
+    async def send_calendar(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
         """
         接收 EA 发送的财经日历数据（来自MT5 API）
 
@@ -268,6 +314,7 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
         import json as json_module
         import re as re_module
         try:
+            server = engine_manager.get_engine_for_ea(identity)
             # 先获取原始body
             raw_body = await request.body()
             raw_text = raw_body.decode('utf-8', errors='replace')
@@ -316,7 +363,7 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
             updated_count = monitor.update_calendar_from_mt5(events)
 
             # 记录日志 - MT5上报财经日历
-            system_log = get_system_log()
+            system_log = server.system_log
             system_log.add_log(
                 "mt5_calendar_update",
                 {
@@ -340,7 +387,10 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
             return {"status": "error", "message": str(e)}
 
     @router.post("/calendar_event_result")
-    async def send_calendar_event_result(request: Request) -> Dict:
+    async def send_calendar_event_result(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
         """
         接收 EA 发送的事件结果（事件发布后EA获取实际值）
 
@@ -363,6 +413,7 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
         ```
         """
         try:
+            server = engine_manager.get_engine_for_ea(identity)
             data = await request.json()
             event_id = data.get('event_id')
             actual = data.get('actual', '')
@@ -393,7 +444,7 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
             event.analyzed = True
 
             # 记录日志 - MT5上报事件结果
-            system_log = get_system_log()
+            system_log = server.system_log
             system_log.add_log(
                 "mt5_event_result",
                 {
@@ -418,7 +469,10 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
             return {"status": "error", "message": str(e)}
 
     @router.post("/trade_history")
-    async def receive_trade_history(request: Request) -> Dict:
+    async def receive_trade_history(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
         """
         接收 EA 发送的交易历史数据
 
@@ -463,10 +517,11 @@ def create_ea_routes(server: TradingServer) -> APIRouter:
                 return {"status": "ok", "message": "无数据需要更新", "count": 0}
 
             # 使用新的交易历史服务
+            server = engine_manager.get_engine_for_ea(identity)
             new_count = server.trade_history_service.process_deals(deals)
 
             # 记录日志
-            system_log = get_system_log()
+            system_log = server.system_log
             system_log.add_log(
                 "trade_history_update",
                 {

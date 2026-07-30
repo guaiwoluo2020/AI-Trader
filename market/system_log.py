@@ -67,14 +67,25 @@ class SystemLog:
         "websocket_disconnect": "WebSocket断开",
     }
 
-    def __init__(self, max_size: int = 200):
+    def __init__(
+        self,
+        max_size: int = 200,
+        user_id: int = None,
+        account_id: int = None,
+    ):
         self._logs = deque(maxlen=max_size)
         self._lock = threading.RLock()
         self._ws_clients = set()
         self._ws_lock = threading.Lock()
         self._main_loop = None
+        self.user_id = user_id
+        self.account_id = account_id
 
         print(f"[SystemLog] 系统日志已初始化，最大保留 {max_size} 条")
+
+    def set_scope(self, user_id: int = None, account_id: int = None):
+        self.user_id = user_id
+        self.account_id = account_id
 
     def set_event_loop(self, loop):
         """设置主事件循环引用"""
@@ -93,6 +104,8 @@ class SystemLog:
         """
         log_entry = {
             "timestamp": datetime.now().isoformat(),
+            "user_id": self.user_id,
+            "account_id": self.account_id,
             "event_type": event_type,
             "event_name": self.EVENT_TYPES.get(event_type, event_type),
             "symbol": symbol,
@@ -107,7 +120,15 @@ class SystemLog:
         self._broadcast_log(log_entry)
 
         # 打印到控制台
-        log_str = f"[SystemLog] {log_entry['timestamp']} | {log_entry['event_name']}"
+        scope = (
+            f"user={self.user_id}, account={self.account_id}"
+            if self.user_id is not None
+            else "platform"
+        )
+        log_str = (
+            f"[SystemLog:{scope}] {log_entry['timestamp']} "
+            f"| {log_entry['event_name']}"
+        )
         if symbol:
             log_str += f" | {symbol}"
         if message:
@@ -155,6 +176,11 @@ class SystemLog:
         """移除WebSocket客户端"""
         with self._ws_lock:
             self._ws_clients.discard(client)
+
+    def close(self):
+        with self._ws_lock:
+            self._ws_clients.clear()
+        self._main_loop = None
 
     def _broadcast_log(self, log_entry: Dict):
         """广播日志到WebSocket客户端"""

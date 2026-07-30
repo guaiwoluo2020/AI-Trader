@@ -5,54 +5,50 @@
 包括K线数据接收、查询、WebSocket推送等
 """
 
-from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
+import asyncio
 import json
 import random
 
-from auth import require_auth
-from market.models import KlineData
-from market.store import KlineStore
-from market.services import KlineService, PivotService, TechService, PendingOrderService
-from market.trade_config import TradeConfig
-from market.system_log import get_system_log
+from auth import AuthUser, get_auth_manager, require_auth
+from ea_auth import EAIdentity, require_ea_auth
+from market.services import PivotService
+from sqlite_storage import LLMConfigRepository, StrategyConfigRepository, TradeConfigRepository
+from trading_engine_manager import TradingEngineManager
 
 
 def create_market_routes(
-    kline_store: KlineStore,
-    kline_service: KlineService,
-    pivot_service: PivotService,
-    tech_service: TechService,
-    pending_order_service: PendingOrderService,
-    trading_server = None
+    engine_manager: TradingEngineManager,
 ) -> APIRouter:
-    """
-    创建行情相关路由
-
-    Args:
-        kline_store: K线存储
-        kline_service: K线服务
-        pivot_service: 转折点服务
-        tech_service: 技术分析服务
-        pending_order_service: 待确认订单服务
-        trading_server: TradingServer 实例
-    """
+    """创建按当前用户或 EA 动态解析引擎的行情路由。"""
     router = APIRouter()
     protected_router = APIRouter(dependencies=[Depends(require_auth)])
 
     # 增量K线日志打印概率 (5%)
     KLINE_LOG_PROBABILITY = 0.05
+    trade_config_repo = TradeConfigRepository()
+    strategy_repo = StrategyConfigRepository()
+    llm_config_repo = LLMConfigRepository()
 
     # ==================== EA端接口 ====================
 
     @router.post("/ea/kline/{period}")
-    async def receive_kline(period: str, request: Request) -> Dict:
+    async def receive_kline(
+        period: str,
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
         """
         EA推送K线数据
         """
         period = period.upper()
+        engine = engine_manager.get_engine_for_ea(identity)
+        kline_store = engine.kline_store
+        kline_service = engine.kline_service
+        pivot_service = engine.pivot_service
 
         if period not in ['H4', 'H1', 'M15', 'M5', 'M1']:
             return JSONResponse(
@@ -69,12 +65,15 @@ def create_market_routes(
             if not klines:
                 return {"status": "ok", "count": 0, "message": "无数据"}
 
-            # 全量数据时检查K线时效性
+            staleness = None
+
+            # 全量数据时检查K线时效性。历史数据即使过期也要入库，
+            # 时效性只作为告警，避免券商服务器时区差异导致整批数据丢失。
             if is_full:
                 staleness = kline_service.check_staleness(symbol, period, klines)
 
                 if staleness.get('latest_kline_time'):
-                    trade_config = TradeConfig.get_instance()
+                    trade_config = engine.trade_config
                     timezone_offset_hours = trade_config.mt5_timezone_offset
 
                     staleness = kline_service.check_staleness(
@@ -82,7 +81,7 @@ def create_market_routes(
                     )
 
                     if staleness.get('is_stale'):
-                        system_log = get_system_log()
+                        system_log = engine.system_log
                         system_log.add_log(
                             "ea_kline_stale",
                             {
@@ -96,14 +95,6 @@ def create_market_routes(
                             message=f"K线数据过期，最新K线距当前 {staleness.get('time_diff_seconds')}秒，可能休市"
                         )
                         print(f"[MarketAPI] {symbol} {period} 全量K线数据过期")
-                        return {
-                            "status": "ok",
-                            "count": 0,
-                            "message": "K线数据过期，可能休市",
-                            "stale": True,
-                            "latest_kline_time": staleness.get('latest_kline_time').isoformat() if staleness.get('latest_kline_time') else None,
-                            "time_diff_seconds": staleness.get('time_diff_seconds')
-                        }
 
             # 检查是否需要全量数据
             if not is_full and not kline_service.is_initialized(symbol, period):
@@ -133,10 +124,21 @@ def create_market_routes(
 
             # 保存K线数据
             result = kline_service.process_kline_data(symbol, period, klines, is_full)
+            if staleness and staleness.get("is_stale"):
+                result.update({
+                    "stale": True,
+                    "message": "K线数据已接收，最新时间可能受 MT5 服务器时区或休市影响",
+                    "latest_kline_time": (
+                        staleness["latest_kline_time"].isoformat()
+                        if staleness.get("latest_kline_time")
+                        else None
+                    ),
+                    "time_diff_seconds": staleness.get("time_diff_seconds"),
+                })
 
             # 记录日志
             if is_full or random.random() < KLINE_LOG_PROBABILITY:
-                system_log = get_system_log()
+                system_log = engine.system_log
                 event_type = "ea_kline_full" if is_full else "ea_kline_incremental"
                 system_log.add_log(
                     event_type,
@@ -161,16 +163,22 @@ def create_market_routes(
             )
 
     @router.post("/ea/kline_batch")
-    async def receive_kline_batch(request: Request) -> Dict:
+    async def receive_kline_batch(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
         """EA批量推送多个周期的K线数据"""
         try:
+            engine = engine_manager.get_engine_for_ea(identity)
+            kline_service = engine.kline_service
+            pivot_service = engine.pivot_service
             data = await request.json()
             symbol = data.get('symbol', 'GOLD')
             is_full = data.get('is_full', False)
             kline_data = data.get('data', {})
 
             results = {}
-            system_log = get_system_log()
+            system_log = engine.system_log
 
             for period, klines in kline_data.items():
                 period = period.upper()
@@ -213,11 +221,13 @@ def create_market_routes(
     async def get_kline(
         symbol: str,
         period: str = Query("M5", description="周期: H4/H1/M15/M5/M1"),
-        count: int = Query(100, description="返回条数")
+        count: int = Query(100, description="返回条数"),
+        user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取K线数据"""
+        engine = engine_manager.get_engine_for_user(user.user_id)
         period = period.upper()
-        klines = kline_service.get_klines(symbol, period, count)
+        klines = engine.kline_service.get_klines(symbol, period, count)
 
         return {
             "status": "ok",
@@ -232,9 +242,12 @@ def create_market_routes(
         symbol: str,
         period: str = Query(None, description="周期，不指定则返回全部"),
         direction: str = Query(None, description="方向: high/low"),
-        count: int = Query(50, description="返回条数")
+        count: int = Query(50, description="返回条数"),
+        user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取转折点数据"""
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        pivot_service = engine.pivot_service
         if period:
             period = period.upper()
             pivots = pivot_service.get_pivots(symbol, period, direction, count)
@@ -259,9 +272,10 @@ def create_market_routes(
             }
 
     @protected_router.get("/market/symbols")
-    async def get_symbols() -> Dict:
+    async def get_symbols(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取所有已存储数据的symbol列表"""
-        symbols = kline_service.get_symbols()
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        symbols = engine.kline_service.get_symbols()
         return {
             "status": "ok",
             "symbols": symbols,
@@ -269,10 +283,13 @@ def create_market_routes(
         }
 
     @protected_router.get("/market/configured_symbols")
-    async def get_configured_symbols() -> Dict:
+    async def get_configured_symbols(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取配置的品种列表及其数据状态"""
-        config = TradeConfig.get_instance()
-        configured_symbols = list(config.symbol_config.keys())
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        kline_store = engine.kline_store
+        kline_service = engine.kline_service
+        config_data = trade_config_repo.get_config(user.user_id)
+        configured_symbols = list(config_data.get("symbol_config", {}).keys())
 
         symbols_status = []
         for symbol in configured_symbols:
@@ -293,7 +310,7 @@ def create_market_routes(
                 "seconds_ago": m1_status.get("seconds_ago"),
                 "market_status": m1_status.get("market_status", "closed"),
                 "period_counts": period_counts,
-                "config": config.symbol_config.get(symbol, {})
+                "config": config_data.get("symbol_config", {}).get(symbol, {})
             })
 
         return {
@@ -303,13 +320,16 @@ def create_market_routes(
         }
 
     @protected_router.get("/market/status")
-    async def get_market_status() -> Dict:
+    async def get_market_status(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取行情存储状态"""
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        kline_service = engine.kline_service
+        pivot_service = engine.pivot_service
         store_status = kline_service.get_status()
         pivot_status = pivot_service.get_status()
 
         # 使用 trading_server 获取状态
-        server_status = trading_server.get_status() if trading_server else {}
+        server_status = engine.get_status()
 
         return {
             "status": "ok",
@@ -321,7 +341,7 @@ def create_market_routes(
     @protected_router.get("/market/thresholds")
     async def get_thresholds() -> Dict:
         """获取各周期的接近阈值"""
-        thresholds = pivot_service.THRESHOLDS
+        thresholds = PivotService.THRESHOLDS
 
         return {
             "status": "ok",
@@ -338,8 +358,13 @@ def create_market_routes(
     # ==================== 趋势分析接口 ====================
 
     @protected_router.get("/trend/{symbol}")
-    async def get_trend(symbol: str) -> Dict:
+    async def get_trend(
+        symbol: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """获取单个品种的趋势分析"""
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        tech_service = engine.tech_service
         for period in ['H4', 'H1', 'M15', 'M5', 'M1']:
             tech_service.analyze_trend(symbol, period)
 
@@ -354,8 +379,15 @@ def create_market_routes(
         }
 
     @protected_router.post("/trend/generate_order/{symbol}")
-    async def generate_trade_order(symbol: str) -> Dict:
+    async def generate_trade_order(
+        symbol: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """基于趋势分析生成交易建议"""
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        tech_service = engine.tech_service
+        kline_service = engine.kline_service
+        pending_order_service = engine.pending_order_service
         for period in ['H4', 'H1', 'M15', 'M5', 'M1']:
             tech_service.analyze_trend(symbol, period)
 
@@ -384,8 +416,13 @@ def create_market_routes(
     # ==================== 待确认订单接口 ====================
 
     @protected_router.get("/pending_orders")
-    async def get_pending_orders(symbol: Optional[str] = None) -> Dict:
+    async def get_pending_orders(
+        symbol: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """获取待确认订单列表"""
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        pending_order_service = engine.pending_order_service
         orders = pending_order_service.get_orders_dict(symbol)
         return {
             "status": "ok",
@@ -394,8 +431,14 @@ def create_market_routes(
         }
 
     @protected_router.post("/pending_orders/{order_id}/confirm")
-    async def confirm_pending_order(order_id: str, request: Request = None) -> Dict:
+    async def confirm_pending_order(
+        order_id: str,
+        request: Request = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """确认待确认订单"""
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        pending_order_service = engine.pending_order_service
         update_data = {}
         if request:
             try:
@@ -408,7 +451,7 @@ def create_market_routes(
         if not order:
             return {"status": "error", "message": "订单不存在"}
 
-        system_log = get_system_log()
+        system_log = engine.system_log
         action_text = '买入' if order.action == 'b' else '卖出'
         symbol = order.symbol
         mount = order.mount
@@ -439,13 +482,18 @@ def create_market_routes(
         }
 
     @protected_router.post("/pending_orders/{order_id}/reject")
-    async def reject_pending_order(order_id: str) -> Dict:
+    async def reject_pending_order(
+        order_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """拒绝待确认订单"""
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        pending_order_service = engine.pending_order_service
         order = pending_order_service.reject_order(order_id)
         if not order:
             return {"status": "error", "message": "订单不存在"}
 
-        system_log = get_system_log()
+        system_log = engine.system_log
         system_log.add_log(
             "order_rejected",
             {"order_id": order_id, "action": order.action, "price": order.price},
@@ -461,26 +509,29 @@ def create_market_routes(
     # ==================== 交易配置接口 ====================
 
     @protected_router.get("/trade_config")
-    async def get_trade_config() -> Dict:
+    async def get_trade_config(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取交易配置"""
-        config = TradeConfig.get_instance()
         return {
             "status": "ok",
-            "config": config.to_dict()
+            "config": trade_config_repo.get_config(user.user_id)
         }
 
     @protected_router.post("/trade_config")
-    async def update_trade_config(request: Request) -> Dict:
+    async def update_trade_config(request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
         """更新交易配置"""
-        config = TradeConfig.get_instance()
-
         try:
             data = await request.json()
-            config.update(data)
+            current_config = trade_config_repo.get_config(user.user_id)
+            current_config.update(data)
+            saved_config = trade_config_repo.save_config(user.user_id, current_config)
+
+            engine = engine_manager.get_engine_for_user(user.user_id)
+            engine.trade_config.update(saved_config)
+
             return {
                 "status": "ok",
                 "message": "配置已更新",
-                "config": config.to_dict()
+                "config": saved_config
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -488,12 +539,9 @@ def create_market_routes(
     # ==================== 策略决策接口 ====================
 
     @protected_router.get("/strategy")
-    async def get_all_strategies() -> Dict:
+    async def get_all_strategies(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取所有策略配置"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
-        strategies = trading_server.strategy_service.get_all_strategies()
+        strategies = strategy_repo.get_all_strategies(user.user_id)
         return {
             "status": "ok",
             "count": len(strategies),
@@ -501,12 +549,14 @@ def create_market_routes(
         }
 
     @protected_router.get("/strategy/decisions")
-    async def get_decisions(symbol: Optional[str] = None, count: int = 20) -> Dict:
+    async def get_decisions(
+        symbol: Optional[str] = None,
+        count: int = 20,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """获取决策历史"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
-        decisions = trading_server.get_decision_history(symbol, count)
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        decisions = engine.get_decision_history(symbol, count)
         return {
             "status": "ok",
             "count": len(decisions),
@@ -514,26 +564,32 @@ def create_market_routes(
         }
 
     @protected_router.get("/strategy/{symbol}")
-    async def get_strategy(symbol: str) -> Dict:
+    async def get_strategy(symbol: str, user: AuthUser = Depends(require_auth)) -> Dict:
         """获取品种策略配置"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
-        strategy = trading_server.strategy_service.get_strategy(symbol)
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        strategy = (
+            strategy_repo.get_strategy(user.user_id, symbol)
+            or engine.strategy_service.get_strategy(symbol)
+        )
         return {
             "status": "ok",
             "strategy": strategy.to_dict()
         }
 
     @protected_router.post("/strategy/{symbol}")
-    async def update_strategy(symbol: str, request: Request) -> Dict:
+    async def update_strategy(symbol: str, request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
         """更新品种策略配置"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
         try:
+            engine = engine_manager.get_engine_for_user(user.user_id)
             data = await request.json()
-            strategy = trading_server.strategy_service.update_strategy(symbol, data)
+            strategy = (
+                strategy_repo.get_strategy(user.user_id, symbol)
+                or engine.strategy_service.get_strategy(symbol)
+            )
+            strategy.update(data)
+            strategy_repo.save_strategy(user.user_id, strategy)
+            strategy = engine.strategy_service.update_strategy(symbol, data)
+
             return {
                 "status": "ok",
                 "message": "策略配置已更新",
@@ -543,27 +599,27 @@ def create_market_routes(
             return {"status": "error", "message": str(e)}
 
     @protected_router.delete("/strategy/{symbol}")
-    async def delete_strategy(symbol: str) -> Dict:
+    async def delete_strategy(symbol: str, user: AuthUser = Depends(require_auth)) -> Dict:
         """删除品种策略配置"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
-        success = trading_server.strategy_service.strategy_store.delete_strategy(symbol)
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        success = strategy_repo.delete_strategy(user.user_id, symbol)
+        engine.strategy_service.strategy_store.delete_strategy(symbol)
         if success:
             return {"status": "ok", "message": "策略配置已删除"}
         return {"status": "error", "message": "策略配置不存在"}
 
     @protected_router.post("/strategy/trigger/{symbol}")
-    async def trigger_strategy_decision(symbol: str) -> Dict:
+    async def trigger_strategy_decision(
+        symbol: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """手动触发策略决策"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
-        current_price = kline_service.get_latest_price(symbol)
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        current_price = engine.kline_service.get_latest_price(symbol)
         if not current_price:
             return {"status": "error", "message": "无法获取当前价格"}
 
-        result = trading_server.process_price(symbol, current_price)
+        result = engine.process_price(symbol, current_price)
         return {
             "status": "ok",
             "result": result
@@ -573,9 +629,11 @@ def create_market_routes(
 
     @protected_router.get("/system/logs")
     async def get_system_logs(count: int = 50, event_type: str = None,
-                               symbol: str = None) -> Dict:
+                               symbol: str = None,
+                               user: AuthUser = Depends(require_auth)) -> Dict:
         """获取系统运行日志"""
-        system_log = get_system_log()
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        system_log = engine.system_log
 
         event_types = None
         if event_type:
@@ -589,9 +647,12 @@ def create_market_routes(
         }
 
     @protected_router.delete("/system/logs")
-    async def clear_system_logs() -> Dict:
+    async def clear_system_logs(
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """清空系统日志"""
-        system_log = get_system_log()
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        system_log = engine.system_log
         system_log.clear_logs()
         return {"status": "ok", "message": "日志已清空"}
 
@@ -599,20 +660,33 @@ def create_market_routes(
 
     @router.websocket("/ws/market")
     async def websocket_market(websocket: WebSocket):
-        """WebSocket连接"""
+        """登录后绑定到当前用户的账户级 WebSocket。"""
         await websocket.accept()
-
-        # 注册到 TradingServer（内部会自动注册到 llm_analyzer 和 system_log）
-        if trading_server:
-            trading_server.add_ws_client(websocket)
-
-        system_log = get_system_log()
-        system_log.add_ws_client(websocket)
+        engine = None
 
         try:
+            auth_text = await asyncio.wait_for(
+                websocket.receive_text(),
+                timeout=10,
+            )
+            auth_message = json.loads(auth_text)
+            if auth_message.get("type") != "auth" or not auth_message.get("token"):
+                await websocket.close(code=1008, reason="请先登录")
+                return
+
+            user = get_auth_manager().verify_token(auth_message["token"])
+            engine = engine_manager.get_engine_for_user(user.user_id)
+            engine.add_ws_client(websocket)
+            engine.system_log.add_log(
+                "websocket_connect",
+                message="行情 WebSocket 已连接",
+            )
+
             await websocket.send_text(json.dumps({
                 "type": "connected",
-                "message": "已连接到行情监控服务"
+                "message": "已连接到账户行情监控服务",
+                "user_id": user.user_id,
+                "account_id": engine.account_id,
             }))
 
             while True:
@@ -626,67 +700,79 @@ def create_market_routes(
                 except WebSocketDisconnect:
                     break
 
+        except asyncio.TimeoutError:
+            await websocket.close(code=1008, reason="登录超时")
+        except (HTTPException, json.JSONDecodeError):
+            await websocket.close(code=1008, reason="登录凭证无效")
         except Exception as e:
             print(f"[WebSocket] 连接异常: {e}")
 
         finally:
-            if trading_server:
-                trading_server.remove_ws_client(websocket)
-            system_log.remove_ws_client(websocket)
+            if engine is not None:
+                engine.system_log.add_log(
+                    "websocket_disconnect",
+                    message="行情 WebSocket 已断开",
+                )
+                engine.remove_ws_client(websocket)
 
     # ==================== 大模型分析接口 ====================
 
     @protected_router.get("/llm/analysis")
-    async def get_llm_analysis(symbol: Optional[str] = None) -> Dict:
+    async def get_llm_analysis(
+        symbol: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """获取大模型分析结果"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
-        result = trading_server.get_llm_analysis(symbol)
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        result = engine.get_llm_analysis(symbol)
         return {
             "status": "ok",
             "data": result
         }
 
     @protected_router.get("/llm/status")
-    async def get_llm_status() -> Dict:
+    async def get_llm_status(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取大模型分析器状态"""
-        if not trading_server:
-            return {"status": "ok", "data": {"enabled": False, "message": "TradingServer 未初始化"}}
-
+        engine = engine_manager.get_engine_for_user(user.user_id)
         return {
             "status": "ok",
-            "data": trading_server.get_llm_status()
+            "data": engine.get_llm_status()
         }
 
     @protected_router.get("/llm/config")
-    async def get_llm_config() -> Dict:
+    async def get_llm_config(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取大模型配置"""
-        if not trading_server:
-            return {"status": "ok", "config": {"enabled": False, "message": "TradingServer 未初始化"}}
-
         return {
             "status": "ok",
-            "config": trading_server.get_llm_config()
+            "config": llm_config_repo.get_config(user.user_id).to_dict()
         }
 
     @protected_router.post("/llm/trigger")
-    async def trigger_llm_analysis() -> Dict:
+    async def trigger_llm_analysis(user: AuthUser = Depends(require_auth)) -> Dict:
         """手动触发大模型分析"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
-        return trading_server.trigger_llm_analysis()
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        return engine.trigger_llm_analysis()
 
     @protected_router.post("/llm/configure")
-    async def configure_llm(request: Request) -> Dict:
+    async def configure_llm(request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
         """配置大模型参数"""
-        if not trading_server:
-            return {"status": "error", "message": "TradingServer 未初始化"}
-
         try:
             data = await request.json()
-            result = trading_server.configure_llm(
+            config = llm_config_repo.save_config(
+                user.user_id,
+                api_key=data.get("api_key"),
+                api_base=data.get("api_base"),
+                model=data.get("model")
+            )
+            result = {
+                "status": "ok",
+                "enabled": config.enabled,
+                "model": config.model,
+                "api_base": config.api_base,
+            }
+
+            engine = engine_manager.get_engine_for_user(user.user_id)
+            result = engine.configure_llm(
                 api_key=data.get("api_key"),
                 api_base=data.get("api_base"),
                 model=data.get("model")

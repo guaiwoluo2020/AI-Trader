@@ -16,6 +16,10 @@ from ..store import LLMStore
 from .kline_service import KlineService
 
 
+class LLMRequestError(RuntimeError):
+    """大模型供应商请求失败。"""
+
+
 class LLMService:
     """LLM 服务（处理业务逻辑）"""
 
@@ -222,7 +226,7 @@ class LLMService:
         """
         config = self.llm_store.get_config()
         if not config.api_key:
-            return None
+            raise LLMRequestError("未配置大模型 API Key")
 
         try:
             headers = {
@@ -251,7 +255,19 @@ class LLMService:
 
             if response.status_code != 200:
                 print(f"[LLMService] API调用失败: {response.status_code} - {response.text}")
-                return None
+                detail = response.text
+                try:
+                    payload = response.json()
+                    detail = (
+                        payload.get("error", {}).get("message")
+                        or payload.get("message")
+                        or detail
+                    )
+                except (ValueError, AttributeError):
+                    pass
+                raise LLMRequestError(
+                    f"大模型接口返回 HTTP {response.status_code}: {str(detail)[:300]}"
+                )
 
             # 收集完整响应
             full_content = ""
@@ -282,11 +298,19 @@ class LLMService:
                         continue
 
             print(f"[LLMService] 流式接收完成，共 {chunk_count} 个chunk，{len(full_content)} 字符")
-            return self._parse_llm_response(full_content)
+            parsed = self._parse_llm_response(full_content)
+            if not parsed:
+                raise LLMRequestError("大模型返回内容为空或不是有效 JSON")
+            return parsed
 
+        except LLMRequestError:
+            raise
+        except requests.RequestException as e:
+            print(f"[LLMService] 流式调用异常: {e}")
+            raise LLMRequestError(f"连接大模型服务失败: {e}") from e
         except Exception as e:
             print(f"[LLMService] 流式调用异常: {e}")
-            return None
+            raise LLMRequestError(f"处理大模型响应失败: {e}") from e
 
     def _parse_llm_response(self, content: str) -> Optional[Dict]:
         """解析 LLM 响应"""
@@ -380,18 +404,22 @@ class LLMService:
         Returns:
             分析结果
         """
+        def report(status: str, message: str):
+            self.llm_store.set_analysis_status(status, message)
+            if on_status:
+                on_status(status, message)
+
         if not self.is_enabled():
-            return {"status": "error", "message": "LLM 未启用"}
+            report("error", "大模型分析未启用")
+            return {"status": "error", "message": "大模型分析未启用"}
 
         # 获取品种列表
         symbols = self.kline_service.get_symbols()
         if not symbols:
-            if on_status:
-                on_status("error", "没有品种数据")
+            report("error", "没有品种数据")
             return {"status": "error", "message": "没有品种数据"}
 
-        if on_status:
-            on_status("analyzing", f"正在检查 {len(symbols)} 个品种...")
+        report("analyzing", f"正在检查 {len(symbols)} 个品种...")
 
         # 检查数据状态
         status = self.kline_service.check_symbols_status(symbols, self.STALE_THRESHOLD)
@@ -404,18 +432,18 @@ class LLMService:
             self.llm_store.update_market_status(symbol, "closed", data_stale=True)
 
         if not active_symbols:
-            if on_status:
-                on_status("stale", "所有品种数据均未更新")
-            return {"status": "ok", "message": "所有品种数据均未更新"}
+            report("stale", "所有品种行情均超过 3 分钟未更新，暂不发起 AI 分析")
+            return {
+                "status": "stale",
+                "message": "所有品种行情均超过 3 分钟未更新，暂不发起 AI 分析",
+            }
 
-        if on_status:
-            on_status("analyzing", f"正在分析 {len(active_symbols)} 个品种...")
+        report("analyzing", f"正在分析 {len(active_symbols)} 个品种...")
 
         # 收集K线数据
         all_klines = self.collect_klines_for_analysis(active_symbols)
         if not all_klines:
-            if on_status:
-                on_status("error", "无K线数据可分析")
+            report("error", "无K线数据可分析")
             return {"status": "error", "message": "无K线数据可分析"}
 
         # 构建提示词
@@ -423,10 +451,15 @@ class LLMService:
 
         # 调用 LLM
         def on_chunk(count, content):
-            if on_status and count % 50 == 0:
-                on_status("streaming", f"正在接收分析结果... ({len(content)} 字符)")
+            if count % 50 == 0:
+                report("streaming", f"正在接收分析结果... ({len(content)} 字符)")
 
-        response = self.call_llm_stream(prompt, on_chunk)
+        try:
+            response = self.call_llm_stream(prompt, on_chunk)
+        except LLMRequestError as exc:
+            message = str(exc)
+            report("error", message)
+            return {"status": "error", "message": message}
 
         # 保存结果
         if response:
@@ -437,9 +470,12 @@ class LLMService:
         if on_complete:
             on_complete(response)
 
+        analyzed_symbols = list(response.keys())
+        report("completed", f"分析完成，共生成 {len(analyzed_symbols)} 个品种的结果")
         return {
             "status": "ok",
-            "analyzed_symbols": list(response.keys()) if response else []
+            "message": "分析完成",
+            "analyzed_symbols": analyzed_symbols,
         }
 
     # ==================== 查询 ====================

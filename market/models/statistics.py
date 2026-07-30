@@ -32,6 +32,8 @@ class StatisticsData:
     balance: float
     equity: float
     margin_level: float
+    free_margin: float = 0.0
+    margin: float = 0.0
 
     # 其他
     tick_count: int = 0
@@ -53,6 +55,8 @@ class StatisticsData:
             "balance": self.balance,
             "equity": self.equity,
             "margin_level": self.margin_level,
+            "free_margin": self.free_margin,
+            "margin": self.margin,
             "tick_count": self.tick_count,
             "mid_price": self.mid_price
         }
@@ -80,5 +84,7 @@ class StatisticsData:
             balance=float(data.get('balance', 0)),
             equity=float(data.get('equity', 0)),
             margin_level=float(data.get('marginLevel', 0)),
+            free_margin=float(data.get('freeMargin', data.get('equity', 0))),
+            margin=float(data.get('margin', 0)),
             tick_count=int(data.get('tickCount', 0))
         )

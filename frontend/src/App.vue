@@ -42,17 +42,17 @@ export default {
     const router = useRouter()
     const drawer = ref(false)
     const menuItems = [
-      { title: '仪表板', path: '/', icon: 'mdi-view-dashboard' },
+      { title: '仪表盘', path: '/', icon: 'mdi-view-dashboard' },
+      { title: '连接 MT5', path: '/mt5-setup', icon: 'mdi-connection' },
       { title: '交易指令', path: '/trades', icon: 'mdi-format-list-bulleted' },
       { title: '行情分析', path: '/market', icon: 'mdi-chart-candlestick' },
       { title: '仓位管理', path: '/positions', icon: 'mdi-chart-box' },
       { title: '财经日历', path: '/news', icon: 'mdi-newspaper-variant-outline' },
       { title: '统计数据', path: '/statistics', icon: 'mdi-chart-line' },
-      { title: '服务状态', path: '/status', icon: 'mdi-information' },
       { title: '系统设置', path: '/settings', icon: 'mdi-cog' },
       { title: '运行日志', path: '/logs', icon: 'mdi-text-box-outline' },
     ]
-    const showShell = computed(() => route.path !== '/login')
+    const showShell = computed(() => !route.meta.public)
     const currentUsername = computed(() => authState.user?.username || '未登录')
 
     function logout() {

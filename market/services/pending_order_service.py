@@ -5,9 +5,6 @@
 """
 
 from typing import List, Dict, Optional, Callable
-from datetime import datetime
-import threading
-
 from ..models import PendingOrder
 from ..store import PendingOrderStore
 
@@ -21,9 +18,6 @@ class PendingOrderService:
         # 订单确认回调（确认后将指令加入交易队列）
         self._confirm_callback: Optional[Callable] = None
 
-        # 启动超时清理线程
-        self._start_cleanup_thread()
-
         print("[PendingOrderService] 待确认订单服务已初始化")
 
     def set_confirm_callback(self, callback: Callable):
@@ -33,21 +27,6 @@ class PendingOrderService:
         回调签名: callback(order: PendingOrder) -> None
         """
         self._confirm_callback = callback
-
-    def _start_cleanup_thread(self):
-        """启动超时清理线程"""
-        def cleanup_loop():
-            while True:
-                try:
-                    expired = self.store.cleanup_expired()
-                    for order in expired:
-                        print(f"[PendingOrderService] 订单超时自动移除: {order.order_id}")
-                except Exception as e:
-                    print(f"[PendingOrderService] 清理线程异常: {e}")
-                threading.Event().wait(10)  # 每10秒检查一次
-
-        thread = threading.Thread(target=cleanup_loop, daemon=True)
-        thread.start()
 
     # ==================== 创建订单 ====================
 
@@ -164,6 +143,13 @@ class PendingOrderService:
     def clear_all(self) -> int:
         """清空所有待确认订单"""
         return self.store.clear_all()
+
+    def cleanup_expired(self) -> int:
+        """由共享调度器清理过期订单。"""
+        expired = self.store.cleanup_expired()
+        for order in expired:
+            print(f"[PendingOrderService] 订单超时自动移除: {order.order_id}")
+        return len(expired)
 
     # ==================== 状态 ====================
 

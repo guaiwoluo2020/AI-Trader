@@ -14,7 +14,7 @@ lianghua/
 ├── routes_trader.py       ✓ 交易员相关路由 (/send_trade_instructions, /query_*)
 ├── routes_system.py       ✓ 系统路由 (/health, /status)
 ├── main.py                ✓ 应用入口和启动脚本
-├── wangxxGold.mq5         正在使用的 MT5 EA
+├── mt5TerminalEA.mq5      正在使用的 MT5 EA
 ├── trading_server.py      旧版本（保留作为参考）
 ├── test_trading_service.py已更新，兼容新服务
 ├── trade_client.py        已更新，兼容新服务
@@ -229,9 +229,20 @@ python main.py  # 会看到详细日志
 
 ## 下一步改进建议
 
-1. **添加数据库支持**
-   - 将统计数据持久化（SQLite/PostgreSQL）
-   - 交易历史记录
+1. **完善交易回执**
+   - EA 上报指令执行成功/失败
+   - 为已下发指令增加超时重试和幂等保护
+
+当前 SQLite 已按用户和 MT5 账户保存待确认订单、交易指令、平仓指令、
+持仓、成交历史及账户资金快照；实时行情和 K 线仍保持内存模式。
+
+账户引擎默认空闲 30 分钟后自动回收，后台清理与 LLM 分析由共享调度器
+执行。可通过环境变量调整：
+
+- `AI_TRADER_ENGINE_IDLE_SECONDS`: 引擎空闲回收时间，默认 `1800`
+- `AI_TRADER_TASK_WORKERS`: 共享后台任务并发数，默认 `4`
+- `AI_TRADER_DAILY_ORDER_LIMIT`: 每账户每日确认订单上限，默认 `20`
+- `AI_TRADER_DAILY_LOSS_LIMIT`: 每账户每日亏损熔断百分比，默认 `5`
 
 2. **增强监控**
    - 将日志写入文件

@@ -10,6 +10,7 @@ from typing import List, Dict, Optional
 import threading
 
 from ..models.trade_history import TradeDeal
+from sqlite_storage import RuntimeStateRepository
 
 
 class TradeHistoryStore:
@@ -19,7 +20,14 @@ class TradeHistoryStore:
     EA通过 /trade_history 上报成交记录
     """
 
-    def __init__(self, retention_hours: int = 24):
+    ENTITY_TYPE = "trade_deal"
+
+    def __init__(
+        self,
+        retention_hours: int = 24,
+        user_id: int = None,
+        account_id: int = None,
+    ):
         """
         Args:
             retention_hours: 数据保留时长（小时）
@@ -28,6 +36,35 @@ class TradeHistoryStore:
         self._lock = threading.RLock()
         self._retention_hours = retention_hours
         self._last_update_time: Optional[datetime] = None
+        self._repository = (
+            RuntimeStateRepository(user_id, account_id)
+            if user_id is not None
+            else None
+        )
+        if self._repository:
+            self._deals = [
+                TradeDeal.from_ea_data(data)
+                for data in self._repository.list_entities(self.ENTITY_TYPE)
+            ]
+            self._deals.sort(
+                key=lambda deal: deal.time or datetime.min,
+                reverse=True,
+            )
+            cutoff = datetime.now() - timedelta(hours=self._retention_hours)
+            self._deals = [
+                deal
+                for deal in self._deals
+                if deal.time and deal.time > cutoff
+            ]
+            persisted_count = len(
+                self._repository.list_entities(self.ENTITY_TYPE)
+            )
+            if len(self._deals) != persisted_count:
+                self._repository.delete_entities(self.ENTITY_TYPE)
+                for deal in self._deals:
+                    self._persist(deal)
+            if self._deals:
+                self._last_update_time = datetime.now()
 
         print(f"[TradeHistoryStore] 交易历史存储已初始化 (retention={retention_hours}h)")
 
@@ -54,6 +91,7 @@ class TradeHistoryStore:
             for deal in deals:
                 if deal.ticket not in existing_tickets:
                     self._deals.append(deal)
+                    existing_tickets.add(deal.ticket)
                     new_count += 1
 
             # 按时间排序
@@ -62,6 +100,10 @@ class TradeHistoryStore:
             # 清理过期数据
             cutoff = now - timedelta(hours=self._retention_hours)
             self._deals = [d for d in self._deals if d.time and d.time > cutoff]
+            if self._repository:
+                self._repository.delete_entities(self.ENTITY_TYPE)
+                for deal in self._deals:
+                    self._persist(deal)
 
             self._last_update_time = now
 
@@ -174,7 +216,7 @@ class TradeHistoryStore:
             "total_profit": round(total_profit, 2),
             "total_swap": round(total_swap, 2),
             "total_commission": round(total_commission, 2),
-            "net_profit": round(total_profit + total_swap - total_commission, 2),
+            "net_profit": round(total_profit + total_swap + total_commission, 2),
             "last_update": self._last_update_time.isoformat() if self._last_update_time else None
         }
 
@@ -188,6 +230,8 @@ class TradeHistoryStore:
         with self._lock:
             self._deals.clear()
             self._last_update_time = None
+            if self._repository:
+                self._repository.delete_entities(self.ENTITY_TYPE)
             print("[TradeHistoryStore] 已清空")
 
     def get_status(self) -> Dict:
@@ -197,3 +241,22 @@ class TradeHistoryStore:
                 "deals_count": len(self._deals),
                 "last_update": self._last_update_time.isoformat() if self._last_update_time else None
             }
+
+    def set_scope(self, user_id: int, account_id: int) -> None:
+        if self._repository:
+            self._repository.migrate_scope(account_id)
+            self._repository.set_scope(user_id, account_id)
+        else:
+            self._repository = RuntimeStateRepository(user_id, account_id)
+        for deal in self._deals:
+            self._persist(deal)
+
+    def _persist(self, deal: TradeDeal) -> None:
+        if self._repository:
+            self._repository.upsert_entity(
+                self.ENTITY_TYPE,
+                str(deal.ticket),
+                deal.to_dict(),
+                symbol=deal.symbol,
+                status="recorded",
+            )

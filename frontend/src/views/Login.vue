@@ -54,7 +54,8 @@
             </v-card-text>
 
             <v-card-text class="login-tip">
-              默认管理员账号：`admin` / `admin123456`
+              还没有账号？
+              <router-link to="/register">创建新账号</router-link>
             </v-card-text>
           </v-card>
         </v-col>
@@ -70,8 +71,8 @@ export default {
   name: 'Login',
   data() {
     return {
-      username: 'admin',
-      password: 'admin123456',
+      username: '',
+      password: '',
       showPassword: false,
       loading: false,
       errorMessage: '',
@@ -83,12 +84,12 @@ export default {
       this.errorMessage = ''
 
       try {
-        await authAPI.login({
+        const loginResult = await authAPI.login({
           username: this.username.trim(),
           password: this.password,
         })
 
-        const redirect = this.$route.query.redirect || '/'
+        const redirect = this.$route.query.redirect || loginResult.next_path || '/'
         this.$router.push(redirect)
       } catch (error) {
         this.errorMessage = error.response?.data?.detail || '登录失败，请检查用户名和密码'
@@ -119,7 +120,15 @@ export default {
 }
 
 .login-tip {
+  text-align: center;
   color: rgba(0, 0, 0, 0.66);
   font-size: 0.9rem;
+}
+
+.login-tip a {
+  margin-left: 4px;
+  color: #1976d2;
+  font-weight: 700;
+  text-decoration: none;
 }
 </style>

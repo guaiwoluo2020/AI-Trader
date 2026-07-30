@@ -21,7 +21,7 @@ class TradingInstruction:
 
     # 可选字段
     sl: float = 0.0  # 止损
-    tp: float = 0.005  # 止盈（默认值）
+    tp: float = 0.0  # 止盈；0 表示由 EA 按当前价格计算
     reason: str = ""
     description: str = ""
     source: str = ""  # manual/pending_order_confirm/key_level/ai_entry
@@ -41,19 +41,19 @@ class TradingInstruction:
             self.instruction_id = str(uuid.uuid4())[:8]
         if not self.created_at:
             self.created_at = datetime.now()
-        # 确保tp有默认值
-        if self.tp is None or self.tp <= 0:
-            self.tp = 0.005
+        if self.tp is None:
+            self.tp = 0.0
 
     def to_dict(self) -> Dict:
         """转换为字典（用于返回给EA）"""
         return {
-            "symbol": self.symbol.lower(),
+            "symbol": self.symbol,
             "action": self.action.lower(),
             "mount": self.mount,
             "price": self.price,
             "sl": self.sl,
             "tp": self.tp,
+            "description": self.description,
         }
 
     def to_full_dict(self) -> Dict:
@@ -99,7 +99,7 @@ class TradingInstruction:
             price=data.get('price', 0.0),
             mount=data.get('mount', 0.0),
             sl=data.get('sl', 0.0),
-            tp=data.get('tp', 0.005),
+            tp=data.get('tp', 0.0),
             reason=data.get('reason', ''),
             description=data.get('description', ''),
             source=data.get('source', ''),

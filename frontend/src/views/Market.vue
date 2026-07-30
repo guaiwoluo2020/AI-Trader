@@ -259,6 +259,17 @@
             </v-chip>
             <v-chip v-else-if="llmStatus.enabled" small color="success" class="mr-2">已启用</v-chip>
             <v-chip v-else small color="grey">未配置</v-chip>
+            <v-btn
+              color="primary"
+              size="small"
+              variant="outlined"
+              :disabled="!llmStatus.enabled || llmAnalyzing"
+              :loading="llmTriggering"
+              @click="triggerLLMAnalysis"
+            >
+              <v-icon start size="small">mdi-play</v-icon>
+              立即分析
+            </v-btn>
           </v-card-title>
           <v-card-text>
             <!-- 分析时间 -->
@@ -274,7 +285,7 @@
                   {{ llmAnalysisStatus || '正在分析...' }}
                 </template>
                 <template v-else>
-                  {{ llmStatus.enabled ? '等待分析完成...' : '请先配置大模型API' }}
+                  {{ llmEmptyMessage }}
                 </template>
               </p>
               <!-- 分析进度条 -->
@@ -514,6 +525,12 @@ export default {
     const llmAnalysis = ref({})
     const llmAnalyzing = ref(false)
     const llmAnalysisStatus = ref('')
+    const llmTriggering = ref(false)
+    const llmEmptyMessage = computed(() => {
+      if (!llmStatus.value.enabled) return '请先配置大模型 API'
+      if (llmStatus.value.analysis_message) return llmStatus.value.analysis_message
+      return '尚未生成分析结果，点击“立即分析”开始'
+    })
 
     // 最新快讯
     const latestFlashNews = ref(null)
@@ -790,6 +807,9 @@ export default {
         const data = await marketAPI.getLLMStatus()
         if (data.status === 'ok') {
           llmStatus.value = data.data
+          const status = data.data.analysis_status
+          llmAnalyzing.value = ['queued', 'analyzing', 'streaming'].includes(status)
+          llmAnalysisStatus.value = data.data.analysis_message || ''
         }
       } catch (err) {
         console.error('获取大模型状态失败:', err)
@@ -804,6 +824,27 @@ export default {
         }
       } catch (err) {
         console.error('获取大模型分析失败:', err)
+      }
+    }
+
+    const triggerLLMAnalysis = async () => {
+      llmTriggering.value = true
+      try {
+        const data = await marketAPI.triggerLLMAnalysis()
+        if (data.status === 'accepted' || data.status === 'busy') {
+          llmAnalyzing.value = true
+          llmAnalysisStatus.value = data.message
+          await loadLLMStatus()
+          return
+        }
+        errorMessage.value = data.message || '提交 AI 分析任务失败'
+        showError.value = true
+        await loadLLMStatus()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || `提交 AI 分析任务失败: ${err.message}`
+        showError.value = true
+      } finally {
+        llmTriggering.value = false
       }
     }
 
@@ -1129,6 +1170,7 @@ export default {
       const statusInterval = setInterval(() => {
         loadStatus()
         loadPendingOrders()
+        loadLLMStatus()
         loadLLMAnalysis()
         loadTrend()
       }, 10000)
@@ -1185,8 +1227,11 @@ export default {
       llmAnalysis,
       llmAnalyzing,
       llmAnalysisStatus,
+      llmTriggering,
+      llmEmptyMessage,
       loadLLMStatus,
       loadLLMAnalysis,
+      triggerLLMAnalysis,
       getTrendChipColor,
       // 技术分析与AI分析整合
       getTechTrend,

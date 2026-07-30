@@ -4,31 +4,32 @@
 LLM 分析结果存储模块
 """
 
-import os
-import json
 from datetime import datetime
 from typing import Dict, Optional, List
 import threading
 
 from ..models import LLMConfig, LLMAnalysisResult
+from sqlite_storage import LLMConfigRepository, bootstrap_runtime_storage
 
 
 class LLMStore:
     """LLM 分析结果存储（只负责数据CRUD）"""
 
-    # 配置文件路径
-    CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "llm_config.json")
-
     # 入场价提醒冷却时间（秒）
     ENTRY_ALERT_COOLDOWN = 300  # 5分钟
 
-    def __init__(self):
+    def __init__(self, user_id: int = None):
         # 分析结果: {SYMBOL: LLMAnalysisResult}
         self._analysis_results: Dict[str, LLMAnalysisResult] = {}
         self._lock = threading.RLock()
 
         # 配置
         self._config = LLMConfig()
+        self._repo = LLMConfigRepository()
+        self._user_id = user_id
+        if self._user_id is None:
+            runtime_user = bootstrap_runtime_storage(self._build_password_credentials)
+            self._user_id = runtime_user.user_id
 
         # 入场价提醒记录: {(symbol, period, direction, entry_price): datetime}
         self._alerted_entries: Dict[tuple, datetime] = {}
@@ -36,11 +37,27 @@ class LLMStore:
 
         # 最后分析时间
         self._last_analysis_time: Optional[str] = None
+        self._analysis_status = "idle"
+        self._analysis_message = "尚未开始分析"
 
         # 加载配置文件
         self._load_config_from_file()
 
         print("[LLMStore] LLM存储已初始化")
+
+    @staticmethod
+    def _build_password_credentials(password: str):
+        import hashlib
+        import secrets
+
+        salt = secrets.token_hex(16)
+        password_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            100_000,
+        ).hex()
+        return salt, password_hash
 
     # ==================== 配置管理 ====================
 
@@ -61,32 +78,25 @@ class LLMStore:
         return self._config
 
     def _load_config_from_file(self):
-        """从文件加载配置"""
+        """从 SQLite 加载配置"""
         try:
-            if os.path.exists(self.CONFIG_FILE):
-                with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self._config = LLMConfig.from_dict(data)
-                print(f"[LLMStore] 已从文件加载配置: {self.CONFIG_FILE}")
+            self._config = self._repo.get_config(self._user_id)
+            print("[LLMStore] 已从 SQLite 加载配置")
         except Exception as e:
-            print(f"[LLMStore] 加载配置文件失败: {e}")
+            print(f"[LLMStore] 加载配置失败: {e}")
 
     def _save_config_to_file(self):
-        """保存配置到文件"""
+        """保存配置到 SQLite"""
         try:
-            config_dir = os.path.dirname(self.CONFIG_FILE)
-            os.makedirs(config_dir, exist_ok=True)
-
-            data = {
-                "api_key": self._config.api_key,
-                "api_base": self._config.api_base,
-                "model": self._config.model
-            }
-            with open(self.CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            print(f"[LLMStore] 配置已保存到文件")
+            self._config = self._repo.save_config(
+                self._user_id,
+                api_key=self._config.api_key,
+                api_base=self._config.api_base,
+                model=self._config.model,
+            )
+            print("[LLMStore] 配置已保存到 SQLite")
         except Exception as e:
-            print(f"[LLMStore] 保存配置文件失败: {e}")
+            print(f"[LLMStore] 保存配置失败: {e}")
 
     # ==================== 分析结果管理 ====================
 
@@ -137,6 +147,12 @@ class LLMStore:
         """获取最后分析时间"""
         return self._last_analysis_time
 
+    def set_analysis_status(self, status: str, message: str):
+        """保存最近一次分析运行状态，供页面轮询展示。"""
+        with self._lock:
+            self._analysis_status = status
+            self._analysis_message = message
+
     # ==================== 入场价提醒管理 ====================
 
     def check_entry_alert_cooldown(self, symbol: str, period: str, direction: str,
@@ -186,5 +202,7 @@ class LLMStore:
                 "model": self._config.model,
                 "api_base": self._config.api_base,
                 "last_analysis_time": self._last_analysis_time,
-                "symbols_analyzed": list(self._analysis_results.keys())
+                "symbols_analyzed": list(self._analysis_results.keys()),
+                "analysis_status": self._analysis_status,
+                "analysis_message": self._analysis_message,
             }

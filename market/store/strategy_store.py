@@ -6,68 +6,62 @@
 
 from typing import List, Dict, Optional
 import threading
-import json
-import os
 
 from ..models import TradingStrategy
-
-
-# 配置文件路径
-CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data')
+from sqlite_storage import StrategyConfigRepository, bootstrap_runtime_storage
 
 
 class StrategyStore:
     """策略配置存储"""
 
-    def __init__(self):
+    def __init__(self, user_id: int = None):
         # 策略配置: {symbol: TradingStrategy}
         self._strategies: Dict[str, TradingStrategy] = {}
 
         # 线程锁
         self._lock = threading.RLock()
+        self._repo = StrategyConfigRepository()
+        self._user_id = user_id
+        if self._user_id is None:
+            runtime_user = bootstrap_runtime_storage(self._build_password_credentials)
+            self._user_id = runtime_user.user_id
 
-        # 从文件加载
+        # 从 SQLite 加载
         self._load_from_file()
 
         print("[StrategyStore] 策略配置存储已初始化")
 
-    def _get_config_file(self) -> str:
-        """获取配置文件路径"""
-        return os.path.join(CONFIG_DIR, 'strategy_config.json')
+    @staticmethod
+    def _build_password_credentials(password: str):
+        import hashlib
+        import secrets
+
+        salt = secrets.token_hex(16)
+        password_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            100_000,
+        ).hex()
+        return salt, password_hash
 
     def _load_from_file(self) -> None:
-        """从文件加载配置"""
+        """从 SQLite 加载配置"""
         try:
-            config_file = self._get_config_file()
-            if os.path.exists(config_file):
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for symbol, strategy_data in data.get('strategies', {}).items():
-                        self._strategies[symbol] = TradingStrategy.from_dict(strategy_data)
-                print(f"[StrategyStore] 从文件加载 {len(self._strategies)} 个策略配置")
+            strategies = self._repo.get_all_strategies(self._user_id)
+            self._strategies = {strategy.symbol: strategy for strategy in strategies}
+            print(f"[StrategyStore] 从 SQLite 加载 {len(self._strategies)} 个策略配置")
         except Exception as e:
-            print(f"[StrategyStore] 加载配置文件失败: {e}")
+            print(f"[StrategyStore] 加载配置失败: {e}")
 
     def save_to_file(self) -> bool:
-        """保存配置到文件"""
+        """保存配置到 SQLite"""
         try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            config_file = self._get_config_file()
-
-            data = {
-                "strategies": {
-                    symbol: strategy.to_dict()
-                    for symbol, strategy in self._strategies.items()
-                }
-            }
-
-            with open(config_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-
-            print(f"[StrategyStore] 配置已保存到: {config_file}")
+            self._repo.replace_all(self._user_id, list(self._strategies.values()))
+            print("[StrategyStore] 配置已保存到 SQLite")
             return True
         except Exception as e:
-            print(f"[StrategyStore] 保存配置文件失败: {e}")
+            print(f"[StrategyStore] 保存配置失败: {e}")
             return False
 
     # ==================== 策略管理 ====================
