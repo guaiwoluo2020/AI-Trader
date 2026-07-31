@@ -176,6 +176,8 @@ class TradingStrategy:
 
     def update(self, data: Dict) -> None:
         """更新配置"""
+        if "strategy_name" in data:
+            self.strategy_name = str(data["strategy_name"]).strip()
         if "enabled" in data:
             self.enabled = bool(data["enabled"])
         if "signal_config" in data:
@@ -398,6 +400,7 @@ class TradingDecision:
     # ==================== 基本信息 ====================
     symbol: str                       # 品种
     strategy_id: str                  # 来源策略ID
+    strategy_name: str = ""           # 来源策略名称
 
     # ==================== 决策结果 ====================
     action: str = ""                  # buy/sell/none
@@ -445,6 +448,7 @@ class TradingDecision:
             "decision_id": self.decision_id,
             "symbol": self.symbol,
             "strategy_id": self.strategy_id,
+            "strategy_name": self.strategy_name,
             "action": self.action,
             "decision_type": self.decision_type,
             "signals": self.signals,
@@ -475,6 +479,7 @@ class TradingDecision:
         return cls(
             symbol=data.get('symbol', ''),
             strategy_id=data.get('strategy_id', ''),
+            strategy_name=data.get('strategy_name', ''),
             action=data.get('action', ''),
             decision_type=data.get('decision_type', ''),
             signals=data.get('signals', []),

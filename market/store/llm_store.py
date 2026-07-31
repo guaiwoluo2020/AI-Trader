@@ -62,8 +62,10 @@ class LLMStore:
     # ==================== 配置管理 ====================
 
     def get_config(self) -> LLMConfig:
-        """获取配置"""
-        return self._config
+        """获取当前用户的有效配置，审批变化无需重启引擎。"""
+        with self._lock:
+            self._config = self._repo.get_effective_config(self._user_id)
+            return self._config
 
     def update_config(self, api_key: str = None, api_base: str = None, model: str = None) -> LLMConfig:
         """更新配置"""
@@ -80,7 +82,7 @@ class LLMStore:
     def _load_config_from_file(self):
         """从 SQLite 加载配置"""
         try:
-            self._config = self._repo.get_config(self._user_id)
+            self._config = self._repo.get_effective_config(self._user_id)
             print("[LLMStore] 已从 SQLite 加载配置")
         except Exception as e:
             print(f"[LLMStore] 加载配置失败: {e}")
@@ -197,10 +199,11 @@ class LLMStore:
     def get_status(self) -> Dict:
         """获取状态"""
         with self._lock:
+            config = self.get_config()
             return {
-                "enabled": self._config.enabled,
-                "model": self._config.model,
-                "api_base": self._config.api_base,
+                "enabled": config.enabled,
+                "model": config.model,
+                "api_base": config.api_base,
                 "last_analysis_time": self._last_analysis_time,
                 "symbols_analyzed": list(self._analysis_results.keys()),
                 "analysis_status": self._analysis_status,

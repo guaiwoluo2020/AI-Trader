@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
@@ -135,15 +136,34 @@ class SQLiteStorage:
                         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                     );
 
+                    CREATE TABLE IF NOT EXISTS llm_access_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL UNIQUE,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        requested_at INTEGER NOT NULL,
+                        reviewed_at INTEGER,
+                        reviewed_by INTEGER,
+                        review_note TEXT NOT NULL DEFAULT '',
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY(reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_llm_access_requests_status
+                    ON llm_access_requests(status, requested_at);
+
                     CREATE TABLE IF NOT EXISTS user_strategy_configs (
                         user_id INTEGER NOT NULL,
+                        strategy_id TEXT NOT NULL,
                         symbol TEXT NOT NULL,
                         config_json TEXT NOT NULL,
                         created_at INTEGER NOT NULL,
                         updated_at INTEGER NOT NULL,
-                        PRIMARY KEY(user_id, symbol),
+                        PRIMARY KEY(user_id, strategy_id),
                         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                     );
+
+                    CREATE INDEX IF NOT EXISTS idx_user_strategy_configs_symbol
+                    ON user_strategy_configs(user_id, symbol);
 
                     CREATE TABLE IF NOT EXISTS trading_accounts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,6 +239,7 @@ class SQLiteStorage:
                     "token_version",
                     "INTEGER NOT NULL DEFAULT 1",
                 )
+                self._migrate_strategy_configs(conn)
                 admin_username = _get_env_default_admin_username().strip().lower()
                 conn.execute(
                     """
@@ -233,6 +254,63 @@ class SQLiteStorage:
                 conn.commit()
 
             self._initialized = True
+
+    @staticmethod
+    def _migrate_strategy_configs(conn: sqlite3.Connection) -> None:
+        """将旧的“每品种一策略”表迁移为“每策略一行”。"""
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(user_strategy_configs)")
+        }
+        if "strategy_id" in columns:
+            return
+
+        rows = conn.execute(
+            """
+            SELECT user_id, symbol, config_json, created_at, updated_at
+            FROM user_strategy_configs
+            """
+        ).fetchall()
+        conn.execute("ALTER TABLE user_strategy_configs RENAME TO user_strategy_configs_legacy")
+        conn.execute("DROP INDEX IF EXISTS idx_user_strategy_configs_symbol")
+        conn.executescript(
+            """
+            CREATE TABLE user_strategy_configs (
+                user_id INTEGER NOT NULL,
+                strategy_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(user_id, strategy_id),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX idx_user_strategy_configs_symbol
+            ON user_strategy_configs(user_id, symbol);
+            """
+        )
+        for row in rows:
+            try:
+                payload = json.loads(row["config_json"])
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            strategy_id = payload.get("strategy_id") or str(uuid.uuid4())[:8]
+            payload["strategy_id"] = strategy_id
+            conn.execute(
+                """
+                INSERT INTO user_strategy_configs(
+                    user_id, strategy_id, symbol, config_json, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["user_id"],
+                    strategy_id,
+                    row["symbol"],
+                    json.dumps(payload, ensure_ascii=False),
+                    row["created_at"],
+                    row["updated_at"],
+                ),
+            )
+        conn.execute("DROP TABLE user_strategy_configs_legacy")
 
     @staticmethod
     def _ensure_column(
@@ -790,6 +868,31 @@ class LLMConfigRepository:
             model=config.get("model"),
         )
 
+    def get_effective_config(self, user_id: int) -> "LLMConfig":
+        """管理员使用自己的配置；获批用户使用管理员的共享配置。"""
+        from market.models.llm_config import LLMConfig
+
+        user = self.storage.fetchone(
+            "SELECT role FROM users WHERE id = ?",
+            (user_id,),
+        )
+        if user is None:
+            return LLMConfig()
+        if user["role"] == "admin":
+            return self.get_config(user_id)
+
+        access = self.storage.fetchone(
+            "SELECT status FROM llm_access_requests WHERE user_id = ?",
+            (user_id,),
+        )
+        if access is None or access["status"] != "approved":
+            return LLMConfig()
+
+        admin = self.storage.fetchone(
+            "SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+        )
+        return self.get_config(int(admin["id"])) if admin else LLMConfig()
+
     def save_config(
         self,
         user_id: int,
@@ -838,6 +941,125 @@ class LLMConfigRepository:
             return None
 
 
+class LLMAccessRepository:
+    VALID_REVIEW_STATUSES = {"approved", "rejected"}
+
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or get_storage()
+
+    def get_status(self, user_id: int, role: Optional[str] = None) -> Dict:
+        if role is None:
+            user = self.storage.fetchone(
+                "SELECT role FROM users WHERE id = ?", (user_id,)
+            )
+            role = user["role"] if user else "user"
+        if role == "admin":
+            return {
+                "request_id": None,
+                "status": "approved",
+                "access_granted": True,
+                "requested_at": None,
+                "reviewed_at": None,
+                "review_note": "",
+            }
+
+        row = self.storage.fetchone(
+            """
+            SELECT id, status, requested_at, reviewed_at, review_note
+            FROM llm_access_requests
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        if row is None:
+            return {
+                "request_id": None,
+                "status": "not_requested",
+                "access_granted": False,
+                "requested_at": None,
+                "reviewed_at": None,
+                "review_note": "",
+            }
+        return {
+            "request_id": int(row["id"]),
+            "status": row["status"],
+            "access_granted": row["status"] == "approved",
+            "requested_at": row["requested_at"],
+            "reviewed_at": row["reviewed_at"],
+            "review_note": row["review_note"],
+        }
+
+    def request_access(self, user_id: int, role: str = "user") -> Dict:
+        current = self.get_status(user_id, role)
+        if current["access_granted"] or current["status"] == "pending":
+            return current
+
+        now = _now_ts()
+        self.storage.execute(
+            """
+            INSERT INTO llm_access_requests(
+                user_id, status, requested_at, reviewed_at, reviewed_by, review_note
+            ) VALUES(?, 'pending', ?, NULL, NULL, '')
+            ON CONFLICT(user_id) DO UPDATE SET
+                status = 'pending',
+                requested_at = excluded.requested_at,
+                reviewed_at = NULL,
+                reviewed_by = NULL,
+                review_note = ''
+            """,
+            (user_id, now),
+        )
+        return self.get_status(user_id, role)
+
+    def list_requests(self, status: Optional[str] = None) -> List[Dict]:
+        params = ()
+        where = ""
+        if status:
+            where = "WHERE request.status = ?"
+            params = (status,)
+        rows = self.storage.fetchall(
+            f"""
+            SELECT request.id, request.user_id, users.username,
+                   request.status, request.requested_at,
+                   request.reviewed_at, request.review_note,
+                   reviewer.username AS reviewer_username
+            FROM llm_access_requests AS request
+            JOIN users ON users.id = request.user_id
+            LEFT JOIN users AS reviewer ON reviewer.id = request.reviewed_by
+            {where}
+            ORDER BY
+                CASE request.status WHEN 'pending' THEN 0 ELSE 1 END,
+                request.requested_at DESC
+            """,
+            params,
+        )
+        return [dict(row) for row in rows]
+
+    def review(
+        self,
+        request_id: int,
+        reviewer_user_id: int,
+        decision: str,
+        note: str = "",
+    ) -> Optional[Dict]:
+        if decision not in self.VALID_REVIEW_STATUSES:
+            raise ValueError("审批结果必须是 approved 或 rejected")
+        now = _now_ts()
+        self.storage.execute(
+            """
+            UPDATE llm_access_requests
+            SET status = ?, reviewed_at = ?, reviewed_by = ?, review_note = ?
+            WHERE id = ?
+            """,
+            (decision, now, reviewer_user_id, note.strip(), request_id),
+        )
+        row = self.storage.fetchone(
+            "SELECT user_id FROM llm_access_requests WHERE id = ?",
+            (request_id,),
+        )
+        return self.get_status(int(row["user_id"])) if row else None
+
+
 class StrategyConfigRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
@@ -847,10 +1069,10 @@ class StrategyConfigRepository:
 
         rows = self.storage.fetchall(
             """
-            SELECT symbol, config_json
+            SELECT strategy_id, symbol, config_json
             FROM user_strategy_configs
             WHERE user_id = ?
-            ORDER BY symbol
+            ORDER BY symbol, created_at, strategy_id
             """,
             (user_id,),
         )
@@ -865,41 +1087,75 @@ class StrategyConfigRepository:
         return []
 
     def get_strategy(self, user_id: int, symbol: str) -> Optional["TradingStrategy"]:
+        """兼容旧调用，返回该品种创建最早的策略。"""
+        strategies = self.get_strategies(user_id, symbol)
+        return strategies[0] if strategies else None
+
+    def get_strategy_by_id(
+        self, user_id: int, strategy_id: str
+    ) -> Optional["TradingStrategy"]:
         from market.models.trading_strategy import TradingStrategy
 
         row = self.storage.fetchone(
             """
             SELECT config_json
             FROM user_strategy_configs
-            WHERE user_id = ? AND symbol = ?
+            WHERE user_id = ? AND strategy_id = ?
             """,
-            (user_id, symbol),
+            (user_id, strategy_id),
         )
         if row:
             return TradingStrategy.from_dict(json.loads(row["config_json"]))
         return None
+
+    def get_strategies(self, user_id: int, symbol: str) -> List["TradingStrategy"]:
+        from market.models.trading_strategy import TradingStrategy
+
+        rows = self.storage.fetchall(
+            """
+            SELECT config_json
+            FROM user_strategy_configs
+            WHERE user_id = ? AND symbol = ?
+            ORDER BY created_at, strategy_id
+            """,
+            (user_id, symbol),
+        )
+        return [TradingStrategy.from_dict(json.loads(row["config_json"])) for row in rows]
 
     def save_strategy(self, user_id: int, strategy: "TradingStrategy") -> "TradingStrategy":
         payload = json.dumps(strategy.to_dict(), ensure_ascii=False)
         now = _now_ts()
         self.storage.execute(
             """
-            INSERT INTO user_strategy_configs(user_id, symbol, config_json, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, symbol) DO UPDATE SET
+            INSERT INTO user_strategy_configs(
+                user_id, strategy_id, symbol, config_json, created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, strategy_id) DO UPDATE SET
+                symbol = excluded.symbol,
                 config_json = excluded.config_json,
                 updated_at = excluded.updated_at
             """,
-            (user_id, strategy.symbol, payload, now, now),
+            (user_id, strategy.strategy_id, strategy.symbol, payload, now, now),
         )
         return strategy
 
     def delete_strategy(self, user_id: int, symbol: str) -> bool:
-        if not self.get_strategy(user_id, symbol):
+        """兼容旧调用，删除该品种的全部策略。"""
+        if not self.get_strategies(user_id, symbol):
             return False
         self.storage.execute(
             "DELETE FROM user_strategy_configs WHERE user_id = ? AND symbol = ?",
             (user_id, symbol),
+        )
+        return True
+
+    def delete_strategy_by_id(self, user_id: int, strategy_id: str) -> bool:
+        if not self.get_strategy_by_id(user_id, strategy_id):
+            return False
+        self.storage.execute(
+            "DELETE FROM user_strategy_configs WHERE user_id = ? AND strategy_id = ?",
+            (user_id, strategy_id),
         )
         return True
 

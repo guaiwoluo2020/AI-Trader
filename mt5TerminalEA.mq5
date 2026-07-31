@@ -510,7 +510,12 @@ void SendPositionsToPython(bool allSymbols = true)
 //+------------------------------------------------------------------+
 void CheckAndCloseRiskyPositions()
   {
-   double riskThreshold = g_accountBalance * (g_riskLimitPercent / 100.0);
+   // 信用账户可能余额很低但权益正常，取较大值避免风控阈值被压到开仓点差以下。
+   double riskBase = MathMax(g_accountBalance, g_accountEquity);
+   if(riskBase <= 0)
+      return;
+
+   double riskThreshold = riskBase * (g_riskLimitPercent / 100.0);
    
    for(int i = 0; i < PositionsTotal(); i++)
      {

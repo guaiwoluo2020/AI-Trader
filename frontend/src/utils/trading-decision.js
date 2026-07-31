@@ -1,14 +1,14 @@
 export function normalizeTradingDecision(decision) {
   const rejected =
     decision.status === 'rejected' || decision.decision_type === 'rejected'
-  const action = ['buy', 'sell'].includes(decision.action)
-    ? decision.action
-    : null
+  const action = normalizeAction(decision.action)
 
   return {
     type: 'trading_decision',
     decision_id: decision.decision_id,
     symbol: decision.symbol,
+    strategy_id: decision.strategy_id,
+    strategy_name: decision.strategy_name || '未命名策略',
     action,
     status: decision.status,
     rejected,
@@ -34,9 +34,18 @@ export function normalizeTradingDecision(decision) {
             tp: toNumberOrNull(decision.tp),
             mount: toNumberOrNull(decision.volume),
             reason: decision.decision_reason,
+            strategy_id: decision.strategy_id,
+            strategy_name: decision.strategy_name || '未命名策略',
           }
         : null,
   }
+}
+
+function normalizeAction(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (['buy', 'b', 'long'].includes(normalized)) return 'buy'
+  if (['sell', 's', 'short'].includes(normalized)) return 'sell'
+  return null
 }
 
 export function formatTradePrice(value) {

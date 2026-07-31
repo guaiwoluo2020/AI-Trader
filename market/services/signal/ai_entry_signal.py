@@ -33,6 +33,13 @@ class AIEntrySignalGenerator:
         """设置LLM分析器"""
         self._llm_analyzer = analyzer
 
+    @staticmethod
+    def _normalize_confidence(value) -> int:
+        try:
+            return max(0, min(100, int(value)))
+        except (TypeError, ValueError):
+            return 75
+
     def _check_cooldown(self, symbol: str, period: str, entry_price: float, direction: str) -> bool:
         """检查是否在冷却期"""
         key = f"{symbol}_{period}_{entry_price}_{direction}"
@@ -77,6 +84,7 @@ class AIEntrySignalGenerator:
         sl = match.get('stop_loss', 0)
         tp = match.get('take_profit', 0)
         reason = match.get('reason', '')
+        confidence = self._normalize_confidence(match.get('confidence', 75))
 
         # 检查冷却
         if self._check_cooldown(symbol, period, entry_price, direction):
@@ -123,7 +131,7 @@ class AIEntrySignalGenerator:
         signal = TradingSignal(
             symbol=symbol,
             action=action,
-            confidence=75,  # AI信号置信度较高
+            confidence=confidence,
             source=SignalSource.AI_ENTRY,
             source_period=period,
             trigger_price=current_price,
@@ -155,6 +163,7 @@ class AIEntrySignalGenerator:
             sl = match.get('stop_loss', 0)
             tp = match.get('take_profit', 0)
             reason = match.get('reason', '')
+            confidence = self._normalize_confidence(match.get('confidence', 75))
 
             # 检查冷却
             if self._check_cooldown(symbol, period, entry_price, direction):
@@ -192,7 +201,7 @@ class AIEntrySignalGenerator:
             signal = TradingSignal(
                 symbol=symbol,
                 action=action,
-                confidence=75,
+                confidence=confidence,
                 source=SignalSource.AI_ENTRY,
                 source_period=period,
                 trigger_price=current_price,

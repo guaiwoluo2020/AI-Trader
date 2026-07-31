@@ -185,6 +185,35 @@ export const marketAPI = {
     return response.data
   },
 
+  // 获取当前用户的大模型功能开通状态
+  async getLLMAccess() {
+    const response = await api.get('/llm/access')
+    return response.data
+  },
+
+  // 申请开通大模型行情分析
+  async requestLLMAccess() {
+    const response = await api.post('/llm/access/request')
+    return response.data
+  },
+
+  // 管理员获取大模型开通申请待办
+  async getLLMAccessRequests(status = 'pending') {
+    const response = await api.get('/admin/llm/access-requests', {
+      params: status ? { status } : {}
+    })
+    return response.data
+  },
+
+  // 管理员审批大模型开通申请
+  async reviewLLMAccessRequest(requestId, decision, note = '') {
+    const response = await api.post(
+      `/admin/llm/access-requests/${requestId}/review`,
+      { decision, note }
+    )
+    return response.data
+  },
+
   // 手动触发大模型分析
   async triggerLLMAnalysis() {
     const response = await api.post('/llm/trigger')
@@ -258,6 +287,12 @@ export const marketAPI = {
     return response.data
   },
 
+  // 创建策略（同一品种可创建多条）
+  async createStrategy(data) {
+    const response = await api.post('/strategy', data)
+    return response.data
+  },
+
   // 获取品种策略配置
   async getStrategy(symbol) {
     const response = await api.get(`/strategy/${encodeURIComponent(symbol)}`)
@@ -265,14 +300,14 @@ export const marketAPI = {
   },
 
   // 更新品种策略配置
-  async updateStrategy(symbol, data) {
-    const response = await api.post(`/strategy/${encodeURIComponent(symbol)}`, data)
+  async updateStrategy(strategyId, data) {
+    const response = await api.post(`/strategy/${encodeURIComponent(strategyId)}`, data)
     return response.data
   },
 
-  // 删除品种策略配置
-  async deleteStrategy(symbol) {
-    const response = await api.delete(`/strategy/${encodeURIComponent(symbol)}`)
+  // 删除指定策略
+  async deleteStrategy(strategyId) {
+    const response = await api.delete(`/strategy/${encodeURIComponent(strategyId)}`)
     return response.data
   },
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from sqlite_storage import MetaRepository, UserRepository, bootstrap_runtime_storage
 
 
@@ -268,3 +268,12 @@ def require_auth(authorization: Optional[str] = Header(default=None)) -> AuthUse
         )
 
     return get_auth_manager().verify_token(token)
+
+
+def require_admin(user: AuthUser = Depends(require_auth)) -> AuthUser:
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅管理员可以执行此操作",
+        )
+    return user

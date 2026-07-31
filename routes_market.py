@@ -13,10 +13,15 @@ import asyncio
 import json
 import random
 
-from auth import AuthUser, get_auth_manager, require_auth
+from auth import AuthUser, get_auth_manager, require_admin, require_auth
 from ea_auth import EAIdentity, require_ea_auth
 from market.services import PivotService
-from sqlite_storage import LLMConfigRepository, StrategyConfigRepository, TradeConfigRepository
+from sqlite_storage import (
+    LLMAccessRepository,
+    LLMConfigRepository,
+    StrategyConfigRepository,
+    TradeConfigRepository,
+)
 from trading_engine_manager import TradingEngineManager
 
 
@@ -32,6 +37,7 @@ def create_market_routes(
     trade_config_repo = TradeConfigRepository()
     strategy_repo = StrategyConfigRepository()
     llm_config_repo = LLMConfigRepository()
+    llm_access_repo = LLMAccessRepository()
 
     # ==================== EA端接口 ====================
 
@@ -273,13 +279,23 @@ def create_market_routes(
 
     @protected_router.get("/market/symbols")
     async def get_symbols(user: AuthUser = Depends(require_auth)) -> Dict:
-        """获取所有已存储数据的symbol列表"""
+        """获取用户可配置的品种，不依赖行情是否仍在内存中。"""
         engine = engine_manager.get_engine_for_user(user.user_id)
-        symbols = engine.kline_service.get_symbols()
+        market_symbols = engine.kline_service.get_symbols()
+        config = trade_config_repo.get_config(user.user_id)
+        configured_symbols = list(config.get("symbol_config", {}).keys())
+        strategy_symbols = [
+            strategy.symbol
+            for strategy in strategy_repo.get_all_strategies(user.user_id)
+        ]
+        symbols = sorted(set(
+            market_symbols + configured_symbols + strategy_symbols
+        ))
         return {
             "status": "ok",
             "symbols": symbols,
-            "count": len(symbols)
+            "count": len(symbols),
+            "market_symbols": market_symbols,
         }
 
     @protected_router.get("/market/configured_symbols")
@@ -548,6 +564,29 @@ def create_market_routes(
             "strategies": [s.to_dict() for s in strategies]
         }
 
+    @protected_router.post("/strategy")
+    async def create_strategy(
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """创建策略；同一品种可创建多条。"""
+        try:
+            data = await request.json()
+            symbol = str(data.get("symbol", "")).strip()
+            if not symbol:
+                return {"status": "error", "message": "请选择交易品种"}
+            engine = engine_manager.get_engine_for_user(user.user_id)
+            strategy = engine.strategy_service.strategy_store.create_strategy(
+                symbol, data
+            )
+            return {
+                "status": "ok",
+                "message": "策略已创建",
+                "strategy": strategy.to_dict(),
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     @protected_router.get("/strategy/decisions")
     async def get_decisions(
         symbol: Optional[str] = None,
@@ -563,32 +602,38 @@ def create_market_routes(
             "decisions": decisions
         }
 
-    @protected_router.get("/strategy/{symbol}")
-    async def get_strategy(symbol: str, user: AuthUser = Depends(require_auth)) -> Dict:
-        """获取品种策略配置"""
+    @protected_router.get("/strategy/{strategy_ref}")
+    async def get_strategy(strategy_ref: str, user: AuthUser = Depends(require_auth)) -> Dict:
+        """按策略 ID 获取；兼容按品种获取第一条策略。"""
         engine = engine_manager.get_engine_for_user(user.user_id)
         strategy = (
-            strategy_repo.get_strategy(user.user_id, symbol)
-            or engine.strategy_service.get_strategy(symbol)
+            strategy_repo.get_strategy_by_id(user.user_id, strategy_ref)
+            or strategy_repo.get_strategy(user.user_id, strategy_ref)
         )
+        if strategy is None:
+            return {"status": "error", "message": "策略配置不存在"}
         return {
             "status": "ok",
             "strategy": strategy.to_dict()
         }
 
-    @protected_router.post("/strategy/{symbol}")
-    async def update_strategy(symbol: str, request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
-        """更新品种策略配置"""
+    @protected_router.post("/strategy/{strategy_ref}")
+    async def update_strategy(strategy_ref: str, request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
+        """按策略 ID 更新；兼容按品种更新第一条策略。"""
         try:
             engine = engine_manager.get_engine_for_user(user.user_id)
             data = await request.json()
             strategy = (
-                strategy_repo.get_strategy(user.user_id, symbol)
-                or engine.strategy_service.get_strategy(symbol)
+                engine.strategy_service.strategy_store.get_strategy_by_id(strategy_ref)
+                or engine.strategy_service.strategy_store.get_strategy(strategy_ref)
             )
-            strategy.update(data)
-            strategy_repo.save_strategy(user.user_id, strategy)
-            strategy = engine.strategy_service.update_strategy(symbol, data)
+            if strategy is None:
+                return {"status": "error", "message": "策略配置不存在"}
+            strategy = engine.strategy_service.update_strategy(
+                strategy.symbol,
+                data,
+                strategy.strategy_id,
+            )
 
             return {
                 "status": "ok",
@@ -598,12 +643,16 @@ def create_market_routes(
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    @protected_router.delete("/strategy/{symbol}")
-    async def delete_strategy(symbol: str, user: AuthUser = Depends(require_auth)) -> Dict:
-        """删除品种策略配置"""
+    @protected_router.delete("/strategy/{strategy_ref}")
+    async def delete_strategy(strategy_ref: str, user: AuthUser = Depends(require_auth)) -> Dict:
+        """按策略 ID 删除；兼容按品种删除全部策略。"""
         engine = engine_manager.get_engine_for_user(user.user_id)
-        success = strategy_repo.delete_strategy(user.user_id, symbol)
-        engine.strategy_service.strategy_store.delete_strategy(symbol)
+        store = engine.strategy_service.strategy_store
+        strategy = store.get_strategy_by_id(strategy_ref)
+        if strategy:
+            success = store.delete_strategy(strategy.symbol, strategy.strategy_id)
+        else:
+            success = store.delete_strategy(strategy_ref)
         if success:
             return {"status": "ok", "message": "策略配置已删除"}
         return {"status": "error", "message": "策略配置不存在"}
@@ -717,12 +766,83 @@ def create_market_routes(
 
     # ==================== 大模型分析接口 ====================
 
+    def require_llm_access(user: AuthUser) -> Dict:
+        access = llm_access_repo.get_status(user.user_id, user.role)
+        if not access["access_granted"]:
+            raise HTTPException(status_code=403, detail="大模型行情分析功能尚未开通")
+        return access
+
+    @protected_router.get("/llm/access")
+    async def get_llm_access(user: AuthUser = Depends(require_auth)) -> Dict:
+        access = llm_access_repo.get_status(user.user_id, user.role)
+        effective_config = llm_config_repo.get_effective_config(user.user_id)
+        return {
+            "status": "ok",
+            "access": {
+                **access,
+                "service_configured": effective_config.enabled,
+                "feature_enabled": (
+                    access["access_granted"] and effective_config.enabled
+                ),
+            },
+        }
+
+    @protected_router.post("/llm/access/request")
+    async def request_llm_access(user: AuthUser = Depends(require_auth)) -> Dict:
+        access = llm_access_repo.request_access(user.user_id, user.role)
+        return {
+            "status": "ok",
+            "message": (
+                "申请已提交，请等待管理员审批"
+                if access["status"] == "pending"
+                else "大模型行情分析功能已开通"
+            ),
+            "access": access,
+        }
+
+    @protected_router.get("/admin/llm/access-requests")
+    async def get_llm_access_requests(
+        status: Optional[str] = None,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        requests = llm_access_repo.list_requests(status)
+        return {
+            "status": "ok",
+            "count": len(requests),
+            "requests": requests,
+        }
+
+    @protected_router.post("/admin/llm/access-requests/{request_id}/review")
+    async def review_llm_access_request(
+        request_id: int,
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        data = await request.json()
+        try:
+            reviewed = llm_access_repo.review(
+                request_id,
+                user.user_id,
+                str(data.get("decision", "")),
+                str(data.get("note", "")),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if reviewed is None:
+            raise HTTPException(status_code=404, detail="开通申请不存在")
+        return {
+            "status": "ok",
+            "message": "审批已完成",
+            "access": reviewed,
+        }
+
     @protected_router.get("/llm/analysis")
     async def get_llm_analysis(
         symbol: Optional[str] = None,
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取大模型分析结果"""
+        require_llm_access(user)
         engine = engine_manager.get_engine_for_user(user.user_id)
         result = engine.get_llm_analysis(symbol)
         return {
@@ -733,15 +853,28 @@ def create_market_routes(
     @protected_router.get("/llm/status")
     async def get_llm_status(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取大模型分析器状态"""
+        access = llm_access_repo.get_status(user.user_id, user.role)
+        if not access["access_granted"]:
+            return {
+                "status": "ok",
+                "data": {
+                    "enabled": False,
+                    "access_status": access["status"],
+                    "analysis_status": "disabled",
+                    "analysis_message": "大模型行情分析功能尚未开通",
+                },
+            }
         engine = engine_manager.get_engine_for_user(user.user_id)
+        status_data = engine.get_llm_status()
+        status_data["access_status"] = access["status"]
         return {
             "status": "ok",
-            "data": engine.get_llm_status()
+            "data": status_data,
         }
 
     @protected_router.get("/llm/config")
-    async def get_llm_config(user: AuthUser = Depends(require_auth)) -> Dict:
-        """获取大模型配置"""
+    async def get_llm_config(user: AuthUser = Depends(require_admin)) -> Dict:
+        """管理员获取共享大模型配置。"""
         return {
             "status": "ok",
             "config": llm_config_repo.get_config(user.user_id).to_dict()
@@ -750,12 +883,13 @@ def create_market_routes(
     @protected_router.post("/llm/trigger")
     async def trigger_llm_analysis(user: AuthUser = Depends(require_auth)) -> Dict:
         """手动触发大模型分析"""
+        require_llm_access(user)
         engine = engine_manager.get_engine_for_user(user.user_id)
         return engine.trigger_llm_analysis()
 
     @protected_router.post("/llm/configure")
-    async def configure_llm(request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
-        """配置大模型参数"""
+    async def configure_llm(request: Request, user: AuthUser = Depends(require_admin)) -> Dict:
+        """管理员配置共享大模型参数。"""
         try:
             data = await request.json()
             config = llm_config_repo.save_config(

@@ -12,7 +12,9 @@ from fastapi import HTTPException
 
 from auth import (
     AuthManager,
+    AuthUser,
     UsernameAlreadyExistsError,
+    require_admin,
     require_auth,
     reset_auth_manager,
 )
@@ -117,6 +119,14 @@ class AuthRoutesTestCase(unittest.TestCase):
             require_auth(None)
 
         self.assertEqual(context.exception.status_code, 401)
+
+    def test_admin_dependency_rejects_regular_user(self):
+        with self.assertRaises(HTTPException) as context:
+            require_admin(AuthUser(user_id=2, username="trader", role="user"))
+        self.assertEqual(context.exception.status_code, 403)
+
+        admin = AuthUser(user_id=1, username="admin", role="admin")
+        self.assertIs(require_admin(admin), admin)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,25 @@ class _FakeEngine:
         self.closed = True
 
 
+class _KlineServiceStub:
+    def __init__(self):
+        self.symbols = []
+
+    def get_symbols(self):
+        return list(self.symbols)
+
+
+class _ScheduledEngine(_FakeEngine):
+    def __init__(self, user_id, account_id):
+        super().__init__(user_id, account_id)
+        self.kline_service = _KlineServiceStub()
+        self.llm_runs = 0
+        self.llm_analyzer = type("Analyzer", (), {"ANALYZE_INTERVAL": 300})()
+
+    def run_scheduled_llm_analysis(self):
+        self.llm_runs += 1
+
+
 class TradingEngineManagerTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -113,6 +132,31 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         second = manager.get_engine(self.admin.user_id, account.account_id)
 
         self.assertIs(first, second)
+
+    def test_llm_analysis_waits_for_initial_kline_data(self):
+        manager = TradingEngineManager(
+            engine_factory=lambda user_id, account_id: _ScheduledEngine(
+                user_id,
+                account_id,
+            )
+        )
+        engine = manager.get_engine(self.admin.user_id, 0)
+        runtime = next(iter(manager._engines.values()))
+        initial_due_at = runtime.next_llm_analysis_at
+
+        manager.run_maintenance_once(initial_due_at)
+
+        self.assertEqual(engine.llm_runs, 0)
+        self.assertEqual(runtime.next_llm_analysis_at, initial_due_at + 10)
+
+        engine.kline_service.symbols.append("GOLD_")
+        manager.run_maintenance_once(runtime.next_llm_analysis_at)
+        deadline = time.time() + 1
+        while engine.llm_runs == 0 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(engine.llm_runs, 1)
+        manager.close_all()
 
     def test_binding_migrates_temporary_user_engine(self):
         manager = TradingEngineManager(
@@ -346,6 +390,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         decision = TradingDecision(
             symbol="GOLD#",
             strategy_id="strategy-gold",
+            strategy_name="Gold Strategy",
             action="buy",
             entry_price=3300.0,
             sl=3290.0,
@@ -355,7 +400,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         )
         broadcasts = []
         engine._signal_service.generate_signals = lambda symbol, price: [object()]
-        engine.strategy_service.make_decision = lambda symbol, price: decision
+        engine.strategy_service.make_decisions = lambda symbol, price: [decision]
         engine._broadcast_decision = lambda current: broadcasts.append(
             current.to_dict()
         )

@@ -104,18 +104,23 @@
           <div class="d-flex flex-wrap align-center">
             <v-icon small class="mr-1">mdi-chart-line</v-icon>
             <strong>{{ alert.symbol }}</strong>
+            <v-chip small outlined color="blue-grey" class="ml-2">
+              <v-icon small left>mdi-strategy</v-icon>
+              {{ alert.strategy_name }} · {{ alert.strategy_id }}
+            </v-chip>
             <v-chip
               small
-              :color="alert.rejected ? 'warning' : alert.action === 'buy' ? 'success' : 'error'"
+              :color="alert.action === 'buy' ? 'success' : alert.action === 'sell' ? 'error' : 'grey'"
               class="ml-2"
             >
-              {{
-                alert.rejected
-                  ? `风控拦截 · ${alert.action === 'buy' ? '买入' : '卖出'}`
-                  : alert.action === 'buy'
-                    ? '买入'
-                    : '卖出'
-              }}
+              <v-icon small left>
+                {{ alert.action === 'buy' ? 'mdi-arrow-up-bold' : alert.action === 'sell' ? 'mdi-arrow-down-bold' : 'mdi-help' }}
+              </v-icon>
+              {{ alert.action === 'buy' ? '买入' : alert.action === 'sell' ? '卖出' : '方向未知' }}
+            </v-chip>
+            <v-chip v-if="alert.rejected" small outlined color="warning" class="ml-2">
+              <v-icon small left>mdi-shield-alert</v-icon>
+              风控拦截
             </v-chip>
             <v-chip v-if="alert.confidence" small color="primary" class="ml-2">
               置信度: {{ alert.confidence }}%
@@ -282,12 +287,14 @@
               {{ llmAnalysisStatus || '分析中...' }}
             </v-chip>
             <v-chip v-else-if="llmStatus.enabled" small color="success" class="mr-2">已启用</v-chip>
-            <v-chip v-else small color="grey">未配置</v-chip>
+            <v-chip v-else small color="grey">
+              {{ llmStatus.access_status === 'pending' ? '开通审批中' : '未开通' }}
+            </v-chip>
             <v-btn
               color="primary"
               size="small"
               variant="outlined"
-              :disabled="!llmStatus.enabled || llmAnalyzing"
+              :disabled="!llmFeatureAvailable || llmAnalyzing"
               :loading="llmTriggering"
               @click="triggerLLMAnalysis"
             >
@@ -558,8 +565,15 @@ export default {
     const llmAnalyzing = ref(false)
     const llmAnalysisStatus = ref('')
     const llmTriggering = ref(false)
+    const llmAccessGranted = computed(() =>
+      llmStatus.value.access_status === 'approved' || Boolean(llmStatus.value.enabled)
+    )
+    const llmFeatureAvailable = computed(() =>
+      llmAccessGranted.value && Boolean(llmStatus.value.enabled)
+    )
     const llmEmptyMessage = computed(() => {
-      if (!llmStatus.value.enabled) return '请先配置大模型 API'
+      if (!llmAccessGranted.value) return '请前往用户配置申请开通大模型行情分析'
+      if (!llmStatus.value.enabled) return '大模型服务暂未配置，请联系管理员'
       if (llmStatus.value.analysis_message) return llmStatus.value.analysis_message
       return '尚未生成分析结果，点击“立即分析”开始'
     })
@@ -839,6 +853,10 @@ export default {
     }
 
     const loadLLMAnalysis = async () => {
+      if (!llmAccessGranted.value) {
+        llmAnalysis.value = {}
+        return
+      }
       try {
         const data = await marketAPI.getLLMAnalysis()
         if (data.status === 'ok') {
@@ -1184,11 +1202,11 @@ export default {
     }
 
     // 生命周期
-    onMounted(() => {
+    onMounted(async () => {
       loadStatus()
       loadThresholds()
       loadPendingOrders()
-      loadLLMStatus()
+      await loadLLMStatus()
       loadLLMAnalysis()
       connectWebSocket()
       // 快讯相关
@@ -1201,8 +1219,7 @@ export default {
       statusInterval = setInterval(() => {
         loadStatus()
         loadPendingOrders()
-        loadLLMStatus()
-        loadLLMAnalysis()
+        loadLLMStatus().then(loadLLMAnalysis)
         loadTrend()
       }, 10000)
 
@@ -1261,6 +1278,7 @@ export default {
       llmAnalyzing,
       llmAnalysisStatus,
       llmTriggering,
+      llmFeatureAvailable,
       llmEmptyMessage,
       loadLLMStatus,
       loadLLMAnalysis,

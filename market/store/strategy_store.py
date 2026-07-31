@@ -15,7 +15,7 @@ class StrategyStore:
     """策略配置存储"""
 
     def __init__(self, user_id: int = None):
-        # 策略配置: {symbol: TradingStrategy}
+        # 策略配置: {strategy_id: TradingStrategy}
         self._strategies: Dict[str, TradingStrategy] = {}
 
         # 线程锁
@@ -49,7 +49,9 @@ class StrategyStore:
         """从 SQLite 加载配置"""
         try:
             strategies = self._repo.get_all_strategies(self._user_id)
-            self._strategies = {strategy.symbol: strategy for strategy in strategies}
+            self._strategies = {
+                strategy.strategy_id: strategy for strategy in strategies
+            }
             print(f"[StrategyStore] 从 SQLite 加载 {len(self._strategies)} 个策略配置")
         except Exception as e:
             print(f"[StrategyStore] 加载配置失败: {e}")
@@ -67,36 +69,81 @@ class StrategyStore:
     # ==================== 策略管理 ====================
 
     def get_strategy(self, symbol: str) -> Optional[TradingStrategy]:
-        """获取品种的策略配置"""
+        """兼容旧调用，获取品种创建最早的策略配置。"""
         with self._lock:
-            return self._strategies.get(symbol)
+            strategies = self.get_strategies(symbol)
+            return strategies[0] if strategies else None
+
+    def get_strategy_by_id(self, strategy_id: str) -> Optional[TradingStrategy]:
+        with self._lock:
+            return self._strategies.get(strategy_id)
+
+    def get_strategies(self, symbol: str) -> List[TradingStrategy]:
+        with self._lock:
+            return [
+                strategy
+                for strategy in self._strategies.values()
+                if strategy.symbol == symbol
+            ]
 
     def get_or_create_strategy(self, symbol: str) -> TradingStrategy:
         """获取或创建策略配置"""
         with self._lock:
-            if symbol not in self._strategies:
-                self._strategies[symbol] = TradingStrategy(symbol=symbol)
-            return self._strategies[symbol]
+            strategy = self.get_strategy(symbol)
+            if strategy is None:
+                strategy = TradingStrategy(symbol=symbol)
+                self._strategies[strategy.strategy_id] = strategy
+            return strategy
 
     def set_strategy(self, strategy: TradingStrategy) -> None:
         """设置策略配置"""
         with self._lock:
-            self._strategies[strategy.symbol] = strategy
+            self._strategies[strategy.strategy_id] = strategy
             self.save_to_file()
 
-    def update_strategy(self, symbol: str, data: Dict) -> Optional[TradingStrategy]:
+    def create_strategy(self, symbol: str, data: Dict = None) -> TradingStrategy:
+        with self._lock:
+            strategy = TradingStrategy(symbol=symbol)
+            if data:
+                strategy.update(data)
+            self._strategies[strategy.strategy_id] = strategy
+            self.save_to_file()
+            return strategy
+
+    def update_strategy(
+        self, symbol: str, data: Dict, strategy_id: str = None
+    ) -> Optional[TradingStrategy]:
         """更新策略配置"""
         with self._lock:
-            strategy = self.get_or_create_strategy(symbol)
+            strategy = (
+                self.get_strategy_by_id(strategy_id)
+                if strategy_id
+                else self.get_or_create_strategy(symbol)
+            )
+            if strategy is None or strategy.symbol != symbol:
+                return None
             strategy.update(data)
             self.save_to_file()
             return strategy
 
-    def delete_strategy(self, symbol: str) -> bool:
+    def delete_strategy(self, symbol: str, strategy_id: str = None) -> bool:
         """删除策略配置"""
         with self._lock:
-            if symbol in self._strategies:
-                del self._strategies[symbol]
+            if strategy_id:
+                strategy = self._strategies.get(strategy_id)
+                if strategy is None or strategy.symbol != symbol:
+                    return False
+                del self._strategies[strategy_id]
+                self.save_to_file()
+                return True
+            matching_ids = [
+                item.strategy_id
+                for item in self._strategies.values()
+                if item.symbol == symbol
+            ]
+            if matching_ids:
+                for matching_id in matching_ids:
+                    del self._strategies[matching_id]
                 self.save_to_file()
                 return True
             return False
@@ -112,8 +159,8 @@ class StrategyStore:
         """获取所有策略配置字典"""
         with self._lock:
             return {
-                symbol: strategy.to_dict()
-                for symbol, strategy in self._strategies.items()
+                strategy_id: strategy.to_dict()
+                for strategy_id, strategy in self._strategies.items()
             }
 
     def get_enabled_strategies(self) -> List[TradingStrategy]:
@@ -124,7 +171,11 @@ class StrategyStore:
     def get_enabled_symbols(self) -> List[str]:
         """获取所有启用策略的品种"""
         with self._lock:
-            return [symbol for symbol, strategy in self._strategies.items() if strategy.enabled]
+            return sorted({
+                strategy.symbol
+                for strategy in self._strategies.values()
+                if strategy.enabled
+            })
 
     # ==================== 状态 ====================
 
@@ -134,5 +185,5 @@ class StrategyStore:
             return {
                 "total_strategies": len(self._strategies),
                 "enabled_strategies": len(self.get_enabled_strategies()),
-                "symbols": list(self._strategies.keys()),
+                "symbols": sorted({s.symbol for s in self._strategies.values()}),
             }

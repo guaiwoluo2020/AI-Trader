@@ -183,7 +183,7 @@
           <v-card-text>
             <!-- 策略列表 -->
             <v-expansion-panels v-if="strategies.length > 0">
-              <v-expansion-panel v-for="strategy in strategies" :key="strategy.symbol">
+              <v-expansion-panel v-for="strategy in strategies" :key="strategy.strategy_id">
                 <v-expansion-panel-title>
                   <div class="d-flex align-center">
                     <strong class="mr-3">{{ strategy.symbol }}</strong>
@@ -191,6 +191,7 @@
                       {{ strategy.enabled ? '启用' : '禁用' }}
                     </v-chip>
                     <span class="text-caption grey--text ml-3">{{ strategy.strategy_name }}</span>
+                    <span class="text-caption grey--text ml-2">#{{ strategy.strategy_id }}</span>
                   </div>
                 </v-expansion-panel-title>
                 <v-expansion-panel-text>
@@ -265,20 +266,20 @@
                               </td>
                               <td>
                                 <v-checkbox
-                                  v-model="getSignalConfig(strategy, 'pivot').enabled"
+                                  :model-value="getSignalConfig(strategy, 'pivot').enabled"
                                   density="compact"
                                   hide-details
-                                  @change="onSignalConfigChange(strategy, 'pivot')"
+                                  @update:model-value="onSignalEnabledChange(strategy, 'pivot', $event)"
                                 ></v-checkbox>
                               </td>
                               <td v-for="period in ['M1', 'M5', 'M15', 'H1', 'H4']" :key="period">
                                 <div class="d-flex align-center">
                                   <v-checkbox
-                                    v-model="getPeriodConfig(strategy, 'pivot', period).enabled"
+                                    :model-value="getPeriodConfig(strategy, 'pivot', period).enabled"
                                     density="compact"
                                     hide-details
                                     :disabled="!getSignalConfig(strategy, 'pivot').enabled"
-                                    @change="onSignalConfigChange(strategy, 'pivot')"
+                                    @update:model-value="onPeriodEnabledChange(strategy, 'pivot', period, $event)"
                                   ></v-checkbox>
                                   <v-text-field
                                     v-model.number="getPeriodConfig(strategy, 'pivot', period).weight"
@@ -302,10 +303,10 @@
                               </td>
                               <td>
                                 <v-checkbox
-                                  v-model="getSignalConfig(strategy, 'key_level').enabled"
+                                  :model-value="getSignalConfig(strategy, 'key_level').enabled"
                                   density="compact"
                                   hide-details
-                                  @change="onSignalConfigChange(strategy, 'key_level')"
+                                  @update:model-value="onSignalEnabledChange(strategy, 'key_level', $event)"
                                 ></v-checkbox>
                               </td>
                               <td colspan="5">
@@ -332,20 +333,20 @@
                               </td>
                               <td>
                                 <v-checkbox
-                                  v-model="getSignalConfig(strategy, 'ai_entry').enabled"
+                                  :model-value="getSignalConfig(strategy, 'ai_entry').enabled"
                                   density="compact"
                                   hide-details
-                                  @change="onSignalConfigChange(strategy, 'ai_entry')"
+                                  @update:model-value="onSignalEnabledChange(strategy, 'ai_entry', $event)"
                                 ></v-checkbox>
                               </td>
                               <td v-for="period in ['M1', 'M5', 'M15', 'H1', 'H4']" :key="period">
                                 <div class="d-flex align-center">
                                   <v-checkbox
-                                    v-model="getPeriodConfig(strategy, 'ai_entry', period).enabled"
+                                    :model-value="getPeriodConfig(strategy, 'ai_entry', period).enabled"
                                     density="compact"
                                     hide-details
                                     :disabled="!getSignalConfig(strategy, 'ai_entry').enabled"
-                                    @change="onSignalConfigChange(strategy, 'ai_entry')"
+                                    @update:model-value="onPeriodEnabledChange(strategy, 'ai_entry', period, $event)"
                                   ></v-checkbox>
                                   <v-text-field
                                     v-model.number="getPeriodConfig(strategy, 'ai_entry', period).weight"
@@ -476,11 +477,11 @@
                   <!-- 操作按钮 -->
                   <v-row>
                     <v-col cols="12">
-                      <v-btn color="primary" small @click="updateStrategy(strategy)" :loading="strategySaving === strategy.symbol">
+                      <v-btn color="primary" small @click="updateStrategy(strategy)" :loading="strategySaving === strategy.strategy_id">
                         <v-icon start small>mdi-content-save</v-icon>
                         保存
                       </v-btn>
-                      <v-btn color="error" small outlined class="ml-2" @click="deleteStrategy(strategy.symbol)">
+                      <v-btn color="error" small outlined class="ml-2" @click="deleteStrategy(strategy)">
                         <v-icon start small>mdi-delete</v-icon>
                         删除策略
                       </v-btn>
@@ -500,7 +501,7 @@
               <v-col cols="4">
                 <v-select
                   v-model="newStrategySymbol"
-                  :items="symbolsWithoutStrategy"
+                  :items="strategySymbolOptions"
                   label="选择品种添加策略"
                   dense
                   hide-details
@@ -525,7 +526,7 @@
 
             <div class="text-caption grey--text mt-3">
               <v-icon small>mdi-information</v-icon>
-              策略配置：信号权重、过滤规则、仓位管理、止损止盈等。每个品种绑定一个策略。
+              同一品种可配置多个策略；每条信号推荐会标明具体的触发策略。
             </div>
           </v-card-text>
         </v-card>
@@ -623,16 +624,16 @@
       </v-col>
     </v-row>
 
-    <!-- 大模型配置 -->
+    <!-- 大模型功能与管理员配置 -->
     <v-row v-if="!isStrategyPage">
       <v-col cols="12">
         <v-card>
           <v-card-title>
             <v-icon class="mr-2">mdi-brain</v-icon>
-            大模型配置
+            {{ isAdmin ? '大模型配置' : '大模型行情分析' }}
           </v-card-title>
           <v-card-text>
-            <v-form ref="llmForm">
+            <v-form v-if="isAdmin" ref="llmForm">
               <v-row>
                 <v-col cols="12" md="4">
                   <v-text-field
@@ -684,7 +685,89 @@
 
             <div class="text-caption grey--text mt-3">
               <v-icon small>mdi-information</v-icon>
-              配置大模型用于生成AI趋势分析和交易建议。支持OpenAI兼容的API接口。
+              管理员配置共享的大模型服务，审批通过的用户将使用此配置进行行情分析。
+            </div>
+
+            <div v-if="isAdmin" class="mt-6">
+              <v-divider class="mb-4"></v-divider>
+              <div class="d-flex align-center mb-3">
+                <div class="text-h6">开通申请待办</div>
+                <v-chip small color="warning" class="ml-2">
+                  {{ llmAccessRequests.length }}
+                </v-chip>
+                <v-btn icon small class="ml-2" :loading="llmRequestsLoading" @click="loadLLMAccessRequests">
+                  <v-icon small>mdi-refresh</v-icon>
+                </v-btn>
+              </div>
+
+              <v-table v-if="llmAccessRequests.length">
+                <thead>
+                  <tr>
+                    <th>申请用户</th>
+                    <th>申请时间</th>
+                    <th class="text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="request in llmAccessRequests" :key="request.id">
+                    <td>{{ request.username }}</td>
+                    <td>{{ formatTimestamp(request.requested_at) }}</td>
+                    <td class="text-right">
+                      <v-btn
+                        color="success"
+                        size="small"
+                        class="mr-2"
+                        :loading="llmReviewingId === request.id"
+                        @click="reviewLLMRequest(request, 'approved')"
+                      >
+                        通过
+                      </v-btn>
+                      <v-btn
+                        color="error"
+                        variant="outlined"
+                        size="small"
+                        :loading="llmReviewingId === request.id"
+                        @click="reviewLLMRequest(request, 'rejected')"
+                      >
+                        拒绝
+                      </v-btn>
+                    </td>
+                  </tr>
+                </tbody>
+              </v-table>
+              <div v-else class="text-center grey--text py-5">
+                暂无待审批的大模型开通申请
+              </div>
+            </div>
+
+            <div v-else class="py-2">
+              <div class="d-flex flex-wrap align-center mb-4">
+                <v-chip :color="llmAccessColor" size="small">
+                  {{ llmAccessLabel }}
+                </v-chip>
+                <span class="text-body-2 grey--text ml-3">
+                  {{ llmAccessDescription }}
+                </span>
+              </div>
+
+              <v-alert
+                v-if="llmAccess.review_note"
+                type="info"
+                variant="tonal"
+                class="mb-4"
+              >
+                管理员备注：{{ llmAccess.review_note }}
+              </v-alert>
+
+              <v-btn
+                v-if="['not_requested', 'rejected'].includes(llmAccess.status)"
+                color="primary"
+                :loading="llmAccessRequesting"
+                @click="requestLLMAccess"
+              >
+                <v-icon start>mdi-send-check</v-icon>
+                {{ llmAccess.status === 'rejected' ? '重新申请开通' : '申请开通' }}
+              </v-btn>
             </div>
           </v-card-text>
         </v-card>
@@ -704,7 +787,7 @@
 </template>
 
 <script>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { marketAPI } from '@/api/market'
 import { authAPI } from '@/api/trading'
 import { authState } from '@/auth'
@@ -753,15 +836,49 @@ export default {
     })
     const showApiKey = ref(false)
     const llmSaving = ref(false)
+    const llmAccess = ref({
+      status: 'not_requested',
+      access_granted: false,
+      service_configured: false,
+      feature_enabled: false,
+      review_note: ''
+    })
+    const llmAccessRequesting = ref(false)
+    const llmAccessRequests = ref([])
+    const llmRequestsLoading = ref(false)
+    const llmReviewingId = ref(null)
+    const strategySaveTimers = new Map()
 
     // 账户与安全
     const currentUser = computed(() => authState.user || {
       username: '未登录',
       role: 'user'
     })
+    const isAdmin = computed(() => currentUser.value.role === 'admin')
     const roleLabel = computed(() =>
       currentUser.value.role === 'admin' ? '管理员' : '普通用户'
     )
+    const llmAccessLabel = computed(() => ({
+      not_requested: '未开通',
+      pending: '审批中',
+      approved: llmAccess.value.feature_enabled ? '已开通' : '等待服务配置',
+      rejected: '申请未通过'
+    }[llmAccess.value.status] || '未开通'))
+    const llmAccessColor = computed(() => ({
+      not_requested: 'grey',
+      pending: 'warning',
+      approved: llmAccess.value.feature_enabled ? 'success' : 'info',
+      rejected: 'error'
+    }[llmAccess.value.status] || 'grey'))
+    const llmAccessDescription = computed(() => {
+      if (llmAccess.value.status === 'pending') return '申请已提交，请等待管理员审批。'
+      if (llmAccess.value.status === 'rejected') return '申请未通过，您可以重新提交申请。'
+      if (llmAccess.value.status === 'approved' && !llmAccess.value.service_configured) {
+        return '权限已开通，管理员配置大模型服务后即可使用。'
+      }
+      if (llmAccess.value.status === 'approved') return '您可以在信号推荐页面使用大模型行情分析。'
+      return '开通后可使用 AI 多周期行情分析和交易信号辅助功能。'
+    })
     const passwordForm = ref({
       current_password: '',
       new_password: '',
@@ -828,6 +945,13 @@ export default {
       const configured = Object.keys(tradeConfig.value.symbol_config || {})
       return symbols.value.filter(s => !configured.includes(s))
     })
+
+    // 策略品种不应依赖当前内存中是否还有实时行情。
+    const strategySymbolOptions = computed(() => Array.from(new Set([
+      ...symbols.value,
+      ...Object.keys(tradeConfig.value.symbol_config || {}),
+      ...strategies.value.map(strategy => strategy.symbol)
+    ])).filter(Boolean).sort())
 
     // 加载配置
     const loadTradeConfig = async () => {
@@ -921,6 +1045,7 @@ export default {
 
     // 加载大模型配置
     const loadLLMConfig = async () => {
+      if (!isAdmin.value) return
       try {
         const data = await marketAPI.getLLMConfig()
         if (data.config) {
@@ -935,6 +1060,65 @@ export default {
       } catch (err) {
         console.error('加载大模型配置失败:', err)
       }
+    }
+
+    const loadLLMAccess = async () => {
+      try {
+        const data = await marketAPI.getLLMAccess()
+        if (data.access) llmAccess.value = data.access
+      } catch (err) {
+        console.error('加载大模型开通状态失败:', err)
+      }
+    }
+
+    const requestLLMAccess = async () => {
+      llmAccessRequesting.value = true
+      try {
+        const data = await marketAPI.requestLLMAccess()
+        if (data.access) llmAccess.value = { ...llmAccess.value, ...data.access }
+        successMessage.value = data.message || '申请已提交'
+        showSuccess.value = true
+        await loadLLMAccess()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '申请提交失败'
+        showError.value = true
+      } finally {
+        llmAccessRequesting.value = false
+      }
+    }
+
+    const loadLLMAccessRequests = async () => {
+      if (!isAdmin.value) return
+      llmRequestsLoading.value = true
+      try {
+        const data = await marketAPI.getLLMAccessRequests('pending')
+        llmAccessRequests.value = data.requests || []
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '加载开通申请失败'
+        showError.value = true
+      } finally {
+        llmRequestsLoading.value = false
+      }
+    }
+
+    const reviewLLMRequest = async (request, decision) => {
+      llmReviewingId.value = request.id
+      try {
+        await marketAPI.reviewLLMAccessRequest(request.id, decision)
+        successMessage.value = decision === 'approved' ? '已通过开通申请' : '已拒绝开通申请'
+        showSuccess.value = true
+        await loadLLMAccessRequests()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '审批失败'
+        showError.value = true
+      } finally {
+        llmReviewingId.value = null
+      }
+    }
+
+    const formatTimestamp = (timestamp) => {
+      if (!timestamp) return '--'
+      return new Date(timestamp * 1000).toLocaleString('zh-CN')
     }
 
     // 保存大模型配置
@@ -995,12 +1179,6 @@ export default {
       { title: '风险回报比', value: 'risk_reward' }
     ]
 
-    // 没有策略的品种
-    const symbolsWithoutStrategy = computed(() => {
-      const strategySymbols = strategies.value.map(s => s.symbol)
-      return symbols.value.filter(s => !strategySymbols.includes(s))
-    })
-
     // 加载策略列表
     const loadStrategies = async () => {
       strategiesLoading.value = true
@@ -1018,7 +1196,12 @@ export default {
 
     // 更新策略
     const updateStrategy = async (strategy) => {
-      strategySaving.value = strategy.symbol
+      const pendingTimer = strategySaveTimers.get(strategy.strategy_id)
+      if (pendingTimer) {
+        clearTimeout(pendingTimer)
+        strategySaveTimers.delete(strategy.strategy_id)
+      }
+      strategySaving.value = strategy.strategy_id
       try {
         // 确保signal_config存在
         if (!strategy.signal_config) {
@@ -1047,7 +1230,7 @@ export default {
           }
         }
 
-        const data = await marketAPI.updateStrategy(strategy.symbol, {
+        const data = await marketAPI.updateStrategy(strategy.strategy_id, {
           enabled: strategy.enabled,
           strategy_name: strategy.strategy_name,
           min_confidence: strategy.min_confidence,
@@ -1076,7 +1259,8 @@ export default {
         }
       } catch (err) {
         console.error('保存策略失败:', err)
-        errorMessage.value = `保存策略失败: ${err.message}`
+        const detail = err.response?.data?.message || err.response?.data?.detail || err.message
+        errorMessage.value = `保存策略失败: ${detail}`
         showError.value = true
       } finally {
         strategySaving.value = null
@@ -1117,17 +1301,37 @@ export default {
       return config.periods[period]
     }
 
-    // 信号配置变更处理
-    const onSignalConfigChange = (strategy, source) => {
-      // 触发保存
-      updateStrategy(strategy)
+    // 合并同一策略短时间内的信号配置变更，避免父子开关产生乱序保存。
+    const scheduleSignalConfigSave = (strategy) => {
+      const existingTimer = strategySaveTimers.get(strategy.strategy_id)
+      if (existingTimer) clearTimeout(existingTimer)
+
+      const timer = setTimeout(() => {
+        strategySaveTimers.delete(strategy.strategy_id)
+        updateStrategy(strategy)
+      }, 150)
+      strategySaveTimers.set(strategy.strategy_id, timer)
+    }
+
+    const onSignalEnabledChange = (strategy, source, enabled) => {
+      getSignalConfig(strategy, source).enabled = Boolean(enabled)
+      scheduleSignalConfigSave(strategy)
+    }
+
+    const onPeriodEnabledChange = (strategy, source, period, enabled) => {
+      getPeriodConfig(strategy, source, period).enabled = Boolean(enabled)
+      scheduleSignalConfigSave(strategy)
+    }
+
+    const onSignalConfigChange = (strategy) => {
+      scheduleSignalConfigSave(strategy)
     }
 
     // 删除策略
-    const deleteStrategy = async (symbol) => {
-      if (!confirm(`确定要删除 ${symbol} 的策略配置吗？`)) return
+    const deleteStrategy = async (strategy) => {
+      if (!confirm(`确定要删除“${strategy.strategy_name}”策略吗？`)) return
       try {
-        const data = await marketAPI.deleteStrategy(symbol)
+        const data = await marketAPI.deleteStrategy(strategy.strategy_id)
         if (data.status === 'ok') {
           successMessage.value = '策略已删除'
           showSuccess.value = true
@@ -1147,7 +1351,8 @@ export default {
       if (!newStrategySymbol.value) return
       strategySaving.value = 'new'
       try {
-        const data = await marketAPI.updateStrategy(newStrategySymbol.value, {
+        const data = await marketAPI.createStrategy({
+          symbol: newStrategySymbol.value,
           enabled: true,
           strategy_name: newStrategyName.value || `Strategy_${newStrategySymbol.value}`
         })
@@ -1169,15 +1374,25 @@ export default {
       }
     }
 
-    onMounted(() => {
+    onMounted(async () => {
       if (isStrategyPage.value) {
         loadSymbols()
         loadTradeConfig()
         loadStrategies()
         return
       }
-      loadCurrentUser()
-      loadLLMConfig()
+      await loadCurrentUser()
+      if (isAdmin.value) {
+        loadLLMConfig()
+        loadLLMAccessRequests()
+      } else {
+        loadLLMAccess()
+      }
+    })
+
+    onUnmounted(() => {
+      strategySaveTimers.forEach(timer => clearTimeout(timer))
+      strategySaveTimers.clear()
     })
 
     return {
@@ -1195,6 +1410,7 @@ export default {
       showSuccess,
       successMessage,
       currentUser,
+      isAdmin,
       roleLabel,
       passwordForm,
       showCurrentPassword,
@@ -1213,6 +1429,18 @@ export default {
       showApiKey,
       llmSaving,
       saveLLMConfig,
+      llmAccess,
+      llmAccessLabel,
+      llmAccessColor,
+      llmAccessDescription,
+      llmAccessRequesting,
+      llmAccessRequests,
+      llmRequestsLoading,
+      llmReviewingId,
+      requestLLMAccess,
+      loadLLMAccessRequests,
+      reviewLLMRequest,
+      formatTimestamp,
       // 策略配置
       strategies,
       strategiesLoading,
@@ -1222,7 +1450,7 @@ export default {
       consistencyOptions,
       slModeOptions,
       tpModeOptions,
-      symbolsWithoutStrategy,
+      strategySymbolOptions,
       loadStrategies,
       updateStrategy,
       deleteStrategy,
@@ -1230,6 +1458,8 @@ export default {
       // 信号配置
       getSignalConfig,
       getPeriodConfig,
+      onSignalEnabledChange,
+      onPeriodEnabledChange,
       onSignalConfigChange
     }
   }

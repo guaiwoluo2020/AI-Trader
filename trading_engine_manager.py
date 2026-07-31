@@ -185,6 +185,14 @@ class TradingEngineManager:
                     scheduler.submit((key, "signal_cleanup"), callback)
 
             if now >= runtime.next_llm_analysis_at:
+                kline_service = getattr(engine, "kline_service", None)
+                get_symbols = getattr(kline_service, "get_symbols", None)
+                if get_symbols is not None and not get_symbols():
+                    # EA may need several seconds to upload its initial Kline batch.
+                    # Retry readiness soon without recording a failed LLM analysis.
+                    runtime.next_llm_analysis_at = now + 10
+                    continue
+
                 interval = getattr(
                     getattr(engine, "llm_analyzer", None),
                     "ANALYZE_INTERVAL",

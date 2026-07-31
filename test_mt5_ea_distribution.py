@@ -24,6 +24,23 @@ class MT5EADistributionTest(unittest.TestCase):
         self.assertTrue(EA_ARTIFACT.is_file())
         self.assertGreater(EA_ARTIFACT.stat().st_size, 100_000)
 
+    def test_risk_threshold_uses_larger_account_value(self):
+        source = EA_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "MathMax(g_accountBalance, g_accountEquity)",
+            source,
+        )
+        self.assertNotIn(
+            "g_accountBalance > 0 ? g_accountBalance : g_accountEquity",
+            source,
+        )
+        self.assertIn("if(riskBase <= 0)", source)
+        self.assertIn(
+            "double riskThreshold = riskBase * (g_riskLimitPercent / 100.0)",
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

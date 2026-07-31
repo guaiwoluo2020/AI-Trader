@@ -97,6 +97,7 @@ class TradingServer:
         # ==================== 策略层（对外暴露） ====================
         # 存储层
         self._strategy_store = StrategyStore(user_id=user_id)
+        self.llm_service.set_strategy_store(self._strategy_store)
 
         # 风险管理器
         self._risk_manager = RiskManager(
@@ -322,7 +323,9 @@ class TradingServer:
         result = {
             "signals_generated": 0,
             "decision": None,
-            "pending_order": None
+            "decisions": [],
+            "pending_order": None,
+            "pending_orders": [],
         }
 
         if not self.trade_config.enabled:
@@ -336,9 +339,9 @@ class TradingServer:
             print(f"[TradingServer] {symbol} 生成了 {len(signals)} 个信号")
 
         # 2. 策略层做决策
-        decision = self.strategy_service.make_decision(symbol, current_price)
+        decisions = self.strategy_service.make_decisions(symbol, current_price)
 
-        if decision:
+        for decision in decisions:
             # 记录决策历史
             self._decision_history.append(decision)
 
@@ -346,19 +349,28 @@ class TradingServer:
             if decision.action != "none" and decision.status != "rejected":
                 order_id = self.strategy_service.execute_decision(decision)
                 if order_id:
-                    result["pending_order"] = {
+                    pending_order = {
                         "order_id": order_id,
                         "symbol": decision.symbol,
+                        "strategy_id": decision.strategy_id,
+                        "strategy_name": decision.strategy_name,
                         "action": decision.action,
                         "price": decision.entry_price,
                         "volume": decision.volume,
                         "sl": decision.sl,
                         "tp": decision.tp
                     }
+                    result["pending_orders"].append(pending_order)
 
             # 创建待确认订单后再序列化和广播，确保携带真实 order_id。
-            result["decision"] = decision.to_dict()
+            result["decisions"].append(decision.to_dict())
             self._broadcast_decision(decision)
+
+        # 保留单策略时代的响应字段，旧客户端继续读取第一条结果。
+        if result["decisions"]:
+            result["decision"] = result["decisions"][0]
+        if result["pending_orders"]:
+            result["pending_order"] = result["pending_orders"][0]
 
         return result
 

@@ -25,6 +25,8 @@ class PendingOrder:
     reason: str = ""
     description: str = ""
     source: str = ""  # auto_pivot_m1/key_level/ai_entry_nearby/manual
+    strategy_id: str = ""
+    strategy_name: str = ""
 
     # 策略相关字段
     pivot_price: Optional[float] = None  # 转折点价格
@@ -93,6 +95,8 @@ class PendingOrder:
             "reason": self.reason,
             "description": self.description,
             "source": self.source,
+            "strategy_id": self.strategy_id,
+            "strategy_name": self.strategy_name,
             "pivot_price": self.pivot_price,
             "key_level": self.key_level,
             "ai_period": self.ai_period,
@@ -138,6 +142,8 @@ class PendingOrder:
             reason=data.get('reason', ''),
             description=data.get('description', ''),
             source=data.get('source', ''),
+            strategy_id=data.get('strategy_id', ''),
+            strategy_name=data.get('strategy_name', ''),
             pivot_price=data.get('pivot_price'),
             key_level=data.get('key_level'),
             ai_period=data.get('ai_period'),

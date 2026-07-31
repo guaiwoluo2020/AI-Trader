@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from market.llm_analyzer import LLMAnalyzer
+from market.models import TradingStrategy
 from market.services.llm_service import LLMService
 
 
@@ -79,6 +80,14 @@ class _AsyncService:
         return {"status": "ok", "analyzed_symbols": []}
 
 
+class _StrategyStore:
+    def __init__(self, strategies):
+        self.strategies = strategies
+
+    def get_all_strategies(self):
+        return self.strategies
+
+
 class LLMAnalysisTestCase(unittest.TestCase):
     def test_provider_error_is_returned_and_saved(self):
         store = _Store()
@@ -112,6 +121,112 @@ class LLMAnalysisTestCase(unittest.TestCase):
         self.assertLess(elapsed, 0.5)
         self.assertEqual(second["status"], "busy")
         service.release.set()
+
+    def test_analysis_plan_merges_enabled_ai_periods_for_same_symbol(self):
+        first = TradingStrategy(
+            symbol="GOLD_",
+            strategy_name="短线策略",
+            signal_config={
+                "ai_entry": {
+                    "enabled": True,
+                    "periods": {
+                        "M5": {"enabled": True, "weight": 20},
+                        "H1": {"enabled": False, "weight": 40},
+                    },
+                },
+            },
+            min_confidence=70,
+            min_risk_reward=1.5,
+        )
+        second = TradingStrategy(
+            symbol="GOLD_",
+            strategy_name="趋势策略",
+            signal_config={
+                "ai_entry": {
+                    "enabled": True,
+                    "periods": {
+                        "M5": {"enabled": True, "weight": 35},
+                        "H1": {"enabled": True, "weight": 30},
+                    },
+                },
+            },
+            min_confidence=80,
+            min_risk_reward=2.0,
+        )
+        service = LLMService(_Store(), _Klines())
+        service.set_strategy_store(_StrategyStore([first, second]))
+
+        plan = service._build_ai_analysis_plan(["GOLD_", "BTCUSD"])
+        prompt = service.build_analysis_prompt(
+            {"GOLD_": {"M5": _Klines().get_klines("GOLD_", "M5", 1)}},
+            plan,
+        )
+
+        self.assertEqual(set(plan), {"GOLD_"})
+        self.assertEqual(set(plan["GOLD_"]["periods"]), {"M5", "H1"})
+        self.assertEqual(plan["GOLD_"]["periods"]["M5"]["weight"], 35)
+        self.assertIn("短线策略", prompt)
+        self.assertIn("趋势策略", prompt)
+        self.assertIn("最低置信度 80%", prompt)
+
+    def test_analysis_skips_provider_when_no_strategy_enables_ai(self):
+        strategy = TradingStrategy(
+            symbol="GOLD_",
+            signal_config={
+                "ai_entry": {
+                    "enabled": False,
+                    "periods": {
+                        "M5": {"enabled": True, "weight": 20},
+                    },
+                },
+            },
+        )
+        store = _Store()
+        service = LLMService(store, _Klines())
+        service.set_strategy_store(_StrategyStore([strategy]))
+
+        with patch("market.services.llm_service.requests.post") as request:
+            result = service.run_analysis()
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(store.status, "skipped")
+        request.assert_not_called()
+
+    def test_model_period_and_risk_reward_are_normalized_for_strategy(self):
+        strategy = TradingStrategy(
+            symbol="GOLD_",
+            strategy_id="2e0ea156",
+            signal_config={
+                "ai_entry": {
+                    "enabled": True,
+                    "periods": {"M1": {"enabled": True, "weight": 15}},
+                },
+            },
+            min_risk_reward=1.3,
+        )
+        service = LLMService(_Store(), _Klines())
+        service.set_strategy_store(_StrategyStore([strategy]))
+        plan = service._build_ai_analysis_plan(["GOLD_"])
+        response = {
+            "GOLD_": {
+                "trade_suggestions": [{
+                    "period": "1分钟大模型趋势 (2e0ea156)",
+                    "direction": "sell",
+                    "entry_price": 4037.37,
+                    "stop_loss": 4062.0,
+                    "take_profit": 4030.0,
+                    "confidence": 80,
+                }],
+            },
+        }
+
+        normalized = service._normalize_analysis_response(response, plan)
+        suggestion = normalized["GOLD_"]["trade_suggestions"][0]
+
+        self.assertEqual(suggestion["period"], "M1")
+        risk = suggestion["stop_loss"] - suggestion["entry_price"]
+        reward = suggestion["entry_price"] - suggestion["take_profit"]
+        self.assertAlmostEqual(reward / risk, 1.3)
 
 
 if __name__ == "__main__":
