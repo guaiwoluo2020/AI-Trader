@@ -169,6 +169,39 @@ class LLMAnalysisTestCase(unittest.TestCase):
         self.assertIn("趋势策略", prompt)
         self.assertIn("最低置信度 80%", prompt)
 
+    def test_custom_prompt_injects_runtime_context_and_changes_hash(self):
+        class Config:
+            enabled = True
+            api_key = "test-key"
+            api_base = "https://example.test/v1"
+            model = "test-model"
+            system_prompt = "system-v1"
+            analysis_prompt_template = (
+                "CONSTRAINTS\n{{strategy_context}}\nDATA\n{{market_data}}"
+            )
+            prompt_version = 2
+
+        class Store(_Store):
+            def __init__(self):
+                super().__init__()
+                self.config = Config()
+
+            def get_config(self):
+                return self.config
+
+        store = Store()
+        service = LLMService(store, _Klines())
+        prompt = service.build_analysis_prompt(
+            {"GOLD_": {"M1": _Klines().get_klines("GOLD_", "M1", 1)}}
+        )
+        first_hash = service.prompt_hash(prompt)
+        store.config.system_prompt = "system-v2"
+
+        self.assertIn("CONSTRAINTS", prompt)
+        self.assertIn("GOLD_", prompt)
+        self.assertIn("2026-07-30 23:30:00", prompt)
+        self.assertNotEqual(first_hash, service.prompt_hash(prompt))
+
     def test_analysis_skips_provider_when_no_strategy_enables_ai(self):
         strategy = TradingStrategy(
             symbol="GOLD_",

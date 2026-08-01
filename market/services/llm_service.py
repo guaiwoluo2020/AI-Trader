@@ -7,12 +7,16 @@ LLM 服务模块
 
 import os
 import json
+import hashlib
 import re
 import requests
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from ..models import LLMConfig, LLMAnalysisResult
+from ..models.llm_config import (
+    DEFAULT_ANALYSIS_PROMPT_TEMPLATE, DEFAULT_SYSTEM_PROMPT,
+)
 from ..store import LLMStore
 from .kline_service import KlineService
 
@@ -121,14 +125,20 @@ class LLMService:
         """获取配置"""
         return self.llm_store.get_config().to_dict()
 
-    def configure(self, api_key: str = None, api_base: str = None, model: str = None) -> Dict:
+    def configure(
+        self, api_key: str = None, api_base: str = None, model: str = None,
+        system_prompt: str = None, analysis_prompt_template: str = None,
+    ) -> Dict:
         """配置 LLM 参数"""
-        config = self.llm_store.update_config(api_key, api_base, model)
+        config = self.llm_store.update_config(
+            api_key, api_base, model, system_prompt, analysis_prompt_template
+        )
         return {
             "status": "ok",
             "enabled": config.enabled,
             "model": config.model,
-            "api_base": config.api_base
+            "api_base": config.api_base,
+            "prompt_version": config.prompt_version,
         }
 
     def is_enabled(self) -> bool:
@@ -176,81 +186,53 @@ class LLMService:
         analysis_plan: Optional[Dict[str, Dict]] = None,
     ) -> str:
         """构建分析提示词"""
-        prompt = """你是一位专业的金融分析师。请分析以下多个交易品种的K线数据，给出每个品种的趋势判断和交易建议。
-
-## 分析要求
-
-对于每个品种，请分析：
-1. 对每个品种实际提供的策略启用周期进行趋势判断，包含趋势类型、置信度(0-100)和判断理由
-2. 整体趋势方向、强度(0-100)和总结
-3. 关键支撑位和压力位（请根据K线数据自行判断，各列出3个）
-4. 交易建议必须覆盖该品种策略启用的全部 AI 周期，period 必须只填写 H4、H1、M15、M5、M1 之一
-5. 每条建议的止盈止损必须满足该周期所关联策略中最高的最低盈亏比要求
-
-趋势类型可选值：单边上涨、单边下跌、区间震荡、震荡上升、震荡下跌、震荡收窄、震荡扩大
-
-请按以下JSON格式输出（必须是有效的JSON格式，包含所有品种）：
-
-```json
-{
-  "品种1": {
-    "trend_analysis": {
-      "策略启用周期": {"trend": "趋势类型", "confidence": 置信度, "reason": "判断理由"}
-    },
-    "overall_trend": {
-      "direction": "整体趋势方向",
-      "strength": 强度,
-      "summary": "整体趋势总结"
-    },
-    "key_levels": {
-      "resistance": [压力位1, 压力位2, 压力位3],
-      "support": [支撑位1, 支撑位2, 支撑位3]
-    },
-    "trade_suggestions": [
-      {
-        "period": "策略启用周期",
-        "direction": "buy或sell",
-        "confidence": 置信度,
-        "entry_price": 入场价格,
-        "stop_loss": 止损价格,
-        "take_profit": 止盈价格,
-        "reason": "交易理由"
-      }
-    ]
-  }
-}
-```
-
-## K线数据
-"""
-        # 添加各品种的K线数据
+        strategy_sections = []
+        market_sections = []
         for symbol, klines_data in all_klines.items():
-            prompt += f"\n### {symbol}\n"
+            constraints = [f"### {symbol}"]
             if analysis_plan and symbol in analysis_plan:
-                prompt += "\n#### 策略分析要求\n"
                 for profile in analysis_plan[symbol]["strategies"]:
                     periods = "、".join(
                         f"{period}(权重{weight})"
                         for period, weight in profile["periods"].items()
                     )
-                    prompt += (
+                    constraints.append(
                         f"- {profile['strategy_name']} ({profile['strategy_id']}): "
                         f"AI周期 {periods}；最低置信度 "
                         f"{profile['min_confidence']}%；最低盈亏比 "
-                        f"{profile['min_risk_reward']}\n"
+                        f"{profile['min_risk_reward']}"
                     )
+            if len(constraints) == 1:
+                constraints.append("- 使用系统默认分析约束")
+            strategy_sections.append("\n".join(constraints))
+
+            market_lines = [f"### {symbol}"]
             for period, klines in klines_data.items():
-                prompt += f"\n#### {period} 周期（{len(klines)}根K线）\n"
-                prompt += "| 时间 | 开盘 | 最高 | 最低 | 收盘 |\n"
-                prompt += "|------|------|------|------|------|\n"
+                market_lines.append(f"\n#### {period} 周期（{len(klines)}根K线）")
+                market_lines.append("| 时间 | 开盘 | 最高 | 最低 | 收盘 |")
+                market_lines.append("|------|------|------|------|------|")
                 for k in klines:
-                    prompt += f"| {k['timestamp']} | {k['open']:.2f} | {k['high']:.2f} | {k['low']:.2f} | {k['close']:.2f} |\n"
+                    market_lines.append(
+                        f"| {k['timestamp']} | {k['open']:.2f} | "
+                        f"{k['high']:.2f} | {k['low']:.2f} | {k['close']:.2f} |"
+                    )
+            market_sections.append("\n".join(market_lines))
 
-        prompt += """
+        config = self.llm_store.get_config()
+        template = getattr(
+            config, "analysis_prompt_template", DEFAULT_ANALYSIS_PROMPT_TEMPLATE
+        )
+        return template.replace(
+            "{{strategy_context}}", "\n\n".join(strategy_sections)
+        ).replace("{{market_data}}", "\n\n".join(market_sections))
 
-请确保输出是纯JSON格式，不要有其他文字说明。每个品种的分析结果都要完整，trade_suggestions必须覆盖该品种策略启用的全部AI周期。
-"""
-        return prompt
+    def prompt_hash(self, prompt: str) -> str:
+        """同时覆盖 system 和 user prompt，供回测缓存与审计使用。"""
+        config = self.llm_store.get_config()
+        version = getattr(config, "prompt_version", 1)
+        system_prompt = getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)
+        payload = f"v{version}\n{system_prompt}\n{prompt}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     # ==================== LLM API 调用 ====================
 
@@ -269,7 +251,7 @@ class LLMService:
             data = {
                 "model": config.model,
                 "messages": [
-                    {"role": "system", "content": "你是一位专业的金融分析师，擅长技术分析和趋势判断。请用JSON格式输出分析结果，不要有任何额外的文字说明。"},
+                    {"role": "system", "content": getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
@@ -316,7 +298,7 @@ class LLMService:
             data = {
                 "model": config.model,
                 "messages": [
-                    {"role": "system", "content": "你是一位专业的金融分析师，擅长技术分析和趋势判断。请用JSON格式输出分析结果，不要有任何额外的文字说明。"},
+                    {"role": "system", "content": getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,

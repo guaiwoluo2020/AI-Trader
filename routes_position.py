@@ -4,12 +4,13 @@
 仓位管理相关的接口路由
 """
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from typing import Dict, Optional
 
 from auth import AuthUser, require_auth
 from ea_auth import EAIdentity, require_ea_auth
 from trading_engine_manager import TradingEngineManager
+from web_account_context import resolve_web_engine
 
 
 def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -82,6 +83,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @protected_router.get("/positions")
     async def get_positions(
         symbol: Optional[str] = None,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -90,7 +92,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
         参数:
         - symbol: 可选，指定品种；不提供则返回所有
         """
-        trading_server = engine_manager.get_engine_for_user(user.user_id)
+        _, trading_server = resolve_web_engine(engine_manager, user, account_id)
         positions = trading_server.position_service.get_positions(symbol)
         return {
             "status": "ok",
@@ -101,6 +103,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @protected_router.get("/positions/summary")
     async def get_positions_summary(
         symbol: Optional[str] = None,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -109,7 +112,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
         参数:
         - symbol: 可选，指定品种；不提供则返回所有
         """
-        trading_server = engine_manager.get_engine_for_user(user.user_id)
+        _, trading_server = resolve_web_engine(engine_manager, user, account_id)
         summary = trading_server.position_service.get_summary(symbol)
         return {
             "status": "ok",
@@ -120,12 +123,13 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     async def get_position(
         symbol: str,
         ticket: int,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
         获取单个持仓详情
         """
-        trading_server = engine_manager.get_engine_for_user(user.user_id)
+        _, trading_server = resolve_web_engine(engine_manager, user, account_id)
         position = trading_server.position_service.get_position(symbol, ticket)
         if not position:
             return {"status": "error", "message": "持仓不存在"}
@@ -202,6 +206,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @protected_router.get("/trade_history")
     async def get_trade_history(
         symbol: Optional[str] = None,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -210,7 +215,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
         参数:
         - symbol: 可选，指定品种
         """
-        trading_server = engine_manager.get_engine_for_user(user.user_id)
+        _, trading_server = resolve_web_engine(engine_manager, user, account_id)
         deals = trading_server.trade_history_service.get_deals(symbol)
         statistics = trading_server.trade_history_service.get_statistics(symbol)
 
@@ -223,6 +228,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @protected_router.get("/trade_history/statistics")
     async def get_trade_history_statistics(
         symbol: Optional[str] = None,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -231,7 +237,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
         参数:
         - symbol: 可选，指定品种
         """
-        trading_server = engine_manager.get_engine_for_user(user.user_id)
+        _, trading_server = resolve_web_engine(engine_manager, user, account_id)
         statistics = trading_server.trade_history_service.get_statistics(symbol)
 
         return {

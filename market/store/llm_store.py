@@ -67,7 +67,10 @@ class LLMStore:
             self._config = self._repo.get_effective_config(self._user_id)
             return self._config
 
-    def update_config(self, api_key: str = None, api_base: str = None, model: str = None) -> LLMConfig:
+    def update_config(
+        self, api_key: str = None, api_base: str = None, model: str = None,
+        system_prompt: str = None, analysis_prompt_template: str = None,
+    ) -> LLMConfig:
         """更新配置"""
         if api_key is not None:
             self._config.api_key = api_key
@@ -75,6 +78,10 @@ class LLMStore:
             self._config.api_base = api_base
         if model is not None:
             self._config.model = model
+        if system_prompt is not None:
+            self._config.system_prompt = system_prompt
+        if analysis_prompt_template is not None:
+            self._config.analysis_prompt_template = analysis_prompt_template
 
         self._save_config_to_file()
         return self._config
@@ -95,6 +102,8 @@ class LLMStore:
                 api_key=self._config.api_key,
                 api_base=self._config.api_base,
                 model=self._config.model,
+                system_prompt=self._config.system_prompt,
+                analysis_prompt_template=self._config.analysis_prompt_template,
             )
             print("[LLMStore] 配置已保存到 SQLite")
         except Exception as e:

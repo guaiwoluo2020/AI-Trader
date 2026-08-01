@@ -4,11 +4,12 @@
 系统相关的接口路由
 """
 
-from fastapi import APIRouter, Depends
-from typing import Dict
+from fastapi import APIRouter, Depends, Query
+from typing import Dict, Optional
 from auth import AuthUser, require_auth
 from status_payload import build_system_status_payload
 from trading_engine_manager import TradingEngineManager
+from web_account_context import resolve_web_engine
 
 
 def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -33,7 +34,10 @@ def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
         return {"status": "ok", "ok": True}
     
     @protected_router.get("/status")
-    async def get_status(user: AuthUser = Depends(require_auth)) -> Dict:
+    async def get_status(
+        account_id: Optional[int] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """
         获取服务状态
         
@@ -47,7 +51,7 @@ def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
         }
         ```
         """
-        server = engine_manager.get_engine_for_user(user.user_id)
+        _, server = resolve_web_engine(engine_manager, user, account_id)
         pending_trades = server.get_all_pending_trades()
         total_instructions = sum(
             len(trades) for trades in pending_trades.values()

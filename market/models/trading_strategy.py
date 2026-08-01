@@ -54,6 +54,43 @@ class PositionConflict:
     BLOCK = "block"                          # 有持仓则阻止
 
 
+class StrategyLifecycle:
+    """策略从研发到实盘的生命周期状态。"""
+
+    DRAFT = "draft"
+    BACKTESTING = "backtesting"
+    BACKTEST_PASSED = "backtest_passed"
+    PAPER_TRADING = "paper_trading"
+    PRODUCTION = "production"
+    RETIRED = "retired"
+
+    LABELS = {
+        DRAFT: "草稿",
+        BACKTESTING: "回测中",
+        BACKTEST_PASSED: "回测通过",
+        PAPER_TRADING: "模拟盘验证",
+        PRODUCTION: "可用于实盘",
+        RETIRED: "已停用",
+    }
+
+    TRANSITIONS = {
+        DRAFT: {BACKTESTING},
+        BACKTESTING: {DRAFT, BACKTEST_PASSED},
+        BACKTEST_PASSED: {BACKTESTING, PAPER_TRADING},
+        PAPER_TRADING: {BACKTEST_PASSED, PRODUCTION},
+        PRODUCTION: {RETIRED},
+        RETIRED: set(),
+    }
+
+    @classmethod
+    def is_valid(cls, status: str) -> bool:
+        return status in cls.LABELS
+
+    @classmethod
+    def can_transition(cls, current: str, target: str) -> bool:
+        return target in cls.TRANSITIONS.get(current, set())
+
+
 @dataclass
 class TradingStrategy:
     """交易策略 - 绑定品种，配置信号权重和决策规则"""
@@ -64,6 +101,12 @@ class TradingStrategy:
 
     # ==================== 启用状态 ====================
     enabled: bool = True              # 是否启用
+    auto_execute: bool = False        # 信号通过风控后是否自动下单
+
+    # 直接构造策略保持历史兼容；通过 StrategyStore 创建的新策略会显式设为草稿。
+    lifecycle_status: str = StrategyLifecycle.PRODUCTION
+    lifecycle_updated_at: datetime = None
+    lifecycle_history: List[Dict] = field(default_factory=list)
 
     # ==================== 信号源配置（新版：支持周期级别控制）====================
     # 信号源配置结构：
@@ -171,15 +214,110 @@ class TradingStrategy:
             self.created_at = datetime.now()
         if not self.updated_at:
             self.updated_at = self.created_at
+        if not StrategyLifecycle.is_valid(self.lifecycle_status):
+            self.lifecycle_status = StrategyLifecycle.DRAFT
+        if not self.lifecycle_updated_at:
+            self.lifecycle_updated_at = self.created_at
+        if self.lifecycle_status != StrategyLifecycle.PRODUCTION:
+            self.enabled = False
+            self.auto_execute = False
         if not self.strategy_name:
             self.strategy_name = f"Strategy_{self.symbol}"
 
+    def is_runnable(self) -> bool:
+        """只有已发布且启用的策略可以生成实盘决策。"""
+        return (
+            self.lifecycle_status == StrategyLifecycle.PRODUCTION
+            and self.enabled
+        )
+
+    def is_runnable_for(self, execution_mode: str = "live") -> bool:
+        """按执行环境判断策略是否可运行，模拟盘不依赖实盘启用开关。"""
+        if execution_mode == "backtest":
+            return self.lifecycle_status != StrategyLifecycle.RETIRED
+        if execution_mode == "paper":
+            return self.lifecycle_status in {
+                StrategyLifecycle.BACKTEST_PASSED,
+                StrategyLifecycle.PAPER_TRADING,
+                StrategyLifecycle.PRODUCTION,
+            }
+        return self.is_runnable()
+
+    def transition_lifecycle(self, target_status: str, reason: str = "") -> None:
+        """按状态机推进策略生命周期。"""
+        if not StrategyLifecycle.is_valid(target_status):
+            raise ValueError(f"未知的策略生命周期状态: {target_status}")
+        if not StrategyLifecycle.can_transition(
+            self.lifecycle_status, target_status
+        ):
+            current_label = StrategyLifecycle.LABELS[self.lifecycle_status]
+            target_label = StrategyLifecycle.LABELS[target_status]
+            raise ValueError(
+                f"不允许从“{current_label}”直接转换为“{target_label}”"
+            )
+
+        now = datetime.now()
+        previous_status = self.lifecycle_status
+        self.lifecycle_status = target_status
+        self.lifecycle_updated_at = now
+        self.updated_at = now
+        if target_status != StrategyLifecycle.PRODUCTION:
+            self.enabled = False
+            self.auto_execute = False
+        self.lifecycle_history.append({
+            "from_status": previous_status,
+            "to_status": target_status,
+            "changed_at": now.isoformat(),
+            "reason": str(reason or "").strip(),
+        })
+
+    @staticmethod
+    def _config_value(value):
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, sort_keys=True, ensure_ascii=False)
+        return value
+
     def update(self, data: Dict) -> None:
         """更新配置"""
+        if data.get("enabled") and (
+            self.lifecycle_status != StrategyLifecycle.PRODUCTION
+        ):
+            raise ValueError("策略通过回测和模拟盘验证后才能启用")
+        if data.get("auto_execute") and (
+            self.lifecycle_status != StrategyLifecycle.PRODUCTION
+        ):
+            raise ValueError("策略达到“可用于实盘”状态后才能自动下单")
+
+        material_fields = {
+            "signal_config", "signal_weights", "period_weights",
+            "min_confidence", "consistency_requirement",
+            "conflict_resolution", "fixed_volume", "volume_mode",
+            "risk_percent", "max_risk_points", "max_positions",
+            "max_same_direction", "sl_mode", "sl_fixed_points",
+            "sl_atr_multiplier", "tp_mode", "tp_fixed_points",
+            "tp_risk_reward", "min_risk_reward", "max_risk_reward",
+            "min_sl_points", "max_sl_points", "trading_hours",
+            "position_conflict",
+        }
+        before = {
+            field_name: self._config_value(getattr(self, field_name))
+            for field_name in material_fields
+            if field_name in data
+        }
+        if (
+            self.lifecycle_status == StrategyLifecycle.RETIRED
+            and any(
+                before[field_name] != self._config_value(data[field_name])
+                for field_name in before
+            )
+        ):
+            raise ValueError("已停用策略不可修改，请创建新策略重新验证")
         if "strategy_name" in data:
             self.strategy_name = str(data["strategy_name"]).strip()
         if "enabled" in data:
             self.enabled = bool(data["enabled"])
+        if "auto_execute" in data:
+            self.auto_execute = bool(data["auto_execute"])
         if "signal_config" in data:
             self.signal_config = data["signal_config"]
         if "signal_weights" in data:
@@ -214,6 +352,29 @@ class TradingStrategy:
             self.position_conflict = data["position_conflict"]
         if "trading_hours" in data:
             self.trading_hours = data["trading_hours"]
+
+        material_changed = any(
+            before[field_name]
+            != self._config_value(getattr(self, field_name))
+            for field_name in before
+        )
+        if (
+            material_changed
+            and self.lifecycle_status != StrategyLifecycle.DRAFT
+        ):
+            now = datetime.now()
+            previous_status = self.lifecycle_status
+            self.lifecycle_status = StrategyLifecycle.DRAFT
+            self.lifecycle_updated_at = now
+            self.enabled = False
+            self.auto_execute = False
+            self.lifecycle_history.append({
+                "from_status": previous_status,
+                "to_status": StrategyLifecycle.DRAFT,
+                "changed_at": now.isoformat(),
+                "reason": "策略参数已修改，需要重新验证",
+            })
+        self.updated_at = datetime.now()
 
         self.updated_at = datetime.now()
 
@@ -292,6 +453,14 @@ class TradingStrategy:
             "strategy_name": self.strategy_name,
             "symbol": self.symbol,
             "enabled": self.enabled,
+            "auto_execute": self.auto_execute,
+            "lifecycle_status": self.lifecycle_status,
+            "lifecycle_label": StrategyLifecycle.LABELS[self.lifecycle_status],
+            "lifecycle_updated_at": (
+                self.lifecycle_updated_at.isoformat()
+                if self.lifecycle_updated_at else None
+            ),
+            "lifecycle_history": self.lifecycle_history,
             "signal_config": self.signal_config,
             "signal_weights": self.signal_weights,
             "period_weights": self.period_weights,
@@ -331,6 +500,17 @@ class TradingStrategy:
         if isinstance(updated_at, str):
             updated_at = datetime.fromisoformat(updated_at)
 
+        lifecycle_updated_at = data.get('lifecycle_updated_at')
+        if isinstance(lifecycle_updated_at, str):
+            lifecycle_updated_at = datetime.fromisoformat(
+                lifecycle_updated_at
+            )
+
+        # 历史配置没有生命周期字段，按原有行为视为已经可用于实盘。
+        lifecycle_status = data.get(
+            'lifecycle_status', StrategyLifecycle.PRODUCTION
+        )
+
         # 默认 signal_config
         default_signal_config = {
             "pivot": {
@@ -363,6 +543,10 @@ class TradingStrategy:
             symbol=data.get('symbol', ''),
             strategy_name=data.get('strategy_name', ''),
             enabled=data.get('enabled', True),
+            auto_execute=data.get('auto_execute', False),
+            lifecycle_status=lifecycle_status,
+            lifecycle_updated_at=lifecycle_updated_at,
+            lifecycle_history=data.get('lifecycle_history', []),
             signal_config=data.get('signal_config', default_signal_config),
             signal_weights=data.get('signal_weights', {"pivot": 30, "key_level": 40, "ai_entry": 30}),
             period_weights=data.get('period_weights', {"H4": 20, "H1": 20, "M15": 25, "M5": 20, "M1": 15}),
@@ -401,6 +585,8 @@ class TradingDecision:
     symbol: str                       # 品种
     strategy_id: str                  # 来源策略ID
     strategy_name: str = ""           # 来源策略名称
+    auto_execute: bool = False        # 策略是否要求自动下单
+    auto_executed: bool = False       # 是否已自动生成 EA 指令
 
     # ==================== 决策结果 ====================
     action: str = ""                  # buy/sell/none
@@ -449,6 +635,8 @@ class TradingDecision:
             "symbol": self.symbol,
             "strategy_id": self.strategy_id,
             "strategy_name": self.strategy_name,
+            "auto_execute": self.auto_execute,
+            "auto_executed": self.auto_executed,
             "action": self.action,
             "decision_type": self.decision_type,
             "signals": self.signals,
@@ -480,6 +668,8 @@ class TradingDecision:
             symbol=data.get('symbol', ''),
             strategy_id=data.get('strategy_id', ''),
             strategy_name=data.get('strategy_name', ''),
+            auto_execute=data.get('auto_execute', False),
+            auto_executed=data.get('auto_executed', False),
             action=data.get('action', ''),
             decision_type=data.get('decision_type', ''),
             signals=data.get('signals', []),

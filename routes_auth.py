@@ -7,6 +7,7 @@
 import os
 import time
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
@@ -128,7 +129,11 @@ def create_auth_routes(
 
     @router.get("/mt5-binding")
     async def get_mt5_binding(user: AuthUser = Depends(require_auth)):
-        account = TradingAccountRepository().get_default(user.user_id)
+        repository = TradingAccountRepository()
+        account = (
+            repository.get_primary_mt5(user.user_id)
+            or repository.get_default(user.user_id)
+        )
         return {
             "status": "ok",
             "binding": _account_payload(account) if account else None,
@@ -152,8 +157,20 @@ def create_auth_routes(
         }
 
     @router.get("/mt5-ea/status")
-    async def get_mt5_ea_status(user: AuthUser = Depends(require_auth)):
-        account = TradingAccountRepository().get_default(user.user_id)
+    async def get_mt5_ea_status(
+        account_id: Optional[int] = None,
+        user: AuthUser = Depends(require_auth),
+    ):
+        repository = TradingAccountRepository()
+        account = (
+            repository.get_by_id(user.user_id, account_id)
+            if account_id is not None
+            else repository.get_primary_mt5(user.user_id)
+        )
+        if account_id is not None and account is None:
+            raise HTTPException(status_code=404, detail="MT5 账户不存在")
+        if account is not None and account.account_type != "mt5":
+            raise HTTPException(status_code=404, detail="MT5 账户不存在")
         last_seen_at = account.last_seen_at if account else None
         connected = bool(last_seen_at and int(time.time()) - last_seen_at <= 120)
         artifact_path = _ea_artifact_path()
@@ -168,7 +185,9 @@ def create_auth_routes(
         }
 
     @router.post("/mt5-ea/download")
-    async def download_mt5_ea(user: AuthUser = Depends(require_auth)):
+    async def download_mt5_ea(
+        user: AuthUser = Depends(require_auth),
+    ):
         artifact_path = _ea_artifact_path()
         if not artifact_path.is_file():
             raise HTTPException(
@@ -201,7 +220,24 @@ def _account_payload(account):
         "user_id": account.user_id,
         "account_key": account.account_key,
         "account_name": account.account_name,
+        "account_type": account.account_type,
+        "environment": account.environment,
+        "currency": account.currency,
+        "initial_balance": account.initial_balance,
+        "balance": account.balance,
+        "equity": account.equity,
+        "free_margin": account.free_margin,
+        "margin": account.margin,
+        "account_status": account.status,
+        "financial_updated_at": account.financial_updated_at,
         "enabled": account.enabled,
+        "trading_enabled": account.trading_enabled,
+        "auto_trading_enabled": account.auto_trading_enabled,
+        "max_total_positions": account.max_total_positions,
+        "max_single_volume": account.max_single_volume,
+        "daily_loss_limit": account.daily_loss_limit,
+        "daily_order_limit": account.daily_order_limit,
+        "archived_at": account.archived_at,
         "last_seen_at": account.last_seen_at,
         "mt5_login": account.mt5_login,
         "mt5_server": account.mt5_server,

@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "wwananggxxxx"
 #property link      "https://www.mql5.com"
-#property version   "2.03"
+#property version   "2.04"
 #property strict
 
 //--- 需要访问Web请求权限
@@ -36,6 +36,8 @@ string g_activationCode = "";
 string g_credentialsFile = "AITrader_credentials.dat";
 uint g_lastPythonRequestTime = 0;
 uint g_pythonRequestInterval = 100;  // 毫秒
+uint g_lastHistoryTaskPollTime = 0;
+uint g_historyTaskPollInterval = 5000;  // 历史数据任务每5秒处理一个分片
 
 // 统计数据 - 每分钟重置
 datetime g_lastStatisticTime = 0;
@@ -233,7 +235,7 @@ bool ActivateEA(string activationCode)
                + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "\",";
    jsonBody += "\"mt5_server\":\""
                + EscapeJsonString(AccountInfoString(ACCOUNT_SERVER)) + "\",";
-   jsonBody += "\"ea_version\":\"2.03\",";
+   jsonBody += "\"ea_version\":\"2.04\",";
    jsonBody += "\"program_name\":\"" + EscapeJsonString(programName) + "\"";
    jsonBody += "}";
 
@@ -766,8 +768,11 @@ void ParseTradeArray(string jsonData)
 //+------------------------------------------------------------------+
 void ExecuteTradeFromJson(string tradeJson)
   {
+   string instructionId = ExtractJsonString(tradeJson, "instruction_id");
+   string orderId = ExtractJsonString(tradeJson, "order_id");
    string symbol = ExtractJsonString(tradeJson, "symbol");
    string action = ExtractJsonString(tradeJson, "action");
+   double requestedPrice = ExtractJsonDouble(tradeJson, "price");
    double volume = ExtractJsonDouble(tradeJson, "mount");
    double sl = ExtractJsonDouble(tradeJson, "sl");
    double tp = ExtractJsonDouble(tradeJson, "tp");
@@ -800,7 +805,8 @@ void ExecuteTradeFromJson(string tradeJson)
    ENUM_ORDER_TYPE orderType = (action == "b") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
 
    Print("[EA] 准备执行交易: ", (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"), " ", volume, " ", symbol, " desc=", description);
-   ExecuteTrade(orderType, volume, sl, tp, description);
+   ExecuteTrade(orderType, volume, sl, tp, description,
+                instructionId, orderId, requestedPrice, action);
   }
 
 //+------------------------------------------------------------------+
@@ -844,7 +850,9 @@ double ExtractJsonDouble(string json, string key)
 //+------------------------------------------------------------------+
 //| 执行交易                                                          |
 //+------------------------------------------------------------------+
-void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp, string description)
+void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp,
+                  string description, string instructionId, string orderId,
+                  double requestedPrice, string action)
   {
    if(volume <= 0)
      {
@@ -878,9 +886,11 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
    volume = MathRound(volume / stepVolume) * stepVolume;
 
    // 执行订单
+   bool succeeded = false;
    if(orderType == ORDER_TYPE_BUY)
      {
-      if(trade.Buy(volume, _Symbol, 0, sl, tp, description))
+      succeeded = trade.Buy(volume, _Symbol, 0, sl, tp, description);
+      if(succeeded)
         {
          Print("Buy order executed: Volume=", volume, " SL=", sl, " TP=", tp, " Description=", description);
          RecordTrade("BUY", _Symbol, volume, sl, tp, trade.ResultPrice());
@@ -892,7 +902,8 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
      }
    else if(orderType == ORDER_TYPE_SELL)
      {
-      if(trade.Sell(volume, _Symbol, 0, sl, tp, description))
+      succeeded = trade.Sell(volume, _Symbol, 0, sl, tp, description);
+      if(succeeded)
         {
          Print("Sell order executed: Volume=", volume, " SL=", sl, " TP=", tp, " Description=", description);
          RecordTrade("SELL", _Symbol, volume, sl, tp, trade.ResultPrice());
@@ -902,6 +913,68 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
          Print("Sell order failed: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
         }
      }
+
+   SendTradeExecutionReport(
+      instructionId,
+      orderId,
+      _Symbol,
+      action,
+      succeeded,
+      requestedPrice,
+      trade.ResultPrice(),
+      volume,
+      succeeded ? trade.ResultVolume() : 0,
+      (long)trade.ResultOrder(),
+      (long)trade.ResultDeal(),
+      (long)trade.ResultRetcode(),
+      succeeded ? "" : trade.ResultRetcodeDescription()
+   );
+  }
+
+//+------------------------------------------------------------------+
+//| 即时回报服务端交易指令执行结果                                   |
+//+------------------------------------------------------------------+
+void SendTradeExecutionReport(
+   string instructionId, string orderId, string symbol, string action,
+   bool success, double requestedPrice, double executedPrice,
+   double requestedVolume, double executedVolume, long mt5Order,
+   long mt5Deal, long retcode, string errorMessage)
+  {
+   if(instructionId == "")
+      return;
+
+   string jsonBody = "{";
+   jsonBody += "\"instruction_id\":\"" + EscapeJsonString(instructionId) + "\",";
+   jsonBody += "\"order_id\":\"" + EscapeJsonString(orderId) + "\",";
+   jsonBody += "\"symbol\":\"" + EscapeJsonString(symbol) + "\",";
+   jsonBody += "\"action\":\"" + EscapeJsonString(action) + "\",";
+   jsonBody += "\"success\":" + (success ? "true" : "false") + ",";
+   jsonBody += "\"requested_price\":" + DoubleToString(requestedPrice, _Digits) + ",";
+   jsonBody += "\"executed_price\":" + DoubleToString(executedPrice, _Digits) + ",";
+   jsonBody += "\"requested_volume\":" + DoubleToString(requestedVolume, 2) + ",";
+   jsonBody += "\"executed_volume\":" + DoubleToString(executedVolume, 2) + ",";
+   jsonBody += "\"mt5_order\":" + IntegerToString(mt5Order) + ",";
+   jsonBody += "\"mt5_deal\":" + IntegerToString(mt5Deal) + ",";
+   jsonBody += "\"retcode\":" + IntegerToString(retcode) + ",";
+   jsonBody += "\"error_message\":\"" + EscapeJsonString(errorMessage) + "\"";
+   jsonBody += "}";
+
+   uchar postData[];
+   uchar responseData[];
+   string outheaders = "";
+   StringToCharArray(jsonBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   ArrayResize(postData, ArraySize(postData) - 1);
+   int responseCode = WebRequest(
+      "POST",
+      g_pythonServer + "/ea/trade_execution",
+      BuildAuthenticatedHeaders(),
+      5000,
+      postData,
+      responseData,
+      outheaders
+   );
+   if(responseCode != 200)
+      Print("[EA] 交易执行回报失败: HTTP ", responseCode);
   }
 
 //+------------------------------------------------------------------+
@@ -1041,6 +1114,9 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTimer()
   {
+//--- 历史任务不依赖实时Tick，休市期间也可以继续下载
+   CheckHistoricalDataTask();
+
 //--- 检查最后一次Tick时间，如果超过10秒无Tick则跳过（可能休市）
    datetime now = TimeCurrent();
    if(g_lastTickTime == 0 || (now - g_lastTickTime) > 10)
@@ -1250,6 +1326,152 @@ bool SendKlineToServer(string url, string jsonData)
       Print("Failed to push K-line data. Response code: ", responseCode);
       return false;
      }
+  }
+
+//+------------------------------------------------------------------+
+//| 检查并处理历史回测数据任务                                       |
+//+------------------------------------------------------------------+
+void CheckHistoricalDataTask()
+  {
+   uint currentTime = GetTickCount();
+   if((currentTime - g_lastHistoryTaskPollTime) < g_historyTaskPollInterval)
+      return;
+   g_lastHistoryTaskPollTime = currentTime;
+
+   string headers = BuildAuthenticatedHeaders();
+   uchar emptyData[];
+   uchar responseData[];
+   string responseHeaders = "";
+   string url = g_pythonServer
+                + "/ea/backtest-data/tasks/next?symbol="
+                + URLEncode(_Symbol);
+   int responseCode = WebRequest(
+      "GET", url, headers, 5000, emptyData, responseData, responseHeaders
+   );
+   if(responseCode != 200)
+     {
+      if(responseCode != -1)
+         Print("[历史数据] 获取任务失败，HTTP=", responseCode);
+      return;
+     }
+
+   string response = CharArrayToString(
+      responseData, 0, WHOLE_ARRAY, CP_UTF8
+   );
+   string datasetId = ExtractJsonString(response, "dataset_id");
+   if(StringLen(datasetId) == 0)
+      return;
+
+   int chunkIndex = (int)ExtractJsonDouble(response, "chunk_index");
+   long rangeStart = (long)ExtractJsonDouble(response, "range_start");
+   long rangeEnd = (long)ExtractJsonDouble(response, "range_end");
+   if(rangeStart <= 0 || rangeEnd < rangeStart)
+     {
+      Print("[历史数据] 服务端返回了无效时间范围");
+      return;
+     }
+
+   UploadHistoricalDataChunk(
+      datasetId, chunkIndex, (datetime)rangeStart, (datetime)rangeEnd
+   );
+  }
+
+//+------------------------------------------------------------------+
+//| 从MT5读取并上传一个历史M1分片                                    |
+//+------------------------------------------------------------------+
+bool UploadHistoricalDataChunk(
+   string datasetId,
+   int chunkIndex,
+   datetime rangeStart,
+   datetime rangeEnd
+)
+  {
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);
+   ResetLastError();
+   int copied = CopyRates(
+      _Symbol, PERIOD_M1, rangeStart, rangeEnd, rates
+   );
+   if(copied < 0)
+     {
+      Print(
+         "[历史数据] CopyRates暂未就绪，将稍后重试。error=",
+         GetLastError(), ", from=", TimeToString(rangeStart),
+         ", to=", TimeToString(rangeEnd)
+      );
+      return false;
+     }
+
+   string json = "{";
+   json += "\"chunk_index\":" + IntegerToString(chunkIndex) + ",";
+   json += "\"range_start\":" + IntegerToString((long)rangeStart) + ",";
+   json += "\"range_end\":" + IntegerToString((long)rangeEnd) + ",";
+   json += "\"broker_server\":\""
+           + EscapeJsonString(AccountInfoString(ACCOUNT_SERVER)) + "\",";
+   json += "\"ea_version\":\"2.04\",";
+   json += "\"bars\":[";
+
+   for(int i = 0; i < copied; i++)
+     {
+      if(i > 0) json += ",";
+      json += "{";
+      json += "\"time\":" + IntegerToString((long)rates[i].time) + ",";
+      json += "\"open\":" + DoubleToString(rates[i].open, _Digits) + ",";
+      json += "\"high\":" + DoubleToString(rates[i].high, _Digits) + ",";
+      json += "\"low\":" + DoubleToString(rates[i].low, _Digits) + ",";
+      json += "\"close\":" + DoubleToString(rates[i].close, _Digits) + ",";
+      json += "\"tick_volume\":"
+              + IntegerToString((long)rates[i].tick_volume) + ",";
+      json += "\"real_volume\":"
+              + IntegerToString((long)rates[i].real_volume) + ",";
+      json += "\"spread\":" + IntegerToString((long)rates[i].spread);
+      json += "}";
+     }
+   json += "]}";
+
+   uchar postData[];
+   uchar responseData[];
+   StringToCharArray(json, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(postData) > 0)
+      ArrayResize(postData, ArraySize(postData) - 1);
+
+   string responseHeaders = "";
+   string url = g_pythonServer
+                + "/ea/backtest-data/tasks/" + datasetId + "/chunks";
+   int responseCode = WebRequest(
+      "POST",
+      url,
+      BuildAuthenticatedHeaders(),
+      15000,
+      postData,
+      responseData,
+      responseHeaders
+   );
+   if(responseCode != 200)
+     {
+      string errorText = CharArrayToString(
+         responseData, 0, WHOLE_ARRAY, CP_UTF8
+      );
+      Print(
+         "[历史数据] 分片上传失败，HTTP=", responseCode,
+         ", dataset=", datasetId, ", chunk=", chunkIndex,
+         ", response=", errorText
+      );
+      return false;
+     }
+
+   string response = CharArrayToString(
+      responseData, 0, WHOLE_ARRAY, CP_UTF8
+   );
+   double progress = ExtractJsonDouble(response, "progress");
+   string datasetStatus = ExtractJsonString(response, "dataset_status");
+   Print(
+      "[历史数据] 分片上传成功，dataset=", datasetId,
+      ", chunk=", chunkIndex, ", bars=", copied,
+      ", progress=", DoubleToString(progress, 1), "%",
+      ", status=", datasetStatus
+   );
+   return true;
   }
 
 //+------------------------------------------------------------------+

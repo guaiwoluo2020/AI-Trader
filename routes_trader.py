@@ -4,11 +4,13 @@
 交易员相关的接口路由
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional, List, Dict
 from auth import AuthUser, require_auth
 from models import TradeInstruction
 from trading_engine_manager import TradingEngineManager
+from web_account_context import resolve_web_engine
+from sqlite_storage import TradeExecutionRepository
 
 
 def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -20,6 +22,7 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @router.post("/send_trade_instructions")
     async def send_trade_instructions(
         instructions: List[TradeInstruction],
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -62,7 +65,11 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
         }
         ```
         """
-        server = engine_manager.get_engine_for_user(user.user_id)
+        account, server = resolve_web_engine(engine_manager, user, account_id)
+        if account.status != "active" or not account.trading_enabled:
+            raise HTTPException(status_code=409, detail="当前账户交易已暂停")
+        if any(item.mount > account.max_single_volume for item in instructions):
+            raise HTTPException(status_code=400, detail="交易手数超过账户单笔限制")
         result = server.add_trade_instruction(instructions)
         added = result.get("added", 0)
         rejected = result.get("rejected", 0)
@@ -77,6 +84,7 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @router.get("/query_pending_trades")
     async def query_pending_trades(
         symbol: Optional[str] = Query(None),
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -102,7 +110,7 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
         }
         ```
         """
-        server = engine_manager.get_engine_for_user(user.user_id)
+        _, server = resolve_web_engine(engine_manager, user, account_id)
         all_trades = server.get_all_pending_trades()
         if symbol:
             result = {symbol: all_trades.get(symbol, [])}
@@ -115,6 +123,7 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
     async def query_statistics(
         count: int = Query(10, description="获取最新的统计数据条数（最多10条）"),
         symbol: Optional[str] = Query(None, description="交易品种"),
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -143,7 +152,7 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
         ```
         """
         count = min(count, 10)
-        server = engine_manager.get_engine_for_user(user.user_id)
+        _, server = resolve_web_engine(engine_manager, user, account_id)
         stats = server.get_latest_statistics(count, symbol)
         available_symbols = server.statistics_store.get_status()["symbols"]
         return {
@@ -155,6 +164,7 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @router.delete("/clear_trades")
     async def clear_trades(
         symbol: Optional[str] = Query(None),
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -171,11 +181,23 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
         }
         ```
         """
-        server = engine_manager.get_engine_for_user(user.user_id)
+        _, server = resolve_web_engine(engine_manager, user, account_id)
         count = server.clear_trades(symbol)
         return {
             "status": "ok",
             "message": f"已清空 {count} 条交易指令"
         }
+
+    @router.get("/trade_executions")
+    async def list_trade_executions(
+        account_id: Optional[int] = Query(None),
+        count: int = Query(100),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        account, _ = resolve_web_engine(engine_manager, user, account_id)
+        reports = TradeExecutionRepository().list_for_account(
+            user.user_id, account.account_id, count
+        )
+        return {"status": "ok", "count": len(reports), "reports": reports}
     
     return router

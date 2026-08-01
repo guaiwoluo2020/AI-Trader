@@ -28,7 +28,11 @@ from market.services import StatisticsService, PositionService, TradeHistoryServ
 from market.trade_config import TradeConfig
 from market.llm_analyzer import LLMAnalyzer
 from market.system_log import SystemLog
-from sqlite_storage import RuntimeStateRepository
+from sqlite_storage import (
+    RuntimeStateRepository,
+    StrategyDeploymentRepository,
+    TradingAccountRepository,
+)
 
 
 class TradingServer:
@@ -43,6 +47,8 @@ class TradingServer:
     def __init__(self, user_id: int = None, account_id: int = None):
         self.user_id = user_id
         self.account_id = account_id
+        self.strategy_deployments = StrategyDeploymentRepository()
+        self.account_repository = TradingAccountRepository()
 
         # 线程锁
         self.lock = threading.RLock()
@@ -331,6 +337,21 @@ class TradingServer:
         if not self.trade_config.enabled:
             return result
 
+        account = (
+            self.account_repository.get_by_id(self.user_id, self.account_id)
+            if self.user_id is not None and self.account_id
+            else None
+        )
+        if account is not None:
+            if account.status != "active" or not account.trading_enabled:
+                return result
+            self._risk_manager.set_account_limits(
+                max_positions=account.max_total_positions,
+                max_single_volume=account.max_single_volume,
+                daily_loss_limit=account.daily_loss_limit,
+                daily_order_limit=account.daily_order_limit,
+            )
+
         # 1. 信号层生成信号
         signals = self._signal_service.generate_signals(symbol, current_price)
         result["signals_generated"] = len(signals)
@@ -339,9 +360,15 @@ class TradingServer:
             print(f"[TradingServer] {symbol} 生成了 {len(signals)} 个信号")
 
         # 2. 策略层做决策
+        strategy_ids = self.strategy_deployments.list_active_strategy_ids(
+            self.user_id, self.account_id or 0, "live"
+        ) if self.user_id is not None else []
+        self.strategy_service.set_allowed_strategy_ids(strategy_ids)
         decisions = self.strategy_service.make_decisions(symbol, current_price)
 
         for decision in decisions:
+            if account is not None and not account.auto_trading_enabled:
+                decision.auto_execute = False
             # 记录决策历史
             self._decision_history.append(decision)
 
@@ -354,6 +381,9 @@ class TradingServer:
                         "symbol": decision.symbol,
                         "strategy_id": decision.strategy_id,
                         "strategy_name": decision.strategy_name,
+                        "auto_execute": decision.auto_execute,
+                        "auto_executed": decision.auto_executed,
+                        "confirmed": decision.auto_executed,
                         "action": decision.action,
                         "price": decision.entry_price,
                         "volume": decision.volume,
@@ -590,9 +620,14 @@ class TradingServer:
         """手动触发大模型分析"""
         return self.llm_analyzer.trigger_analysis()
 
-    def configure_llm(self, api_key: str = None, api_base: str = None, model: str = None) -> Dict:
+    def configure_llm(
+        self, api_key: str = None, api_base: str = None, model: str = None,
+        system_prompt: str = None, analysis_prompt_template: str = None,
+    ) -> Dict:
         """配置大模型参数"""
-        return self.llm_analyzer.configure(api_key, api_base, model)
+        return self.llm_analyzer.configure(
+            api_key, api_base, model, system_prompt, analysis_prompt_template
+        )
 
     # ==================== 状态查询 ====================
 

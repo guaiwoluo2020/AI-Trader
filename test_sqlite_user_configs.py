@@ -10,7 +10,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from market.models import TradingStrategy
+from market.models import StrategyLifecycle, TradingStrategy
 from market.store.llm_store import LLMStore
 from sqlite_storage import (
     LLMAccessRepository,
@@ -73,6 +73,28 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.assertEqual(config_a.model, "model-a")
         self.assertEqual(config_b.api_key, "")
         self.assertNotEqual(config_a.api_base, config_b.api_base)
+
+    def test_llm_prompt_configuration_is_versioned_and_validated(self):
+        initial = self.llm_repo.get_config(self.user_a.user_id)
+        customized = self.llm_repo.save_config(
+            self.user_a.user_id,
+            system_prompt="你是严格的黄金分析师",
+            analysis_prompt_template=(
+                "策略={{strategy_context}}\n行情={{market_data}}\n只输出JSON"
+            ),
+        )
+
+        self.assertEqual(customized.prompt_version, initial.prompt_version + 1)
+        self.assertEqual(customized.system_prompt, "你是严格的黄金分析师")
+        with self.assertRaisesRegex(ValueError, "market_data"):
+            self.llm_repo.save_config(
+                self.user_a.user_id,
+                analysis_prompt_template="仅有{{strategy_context}}",
+            )
+
+        restored = self.llm_repo.reset_prompts(self.user_a.user_id)
+        self.assertGreater(restored.prompt_version, customized.prompt_version)
+        self.assertIn("{{market_data}}", restored.analysis_prompt_template)
 
     def test_approved_user_uses_shared_admin_llm_config(self):
         admin = self.user_repo.create_user(
@@ -157,6 +179,40 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         )
         self.assertIsNotNone(reloaded)
         self.assertFalse(reloaded.signal_config["pivot"]["enabled"])
+
+    def test_strategy_lifecycle_is_persisted(self):
+        strategy = TradingStrategy(
+            symbol="GOLD#",
+            strategy_name="LifecycleGold",
+            enabled=False,
+            lifecycle_status=StrategyLifecycle.DRAFT,
+        )
+        strategy.transition_lifecycle(StrategyLifecycle.BACKTESTING)
+        self.strategy_repo.save_strategy(self.user_a.user_id, strategy)
+
+        reloaded = self.strategy_repo.get_strategy_by_id(
+            self.user_a.user_id, strategy.strategy_id
+        )
+
+        self.assertEqual(
+            reloaded.lifecycle_status, StrategyLifecycle.BACKTESTING
+        )
+        self.assertEqual(len(reloaded.lifecycle_history), 1)
+
+    def test_strategy_without_lifecycle_keeps_legacy_production_status(self):
+        strategy = TradingStrategy(symbol="GOLD#")
+        payload = strategy.to_dict()
+        payload.pop("lifecycle_status")
+        payload.pop("lifecycle_label")
+        payload.pop("lifecycle_updated_at")
+        payload.pop("lifecycle_history")
+
+        restored = TradingStrategy.from_dict(payload)
+
+        self.assertEqual(
+            restored.lifecycle_status, StrategyLifecycle.PRODUCTION
+        )
+        self.assertTrue(restored.is_runnable())
 
     def test_legacy_symbol_primary_key_is_migrated(self):
         legacy_db = os.path.join(self.temp_dir.name, "legacy.db")

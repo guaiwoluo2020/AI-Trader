@@ -10,6 +10,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 from background_scheduler import SharedTaskScheduler
 from ea_auth import EAIdentity
+from paper_trading import PaperTradingService
 from server import TradingServer
 from sqlite_storage import TradingAccountRepository
 
@@ -43,6 +44,7 @@ class TradingEngineManager:
         self._lock = threading.RLock()
         self._event_loop = None
         self._account_repo = TradingAccountRepository()
+        self.paper_trading = PaperTradingService()
         self._idle_timeout_seconds = float(
             idle_timeout_seconds
             if idle_timeout_seconds is not None
@@ -54,6 +56,7 @@ class TradingEngineManager:
             max_workers=int(os.getenv("AI_TRADER_TASK_WORKERS", "4")),
         )
         self._scheduler_started = False
+        self._next_paper_maintenance_at = time.monotonic() + 10
 
     @staticmethod
     def _create_engine(user_id: int, account_id: int) -> TradingServer:
@@ -85,7 +88,10 @@ class TradingEngineManager:
         return self.get_engine(identity.user_id, identity.account_id)
 
     def get_engine_for_user(self, user_id: int) -> TradingServer:
-        account = self._account_repo.get_default(user_id)
+        account = self._account_repo.get_primary_mt5(user_id)
+        if account is None:
+            default = self._account_repo.get_default(user_id)
+            account = default if default and default.status == "active" else None
         account_id = account.account_id if account else 0
         return self.get_engine(user_id, account_id)
 
@@ -140,6 +146,19 @@ class TradingEngineManager:
             ],
         }
 
+    def refresh_user_strategies(self, user_id: int) -> None:
+        """策略变更后同步刷新该用户所有已运行账户引擎。"""
+        with self._lock:
+            engines = [
+                runtime.engine for key, runtime in self._engines.items()
+                if key.user_id == int(user_id)
+            ]
+        for engine in engines:
+            store = getattr(getattr(engine, "strategy_service", None), "strategy_store", None)
+            reload_strategy = getattr(store, "reload_from_storage", None)
+            if reload_strategy:
+                reload_strategy()
+
     def close_all(self) -> None:
         with self._lock:
             runtimes = list(self._engines.values())
@@ -164,6 +183,12 @@ class TradingEngineManager:
         now: float,
         scheduler: SharedTaskScheduler,
     ) -> None:
+        if now >= self._next_paper_maintenance_at:
+            self._next_paper_maintenance_at = now + 10
+            scheduler.submit(
+                ("paper", "maintenance"), self.paper_trading.run_maintenance
+            )
+
         with self._lock:
             items = list(self._engines.items())
 

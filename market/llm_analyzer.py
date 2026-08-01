@@ -103,9 +103,14 @@ class LLMAnalyzer:
 
     # ==================== 配置 ====================
 
-    def configure(self, api_key: str = None, api_base: str = None, model: str = None) -> Dict:
+    def configure(
+        self, api_key: str = None, api_base: str = None, model: str = None,
+        system_prompt: str = None, analysis_prompt_template: str = None,
+    ) -> Dict:
         """配置 LLM 参数"""
-        result = self.llm_service.configure(api_key, api_base, model)
+        result = self.llm_service.configure(
+            api_key, api_base, model, system_prompt, analysis_prompt_template
+        )
 
         return result
 

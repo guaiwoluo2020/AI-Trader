@@ -47,6 +47,8 @@ class TradingInstruction:
     def to_dict(self) -> Dict:
         """转换为字典（用于返回给EA）"""
         return {
+            "instruction_id": self.instruction_id,
+            "order_id": self.order_id or "",
             "symbol": self.symbol,
             "action": self.action.lower(),
             "mount": self.mount,

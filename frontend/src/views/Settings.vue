@@ -187,14 +187,64 @@
                 <v-expansion-panel-title>
                   <div class="d-flex align-center">
                     <strong class="mr-3">{{ strategy.symbol }}</strong>
+                    <v-chip :color="getLifecycleMeta(strategy).color" size="x-small">
+                      {{ getLifecycleMeta(strategy).label }}
+                    </v-chip>
                     <v-chip :color="strategy.enabled ? 'success' : 'grey'" size="x-small">
                       {{ strategy.enabled ? '启用' : '禁用' }}
+                    </v-chip>
+                    <v-chip v-if="strategy.auto_execute" color="warning" size="x-small" class="ml-2">
+                      自动下单
                     </v-chip>
                     <span class="text-caption grey--text ml-3">{{ strategy.strategy_name }}</span>
                     <span class="text-caption grey--text ml-2">#{{ strategy.strategy_id }}</span>
                   </div>
                 </v-expansion-panel-title>
                 <v-expansion-panel-text>
+                  <v-alert type="info" variant="tonal" density="compact" class="mb-4">
+                    <div class="d-flex flex-wrap align-center justify-space-between">
+                      <div class="mr-4">
+                        <strong>生命周期：{{ getLifecycleMeta(strategy).label }}</strong>
+                        <div class="text-caption mt-1">
+                          {{ getLifecycleMeta(strategy).description }}
+                        </div>
+                      </div>
+                      <div class="d-flex flex-wrap ga-2 mt-2 mt-md-0">
+                        <v-btn
+                          v-for="action in getLifecycleActions(strategy)"
+                          :key="action.target"
+                          :color="action.color"
+                          size="small"
+                          variant="outlined"
+                          :disabled="isLifecycleActionDisabled(strategy, action)"
+                          :loading="strategyLifecycleSaving === strategy.strategy_id"
+                          @click="transitionStrategyLifecycle(strategy, action)"
+                        >
+                          <v-icon start>{{ action.icon }}</v-icon>
+                          {{ action.label }}
+                        </v-btn>
+                      </div>
+                    </div>
+                  </v-alert>
+
+                  <div v-if="getAdmission(strategy)" class="admission-panel mb-4">
+                    <div class="admission-title">
+                      <div><strong>策略准入证据</strong><span>只认可当前策略参数版本产生的结果</span></div>
+                      <v-chip size="small" :color="getAdmission(strategy).eligible_for_production ? 'success' : 'warning'" variant="tonal">
+                        {{ getAdmission(strategy).eligible_for_production ? '满足实盘准入' : '验证进行中' }}
+                      </v-chip>
+                    </div>
+                    <div class="admission-stages">
+                      <article v-for="stage in admissionStages(strategy)" :key="stage.key">
+                        <div><v-icon size="18" :color="stage.data.passed ? 'success' : 'grey'">{{ stage.data.passed ? 'mdi-check-decagram' : 'mdi-progress-clock' }}</v-icon><strong>{{ stage.label }}</strong></div>
+                        <p>{{ stage.data.message }}</p>
+                        <div v-if="stage.data.checks?.length" class="admission-checks">
+                          <v-chip v-for="check in stage.data.checks" :key="check.key" size="x-small" :color="check.passed ? 'success' : 'error'" variant="tonal">{{ check.label }}</v-chip>
+                        </div>
+                      </article>
+                    </div>
+                  </div>
+
                   <!-- 基本信息 -->
                   <v-row class="mb-3">
                     <v-col cols="12" md="3">
@@ -204,7 +254,8 @@
                         color="success"
                         dense
                         hide-details
-                        @change="updateStrategy(strategy)"
+                        :disabled="strategy.lifecycle_status !== 'production'"
+                        @update:model-value="updateStrategy(strategy)"
                       ></v-switch>
                     </v-col>
                     <v-col cols="12" md="3">
@@ -239,6 +290,24 @@
                       ></v-select>
                     </v-col>
                   </v-row>
+
+                  <v-alert type="warning" variant="tonal" density="compact" class="mb-3">
+                    <div class="d-flex flex-wrap align-center">
+                      <v-switch
+                        v-model="strategy.auto_execute"
+                        label="信号推荐后自动下单"
+                        color="success"
+                        density="compact"
+                        hide-details
+                        class="mr-3"
+                        :disabled="strategy.lifecycle_status !== 'production'"
+                        @change="updateStrategy(strategy)"
+                      ></v-switch>
+                      <span class="text-caption">
+                        仅“可用于实盘”的策略可以开启；信号通过仓位和风险检查后将直接生成 MT5 交易指令。
+                      </span>
+                    </div>
+                  </v-alert>
 
                   <!-- 信号权重 -->
                   <div class="text-subtitle-2 mb-2">信号源配置</div>
@@ -666,6 +735,57 @@
                   ></v-text-field>
                 </v-col>
               </v-row>
+              <v-expansion-panels class="mt-4" variant="accordion">
+                <v-expansion-panel>
+                  <v-expansion-panel-title>
+                    <div class="d-flex align-center ga-3">
+                      <v-icon color="primary">mdi-text-box-edit-outline</v-icon>
+                      <div>
+                        <div class="font-weight-medium">分析提示词</div>
+                        <div class="text-caption text-medium-emphasis">
+                          版本 {{ llmConfig.prompt_version }} · 修改后实时分析与新回测共同生效
+                        </div>
+                      </div>
+                    </div>
+                  </v-expansion-panel-title>
+                  <v-expansion-panel-text>
+                    <v-alert type="info" variant="tonal" density="compact" class="mb-4">
+                      分析模板必须保留 <code v-pre>{{strategy_context}}</code> 和
+                      <code v-pre>{{market_data}}</code>，系统会在调用前注入策略约束与K线数据。
+                    </v-alert>
+                    <v-textarea
+                      v-model="llmConfig.system_prompt"
+                      label="System Prompt"
+                      rows="4"
+                      auto-grow
+                      counter="10000"
+                      variant="outlined"
+                      hint="定义模型角色、行为边界和输出原则"
+                      persistent-hint
+                    />
+                    <v-textarea
+                      v-model="llmConfig.analysis_prompt_template"
+                      label="分析 Prompt 模板"
+                      rows="14"
+                      auto-grow
+                      counter="50000"
+                      variant="outlined"
+                      hint="建议保留JSON输出结构，避免分析结果无法解析"
+                      persistent-hint
+                      class="mt-3 prompt-template-editor"
+                    />
+                    <v-btn
+                      variant="tonal"
+                      color="warning"
+                      prepend-icon="mdi-restore"
+                      :loading="llmPromptResetting"
+                      @click="resetLLMPrompts"
+                    >
+                      恢复系统默认提示词
+                    </v-btn>
+                  </v-expansion-panel-text>
+                </v-expansion-panel>
+              </v-expansion-panels>
               <v-row class="mt-2">
                 <v-col cols="12">
                   <v-btn color="primary" @click="saveLLMConfig" :loading="llmSaving">
@@ -832,10 +952,14 @@ export default {
       api_key_set: false,
       api_base: 'https://api.openai.com/v1',
       model: 'gpt-4o-mini',
+      system_prompt: '',
+      analysis_prompt_template: '',
+      prompt_version: 1,
       enabled: false
     })
     const showApiKey = ref(false)
     const llmSaving = ref(false)
+    const llmPromptResetting = ref(false)
     const llmAccess = ref({
       status: 'not_requested',
       access_granted: false,
@@ -1054,6 +1178,9 @@ export default {
             api_key_set: data.config.api_key_set || false,
             api_base: data.config.api_base || 'https://api.openai.com/v1',
             model: data.config.model || 'gpt-4o-mini',
+            system_prompt: data.config.system_prompt || '',
+            analysis_prompt_template: data.config.analysis_prompt_template || '',
+            prompt_version: data.config.prompt_version || 1,
             enabled: data.config.enabled || false
           }
         }
@@ -1127,7 +1254,9 @@ export default {
       try {
         const updateData = {
           api_base: llmConfig.value.api_base,
-          model: llmConfig.value.model
+          model: llmConfig.value.model,
+          system_prompt: llmConfig.value.system_prompt,
+          analysis_prompt_template: llmConfig.value.analysis_prompt_template
         }
         // 只有输入了新的API Key才更新
         if (llmConfig.value.api_key) {
@@ -1152,12 +1281,30 @@ export default {
       }
     }
 
+    const resetLLMPrompts = async () => {
+      if (!confirm('确定恢复系统默认提示词吗？当前自定义内容将被覆盖。')) return
+      llmPromptResetting.value = true
+      try {
+        const data = await marketAPI.resetLLMPrompts()
+        successMessage.value = data.message || '提示词已恢复为系统默认值'
+        showSuccess.value = true
+        await loadLLMConfig()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '恢复默认提示词失败'
+        showError.value = true
+      } finally {
+        llmPromptResetting.value = false
+      }
+    }
+
     // ==================== 策略配置 ====================
 
     // 策略数据
     const strategies = ref([])
     const strategiesLoading = ref(false)
     const strategySaving = ref(null)
+    const strategyLifecycleSaving = ref(null)
+    const strategyAdmissions = ref({})
     const newStrategySymbol = ref('')
     const newStrategyName = ref('')
 
@@ -1179,18 +1326,139 @@ export default {
       { title: '风险回报比', value: 'risk_reward' }
     ]
 
+    const lifecycleMeta = {
+      draft: {
+        label: '草稿',
+        color: 'grey',
+        description: '策略参数可以编辑，完成后进入历史回测。'
+      },
+      backtesting: {
+        label: '回测中',
+        color: 'info',
+        description: '策略正在进行历史数据验证，暂不可用于交易。'
+      },
+      backtest_passed: {
+        label: '回测通过',
+        color: 'primary',
+        description: '历史回测已通过，下一步进入模拟盘验证。'
+      },
+      paper_trading: {
+        label: '模拟盘验证',
+        color: 'warning',
+        description: '策略正在模拟盘运行，确认实盘表现前不会真实下单。'
+      },
+      production: {
+        label: '可用于实盘',
+        color: 'success',
+        description: '策略已完成验证，可以启用信号推荐或自动下单。'
+      },
+      retired: {
+        label: '已停用',
+        color: 'error',
+        description: '策略已经归档，不再参与信号和交易决策。'
+      }
+    }
+
+    const lifecycleActions = {
+      draft: [
+        { target: 'backtesting', label: '开始回测', color: 'primary', icon: 'mdi-play-circle-outline' }
+      ],
+      backtesting: [
+        { target: 'backtest_passed', label: '标记回测通过', color: 'success', icon: 'mdi-check-decagram-outline' },
+        { target: 'draft', label: '取消回测', color: 'grey', icon: 'mdi-undo' }
+      ],
+      backtest_passed: [
+        { target: 'paper_trading', label: '开始模拟盘', color: 'warning', icon: 'mdi-flask-outline' },
+        { target: 'backtesting', label: '重新回测', color: 'info', icon: 'mdi-refresh' }
+      ],
+      paper_trading: [
+        { target: 'production', label: '批准用于实盘', color: 'success', icon: 'mdi-rocket-launch-outline', confirm: true },
+        { target: 'backtest_passed', label: '结束模拟盘', color: 'grey', icon: 'mdi-stop-circle-outline' }
+      ],
+      production: [
+        { target: 'retired', label: '停用并归档', color: 'error', icon: 'mdi-archive-outline', confirm: true }
+      ],
+      retired: []
+    }
+
+    const getLifecycleMeta = (strategy) => (
+      lifecycleMeta[strategy.lifecycle_status] || lifecycleMeta.draft
+    )
+
+    const getLifecycleActions = (strategy) => (
+      lifecycleActions[strategy.lifecycle_status] || []
+    )
+
+    const getAdmission = (strategy) => strategyAdmissions.value[strategy.strategy_id]
+    const admissionStages = (strategy) => {
+      const admission = getAdmission(strategy)
+      return admission ? [
+        { key: 'backtest', label: '历史回测', data: admission.backtest },
+        { key: 'paper', label: '模拟盘验证', data: admission.paper }
+      ] : []
+    }
+    const isLifecycleActionDisabled = (strategy, action) => {
+      const admission = getAdmission(strategy)
+      if (!admission) return ['backtest_passed', 'paper_trading', 'production'].includes(action.target)
+      if (action.target === 'backtest_passed') return !admission.backtest.passed
+      if (action.target === 'paper_trading') return !admission.eligible_for_paper
+      if (action.target === 'production') return !admission.eligible_for_production
+      return false
+    }
+
+    const transitionStrategyLifecycle = async (strategy, action) => {
+      if (action.confirm && !confirm(`确定要执行“${action.label}”吗？`)) return
+      strategyLifecycleSaving.value = strategy.strategy_id
+      try {
+        const data = await marketAPI.transitionStrategyLifecycle(
+          strategy.strategy_id,
+          action.target,
+          action.label
+        )
+        if (data.status !== 'ok') {
+          throw new Error(data.message || '生命周期状态转换失败')
+        }
+        if (data.strategy) Object.assign(strategy, data.strategy)
+        await loadStrategyAdmissions()
+        successMessage.value = data.message
+        showSuccess.value = true
+      } catch (err) {
+        const detail = err.response?.data?.detail || err.message
+        errorMessage.value = `生命周期状态转换失败: ${detail}`
+        showError.value = true
+      } finally {
+        strategyLifecycleSaving.value = null
+      }
+    }
+
     // 加载策略列表
     const loadStrategies = async () => {
       strategiesLoading.value = true
       try {
-        const data = await marketAPI.getStrategies()
+        const [data, admissionData] = await Promise.all([
+          marketAPI.getStrategies(), marketAPI.getStrategyAdmission()
+        ])
         if (data.status === 'ok') {
           strategies.value = data.strategies || []
+        }
+        if (admissionData.status === 'ok') {
+          strategyAdmissions.value = Object.fromEntries(
+            (admissionData.items || []).map(item => [item.strategy_id, item])
+          )
         }
       } catch (err) {
         console.error('加载策略配置失败:', err)
       } finally {
         strategiesLoading.value = false
+      }
+    }
+
+    const loadStrategyAdmissions = async () => {
+      const data = await marketAPI.getStrategyAdmission()
+      if (data.status === 'ok') {
+        strategyAdmissions.value = Object.fromEntries(
+          (data.items || []).map(item => [item.strategy_id, item])
+        )
       }
     }
 
@@ -1232,6 +1500,7 @@ export default {
 
         const data = await marketAPI.updateStrategy(strategy.strategy_id, {
           enabled: strategy.enabled,
+          auto_execute: Boolean(strategy.auto_execute),
           strategy_name: strategy.strategy_name,
           min_confidence: strategy.min_confidence,
           consistency_requirement: strategy.consistency_requirement,
@@ -1353,7 +1622,8 @@ export default {
       try {
         const data = await marketAPI.createStrategy({
           symbol: newStrategySymbol.value,
-          enabled: true,
+          enabled: false,
+          auto_execute: false,
           strategy_name: newStrategyName.value || `Strategy_${newStrategySymbol.value}`
         })
         if (data.status === 'ok') {
@@ -1428,7 +1698,9 @@ export default {
       llmConfig,
       showApiKey,
       llmSaving,
+      llmPromptResetting,
       saveLLMConfig,
+      resetLLMPrompts,
       llmAccess,
       llmAccessLabel,
       llmAccessColor,
@@ -1445,6 +1717,8 @@ export default {
       strategies,
       strategiesLoading,
       strategySaving,
+      strategyLifecycleSaving,
+      strategyAdmissions,
       newStrategySymbol,
       newStrategyName,
       consistencyOptions,
@@ -1455,6 +1729,12 @@ export default {
       updateStrategy,
       deleteStrategy,
       addStrategy,
+      getLifecycleMeta,
+      getLifecycleActions,
+      getAdmission,
+      admissionStages,
+      isLifecycleActionDisabled,
+      transitionStrategyLifecycle,
       // 信号配置
       getSignalConfig,
       getPeriodConfig,
@@ -1465,3 +1745,15 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.admission-panel { padding: 16px; border: 1px solid #dbe7e1; border-radius: 14px; background: linear-gradient(135deg, #f5f9f6, #fffaf0); }
+.admission-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.admission-title strong,.admission-title span { display: block; }.admission-title span { margin-top: 2px; color: #7a8982; font-size: .72rem; }
+.admission-stages { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.admission-stages article { padding: 12px; border-radius: 10px; background: rgba(255,255,255,.85); }
+.admission-stages article>div:first-child { display: flex; align-items: center; gap: 7px; }.admission-stages p { margin: 6px 0; color: #718079; font-size: .72rem; }
+.admission-checks { display: flex; flex-wrap: wrap; gap: 5px; }
+.prompt-template-editor :deep(textarea) { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .78rem; line-height: 1.55; }
+@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; } }
+</style>

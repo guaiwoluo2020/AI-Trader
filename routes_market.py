@@ -21,8 +21,11 @@ from sqlite_storage import (
     LLMConfigRepository,
     StrategyConfigRepository,
     TradeConfigRepository,
+    TradingAccountRepository,
 )
 from trading_engine_manager import TradingEngineManager
+from strategy_admission import StrategyAdmissionService
+from web_account_context import resolve_web_engine
 
 
 def create_market_routes(
@@ -38,6 +41,7 @@ def create_market_routes(
     strategy_repo = StrategyConfigRepository()
     llm_config_repo = LLMConfigRepository()
     llm_access_repo = LLMAccessRepository()
+    admission_service = StrategyAdmissionService(engine_manager.paper_trading)
 
     # ==================== EA端接口 ====================
 
@@ -278,9 +282,12 @@ def create_market_routes(
             }
 
     @protected_router.get("/market/symbols")
-    async def get_symbols(user: AuthUser = Depends(require_auth)) -> Dict:
+    async def get_symbols(
+        account_id: Optional[int] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """获取用户可配置的品种，不依赖行情是否仍在内存中。"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
         market_symbols = engine.kline_service.get_symbols()
         config = trade_config_repo.get_config(user.user_id)
         configured_symbols = list(config.get("symbol_config", {}).keys())
@@ -336,9 +343,12 @@ def create_market_routes(
         }
 
     @protected_router.get("/market/status")
-    async def get_market_status(user: AuthUser = Depends(require_auth)) -> Dict:
+    async def get_market_status(
+        account_id: Optional[int] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """获取行情存储状态"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
         kline_service = engine.kline_service
         pivot_service = engine.pivot_service
         store_status = kline_service.get_status()
@@ -376,10 +386,11 @@ def create_market_routes(
     @protected_router.get("/trend/{symbol}")
     async def get_trend(
         symbol: str,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取单个品种的趋势分析"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
         tech_service = engine.tech_service
         for period in ['H4', 'H1', 'M15', 'M5', 'M1']:
             tech_service.analyze_trend(symbol, period)
@@ -434,10 +445,11 @@ def create_market_routes(
     @protected_router.get("/pending_orders")
     async def get_pending_orders(
         symbol: Optional[str] = None,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取待确认订单列表"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
         pending_order_service = engine.pending_order_service
         orders = pending_order_service.get_orders_dict(symbol)
         return {
@@ -449,11 +461,16 @@ def create_market_routes(
     @protected_router.post("/pending_orders/{order_id}/confirm")
     async def confirm_pending_order(
         order_id: str,
+        account_id: Optional[int] = Query(None),
         request: Request = None,
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """确认待确认订单"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        account, engine = resolve_web_engine(engine_manager, user, account_id)
+        if account is not None and (
+            account.status != "active" or not account.trading_enabled
+        ):
+            raise HTTPException(status_code=409, detail="当前账户交易已暂停")
         pending_order_service = engine.pending_order_service
         update_data = {}
         if request:
@@ -500,10 +517,11 @@ def create_market_routes(
     @protected_router.post("/pending_orders/{order_id}/reject")
     async def reject_pending_order(
         order_id: str,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """拒绝待确认订单"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
         pending_order_service = engine.pending_order_service
         order = pending_order_service.reject_order(order_id)
         if not order:
@@ -579,6 +597,7 @@ def create_market_routes(
             strategy = engine.strategy_service.strategy_store.create_strategy(
                 symbol, data
             )
+            engine_manager.refresh_user_strategies(user.user_id)
             return {
                 "status": "ok",
                 "message": "策略已创建",
@@ -634,6 +653,7 @@ def create_market_routes(
                 data,
                 strategy.strategy_id,
             )
+            engine_manager.refresh_user_strategies(user.user_id)
 
             return {
                 "status": "ok",
@@ -642,6 +662,58 @@ def create_market_routes(
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    @protected_router.post("/strategy/{strategy_ref}/lifecycle")
+    async def transition_strategy_lifecycle(
+        strategy_ref: str,
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """按状态机转换策略生命周期。"""
+        try:
+            data = await request.json()
+            target_status = str(data.get("target_status", "")).strip()
+            reason = str(data.get("reason", "")).strip()
+            if not target_status:
+                return {"status": "error", "message": "请选择目标状态"}
+
+            engine = engine_manager.get_engine_for_user(user.user_id)
+            store = engine.strategy_service.strategy_store
+            current = store.get_strategy_by_id(strategy_ref)
+            if current is None:
+                return {"status": "error", "message": "策略配置不存在"}
+            admission_service.validate_transition(
+                user.user_id, current, target_status
+            )
+            strategy = store.transition_lifecycle(
+                strategy_ref, target_status, reason
+            )
+            if strategy is None:
+                return {"status": "error", "message": "策略配置不存在"}
+            engine_manager.refresh_user_strategies(user.user_id)
+            return {
+                "status": "ok",
+                "message": f"策略已进入“{strategy.to_dict()['lifecycle_label']}”状态",
+                "strategy": strategy.to_dict(),
+            }
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @protected_router.get("/strategy-admission")
+    async def get_strategy_admission(
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        strategies = engine.strategy_service.strategy_store.get_all_strategies()
+        return {
+            "status": "ok",
+            "items": [
+                admission_service.evaluate(user.user_id, strategy)
+                for strategy in strategies
+            ],
+        }
 
     @protected_router.delete("/strategy/{strategy_ref}")
     async def delete_strategy(strategy_ref: str, user: AuthUser = Depends(require_auth)) -> Dict:
@@ -654,6 +726,7 @@ def create_market_routes(
         else:
             success = store.delete_strategy(strategy_ref)
         if success:
+            engine_manager.refresh_user_strategies(user.user_id)
             return {"status": "ok", "message": "策略配置已删除"}
         return {"status": "error", "message": "策略配置不存在"}
 
@@ -724,7 +797,9 @@ def create_market_routes(
                 return
 
             user = get_auth_manager().verify_token(auth_message["token"])
-            engine = engine_manager.get_engine_for_user(user.user_id)
+            _, engine = resolve_web_engine(
+                engine_manager, user, auth_message.get("account_id")
+            )
             engine.add_ws_client(websocket)
             engine.system_log.add_log(
                 "websocket_connect",
@@ -839,11 +914,12 @@ def create_market_routes(
     @protected_router.get("/llm/analysis")
     async def get_llm_analysis(
         symbol: Optional[str] = None,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取大模型分析结果"""
         require_llm_access(user)
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
         result = engine.get_llm_analysis(symbol)
         return {
             "status": "ok",
@@ -851,7 +927,10 @@ def create_market_routes(
         }
 
     @protected_router.get("/llm/status")
-    async def get_llm_status(user: AuthUser = Depends(require_auth)) -> Dict:
+    async def get_llm_status(
+        account_id: Optional[int] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """获取大模型分析器状态"""
         access = llm_access_repo.get_status(user.user_id, user.role)
         if not access["access_granted"]:
@@ -864,7 +943,7 @@ def create_market_routes(
                     "analysis_message": "大模型行情分析功能尚未开通",
                 },
             }
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
         status_data = engine.get_llm_status()
         status_data["access_status"] = access["status"]
         return {
@@ -881,10 +960,13 @@ def create_market_routes(
         }
 
     @protected_router.post("/llm/trigger")
-    async def trigger_llm_analysis(user: AuthUser = Depends(require_auth)) -> Dict:
+    async def trigger_llm_analysis(
+        account_id: Optional[int] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
         """手动触发大模型分析"""
         require_llm_access(user)
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
         return engine.trigger_llm_analysis()
 
     @protected_router.post("/llm/configure")
@@ -896,7 +978,9 @@ def create_market_routes(
                 user.user_id,
                 api_key=data.get("api_key"),
                 api_base=data.get("api_base"),
-                model=data.get("model")
+                model=data.get("model"),
+                system_prompt=data.get("system_prompt"),
+                analysis_prompt_template=data.get("analysis_prompt_template"),
             )
             result = {
                 "status": "ok",
@@ -909,11 +993,30 @@ def create_market_routes(
             result = engine.configure_llm(
                 api_key=data.get("api_key"),
                 api_base=data.get("api_base"),
-                model=data.get("model")
+                model=data.get("model"),
+                system_prompt=data.get("system_prompt"),
+                analysis_prompt_template=data.get("analysis_prompt_template"),
             )
             return {"status": "ok", "data": result}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    @protected_router.post("/llm/config/reset-prompts")
+    async def reset_llm_prompts(
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        """管理员恢复系统内置提示词。"""
+        config = llm_config_repo.reset_prompts(user.user_id)
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        engine.configure_llm(
+            system_prompt=config.system_prompt,
+            analysis_prompt_template=config.analysis_prompt_template,
+        )
+        return {
+            "status": "ok",
+            "message": "提示词已恢复为系统默认值",
+            "config": config.to_dict(),
+        }
 
     router.include_router(protected_router)
     return router

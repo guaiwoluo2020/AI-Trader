@@ -8,7 +8,8 @@
 from typing import Optional, List, Dict
 from datetime import datetime
 
-from ...models import TradingSignal, SignalSource
+from ...models import TradingSignal
+from .signal_rules import automatic_key_levels, build_key_level_signal
 
 
 class KeyLevelSignalGenerator:
@@ -43,35 +44,7 @@ class KeyLevelSignalGenerator:
 
     def _auto_calculate_key_levels(self, current_price: float) -> List[float]:
         """自动计算关键点位"""
-        if current_price <= 0:
-            return []
-
-        int_part = int(current_price)
-        num_digits = len(str(int_part)) if int_part > 0 else 1
-
-        # 根据位数确定步长
-        if num_digits == 1:
-            step = 1
-        elif num_digits == 2:
-            step = 5
-        elif num_digits == 3:
-            step = 10
-        elif num_digits == 4:
-            step = 100
-        else:
-            step = 1000
-
-        # 计算基础点位
-        base_level = int(current_price / step) * step
-
-        # 生成上下各3个关键点位
-        levels = []
-        for i in range(-3, 4):
-            level = base_level + i * step
-            if level > 0:
-                levels.append(float(level))
-
-        return sorted(levels)
+        return automatic_key_levels(current_price)
 
     def _check_cooldown(self, symbol: str, key_level: float) -> bool:
         """检查是否在冷却期"""
@@ -95,74 +68,17 @@ class KeyLevelSignalGenerator:
         - 价格在关键点位上方，向下接近 → 买入（支撑位）
         - 价格在关键点位下方，向上接近 → 卖出（压力位）
         """
-        key_levels = self.get_key_levels(symbol, current_price)
-        if not key_levels:
-            return None
-
-        # 找到最近的关键点位
-        nearest_level = None
-        min_distance_pct = float('inf')
-
-        for level in key_levels:
-            distance_pct = abs(current_price - level) / current_price
-            if distance_pct < min_distance_pct:
-                min_distance_pct = distance_pct
-                nearest_level = level
-
-        if nearest_level is None:
-            return None
-
-        # 检查是否在阈值范围内
-        if min_distance_pct > self.threshold:
-            return None
-
-        # 检查冷却
-        if self._check_cooldown(symbol, nearest_level):
-            return None
-
-        # 设置冷却
-        self._set_cooldown(symbol, nearest_level)
-
-        # 确定方向
-        if current_price > nearest_level:
-            # 价格在关键点位上方 → 支撑位 → 买入
-            action = "buy"
-            sl = nearest_level - (nearest_level * 0.006)  # 关键点位下方万分之六
-            risk = current_price - sl
-            tp = current_price + risk * 1.5
-            trigger_reason = f"价格向下接近 {nearest_level}（支撑位）"
-        else:
-            # 价格在关键点位下方 → 压力位 → 卖出
-            action = "sell"
-            sl = nearest_level + (nearest_level * 0.006)
-            risk = sl - current_price
-            tp = current_price - risk * 1.5
-            trigger_reason = f"价格向上接近 {nearest_level}（压力位）"
-
-        # 计算风险回报比
-        reward = abs(tp - current_price)
-        rr_ratio = reward / risk if risk > 0 else 0
-
-        print(f"[KeyLevelSignalGenerator] 生成信号: {action} @ {current_price:.2f}, key_level={nearest_level:.2f}, sl={sl:.2f}, tp={tp:.2f}, risk={risk:.2f}, rr={rr_ratio:.2f}")
-
-        # 创建信号
-        signal = TradingSignal(
-            symbol=symbol,
-            action=action,
-            confidence=65,  # 基础置信度
-            source=SignalSource.KEY_LEVEL,
-            source_period="",  # 关键点位不区分周期
-            trigger_price=current_price,
-            trigger_reason=trigger_reason,
-            suggested_entry=current_price,
-            suggested_sl=round(sl, 2),
-            suggested_tp=round(tp, 2),
-            risk_reward_ratio=round(rr_ratio, 2),
-            key_level=nearest_level,
-            distance_pct=round(min_distance_pct * 100, 4),
+        signal = build_key_level_signal(
+            symbol, current_price, self.get_key_levels(symbol, current_price),
+            threshold=self.threshold,
         )
-
-        print(f"[KeyLevelSignalGenerator] 生成信号: {signal.signal_id} {action} @ {current_price}, 关键位={nearest_level}")
+        if signal is None or self._check_cooldown(symbol, signal.key_level):
+            return None
+        self._set_cooldown(symbol, signal.key_level)
+        print(
+            f"[KeyLevelSignalGenerator] 生成信号: {signal.signal_id} "
+            f"{signal.action} @ {current_price}, 关键位={signal.key_level}"
+        )
         return signal
 
     def __call__(self, symbol: str, current_price: float) -> Optional[TradingSignal]:

@@ -67,8 +67,9 @@ class EAActivationRepositoryTests(unittest.TestCase):
         first_code, _ = self.activations.create(self.user.user_id)
         second_code, _ = self.activations.create(self.user.user_id)
 
-        self.assertIsNone(self.activations.consume(first_code))
-        self.assertIsNotNone(self.activations.consume(second_code))
+        identity = {"mt5_login": "900002", "mt5_server": "Broker-Live"}
+        self.assertIsNone(self.activations.consume(first_code, **identity))
+        self.assertIsNotNone(self.activations.consume(second_code, **identity))
 
 
 if __name__ == "__main__":

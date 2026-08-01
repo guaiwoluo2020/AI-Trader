@@ -9,6 +9,8 @@ export function normalizeTradingDecision(decision) {
     symbol: decision.symbol,
     strategy_id: decision.strategy_id,
     strategy_name: decision.strategy_name || '未命名策略',
+    auto_execute: Boolean(decision.auto_execute),
+    auto_executed: Boolean(decision.auto_executed),
     action,
     status: decision.status,
     rejected,
@@ -36,6 +38,8 @@ export function normalizeTradingDecision(decision) {
             reason: decision.decision_reason,
             strategy_id: decision.strategy_id,
             strategy_name: decision.strategy_name || '未命名策略',
+            confirmed: Boolean(decision.auto_executed),
+            auto_executed: Boolean(decision.auto_executed),
           }
         : null,
   }

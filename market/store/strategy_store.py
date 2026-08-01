@@ -7,7 +7,7 @@
 from typing import List, Dict, Optional
 import threading
 
-from ..models import TradingStrategy
+from ..models import StrategyLifecycle, TradingStrategy
 from sqlite_storage import StrategyConfigRepository, bootstrap_runtime_storage
 
 
@@ -56,6 +56,11 @@ class StrategyStore:
         except Exception as e:
             print(f"[StrategyStore] 加载配置失败: {e}")
 
+    def reload_from_storage(self) -> None:
+        """刷新其他账户引擎持有的同一用户策略副本。"""
+        with self._lock:
+            self._load_from_file()
+
     def save_to_file(self) -> bool:
         """保存配置到 SQLite"""
         try:
@@ -91,7 +96,11 @@ class StrategyStore:
         with self._lock:
             strategy = self.get_strategy(symbol)
             if strategy is None:
-                strategy = TradingStrategy(symbol=symbol)
+                strategy = TradingStrategy(
+                    symbol=symbol,
+                    enabled=False,
+                    lifecycle_status=StrategyLifecycle.DRAFT,
+                )
                 self._strategies[strategy.strategy_id] = strategy
             return strategy
 
@@ -103,10 +112,30 @@ class StrategyStore:
 
     def create_strategy(self, symbol: str, data: Dict = None) -> TradingStrategy:
         with self._lock:
-            strategy = TradingStrategy(symbol=symbol)
+            strategy = TradingStrategy(
+                symbol=symbol,
+                enabled=False,
+                auto_execute=False,
+                lifecycle_status=StrategyLifecycle.DRAFT,
+            )
             if data:
-                strategy.update(data)
+                safe_data = dict(data)
+                safe_data.pop("lifecycle_status", None)
+                safe_data.pop("lifecycle_history", None)
+                strategy.update(safe_data)
             self._strategies[strategy.strategy_id] = strategy
+            self.save_to_file()
+            return strategy
+
+    def transition_lifecycle(
+        self, strategy_id: str, target_status: str, reason: str = ""
+    ) -> Optional[TradingStrategy]:
+        """转换生命周期并持久化。"""
+        with self._lock:
+            strategy = self.get_strategy_by_id(strategy_id)
+            if strategy is None:
+                return None
+            strategy.transition_lifecycle(target_status, reason)
             self.save_to_file()
             return strategy
 
@@ -166,7 +195,7 @@ class StrategyStore:
     def get_enabled_strategies(self) -> List[TradingStrategy]:
         """获取所有启用的策略"""
         with self._lock:
-            return [s for s in self._strategies.values() if s.enabled]
+            return [s for s in self._strategies.values() if s.is_runnable()]
 
     def get_enabled_symbols(self) -> List[str]:
         """获取所有启用策略的品种"""
@@ -174,7 +203,7 @@ class StrategyStore:
             return sorted({
                 strategy.symbol
                 for strategy in self._strategies.values()
-                if strategy.enabled
+                if strategy.is_runnable()
             })
 
     # ==================== 状态 ====================

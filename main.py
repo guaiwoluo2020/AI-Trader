@@ -24,6 +24,10 @@ from routes_system import create_system_routes
 from routes_market import create_market_routes
 from routes_position import create_position_routes
 from routes_news import create_news_routes
+from routes_backtest_data import create_backtest_data_routes
+from routes_backtest_tasks import create_backtest_task_routes
+from routes_accounts import create_account_routes
+from backtest_engine import BacktestWorker
 from trading_engine_manager import TradingEngineManager
 
 
@@ -33,6 +37,7 @@ def create_app():
     # 初始化多账户交易引擎
     get_auth_manager()
     engine_manager = TradingEngineManager()
+    backtest_worker = BacktestWorker()
 
     # 创建 FastAPI 应用
     app = FastAPI(
@@ -82,6 +87,9 @@ def create_app():
     app.include_router(create_market_routes(engine_manager))
     app.include_router(create_position_routes(engine_manager=engine_manager))
     app.include_router(create_news_routes())
+    app.include_router(create_backtest_data_routes(engine_manager))
+    app.include_router(create_backtest_task_routes())
+    app.include_router(create_account_routes(engine_manager))
 
     # 启动时设置事件循环
     @app.on_event("startup")
@@ -103,9 +111,12 @@ def create_app():
         monitor.set_event_loop(loop)
         app.state.market_monitor = monitor
         app.state.market_monitor_task = asyncio.create_task(monitor.run())
+        app.state.backtest_worker = backtest_worker
+        backtest_worker.start()
 
         print("[Startup] 事件循环已设置")
         print("[Startup] 市场事件监控已启动")
+        print("[Startup] 回测任务 Worker 已启动")
 
     @app.on_event("shutdown")
     async def shutdown_event():
@@ -118,6 +129,7 @@ def create_app():
         if monitor is not None:
             await monitor.stop()
 
+        backtest_worker.stop()
         engine_manager.close_all()
 
         from market.system_log import get_system_log

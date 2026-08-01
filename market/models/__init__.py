@@ -17,7 +17,7 @@ from .trading_signal import TradingSignal, SignalSource, SignalStatus
 from .trading_strategy import (
     TradingStrategy, TradingDecision,
     ConsistencyRequirement, ConflictResolution, VolumeMode,
-    StopLossMode, TakeProfitMode, PositionConflict
+    StopLossMode, TakeProfitMode, PositionConflict, StrategyLifecycle
 )
 from .statistics import StatisticsData
 from .position import PositionData
@@ -32,6 +32,6 @@ __all__ = [
     'TradingSignal', 'SignalSource', 'SignalStatus',
     'TradingStrategy', 'TradingDecision',
     'ConsistencyRequirement', 'ConflictResolution', 'VolumeMode',
-    'StopLossMode', 'TakeProfitMode', 'PositionConflict',
+    'StopLossMode', 'TakeProfitMode', 'PositionConflict', 'StrategyLifecycle',
     'StatisticsData', 'PositionData', 'TradeDeal'
 ]

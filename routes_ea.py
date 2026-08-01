@@ -10,8 +10,13 @@ from typing import Optional, List, Dict
 from auth import AuthUser, require_auth
 from ea_auth import EAIdentity, require_ea_auth
 from models import TradeInstruction
-from sqlite_storage import EAActivationRepository
+from sqlite_storage import (
+    EAActivationRepository,
+    TradeExecutionRepository,
+    TradingAccountRepository,
+)
 from trading_engine_manager import TradingEngineManager
+from web_account_context import resolve_web_engine
 
 
 # 统计数据日志打印概率 (5%)
@@ -101,6 +106,15 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         """
         server = engine_manager.get_engine_for_ea(identity)
         result = server.get_trades_by_symbol(symbol, price)
+        paper_orders_created = 0
+        try:
+            paper_orders_created = engine_manager.paper_trading.process_strategy_signals(
+                identity.user_id, symbol, price, server.strategy_service
+            )
+        except Exception as exc:
+            # 模拟账户故障不能阻断 EA 获取真实交易指令。
+            print(f"[PaperTrading] 创建模拟订单失败: {exc}")
+        result["paper_orders_created"] = paper_orders_created
 
         # 如果结果不为空，记录到运行日志
         trades = result.get("trades", [])
@@ -155,6 +169,31 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
 
         return result
 
+    @router.post("/ea/trade_execution")
+    async def report_trade_execution(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
+        try:
+            payload = await request.json()
+            report = TradeExecutionRepository().record(
+                identity.user_id, identity.account_id, payload
+            )
+            server = engine_manager.get_engine_for_ea(identity)
+            server.system_log.add_log(
+                "trade_execution_success" if report["success"] else "trade_execution_failed",
+                report,
+                symbol=report["symbol"],
+                message=(
+                    f"MT5 成交 #{report['mt5_deal']}，滑点 {report['slippage']:.5f}"
+                    if report["success"]
+                    else f"MT5 下单失败: {report['error_message']}"
+                ),
+            )
+            return {"status": "ok", "report": report}
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @router.post("/send_statistics")
     async def send_statistics(
         request: Request,
@@ -192,6 +231,27 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             data = await request.json()
             server = engine_manager.get_engine_for_ea(identity)
             server.save_statistics(data)
+            if data.get("balance") is not None and data.get("equity") is not None:
+                TradingAccountRepository().update_financial_snapshot(
+                    identity.account_id,
+                    balance=data.get("balance"),
+                    equity=data.get("equity"),
+                    free_margin=data.get("freeMargin", data.get("equity")),
+                    margin=data.get("margin", 0),
+                )
+            bid = data.get("bidPrice")
+            ask = data.get("askPrice")
+            if bid is not None:
+                try:
+                    engine_manager.paper_trading.process_tick(
+                        identity.user_id,
+                        str(data.get("symbol", "")),
+                        float(bid),
+                        float(ask) if ask is not None else None,
+                    )
+                except Exception as exc:
+                    # 实盘账户上报成功优先，模拟撮合错误单独记录。
+                    print(f"[PaperTrading] 模拟 Tick 处理失败: {exc}")
 
             # 随机打印日志 (5%概率)
             if random.random() < STATISTICS_LOG_PROBABILITY:
@@ -220,6 +280,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @router.post("/close_position")
     async def close_position(
         request: Request,
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -250,7 +311,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 return {"status": "error", "message": "缺少订单号"}
 
             # 添加平仓指令到队列
-            server = engine_manager.get_engine_for_user(user.user_id)
+            _, server = resolve_web_engine(engine_manager, user, account_id)
             server.add_close_position_instruction(symbol, ticket)
 
             print(f"[EA API] 平仓指令已添加: {symbol} ticket={ticket}")

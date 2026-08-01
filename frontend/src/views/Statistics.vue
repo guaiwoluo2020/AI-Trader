@@ -143,10 +143,11 @@
 </template>
 
 <script>
-import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import * as echarts from 'echarts'
 import { tradingAPI } from '@/api/trading'
 import { normalizeStatisticsForView } from '@/utils/statistics-view-data'
+import { useAccountContext } from '@/composables/useAccountContext'
 
 export default {
   name: 'Statistics',
@@ -160,6 +161,7 @@ export default {
     const availableSymbols = ref([])
     const itemsPerPage = ref(10)
     let refreshTimer = null
+    const { selectedAccountId } = useAccountContext()
 
     const totalTrades = ref(0)
     const totalRecords = ref(0)
@@ -185,8 +187,8 @@ export default {
         loading.value = true
         error.value = ''
         const [data, tradeStatistics] = await Promise.all([
-          tradingAPI.getStatistics(selectedSymbol.value),
-          tradingAPI.getTradeHistoryStatistics(selectedSymbol.value),
+          tradingAPI.getStatistics(selectedSymbol.value, 10, selectedAccountId.value),
+          tradingAPI.getTradeHistoryStatistics(selectedSymbol.value, selectedAccountId.value),
         ])
         statistics.value = normalizeStatisticsForView(data.statistics || [])
         totalTrades.value = Number(tradeStatistics.total_count || 0)
@@ -276,9 +278,15 @@ export default {
     }
 
     onMounted(() => {
-      loadStatistics()
+      if (selectedAccountId.value) loadStatistics()
       // 每30秒自动刷新
       refreshTimer = setInterval(loadStatistics, 30000)
+    })
+
+    watch(selectedAccountId, (value) => {
+      selectedSymbol.value = ''
+      availableSymbols.value = []
+      if (value) loadStatistics()
     })
 
     onBeforeUnmount(() => {

@@ -41,6 +41,8 @@ class RiskManager:
             os.getenv("AI_TRADER_DAILY_ORDER_LIMIT", "20")
         )
         self._daily_order_count: int = 0
+        self._account_max_positions: int = 10
+        self._account_max_single_volume: float = 10.0
         self._daily_realized_pnl: float = 0.0
         self._circuit_breaker: bool = False
         self._circuit_breaker_reason: str = ""
@@ -63,6 +65,21 @@ class RiskManager:
 
     def set_trade_history_service(self, service) -> None:
         self._trade_history_service = service
+
+    def set_account_limits(
+        self,
+        *,
+        max_positions: int,
+        max_single_volume: float,
+        daily_loss_limit: float,
+        daily_order_limit: int,
+    ) -> None:
+        """应用当前交易账户自己的风控阈值。"""
+        with self._lock:
+            self._account_max_positions = max(1, int(max_positions))
+            self._account_max_single_volume = max(0.01, float(max_single_volume))
+            self._daily_loss_limit = max(0.1, float(daily_loss_limit))
+            self._daily_order_limit = max(1, int(daily_order_limit))
 
     def _refresh_account_info(self) -> None:
         """从统计服务刷新账户信息"""
@@ -208,6 +225,13 @@ class RiskManager:
             allowed = False
             warnings.append(f"单笔风险 {risk_percent:.2f}% 超过5%")
 
+        if volume > self._account_max_single_volume:
+            allowed = False
+            warnings.append(
+                f"下单手数 {volume:.2f} 超过账户限制 "
+                f"{self._account_max_single_volume:.2f}"
+            )
+
         if risk_percent + daily_risk_used > self._daily_risk_limit:
             allowed = False
             warnings.append(f"将超过每日风险限制 {self._daily_risk_limit}%")
@@ -267,9 +291,12 @@ class RiskManager:
         warnings = []
 
         # 检查最大持仓数
-        if current_positions >= strategy.max_positions:
+        effective_max_positions = min(
+            int(strategy.max_positions), self._account_max_positions
+        )
+        if current_positions >= effective_max_positions:
             allowed = False
-            warnings.append(f"已达到最大持仓数 {strategy.max_positions}")
+            warnings.append(f"已达到最大持仓数 {effective_max_positions}")
 
         # 检查同向持仓
         new_same_direction = same_direction + 1
@@ -294,7 +321,7 @@ class RiskManager:
             "current_positions": current_positions,
             "same_direction": same_direction,
             "opposite_direction": opposite_direction,
-            "max_positions": strategy.max_positions,
+            "max_positions": effective_max_positions,
             "max_same_direction": strategy.max_same_direction,
             "warnings": warnings,
         }
@@ -402,6 +429,8 @@ class RiskManager:
             "daily_risk_limit": self._daily_risk_limit,
             "daily_order_count": self._daily_order_count,
             "daily_order_limit": self._daily_order_limit,
+            "account_max_positions": self._account_max_positions,
+            "account_max_single_volume": self._account_max_single_volume,
             "daily_realized_pnl": self._daily_realized_pnl,
             "daily_loss_limit": self._daily_loss_limit,
             "circuit_breaker": self._circuit_breaker,

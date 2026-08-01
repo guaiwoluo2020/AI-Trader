@@ -22,9 +22,108 @@ api.interceptors.response.use(
 )
 
 export const marketAPI = {
+  // ==================== 回测任务 ====================
+
+  async getBacktestTemplateContext() {
+    const response = await api.get('/backtest/templates/context')
+    return response.data
+  },
+
+  async getBacktestTemplates() {
+    const response = await api.get('/backtest/templates')
+    return response.data
+  },
+
+  async createBacktestTemplate(data) {
+    const response = await api.post('/backtest/templates', data)
+    return response.data
+  },
+
+  async updateBacktestTemplate(templateId, data) {
+    const response = await api.put(
+      `/backtest/templates/${encodeURIComponent(templateId)}`,
+      data
+    )
+    return response.data
+  },
+
+  async deleteBacktestTemplate(templateId) {
+    const response = await api.delete(
+      `/backtest/templates/${encodeURIComponent(templateId)}`
+    )
+    return response.data
+  },
+
+  async runBacktestTemplate(templateId) {
+    const response = await api.post(
+      `/backtest/templates/${encodeURIComponent(templateId)}/run`
+    )
+    return response.data
+  },
+
+  async getBacktestBatches() {
+    const response = await api.get('/backtest/batches')
+    return response.data
+  },
+
+  async getBacktestBatch(batchId) {
+    const response = await api.get(
+      `/backtest/batches/${encodeURIComponent(batchId)}`
+    )
+    return response.data
+  },
+
+  async getBacktestTaskLedger(taskId) {
+    const response = await api.get(
+      `/backtest/tasks/${encodeURIComponent(taskId)}/ledger`
+    )
+    return response.data
+  },
+
+  // ==================== 回测数据集 ====================
+
+  async getBacktestDatasetContext() {
+    const response = await api.get('/backtest/datasets/context')
+    return response.data
+  },
+
+  async getBacktestDatasets() {
+    const response = await api.get('/backtest/datasets')
+    return response.data
+  },
+
+  async createBacktestDataset(data) {
+    const response = await api.post('/backtest/datasets', data)
+    return response.data
+  },
+
+  async cancelBacktestDataset(datasetId) {
+    const response = await api.post(
+      `/backtest/datasets/${encodeURIComponent(datasetId)}/cancel`
+    )
+    return response.data
+  },
+
+  async updateBacktestDatasetVisibility(datasetId, visibility) {
+    const response = await api.patch(
+      `/backtest/datasets/${encodeURIComponent(datasetId)}/visibility`,
+      { visibility }
+    )
+    return response.data
+  },
+
+  async deleteBacktestDataset(datasetId) {
+    const response = await api.delete(
+      `/backtest/datasets/${encodeURIComponent(datasetId)}`
+    )
+    return response.data
+  },
+
   // 获取所有symbol列表
-  async getSymbols() {
-    const response = await api.get('/market/symbols')
+  async getSymbols(accountId = null) {
+    const response = await api.get('/market/symbols', {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
@@ -48,8 +147,10 @@ export const marketAPI = {
   },
 
   // 获取行情状态
-  async getStatus() {
-    const response = await api.get('/market/status')
+  async getStatus(accountId = null) {
+    const response = await api.get('/market/status', {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
@@ -60,7 +161,7 @@ export const marketAPI = {
   },
 
   // 创建WebSocket连接
-  createWebSocket(onMessage, onError, onOpen, onClose) {
+  createWebSocket(onMessage, onError, onOpen, onClose, accountId = null) {
     const ws = new WebSocket(getMarketWebSocketUrl())
 
     ws.onopen = () => {
@@ -69,7 +170,7 @@ export const marketAPI = {
         ws.close(1008, 'Authentication required')
         return
       }
-      ws.send(JSON.stringify({ type: 'auth', token }))
+      ws.send(JSON.stringify({ type: 'auth', token, account_id: accountId }))
       console.log('WebSocket 连接成功')
       if (onOpen) onOpen()
     }
@@ -104,8 +205,10 @@ export const marketAPI = {
   },
 
   // 获取趋势分析
-  async getTrend(symbol) {
-    const response = await api.get(`/trend/${encodeURIComponent(symbol)}`)
+  async getTrend(symbol, accountId = null) {
+    const response = await api.get(`/trend/${encodeURIComponent(symbol)}`, {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
@@ -116,27 +219,34 @@ export const marketAPI = {
   },
 
   // 获取待确认订单
-  async getPendingOrders(symbol = null) {
+  async getPendingOrders(symbol = null, accountId = null) {
     const params = symbol ? { symbol } : {}
+    if (accountId) params.account_id = accountId
     const response = await api.get('/pending_orders', { params })
     return response.data
   },
 
   // 确认订单
-  async confirmOrder(orderId) {
-    const response = await api.post(`/pending_orders/${orderId}/confirm`)
+  async confirmOrder(orderId, accountId = null) {
+    const response = await api.post(`/pending_orders/${orderId}/confirm`, null, {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
   // 确认订单并更新参数
-  async confirmOrderWithUpdate(orderId, updateData) {
-    const response = await api.post(`/pending_orders/${orderId}/confirm`, updateData)
+  async confirmOrderWithUpdate(orderId, updateData, accountId = null) {
+    const response = await api.post(`/pending_orders/${orderId}/confirm`, updateData, {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
   // 拒绝订单
-  async rejectOrder(orderId) {
-    const response = await api.post(`/pending_orders/${orderId}/reject`)
+  async rejectOrder(orderId, accountId = null) {
+    const response = await api.post(`/pending_orders/${orderId}/reject`, null, {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
@@ -159,23 +269,28 @@ export const marketAPI = {
   },
 
   // 平仓
-  async closePosition(ticket, symbol) {
-    const response = await api.post('/close_position', { ticket, symbol })
+  async closePosition(ticket, symbol, accountId = null) {
+    const response = await api.post('/close_position', { ticket, symbol }, {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
   // ==================== 大模型分析 ====================
 
   // 获取大模型分析结果
-  async getLLMAnalysis(symbol = null) {
+  async getLLMAnalysis(symbol = null, accountId = null) {
     const params = symbol ? { symbol } : {}
+    if (accountId) params.account_id = accountId
     const response = await api.get('/llm/analysis', { params })
     return response.data
   },
 
   // 获取大模型分析器状态
-  async getLLMStatus() {
-    const response = await api.get('/llm/status')
+  async getLLMStatus(accountId = null) {
+    const response = await api.get('/llm/status', {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
@@ -215,14 +330,21 @@ export const marketAPI = {
   },
 
   // 手动触发大模型分析
-  async triggerLLMAnalysis() {
-    const response = await api.post('/llm/trigger')
+  async triggerLLMAnalysis(accountId = null) {
+    const response = await api.post('/llm/trigger', null, {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
   // 配置大模型参数
   async configureLLM(config) {
     const response = await api.post('/llm/configure', config)
+    return response.data
+  },
+
+  async resetLLMPrompts() {
+    const response = await api.post('/llm/config/reset-prompts')
     return response.data
   },
 
@@ -252,15 +374,17 @@ export const marketAPI = {
   // ==================== 仓位管理 ====================
 
   // 获取持仓数据
-  async getPositions(symbol = null) {
+  async getPositions(symbol = null, accountId = null) {
     const params = symbol ? { symbol } : {}
+    if (accountId) params.account_id = accountId
     const response = await api.get('/positions', { params })
     return response.data
   },
 
   // 获取持仓汇总
-  async getPositionsSummary(symbol = null) {
+  async getPositionsSummary(symbol = null, accountId = null) {
     const params = symbol ? { symbol } : {}
+    if (accountId) params.account_id = accountId
     const response = await api.get('/positions/summary', { params })
     return response.data
   },
@@ -268,14 +392,18 @@ export const marketAPI = {
   // ==================== 交易历史 ====================
 
   // 获取交易历史
-  async getTradeHistory() {
-    const response = await api.get('/trade_history')
+  async getTradeHistory(accountId = null) {
+    const response = await api.get('/trade_history', {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
   // 获取交易历史统计
-  async getTradeHistoryStatistics() {
-    const response = await api.get('/trade_history/statistics')
+  async getTradeHistoryStatistics(accountId = null) {
+    const response = await api.get('/trade_history/statistics', {
+      params: accountId ? { account_id: accountId } : {},
+    })
     return response.data
   },
 
@@ -302,6 +430,20 @@ export const marketAPI = {
   // 更新品种策略配置
   async updateStrategy(strategyId, data) {
     const response = await api.post(`/strategy/${encodeURIComponent(strategyId)}`, data)
+    return response.data
+  },
+
+  // 转换策略生命周期
+  async transitionStrategyLifecycle(strategyId, targetStatus, reason = '') {
+    const response = await api.post(
+      `/strategy/${encodeURIComponent(strategyId)}/lifecycle`,
+      { target_status: targetStatus, reason }
+    )
+    return response.data
+  },
+
+  async getStrategyAdmission() {
+    const response = await api.get('/strategy-admission')
     return response.data
   },
 

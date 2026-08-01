@@ -334,8 +334,9 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { marketAPI } from '@/api/market'
+import { useAccountContext } from '@/composables/useAccountContext'
 
 export default {
   name: 'Positions',
@@ -362,6 +363,7 @@ export default {
     const historyLoading = ref(false)
 
     let refreshInterval = null
+    const { selectedAccountId } = useAccountContext()
 
     const categoryHeaders = [
       { text: '分类', value: 'category', width: 150 },
@@ -383,7 +385,7 @@ export default {
     const loadPositions = async () => {
       loading.value = true
       try {
-        const data = await marketAPI.getPositionsSummary()
+        const data = await marketAPI.getPositionsSummary(null, selectedAccountId.value)
         if (data.status === 'ok') {
           positions.value = data.positions || []
           summary.value = {
@@ -403,7 +405,7 @@ export default {
     const loadTradeHistory = async () => {
       historyLoading.value = true
       try {
-        const data = await marketAPI.getTradeHistory()
+        const data = await marketAPI.getTradeHistory(selectedAccountId.value)
         if (data.status === 'ok') {
           tradeDeals.value = data.deals || []
           historyStats.value = data.statistics || {}
@@ -425,7 +427,11 @@ export default {
 
       closing.value = true
       try {
-        const data = await marketAPI.closePosition(selectedPosition.value.ticket, selectedPosition.value.symbol)
+        const data = await marketAPI.closePosition(
+          selectedPosition.value.ticket,
+          selectedPosition.value.symbol,
+          selectedAccountId.value
+        )
         if (data.status === 'ok') {
           snackbarMessage.value = '平仓指令已发送'
           snackbarColor.value = 'success'
@@ -458,10 +464,22 @@ export default {
     }
 
     onMounted(() => {
-      loadPositions()
-      loadTradeHistory()
+      if (selectedAccountId.value) {
+        loadPositions()
+        loadTradeHistory()
+      }
       // 每5秒刷新一次持仓
       refreshInterval = setInterval(loadPositions, 5000)
+    })
+
+    watch(selectedAccountId, (value) => {
+      positions.value = []
+      tradeDeals.value = []
+      historyStats.value = {}
+      if (value) {
+        loadPositions()
+        loadTradeHistory()
+      }
     })
 
     onUnmounted(() => {

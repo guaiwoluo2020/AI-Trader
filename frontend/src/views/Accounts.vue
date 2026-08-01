@@ -1,0 +1,837 @@
+<template>
+  <div class="accounts-page">
+    <section class="account-hero">
+      <div>
+        <div class="eyebrow">ACCOUNT LEDGER</div>
+        <h1>交易账户</h1>
+        <p>MT5 连接、Paper 模拟和未来回测账户共享统一身份，但资金与持仓始终相互隔离。</p>
+      </div>
+      <v-btn variant="outlined" color="white" prepend-icon="mdi-refresh" :loading="loading" @click="loadAccounts">
+        刷新账户
+      </v-btn>
+    </section>
+
+    <v-alert type="info" variant="tonal" class="mb-5">
+      MT5 实盘账户由 EA 上报自动发现，无需手工创建；Paper 账户可以部署自动交易策略，使用 EA 实时行情进行独立模拟撮合，不会向 MT5 下发订单。
+    </v-alert>
+    <v-alert v-if="message" :type="messageType" variant="tonal" closable class="mb-5" @click:close="message = ''">
+      {{ message }}
+    </v-alert>
+
+    <section class="metric-grid">
+      <article><span>账户总数</span><strong>{{ accounts.length }}</strong></article>
+      <article><span>MT5 账户</span><strong>{{ mt5Accounts.length }}</strong></article>
+      <article><span>在线终端</span><strong>{{ connectedCount }}</strong></article>
+      <article><span>Paper 账户</span><strong>{{ paperAccounts.length }}</strong></article>
+    </section>
+
+    <div class="content-grid">
+      <section class="account-catalog">
+        <div class="section-heading">
+          <div>
+            <div class="section-tag">ACCOUNT CATALOG</div>
+            <h2>我的账户</h2>
+          </div>
+          <span>资金快照由对应执行端维护</span>
+        </div>
+
+        <div v-if="!accounts.length && !loading" class="empty-state">
+          <v-icon icon="mdi-wallet-plus-outline" size="50" />
+          <h3>还没有交易账户</h3>
+          <p>下载并安装 EA 后，系统会按 MT5 登录号和交易服务器自动建立账户；也可以先创建 Paper 账户。</p>
+        </div>
+
+        <div v-else class="account-list">
+          <article v-for="account in accounts" :key="account.account_id" class="account-card" :class="account.account_type">
+            <div class="account-topline">
+              <div class="account-identity">
+                <div class="account-mark">
+                  <v-icon :icon="typeMeta(account.account_type).icon" />
+                </div>
+                <div>
+                  <h3>{{ account.account_name }}</h3>
+                  <span>#{{ account.account_id }} · {{ typeMeta(account.account_type).label }}</span>
+                </div>
+              </div>
+              <div class="account-chips">
+                <v-chip v-if="account.is_default" size="small" variant="tonal" color="amber-darken-2">默认实盘</v-chip>
+                <v-chip v-if="account.status === 'archived'" size="small" variant="tonal" color="grey">已归档</v-chip>
+                <v-chip v-else-if="account.account_type === 'mt5'" size="small" variant="flat" :color="account.active ? 'success' : 'error'">
+                  {{ account.active ? '活跃账户' : '不活跃账户' }}
+                </v-chip>
+                <v-chip v-if="account.status !== 'archived'" size="small" variant="tonal" :color="account.trading_enabled ? 'success' : 'warning'">
+                  {{ account.trading_enabled ? '交易运行' : '交易暂停' }}
+                </v-chip>
+                <v-chip size="small" variant="tonal" :color="statusMeta(account).color">
+                  {{ statusMeta(account).label }}
+                </v-chip>
+              </div>
+            </div>
+
+            <div class="balance-row">
+              <div><span>余额</span><strong>{{ money(account.balance, account.currency) }}</strong></div>
+              <div><span>净值</span><strong>{{ money(account.equity, account.currency) }}</strong></div>
+              <div><span>可用资金</span><strong>{{ money(account.free_margin, account.currency) }}</strong></div>
+            </div>
+
+            <dl class="account-details">
+              <div><dt>环境</dt><dd>{{ environmentLabel(account.environment) }}</dd></div>
+              <div><dt>账户币种</dt><dd>{{ account.currency }}</dd></div>
+              <div v-if="account.account_type === 'mt5'"><dt>MT5 登录号</dt><dd>{{ account.mt5_login || '未上报' }}</dd></div>
+              <div v-if="account.account_type === 'mt5'"><dt>交易服务器</dt><dd>{{ account.mt5_server || '未上报' }}</dd></div>
+              <div><dt>资金更新时间</dt><dd>{{ formatTime(account.financial_updated_at) }}</dd></div>
+              <div><dt>连接更新时间</dt><dd>{{ formatTime(account.last_seen_at) }}</dd></div>
+              <div><dt>自动下单</dt><dd>{{ account.auto_trading_enabled ? '允许' : '仅推荐' }}</dd></div>
+              <div><dt>账户风控</dt><dd>{{ account.max_total_positions }} 持仓 · {{ account.max_single_volume }} 手/单</dd></div>
+            </dl>
+            <div class="bound-strategies">
+              <span>已绑定策略</span>
+              <div v-if="account.deployments?.length">
+                <v-chip v-for="deployment in account.deployments" :key="deployment.deployment_id" size="x-small" :color="deployment.status === 'active' ? 'success' : 'grey'" variant="tonal">
+                  {{ deployment.strategy_name || deployment.strategy_id }} · {{ deploymentStatusLabel(deployment.status) }}
+                </v-chip>
+              </div>
+              <strong v-else>尚未绑定策略</strong>
+            </div>
+            <div class="paper-actions">
+              <v-btn color="primary" variant="tonal" prepend-icon="mdi-tune-variant" @click="openAccountManager(account)">
+                账户管理
+              </v-btn>
+              <v-btn v-if="account.account_type === 'mt5'" color="secondary" variant="tonal" prepend-icon="mdi-download" :loading="eaDownloadingId === account.account_id" @click="downloadAccountEA(account)">
+                重新下载 EA
+              </v-btn>
+              <v-btn v-if="account.account_type === 'mt5'" color="primary" variant="tonal" prepend-icon="mdi-link-variant" @click="openStrategyManager(account)">
+                管理绑定策略
+              </v-btn>
+              <v-btn v-if="account.account_type === 'paper'" color="primary" variant="tonal" prepend-icon="mdi-monitor-dashboard" @click="openPaperRuntime(account)">
+                打开模拟运行台
+              </v-btn>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <v-card class="paper-card" elevation="0">
+        <v-card-text>
+          <div class="section-tag">MT5 ACCOUNT</div>
+          <h2>连接新的 MT5 账户</h2>
+          <p>下载 EA 并放入目标 MT5 终端。EA 启动后会自动上报登录号和交易服务器，相同账户重复安装不会重复创建。</p>
+          <v-btn block color="secondary" prepend-icon="mdi-download-network-outline" :loading="eaDownloadingId === 'new'" class="mt-4" @click="downloadNewEA">
+            下载 MT5 Terminal EA
+          </v-btn>
+          <v-divider class="my-6" />
+          <div class="section-tag">PAPER ACCOUNT</div>
+          <h2>建立模拟账户</h2>
+          <p>定义独立资金与交易成本。账户只使用实时行情模拟成交，不会产生真实订单。</p>
+          <v-form @submit.prevent="createPaper">
+            <v-text-field v-model.trim="paperForm.name" label="账户名称" placeholder="例如：GOLD 策略模拟盘" variant="outlined" density="comfortable" class="mt-5" />
+            <v-text-field v-model.number="paperForm.initialBalance" label="初始资金" type="number" min="1" variant="outlined" density="comfortable" />
+            <v-select v-model="paperForm.currency" :items="currencies" label="账户币种" variant="outlined" density="comfortable" />
+            <div class="paper-setting-grid">
+              <v-text-field v-model.number="paperForm.leverage" label="杠杆" type="number" min="1" variant="outlined" density="comfortable" />
+              <v-text-field v-model.number="paperForm.spreadPoints" label="模拟点差（点）" type="number" min="0" variant="outlined" density="comfortable" />
+              <v-text-field v-model.number="paperForm.slippagePoints" label="滑点（点）" type="number" min="0" variant="outlined" density="comfortable" />
+              <v-text-field v-model.number="paperForm.commissionPerLot" label="每手手续费" type="number" min="0" variant="outlined" density="comfortable" />
+            </div>
+            <div class="paper-note">
+              <v-icon icon="mdi-flask-outline" />
+              <span>市价单在下一条有效 Tick 按 Bid/Ask 成交。</span>
+            </div>
+            <v-btn type="submit" block size="large" color="primary" prepend-icon="mdi-wallet-plus-outline" :loading="creating" :disabled="!paperForm.name || paperForm.initialBalance <= 0" class="mt-5">
+              创建 Paper 账户
+            </v-btn>
+          </v-form>
+        </v-card-text>
+      </v-card>
+    </div>
+
+    <v-dialog v-model="paperDialog" max-width="1160" scrollable @after-enter="renderEquityChart">
+      <v-card v-if="paperDetail" class="runtime-dialog" elevation="0">
+        <v-card-title class="runtime-header">
+          <div>
+            <div class="section-tag">LIVE PAPER EXECUTION</div>
+            <h2>{{ paperDetail.account.account_name }}</h2>
+            <span>实时模拟运行 · 不发送 MT5 指令</span>
+          </div>
+          <v-btn icon="mdi-close" variant="text" @click="closePaperRuntime" />
+        </v-card-title>
+        <v-divider />
+        <v-card-text class="runtime-body">
+          <section class="runtime-metrics">
+            <article><span>余额</span><strong>{{ money(paperDetail.account.balance, paperDetail.account.currency) }}</strong></article>
+            <article><span>净值</span><strong>{{ money(paperDetail.account.equity, paperDetail.account.currency) }}</strong></article>
+            <article><span>可用资金</span><strong>{{ money(paperDetail.account.free_margin, paperDetail.account.currency) }}</strong></article>
+            <article><span>持仓 / 成交</span><strong>{{ paperDetail.positions.length }} / {{ paperDetail.trades.length }}</strong></article>
+          </section>
+
+          <section class="deployment-workbench">
+            <div>
+              <div class="section-tag">STRATEGY DEPLOYMENT</div>
+              <h3>策略运行实例</h3>
+              <p>部署后仅在该 Paper 账户自动执行；策略的实盘自动下单开关保持独立。</p>
+            </div>
+            <div class="deployment-form">
+              <v-select
+                v-model="selectedStrategyId"
+                :items="strategyOptions"
+                item-title="label"
+                item-value="value"
+                label="选择策略"
+                variant="outlined"
+                density="compact"
+                hide-details
+              />
+              <v-btn color="primary" :disabled="!selectedStrategyId" :loading="deploying" @click="deploySelectedStrategy">部署策略</v-btn>
+            </div>
+          </section>
+          <div v-if="!paperDetail.deployments.length" class="runtime-empty compact">还没有部署策略</div>
+          <div v-else class="deployment-list">
+            <article v-for="deployment in paperDetail.deployments" :key="deployment.deployment_id">
+              <div><strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong><span>{{ deployment.symbol }} · Paper 自动执行 · {{ deploymentStatusLabel(deployment.status) }}</span></div>
+              <v-switch
+                :model-value="deployment.status === 'active'"
+                color="success"
+                inset
+                hide-details
+                :loading="deploymentLoadingId === deployment.deployment_id"
+                @update:model-value="value => toggleDeployment(deployment, value)"
+              />
+            </article>
+          </div>
+
+          <section class="runtime-chart-card">
+            <div class="runtime-section-title">
+              <h3>账户净值</h3>
+              <v-btn size="small" variant="tonal" color="primary" :loading="reportLoading" @click="loadPaperReport">生成运行报告</v-btn>
+            </div>
+            <div v-if="paperDetail.equity_curve.length" ref="equityChart" class="equity-chart" />
+            <div v-else class="runtime-empty">收到第一条 EA Tick 后开始记录净值</div>
+          </section>
+
+          <section v-if="paperReport" class="paper-report">
+            <div class="report-heading">
+              <div><div class="section-tag">PERFORMANCE REPORT</div><h3>模拟盘绩效报告</h3></div>
+              <v-select v-model="reportStrategyId" :items="reportStrategyOptions" item-title="label" item-value="value" label="报告范围" density="compact" variant="outlined" hide-details @update:model-value="loadPaperReport" />
+            </div>
+            <div class="report-metrics">
+              <article><span>累计收益</span><strong :class="paperReport.summary.net_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(paperReport.summary.net_profit) }}</strong></article>
+              <article><span>胜率</span><strong>{{ paperReport.summary.win_rate }}%</strong></article>
+              <article><span>收益因子</span><strong>{{ paperReport.summary.profit_factor ?? '∞' }}</strong></article>
+              <article><span>最大回撤</span><strong>{{ paperReport.summary.max_drawdown_pct }}%</strong></article>
+              <article><span>成交次数</span><strong>{{ paperReport.summary.trade_count }}</strong></article>
+              <article><span>拒单次数</span><strong>{{ paperReport.summary.rejected_order_count }}</strong></article>
+            </div>
+            <div v-if="paperReport.backtest_benchmark" class="benchmark-panel">
+              <div class="benchmark-title">
+                <div><span>BACKTEST VS PAPER</span><h4>回测与模拟偏差</h4></div>
+                <small>基准任务 {{ paperReport.backtest_benchmark.task_id }}</small>
+              </div>
+              <div class="benchmark-grid">
+                <article><span>收益率</span><strong>{{ paperReport.summary.return_pct }}%</strong><small>回测 {{ paperReport.backtest_benchmark.return_pct }}% · 偏差 {{ signedDelta(paperReport.comparison.return_pct) }}pp</small></article>
+                <article><span>胜率</span><strong>{{ paperReport.summary.win_rate }}%</strong><small>回测 {{ paperReport.backtest_benchmark.win_rate }}% · 偏差 {{ signedDelta(paperReport.comparison.win_rate) }}pp</small></article>
+                <article><span>最大回撤</span><strong>{{ paperReport.summary.max_drawdown_pct }}%</strong><small>回测 {{ paperReport.backtest_benchmark.max_drawdown_pct }}% · 偏差 {{ signedDelta(paperReport.comparison.max_drawdown_pct) }}pp</small></article>
+                <article><span>收益因子</span><strong>{{ paperReport.summary.profit_factor ?? '∞' }}</strong><small>回测 {{ paperReport.backtest_benchmark.profit_factor ?? '∞' }} · 偏差 {{ paperReport.comparison.profit_factor === null ? '--' : signedDelta(paperReport.comparison.profit_factor) }}</small></article>
+                <article><span>成交次数</span><strong>{{ paperReport.summary.trade_count }}</strong><small>回测 {{ paperReport.backtest_benchmark.trade_count }} · 偏差 {{ signedDelta(paperReport.comparison.trade_count) }}</small></article>
+              </div>
+            </div>
+            <div class="report-breakdowns">
+              <div><h4>按策略</h4><p v-if="!paperReport.by_strategy.length">暂无成交</p><p v-for="item in paperReport.by_strategy" :key="item.name"><b>{{ strategyName(item.name) }}</b><span>{{ item.trade_count }} 笔 · {{ signedMoney(item.net_profit) }}</span></p></div>
+              <div><h4>按品种</h4><p v-if="!paperReport.by_symbol.length">暂无成交</p><p v-for="item in paperReport.by_symbol" :key="item.name"><b>{{ item.name }}</b><span>{{ item.trade_count }} 笔 · 胜率 {{ item.win_rate }}%</span></p></div>
+              <div><h4>按平仓原因</h4><p v-if="!paperReport.by_exit_reason.length">暂无成交</p><p v-for="item in paperReport.by_exit_reason" :key="item.name"><b>{{ exitReasonLabel(item.name) }}</b><span>{{ item.trade_count }} 笔 · {{ signedMoney(item.net_profit) }}</span></p></div>
+            </div>
+          </section>
+
+          <section class="runtime-grid">
+            <div class="runtime-table-card">
+              <div class="runtime-section-title"><h3>当前持仓</h3><span>{{ paperDetail.positions.length }} 笔</span></div>
+              <div v-if="!paperDetail.positions.length" class="runtime-empty compact">暂无持仓</div>
+              <div v-for="position in paperDetail.positions" :key="position.position_id" class="runtime-row position-row">
+                <b :class="position.direction === 'buy' ? 'positive' : 'negative'">{{ position.direction === 'buy' ? '买入' : '卖出' }}</b>
+                <span>{{ position.symbol }} · {{ position.volume }} 手</span>
+                <span>{{ position.entry_price }} → {{ position.current_price }}</span>
+                <strong :class="position.unrealized_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(position.unrealized_profit) }}</strong>
+              </div>
+            </div>
+            <div class="runtime-table-card">
+              <div class="runtime-section-title"><h3>最近成交</h3><span>最多显示 50 笔</span></div>
+              <div v-if="!paperDetail.trades.length" class="runtime-empty compact">暂无成交</div>
+              <div v-for="trade in paperDetail.trades.slice(0, 50)" :key="trade.trade_id" class="runtime-row trade-row">
+                <span>{{ formatTime(trade.closed_at) }}</span>
+                <b>{{ trade.symbol }}</b>
+                <span>{{ exitReasonLabel(trade.exit_reason) }}</span>
+                <strong :class="trade.net_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(trade.net_profit) }}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="runtime-table-card orders-card">
+            <div class="runtime-section-title"><h3>模拟订单流水</h3><span>包含拒单和取消订单</span></div>
+            <div v-if="!paperDetail.orders.length" class="runtime-empty compact">暂无订单</div>
+            <div v-for="order in paperDetail.orders.slice(0, 100)" :key="order.order_id" class="runtime-row order-row">
+              <span>{{ formatTime(order.requested_at) }}</span>
+              <b :class="order.direction === 'buy' ? 'positive' : 'negative'">{{ order.direction === 'buy' ? '买入' : '卖出' }}</b>
+              <span>{{ order.symbol }} · {{ order.requested_volume }} 手</span>
+              <span>{{ order.filled_price ?? order.requested_price }}</span>
+              <v-chip size="x-small" variant="tonal" :color="orderStatus(order.status).color">{{ orderStatus(order.status).label }}</v-chip>
+              <span class="reject-reason">{{ order.rejection_reason || '--' }}</span>
+            </div>
+          </section>
+
+          <section class="runtime-table-card orders-card">
+            <div class="runtime-section-title"><h3>后台运行日志</h3><span>最近 100 条</span></div>
+            <div v-if="!paperDetail.runtime_logs?.length" class="runtime-empty compact">后台维护启动后将在这里记录心跳与撮合事件</div>
+            <div v-for="log in paperDetail.runtime_logs || []" :key="log.id" class="runtime-row order-row">
+              <span>{{ formatTime(log.created_at) }}</span>
+              <b>{{ runtimeEventLabel(log.event_type) }}</b>
+              <span>{{ log.message }}</span>
+            </div>
+          </section>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="accountDialog" max-width="680">
+      <v-card v-if="managedAccount" class="binding-dialog" elevation="0">
+        <v-card-title class="binding-header">
+          <div><div class="section-tag">ACCOUNT CONTROL</div><h2>账户管理</h2><span>{{ managedAccount.mt5_login || managedAccount.account_type }} · {{ managedAccount.mt5_server || 'AI Trader' }}</span></div>
+          <v-btn icon="mdi-close" variant="text" @click="accountDialog = false" />
+        </v-card-title>
+        <v-card-text>
+          <v-alert type="info" variant="tonal" density="compact" class="mb-4">
+            MT5 登录号和交易服务器由 EA 上报，不允许手工修改。暂停交易不会中断行情和资金上报。
+          </v-alert>
+          <v-text-field v-model.trim="accountForm.accountName" label="账户备注名" variant="outlined" />
+          <v-switch v-model="accountForm.tradingEnabled" color="success" inset label="允许该账户产生新交易" />
+          <v-switch v-model="accountForm.autoTradingEnabled" color="success" inset label="允许策略自动确认并下单" />
+          <div class="paper-setting-grid">
+            <v-text-field v-model.number="accountForm.maxTotalPositions" label="最大总持仓" type="number" min="1" max="100" variant="outlined" />
+            <v-text-field v-model.number="accountForm.maxSingleVolume" label="单笔最大手数" type="number" min="0.01" step="0.01" variant="outlined" />
+            <v-text-field v-model.number="accountForm.dailyLossLimit" label="每日最大亏损（%）" type="number" min="0.1" step="0.1" variant="outlined" />
+            <v-text-field v-model.number="accountForm.dailyOrderLimit" label="每日订单上限" type="number" min="1" variant="outlined" />
+          </div>
+          <div class="paper-actions mt-2">
+            <v-btn color="primary" :loading="accountSaving" @click="saveAccountControls">保存账户配置</v-btn>
+            <v-btn v-if="managedAccount.status === 'archived'" color="success" variant="tonal" :loading="accountSaving" @click="restoreManagedAccount">恢复账户</v-btn>
+            <v-btn v-else color="error" variant="tonal" :disabled="managedAccount.account_type === 'mt5' && managedAccount.connected" :loading="accountSaving" @click="archiveManagedAccount">归档账户</v-btn>
+          </div>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="strategyDialog" max-width="720">
+      <v-card v-if="selectedAccount" class="binding-dialog" elevation="0">
+        <v-card-title class="binding-header">
+          <div><div class="section-tag">ACCOUNT STRATEGIES</div><h2>{{ selectedAccount.account_name }}</h2><span>#{{ selectedAccount.account_id }} · {{ typeMeta(selectedAccount.account_type).label }}</span></div>
+          <v-btn icon="mdi-close" variant="text" @click="strategyDialog = false" />
+        </v-card-title>
+        <v-card-text>
+          <v-alert type="info" variant="tonal" density="compact" class="mb-4">该账户只会执行这里处于“运行中”的策略，其他账户的绑定不会影响本账户。</v-alert>
+          <div class="binding-form">
+            <v-select v-model="accountStrategyId" :items="accountStrategyOptions" item-title="label" item-value="value" label="选择可绑定策略" variant="outlined" density="compact" hide-details />
+            <v-btn color="primary" :disabled="!accountStrategyId" :loading="bindingStrategy" @click="bindAccountStrategy">绑定策略</v-btn>
+          </div>
+          <div v-if="!selectedAccount.deployments?.length" class="runtime-empty compact">当前账户尚未绑定策略</div>
+          <div v-else class="binding-list">
+            <article v-for="deployment in selectedAccount.deployments" :key="deployment.deployment_id">
+              <div><strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong><span>{{ deployment.symbol }} · {{ deployment.execution_mode === 'live' ? 'MT5 实盘' : 'Paper 模拟' }}</span></div>
+              <div class="binding-controls">
+                <v-switch :model-value="deployment.status === 'active'" color="success" inset hide-details :loading="deploymentLoadingId === deployment.deployment_id" @update:model-value="value => toggleAccountDeployment(deployment, value)" />
+                <v-btn v-if="selectedAccount.account_type === 'mt5'" icon="mdi-link-variant-off" size="small" variant="text" color="error" @click="removeAccountDeployment(deployment)" />
+              </div>
+            </article>
+          </div>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
+  </div>
+</template>
+
+<script setup>
+import { computed, nextTick, onBeforeUnmount, reactive, ref } from 'vue'
+import * as echarts from 'echarts'
+import { accountAPI } from '../api/trading'
+
+const accounts = ref([])
+const loading = ref(false)
+const creating = ref(false)
+const eaDownloadingId = ref(null)
+const accountDialog = ref(false)
+const accountSaving = ref(false)
+const managedAccount = ref(null)
+const accountForm = reactive({
+  accountName: '', tradingEnabled: true, autoTradingEnabled: true,
+  maxTotalPositions: 10, maxSingleVolume: 10,
+  dailyLossLimit: 5, dailyOrderLimit: 20,
+})
+const strategyDialog = ref(false)
+const selectedAccount = ref(null)
+const accountStrategyId = ref('')
+const bindingStrategy = ref(false)
+const paperDialog = ref(false)
+const paperDetail = ref(null)
+const paperContext = reactive({ strategies: [] })
+const selectedStrategyId = ref('')
+const deploying = ref(false)
+const deploymentLoadingId = ref('')
+const reportLoading = ref(false)
+const paperReport = ref(null)
+const reportStrategyId = ref('')
+const equityChart = ref(null)
+let equityChartInstance = null
+const message = ref('')
+const messageType = ref('success')
+const currencies = ['USD', 'CNY', 'EUR', 'GBP', 'JPY']
+const paperForm = reactive({
+  name: '', initialBalance: 100000, currency: 'USD', leverage: 100,
+  spreadPoints: 0, slippagePoints: 0, commissionPerLot: 0,
+})
+
+const mt5Accounts = computed(() => accounts.value.filter(item => item.account_type === 'mt5'))
+const paperAccounts = computed(() => accounts.value.filter(item => item.account_type === 'paper'))
+const connectedCount = computed(() => mt5Accounts.value.filter(item => item.connected).length)
+const strategyOptions = computed(() => paperContext.strategies.filter(
+  strategy => strategy.paper_eligible
+).map(strategy => ({
+  value: strategy.strategy_id,
+  label: `${strategy.strategy_name} · ${strategy.symbol}`,
+})))
+const accountStrategyOptions = computed(() => {
+  if (!selectedAccount.value) return []
+  const existing = new Set((selectedAccount.value.deployments || []).map(item => item.strategy_id))
+  return paperContext.strategies.filter(strategy => {
+    const eligible = selectedAccount.value.account_type === 'mt5'
+      ? strategy.live_eligible : strategy.paper_eligible
+    return eligible && !existing.has(strategy.strategy_id)
+  }).map(strategy => ({
+    value: strategy.strategy_id,
+    label: `${strategy.strategy_name} · ${strategy.symbol}`,
+  }))
+})
+const reportStrategyOptions = computed(() => [
+  { value: '', label: '全部策略' },
+  ...(paperDetail.value?.deployments || []).map(item => ({
+    value: item.strategy_id, label: item.strategy_name || item.strategy_id,
+  })),
+])
+
+const typeMap = {
+  mt5: { label: 'MT5 经纪商账户', icon: 'mdi-server-network' },
+  paper: { label: 'Paper 模拟账户', icon: 'mdi-flask-outline' },
+  backtest: { label: '回测账户', icon: 'mdi-history' },
+}
+function typeMeta(type) { return typeMap[type] || typeMap.paper }
+function statusMeta(account) {
+  if (account.status === 'archived') return { label: '已归档', color: 'grey' }
+  if (account.account_type === 'mt5') return account.connected
+    ? { label: '终端在线', color: 'success' }
+    : { label: '终端离线', color: 'grey' }
+  return { label: '模拟引擎就绪', color: 'teal' }
+}
+function environmentLabel(value) {
+  return { live: '实盘', demo: '经纪商模拟', simulated: '系统模拟', unknown: '待识别' }[value] || value
+}
+function money(value, currency) {
+  return `${Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`
+}
+function formatTime(value) {
+  return value ? new Date(value * 1000).toLocaleString('zh-CN', { hour12: false }) : '暂无数据'
+}
+function signedMoney(value) {
+  const number = Number(value || 0)
+  return `${number > 0 ? '+' : ''}${number.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}`
+}
+function signedDelta(value) {
+  const number = Number(value || 0)
+  return `${number > 0 ? '+' : ''}${number.toFixed(2)}`
+}
+function deploymentStatusLabel(status) {
+  return { active: '运行中', paused: '已暂停', completed: '期限已结束' }[status] || status
+}
+function exitReasonLabel(reason) { return { take_profit: '止盈', stop_loss: '止损' }[reason] || reason }
+function strategyName(strategyId) {
+  return paperContext.strategies.find(item => item.strategy_id === strategyId)?.strategy_name || strategyId
+}
+function orderStatus(status) {
+  return {
+    pending: { label: '待成交', color: 'info' },
+    filled: { label: '已成交', color: 'success' },
+    rejected: { label: '已拒绝', color: 'error' },
+    canceled: { label: '已取消', color: 'grey' },
+  }[status] || { label: status, color: 'grey' }
+}
+function runtimeEventLabel(type) {
+  return { heartbeat: '运行心跳', execution: '撮合事件' }[type] || type
+}
+
+async function loadAccounts() {
+  loading.value = true
+  try {
+    const [data, contextData] = await Promise.all([
+      accountAPI.list(), accountAPI.getPaperContext(),
+    ])
+    accounts.value = data.accounts || []
+    paperContext.strategies = contextData.strategies || []
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '加载交易账户失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function createPaper() {
+  creating.value = true
+  try {
+    const data = await accountAPI.createPaper({
+      account_name: paperForm.name,
+      initial_balance: paperForm.initialBalance,
+      currency: paperForm.currency,
+      leverage: paperForm.leverage,
+      spread_points: paperForm.spreadPoints,
+      slippage_points: paperForm.slippagePoints,
+      commission_per_lot: paperForm.commissionPerLot,
+    })
+    messageType.value = 'success'
+    message.value = data.message
+    paperForm.name = ''
+    await loadAccounts()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '创建 Paper 账户失败'
+  } finally {
+    creating.value = false
+  }
+}
+
+async function downloadAccountEA(account) {
+  eaDownloadingId.value = account.account_id
+  await downloadEA(`${account.account_name} 的 EA 已下载；终端启动后将按实际登录账户自动识别`)
+}
+
+async function downloadNewEA() {
+  eaDownloadingId.value = 'new'
+  await downloadEA('EA 已下载；在目标 MT5 终端启动后，账户会自动出现在这里')
+}
+
+async function downloadEA(successMessage) {
+  try {
+    const response = await accountAPI.downloadMt5EA()
+    const filename = response.headers['x-ea-filename'] || 'mt5TerminalEA.ex5'
+    const url = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    link.click()
+    URL.revokeObjectURL(url)
+    messageType.value = 'success'
+    message.value = successMessage
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '下载 EA 失败'
+  } finally {
+    eaDownloadingId.value = null
+  }
+}
+
+function openAccountManager(account) {
+  managedAccount.value = account
+  Object.assign(accountForm, {
+    accountName: account.account_name,
+    tradingEnabled: account.trading_enabled,
+    autoTradingEnabled: account.auto_trading_enabled,
+    maxTotalPositions: account.max_total_positions,
+    maxSingleVolume: account.max_single_volume,
+    dailyLossLimit: account.daily_loss_limit,
+    dailyOrderLimit: account.daily_order_limit,
+  })
+  accountDialog.value = true
+}
+
+async function saveAccountControls() {
+  accountSaving.value = true
+  try {
+    const data = await accountAPI.update(managedAccount.value.account_id, {
+      account_name: accountForm.accountName,
+      trading_enabled: accountForm.tradingEnabled,
+      auto_trading_enabled: accountForm.autoTradingEnabled,
+      max_total_positions: accountForm.maxTotalPositions,
+      max_single_volume: accountForm.maxSingleVolume,
+      daily_loss_limit: accountForm.dailyLossLimit,
+      daily_order_limit: accountForm.dailyOrderLimit,
+    })
+    messageType.value = 'success'
+    message.value = data.message
+    await loadAccounts()
+    managedAccount.value = accounts.value.find(item => item.account_id === data.account.account_id)
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '保存账户配置失败'
+  } finally {
+    accountSaving.value = false
+  }
+}
+
+async function archiveManagedAccount() {
+  if (!confirm(`确定归档“${managedAccount.value.account_name}”吗？关联策略会暂停运行。`)) return
+  accountSaving.value = true
+  try {
+    const data = await accountAPI.archive(managedAccount.value.account_id)
+    messageType.value = 'success'
+    message.value = data.message
+    accountDialog.value = false
+    await loadAccounts()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '归档账户失败'
+  } finally {
+    accountSaving.value = false
+  }
+}
+
+async function restoreManagedAccount() {
+  accountSaving.value = true
+  try {
+    const data = await accountAPI.restore(managedAccount.value.account_id)
+    messageType.value = 'success'
+    message.value = data.message
+    accountDialog.value = false
+    await loadAccounts()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '恢复账户失败'
+  } finally {
+    accountSaving.value = false
+  }
+}
+
+function openStrategyManager(account) {
+  selectedAccount.value = account
+  accountStrategyId.value = ''
+  strategyDialog.value = true
+}
+
+async function bindAccountStrategy() {
+  bindingStrategy.value = true
+  try {
+    const data = await accountAPI.deployStrategy(selectedAccount.value.account_id, accountStrategyId.value)
+    messageType.value = 'success'
+    message.value = data.message
+    accountStrategyId.value = ''
+    await refreshSelectedAccount()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '绑定策略失败'
+  } finally {
+    bindingStrategy.value = false
+  }
+}
+
+async function toggleAccountDeployment(deployment, active) {
+  deploymentLoadingId.value = deployment.deployment_id
+  try {
+    await accountAPI.setDeploymentStatus(selectedAccount.value.account_id, deployment.deployment_id, active)
+    await refreshSelectedAccount()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '更新绑定状态失败'
+  } finally {
+    deploymentLoadingId.value = ''
+  }
+}
+
+async function removeAccountDeployment(deployment) {
+  if (!confirm(`确定从该账户解绑“${deployment.strategy_name || deployment.strategy_id}”吗？`)) return
+  try {
+    const data = await accountAPI.removeDeployment(selectedAccount.value.account_id, deployment.deployment_id)
+    messageType.value = 'success'
+    message.value = data.message
+    await refreshSelectedAccount()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '解绑策略失败'
+  }
+}
+
+async function refreshSelectedAccount() {
+  const accountId = selectedAccount.value.account_id
+  await loadAccounts()
+  selectedAccount.value = accounts.value.find(item => item.account_id === accountId) || null
+}
+
+async function openPaperRuntime(account) {
+  try {
+    const data = await accountAPI.getPaperDetail(account.account_id)
+    paperDetail.value = data.detail
+    selectedStrategyId.value = ''
+    paperReport.value = null
+    reportStrategyId.value = ''
+    paperDialog.value = true
+    await nextTick()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '加载模拟账户失败'
+  }
+}
+
+async function loadPaperReport() {
+  if (!paperDetail.value) return
+  reportLoading.value = true
+  try {
+    const data = await accountAPI.getPaperReport(
+      paperDetail.value.account.account_id, reportStrategyId.value
+    )
+    paperReport.value = data.report
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '生成模拟盘报告失败'
+  } finally {
+    reportLoading.value = false
+  }
+}
+
+function closePaperRuntime() {
+  paperDialog.value = false
+  equityChartInstance?.dispose()
+  equityChartInstance = null
+  paperDetail.value = null
+}
+
+async function refreshPaperDetail() {
+  const data = await accountAPI.getPaperDetail(paperDetail.value.account.account_id)
+  paperDetail.value = data.detail
+  await nextTick()
+  renderEquityChart()
+  await loadAccounts()
+}
+
+async function deploySelectedStrategy() {
+  deploying.value = true
+  try {
+    const data = await accountAPI.deployStrategy(
+      paperDetail.value.account.account_id, selectedStrategyId.value
+    )
+    messageType.value = 'success'
+    message.value = data.message
+    selectedStrategyId.value = ''
+    await refreshPaperDetail()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '部署策略失败'
+  } finally {
+    deploying.value = false
+  }
+}
+
+async function toggleDeployment(deployment, active) {
+  deploymentLoadingId.value = deployment.deployment_id
+  try {
+    await accountAPI.setDeploymentStatus(
+      paperDetail.value.account.account_id, deployment.deployment_id, active
+    )
+    await refreshPaperDetail()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '更新策略运行状态失败'
+  } finally {
+    deploymentLoadingId.value = ''
+  }
+}
+
+function renderEquityChart() {
+  if (!equityChart.value || !paperDetail.value?.equity_curve?.length) return
+  equityChartInstance?.dispose()
+  equityChartInstance = echarts.init(equityChart.value)
+  const curve = paperDetail.value.equity_curve
+  equityChartInstance.setOption({
+    animationDuration: 500,
+    tooltip: { trigger: 'axis' },
+    grid: { left: 18, right: 18, top: 18, bottom: 8, containLabel: true },
+    xAxis: {
+      type: 'category', boundaryGap: false,
+      data: curve.map(item => new Date(item.time * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })),
+      axisLabel: { color: '#81908a', hideOverlap: true },
+    },
+    yAxis: { type: 'value', scale: true },
+    series: [{
+      type: 'line', name: '净值', symbol: 'none', smooth: 0.15,
+      data: curve.map(item => item.equity), lineStyle: { color: '#24735f', width: 2 },
+      areaStyle: { color: 'rgba(36,115,95,.16)' },
+    }],
+  })
+}
+
+loadAccounts()
+onBeforeUnmount(() => equityChartInstance?.dispose())
+</script>
+
+<style scoped>
+.accounts-page { min-height: 100%; padding: 28px; background: radial-gradient(circle at 92% 5%, rgba(187,134,49,.13), transparent 27%), linear-gradient(145deg, #f4f0e7, #edf3ef 58%, #f8f5ec); }
+.account-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 22px; padding: 34px 38px; border-radius: 24px; color: #fbf7ec; background: linear-gradient(118deg, #122f2a, #285f50 70%, #9a7336); box-shadow: 0 20px 46px rgba(20,58,48,.18); }
+.account-hero h1 { margin: 5px 0 8px; font: 700 clamp(2rem,4vw,3.35rem)/1 Georgia,serif; }
+.account-hero p { margin: 0; max-width: 760px; color: rgba(255,255,255,.76); }
+.eyebrow,.section-tag { color: #d9b873; font-size: .7rem; font-weight: 800; letter-spacing: .16em; }
+.section-tag { color: #24735f; }
+.metric-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 20px; }
+.metric-grid article { padding: 17px 20px; border: 1px solid rgba(27,71,59,.1); border-radius: 15px; background: rgba(255,255,255,.82); }
+.metric-grid span { display: block; color: #79847f; font-size: .76rem; }
+.metric-grid strong { color: #1c4a3e; font-size: 1.75rem; }
+.content-grid { display: grid; grid-template-columns: 1fr minmax(300px,380px); gap: 20px; align-items: start; }
+.account-catalog,.paper-card { padding: 22px; border: 1px solid rgba(24,67,56,.1); border-radius: 20px; background: rgba(255,255,255,.92); }
+.paper-card { position: sticky; top: 20px; padding: 0; }
+.paper-card h2,.section-heading h2 { margin: 4px 0 8px; color: #1d453a; font-family: Georgia,serif; }
+.paper-card p { color: #6d7973; font-size: .86rem; line-height: 1.55; }
+.section-heading,.account-topline,.account-identity,.account-chips { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.section-heading > span { color: #7f8a85; font-size: .74rem; }
+.account-list { display: grid; gap: 14px; }
+.account-card { padding: 19px; border: 1px solid #dfe7e2; border-left: 4px solid #33725f; border-radius: 16px; background: #fcfdfb; }
+.account-card.paper { border-left-color: #b38237; }
+.account-mark { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; color: #276a57; background: #eaf3ee; }
+.account-card.paper .account-mark { color: #8a642b; background: #f8f0df; }
+.account-identity h3 { margin: 0; color: #284b41; font-size: 1rem; }
+.account-identity span { color: #87918d; font-size: .72rem; }
+.balance-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin: 17px 0; }
+.balance-row div { padding: 12px; border-radius: 11px; background: #f0f5f2; }
+.balance-row span,.balance-row strong { display: block; }
+.balance-row span { color: #81908a; font-size: .68rem; }
+.balance-row strong { margin-top: 4px; color: #254b40; font-size: .9rem; }
+.account-details { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px 18px; margin: 0; }
+.account-details dt { color: #8b9590; font-size: .67rem; }
+.account-details dd { margin: 2px 0 0; color: #4a615a; font-size: .76rem; overflow-wrap: anywhere; }
+.paper-note { display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 11px; color: #6d684f; background: #faf3e3; font-size: .76rem; }
+.paper-setting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.paper-actions { display: flex; justify-content: flex-end; margin-top: 15px; padding-top: 13px; border-top: 1px solid #e7ece9; }
+.bound-strategies { margin-top: 14px; padding: 11px 13px; border-radius: 11px; background: #f5f8f6; }.bound-strategies>span { display:block; margin-bottom:7px; color:#7d8a84; font-size:.65rem; }.bound-strategies>div { display:flex; flex-wrap:wrap; gap:5px; }.bound-strategies>strong { color:#9aa39f; font-size:.7rem; font-weight:500; }.paper-actions { gap:8px; flex-wrap:wrap; }
+.binding-dialog { border-radius:18px!important; background:#f5f7f3; }.binding-header { display:flex; align-items:center; justify-content:space-between; padding:22px 24px; }.binding-header h2 { margin:3px 0; }.binding-header span { color:#7d8983; font-size:.7rem; }.binding-form { display:grid; grid-template-columns:1fr auto; gap:9px; }.binding-list { display:grid; gap:8px; margin-top:14px; }.binding-list article { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border:1px solid #dbe5df; border-radius:11px; background:#fff; }.binding-list strong,.binding-list span { display:block; }.binding-list strong { color:#285044; font-size:.8rem; }.binding-list span { color:#89948f; font-size:.65rem; }.binding-controls { display:flex; align-items:center; gap:5px; }
+.runtime-dialog { border-radius: 20px !important; background: #f5f7f3; }
+.runtime-header { display: flex; align-items: center; justify-content: space-between; padding: 22px 26px; }
+.runtime-header h2 { margin: 3px 0; }
+.runtime-header span { color: #7f8b85; font-size: .72rem; }
+.runtime-body { padding: 22px 26px 30px !important; }
+.runtime-metrics { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
+.runtime-metrics article { padding: 15px; border: 1px solid #dce5df; border-radius: 12px; background: #fff; }
+.runtime-metrics span,.runtime-metrics strong { display: block; }
+.runtime-metrics span { color: #82908a; font-size: .68rem; }.runtime-metrics strong { margin-top: 4px; color: #295145; font-size: 1rem; }
+.deployment-workbench { display: grid; grid-template-columns: 1fr minmax(360px,520px); align-items: center; gap: 20px; margin-top: 14px; padding: 16px; border-radius: 13px; color: #f8f4e8; background: linear-gradient(120deg,#183b33,#2d6958); }
+.deployment-workbench h3 { margin: 3px 0; }.deployment-workbench p { margin: 0; color: rgba(255,255,255,.68); font-size: .7rem; }
+.deployment-form { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
+.deployment-form :deep(.v-field) { background: #fff; }
+.deployment-list { display: grid; gap: 7px; margin-top: 9px; }
+.deployment-list article { display: flex; align-items: center; justify-content: space-between; padding: 10px 13px; border: 1px solid #dce6e0; border-radius: 10px; background: #fff; }
+.deployment-list strong,.deployment-list span { display: block; }.deployment-list strong { color: #31554b; font-size: .78rem; }.deployment-list span { color: #87928d; font-size: .64rem; }
+.runtime-chart-card,.runtime-table-card { margin-top: 13px; padding: 15px; border: 1px solid #dfe7e2; border-radius: 13px; background: #fff; }
+.paper-report { margin-top: 13px; padding: 18px; border-radius: 15px; background: linear-gradient(135deg,#173d34,#275d50); color: #fff; }
+.report-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; }.report-heading h3 { margin: 3px 0; }.report-heading .v-select { max-width: 280px; }.report-heading :deep(.v-field) { background: #fff; }
+.report-metrics { display: grid; grid-template-columns: repeat(6,1fr); gap: 8px; margin-top: 14px; }.report-metrics article { padding: 12px; border-radius: 10px; background: rgba(255,255,255,.1); }.report-metrics span,.report-metrics strong { display:block; }.report-metrics span { color: rgba(255,255,255,.62); font-size:.62rem; }.report-metrics strong { margin-top:4px; font-size:.9rem; }
+.report-breakdowns { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:10px; }.report-breakdowns>div { padding:12px; border-radius:10px; background:rgba(255,255,255,.07); }.report-breakdowns h4 { margin:0 0 7px; font-size:.72rem; }.report-breakdowns p { display:flex; justify-content:space-between; gap:8px; margin:5px 0; color:rgba(255,255,255,.72); font-size:.62rem; }
+.benchmark-panel { margin-top:12px; padding:14px; border-radius:11px; background:rgba(255,255,255,.08); }.benchmark-title { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }.benchmark-title span { color:#d7b36f; font-size:.58rem; font-weight:800; letter-spacing:.12em; }.benchmark-title h4 { margin:2px 0; }.benchmark-title small { color:rgba(255,255,255,.55); font-size:.6rem; }.benchmark-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:7px; margin-top:10px; }.benchmark-grid article { padding:10px; border-radius:8px; background:rgba(255,255,255,.07); }.benchmark-grid span,.benchmark-grid strong,.benchmark-grid small { display:block; }.benchmark-grid span { color:rgba(255,255,255,.57); font-size:.59rem; }.benchmark-grid strong { margin:3px 0; font-size:.8rem; }.benchmark-grid small { color:rgba(255,255,255,.62); font-size:.56rem; line-height:1.45; }
+.runtime-section-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }.runtime-section-title h3 { margin: 0; color: #31554b; font-size: .84rem; }.runtime-section-title span { color: #89948f; font-size: .65rem; }
+.equity-chart { width: 100%; height: 280px; }
+.runtime-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }.runtime-grid .runtime-table-card { margin-top: 13px; }
+.runtime-row { display: grid; align-items: center; gap: 8px; padding: 8px 5px; border-top: 1px solid #edf1ee; color: #6f7d77; font-size: .67rem; }.position-row { grid-template-columns: 45px 1fr 1fr auto; }.trade-row { grid-template-columns: 130px 1fr 80px auto; }.order-row { grid-template-columns: 130px 45px 1fr 90px 65px minmax(100px,1fr); }
+.runtime-dialog .positive { color: #147b59; }.runtime-dialog .negative { color: #bd493c; }.reject-reason { color: #9a6258; }
+.runtime-empty { display: grid; place-items: center; min-height: 130px; color: #919c97; font-size: .72rem; }.runtime-empty.compact { min-height: 62px; }
+.empty-state { padding: 65px 20px; color: #85918b; text-align: center; }
+.empty-state h3 { margin: 12px 0 5px; color: #4a625b; }.empty-state p { margin: 0; }
+@media(max-width:1000px){.content-grid{grid-template-columns:1fr}.paper-card{position:static}.account-details{grid-template-columns:1fr 1fr}.deployment-workbench{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}.report-metrics{grid-template-columns:repeat(3,1fr)}.report-breakdowns{grid-template-columns:1fr}.benchmark-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:650px){.accounts-page{padding:15px}.account-hero{align-items:flex-start;flex-direction:column;padding:25px}.metric-grid,.runtime-metrics{grid-template-columns:1fr 1fr}.account-topline{align-items:flex-start;flex-direction:column}.balance-row,.account-details,.paper-setting-grid{grid-template-columns:1fr}.account-chips{flex-wrap:wrap}.runtime-body{padding:14px!important}.deployment-form{grid-template-columns:1fr}.order-row{grid-template-columns:1fr 45px 70px}.order-row>*:nth-child(n+4):not(:last-child){display:none}.trade-row{grid-template-columns:1fr auto}.trade-row>*:nth-child(2),.trade-row>*:nth-child(3){display:none}}
+</style>

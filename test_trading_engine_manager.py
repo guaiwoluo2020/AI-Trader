@@ -9,7 +9,8 @@ import time
 import unittest
 from datetime import datetime
 
-from auth import AuthManager, reset_auth_manager
+from auth import AuthManager, AuthUser, reset_auth_manager
+from fastapi import HTTPException
 from background_scheduler import SharedTaskScheduler
 from market.models import (
     PendingOrder,
@@ -24,6 +25,7 @@ from sqlite_storage import (
     reset_storage,
 )
 from trading_engine_manager import TradingEngineManager
+from web_account_context import resolve_web_engine
 
 
 class _FakeEngine:
@@ -94,7 +96,35 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             mount=0.01,
         )
 
-        self.assertEqual(instruction.to_dict()["tp"], 0.0)
+        payload = instruction.to_dict()
+        self.assertEqual(payload["tp"], 0.0)
+        self.assertEqual(payload["instruction_id"], instruction.instruction_id)
+        self.assertIn("order_id", payload)
+
+    def test_web_account_context_rejects_another_users_account(self):
+        salt, password_hash = self.auth_manager._build_password_credentials("user2")
+        user2 = UserRepository().create_user("user2", password_hash, salt)
+        account_repo = TradingAccountRepository()
+        own_account, _ = account_repo.create_or_rotate_default(self.admin.user_id)
+        other_account, _ = account_repo.create_or_rotate_default(user2.user_id)
+        manager = TradingEngineManager(
+            engine_factory=lambda user_id, account_id: _FakeEngine(user_id, account_id)
+        )
+        auth_user = AuthUser(
+            user_id=self.admin.user_id,
+            username=self.admin.username,
+            role=self.admin.role,
+        )
+
+        resolved, engine = resolve_web_engine(
+            manager, auth_user, own_account.account_id
+        )
+        self.assertEqual(resolved.account_id, own_account.account_id)
+        self.assertEqual(engine.account_id, own_account.account_id)
+        with self.assertRaises(HTTPException) as raised:
+            resolve_web_engine(manager, auth_user, other_account.account_id)
+        self.assertEqual(raised.exception.status_code, 404)
+        manager.close_all()
 
     def test_accounts_receive_distinct_engine_instances(self):
         salt, password_hash = self.auth_manager._build_password_credentials("user2")
@@ -413,6 +443,86 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             result["pending_order"]["order_id"],
         )
         self.assertNotEqual(broadcasts[0]["order_id"], decision.decision_id)
+        manager.close_all()
+
+    def test_auto_execute_strategy_creates_instruction_without_confirmation(self):
+        account, _ = TradingAccountRepository().create_or_rotate_default(
+            self.admin.user_id
+        )
+        manager = TradingEngineManager()
+        engine = manager.get_engine(self.admin.user_id, account.account_id)
+        decision = TradingDecision(
+            symbol="GOLD#",
+            strategy_id="auto-strategy",
+            strategy_name="Auto Strategy",
+            auto_execute=True,
+            action="buy",
+            entry_price=3300.0,
+            sl=3290.0,
+            tp=3320.0,
+            volume=0.01,
+            decision_reason="auto test signal",
+        )
+        engine._signal_service.generate_signals = lambda symbol, price: [object()]
+        engine.strategy_service.make_decisions = lambda symbol, price: [decision]
+
+        result = engine.process_price("GOLD#", 3300.0)
+        queued_instructions = (
+            engine.trading_instruction_service.get_all_instructions()
+        )
+        instructions = engine.trading_instruction_service.fetch_instructions_for_ea(
+            "GOLD#",
+            3300.0,
+        )
+
+        self.assertTrue(result["pending_order"]["confirmed"])
+        self.assertTrue(result["decision"]["auto_executed"])
+        self.assertEqual(engine.pending_order_service.get_pending_count("GOLD#"), 0)
+        self.assertEqual(queued_instructions[0].order_id, decision.order_id)
+        self.assertEqual(len(instructions), 1)
+        self.assertEqual(instructions[0]["action"], "b")
+        manager.close_all()
+
+    def test_account_controls_override_strategy_auto_execution(self):
+        repository = TradingAccountRepository()
+        account, _ = repository.create_or_rotate_default(self.admin.user_id)
+        repository.update_controls(
+            self.admin.user_id,
+            account.account_id,
+            auto_trading_enabled=False,
+        )
+        manager = TradingEngineManager()
+        engine = manager.get_engine(self.admin.user_id, account.account_id)
+        decision = TradingDecision(
+            symbol="GOLD#",
+            strategy_id="auto-strategy",
+            strategy_name="Auto Strategy",
+            auto_execute=True,
+            action="buy",
+            entry_price=3300.0,
+            sl=3290.0,
+            tp=3320.0,
+            volume=0.01,
+            decision_reason="account control",
+        )
+        engine._signal_service.generate_signals = lambda symbol, price: [object()]
+        engine.strategy_service.make_decisions = lambda symbol, price: [decision]
+
+        result = engine.process_price("GOLD#", 3300.0)
+
+        self.assertFalse(result["pending_order"]["confirmed"])
+        self.assertEqual(engine.pending_order_service.get_pending_count("GOLD#"), 1)
+        self.assertEqual(
+            engine.trading_instruction_service.get_all_instructions(), []
+        )
+
+        repository.update_controls(
+            self.admin.user_id,
+            account.account_id,
+            trading_enabled=False,
+        )
+        paused = engine.process_price("GOLD#", 3300.0)
+        self.assertEqual(paused["decisions"], [])
         manager.close_all()
 
     def test_binding_migrates_persisted_temporary_runtime_data(self):

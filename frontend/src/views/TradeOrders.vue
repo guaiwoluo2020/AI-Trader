@@ -6,6 +6,51 @@
       </v-col>
     </v-row>
 
+    <v-row>
+      <v-col cols="12">
+        <v-card>
+          <v-card-title class="d-flex align-center justify-space-between">
+            EA 执行结果
+            <v-btn size="small" variant="text" :loading="loadingExecutions" @click="loadExecutions">
+              刷新
+            </v-btn>
+          </v-card-title>
+          <v-card-text>
+            <v-data-table
+              :headers="executionHeaders"
+              :items="executionReports"
+              :loading="loadingExecutions"
+              no-data-text="当前账户暂无 EA 执行回报"
+              density="compact"
+            >
+              <template v-slot:item.success="{ item }">
+                <v-chip :color="item.success ? 'success' : 'error'" size="small">
+                  {{ item.success ? '成交' : '失败' }}
+                </v-chip>
+              </template>
+              <template v-slot:item.price="{ item }">
+                {{ formatPrice(item.requested_price) }} → {{ formatPrice(item.executed_price) }}
+              </template>
+              <template v-slot:item.slippage="{ item }">
+                <span :class="Number(item.slippage) > 0 ? 'text-error' : 'text-success'">
+                  {{ formatSlippage(item.slippage) }}
+                </span>
+              </template>
+              <template v-slot:item.reported_at="{ item }">
+                {{ formatExecutionTime(item.reported_at) }}
+              </template>
+              <template v-slot:item.mt5_order="{ item }">
+                {{ item.mt5_order || '-' }} / {{ item.mt5_deal || '-' }}
+              </template>
+              <template v-slot:item.error="{ item }">
+                {{ item.error_message || (item.retcode ? `retcode: ${item.retcode}` : '-') }}
+              </template>
+            </v-data-table>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+
     <!-- 发送交易指令表单 -->
     <v-row>
       <v-col cols="12" md="6">
@@ -139,9 +184,10 @@
 </template>
 
 <script>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { tradingAPI } from '@/api/trading'
 import { marketAPI } from '@/api/market'
+import { useAccountContext } from '@/composables/useAccountContext'
 
 export default {
   name: 'TradeOrders',
@@ -153,6 +199,10 @@ export default {
     const clearing = ref(false)
     const error = ref('')
     const success = ref('')
+    const loadingExecutions = ref(false)
+    const executionReports = ref([])
+    let refreshTimer = null
+    const { selectedAccountId } = useAccountContext()
 
     const tradeForm = ref({
       symbol: '',
@@ -176,6 +226,15 @@ export default {
       { title: '价格', key: 'price', width: '20%' },
       { title: '时间', key: 'timestamp', width: '30%' },
     ]
+    const executionHeaders = [
+      { title: '回报时间', key: 'reported_at' },
+      { title: '品种', key: 'symbol' },
+      { title: '结果', key: 'success' },
+      { title: '请求价 → 成交价', key: 'price' },
+      { title: '滑点', key: 'slippage' },
+      { title: 'MT5 订单/成交', key: 'mt5_order' },
+      { title: '失败原因', key: 'error' },
+    ]
 
     const pendingTrades = ref([])
 
@@ -183,7 +242,7 @@ export default {
       try {
         loadingTrades.value = true
         error.value = ''
-        const data = await tradingAPI.getPendingTrades()
+        const data = await tradingAPI.getPendingTrades(selectedAccountId.value)
 
         // 将对象格式转换为数组格式
         const tradesObj = data.pending_trades || {}
@@ -234,7 +293,7 @@ export default {
           tp: tradeForm.value.tp || 0
         }
 
-        await tradingAPI.sendTradeInstructions([instruction])
+        await tradingAPI.sendTradeInstructions([instruction], selectedAccountId.value)
         success.value = '交易指令发送成功！'
         form.value.reset()
         await loadPendingTrades()
@@ -253,7 +312,7 @@ export default {
         clearing.value = true
         error.value = ''
         success.value = ''
-        await tradingAPI.clearTrades()
+        await tradingAPI.clearTrades(selectedAccountId.value)
         success.value = '已清空所有指令！'
         await loadPendingTrades()
       } catch (err) {
@@ -269,9 +328,40 @@ export default {
       return new Date(timestamp * 1000).toLocaleString('zh-CN')
     }
 
+    const formatExecutionTime = (timestamp) => {
+      if (!timestamp) return '-'
+      const date = typeof timestamp === 'number'
+        ? new Date(timestamp * 1000)
+        : new Date(timestamp)
+      return date.toLocaleString('zh-CN')
+    }
+
+    const formatPrice = (value) => value == null ? '-' : Number(value).toLocaleString('zh-CN', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 5,
+    })
+    const formatSlippage = (value) => {
+      if (value == null) return '-'
+      const number = Number(value)
+      return `${number > 0 ? '+' : ''}${number.toFixed(5)}`
+    }
+
+    const loadExecutions = async () => {
+      if (!selectedAccountId.value) return
+      loadingExecutions.value = true
+      try {
+        const data = await tradingAPI.getTradeExecutions(selectedAccountId.value)
+        executionReports.value = data.reports || []
+      } catch (err) {
+        console.error('加载 EA 执行结果失败:', err)
+      } finally {
+        loadingExecutions.value = false
+      }
+    }
+
     const loadSymbols = async () => {
       try {
-        const data = await marketAPI.getSymbols()
+        const data = await marketAPI.getSymbols(selectedAccountId.value)
         symbols.value = data.symbols || []
       } catch (err) {
         console.error('加载品种列表失败:', err)
@@ -279,11 +369,31 @@ export default {
     }
 
     onMounted(() => {
-      loadSymbols()
-      loadPendingTrades()
-      // 每10秒自动刷新
-      setInterval(loadPendingTrades, 10000)
+      if (selectedAccountId.value) {
+        loadSymbols()
+        loadPendingTrades()
+        loadExecutions()
+      }
+      refreshTimer = setInterval(() => {
+        if (!selectedAccountId.value) return
+        loadPendingTrades()
+        loadExecutions()
+      }, 10000)
     })
+
+    watch(selectedAccountId, (value) => {
+      symbols.value = []
+      pendingTrades.value = []
+      executionReports.value = []
+      tradeForm.value.symbol = ''
+      if (value) {
+        loadSymbols()
+        loadPendingTrades()
+        loadExecutions()
+      }
+    })
+
+    onUnmounted(() => clearInterval(refreshTimer))
 
     return {
       form,
@@ -297,11 +407,18 @@ export default {
       symbols,
       directions,
       tradeHeaders,
+      executionHeaders,
       pendingTrades,
+      executionReports,
+      loadingExecutions,
       loadPendingTrades,
+      loadExecutions,
       sendTrade,
       clearAllTrades,
       formatTime,
+      formatExecutionTime,
+      formatPrice,
+      formatSlippage,
     }
   },
 }

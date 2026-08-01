@@ -12,6 +12,9 @@ import SystemLog from '../views/SystemLog.vue'
 import Positions from '../views/Positions.vue'
 import News from '../views/News.vue'
 import Mt5Setup from '../views/Mt5Setup.vue'
+import BacktestDatasets from '../views/BacktestDatasets.vue'
+import BacktestTasks from '../views/BacktestTasks.vue'
+import Accounts from '../views/Accounts.vue'
 
 const routes = [
   {
@@ -36,6 +39,12 @@ const routes = [
     path: '/mt5-setup',
     name: 'Mt5Setup',
     component: Mt5Setup,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/accounts',
+    name: 'Accounts',
+    component: Accounts,
     meta: { requiresAuth: true }
   },
   {
@@ -72,6 +81,18 @@ const routes = [
     path: '/strategy-settings',
     name: 'StrategySettings',
     component: StrategySettings,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/backtest-datasets',
+    name: 'BacktestDatasets',
+    component: BacktestDatasets,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/backtests',
+    name: 'BacktestTasks',
+    component: BacktestTasks,
     meta: { requiresAuth: true }
   },
   {

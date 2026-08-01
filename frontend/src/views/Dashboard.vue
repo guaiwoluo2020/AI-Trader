@@ -126,13 +126,14 @@
 </template>
 
 <script>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { marketAPI } from '@/api/market'
 import { mt5API, tradingAPI } from '@/api/trading'
 import {
   countPendingTrades,
   normalizeActiveSymbols,
 } from '@/utils/dashboard-view-data'
+import { useAccountContext } from '@/composables/useAccountContext'
 
 export default {
   name: 'Dashboard',
@@ -143,16 +144,17 @@ export default {
     const activeSymbols = ref([])
     const error = ref('')
     let refreshTimer = null
+    const { selectedAccountId, selectedAccount } = useAccountContext()
 
     const loadData = async () => {
       try {
         error.value = ''
 
         const [connection, pendingTrades, statistics, marketStatus] = await Promise.all([
-          mt5API.status(),
-          tradingAPI.getPendingTrades(),
-          tradingAPI.getStatistics(),
-          marketAPI.getStatus(),
+          mt5API.status(selectedAccountId.value),
+          tradingAPI.getPendingTrades(selectedAccountId.value),
+          tradingAPI.getStatistics(null, 10, selectedAccountId.value),
+          marketAPI.getStatus(selectedAccountId.value),
         ])
 
         mt5Status.value = connection
@@ -167,9 +169,13 @@ export default {
     }
 
     onMounted(() => {
-      loadData()
+      if (selectedAccountId.value) loadData()
       // 每30秒自动刷新
       refreshTimer = setInterval(loadData, 30000)
+    })
+
+    watch(selectedAccountId, (value) => {
+      if (value) loadData()
     })
 
     onUnmounted(() => {
@@ -182,6 +188,7 @@ export default {
       statisticsCount,
       activeSymbols,
       error,
+      selectedAccount,
       loadData,
     }
   },

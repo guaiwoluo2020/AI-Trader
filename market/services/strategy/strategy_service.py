@@ -5,7 +5,7 @@
 综合信号、持仓、资金等做出交易决策
 """
 
-from typing import List, Dict, Optional
+from typing import Callable, List, Dict, Optional
 from datetime import datetime
 import threading
 
@@ -37,6 +37,7 @@ class StrategyService:
         self._decision_cooldowns: Dict[str, datetime] = {}
         self._cooldown_lock = threading.Lock()
         self.decision_cooldown = 60  # 60秒冷却
+        self._allowed_strategy_ids: Optional[set] = None
 
         print("[StrategyService] 策略决策服务已初始化")
 
@@ -47,6 +48,10 @@ class StrategyService:
     def set_pending_order_service(self, service) -> None:
         """设置待确认订单服务"""
         self._pending_order_service = service
+
+    def set_allowed_strategy_ids(self, strategy_ids: List[str]) -> None:
+        """限制当前账户可参与实盘决策的策略。"""
+        self._allowed_strategy_ids = set(strategy_ids)
 
     # ==================== 策略配置 ====================
 
@@ -165,7 +170,12 @@ class StrategyService:
 
         # 检查一致性要求
         action = "none"
-        if direction:
+        has_skipped_conflict = (
+            strategy.conflict_resolution == ConflictResolution.SKIP
+            and bool(buy_signals)
+            and bool(sell_signals)
+        )
+        if direction and not has_skipped_conflict:
             if strategy.consistency_requirement == ConsistencyRequirement.ANY:
                 action = direction
             elif strategy.consistency_requirement == ConsistencyRequirement.MAJORITY:
@@ -194,11 +204,17 @@ class StrategyService:
     # ==================== 决策生成 ====================
 
     def make_decisions(self, symbol: str, current_price: float,
-                       force_signals: List[TradingSignal] = None) -> List[TradingDecision]:
+                       force_signals: List[TradingSignal] = None,
+                       strategy_ids: Optional[List[str]] = None) -> List[TradingDecision]:
         """分别使用该品种的所有策略生成决策。"""
+        allowed_ids = (
+            set(strategy_ids) if strategy_ids is not None
+            else self._allowed_strategy_ids
+        )
         return [
             decision
             for strategy in self.get_strategies(symbol)
+            if allowed_ids is None or strategy.strategy_id in allowed_ids
             if (
                 decision := self.make_decision(
                     symbol,
@@ -211,7 +227,13 @@ class StrategyService:
 
     def make_decision(self, symbol: str, current_price: float,
                      force_signals: List[TradingSignal] = None,
-                     strategy: TradingStrategy = None) -> Optional[TradingDecision]:
+                     strategy: TradingStrategy = None,
+                     execution_mode: str = "live",
+                     cooldown_scope: str = "live",
+                     decision_time: datetime = None,
+                     volume_calculator: Callable = None,
+                     position_checker: Callable = None,
+                     risk_checker: Callable = None) -> Optional[TradingDecision]:
         """
         做出交易决策
 
@@ -225,15 +247,20 @@ class StrategyService:
         """
         # 获取策略配置
         strategy = strategy or self.get_strategy(symbol)
-        if not strategy.enabled:
+        if not strategy.is_runnable_for(execution_mode):
             return None
 
         # 同一品种的多个策略独立冷却，互不阻塞。
-        if self._is_in_cooldown(strategy.strategy_id):
+        cooldown_key = f"{cooldown_scope}:{strategy.strategy_id}"
+        if self._is_in_cooldown(cooldown_key, decision_time):
             return None
 
         # 获取信号
-        signals = force_signals if force_signals else self.signal_service.get_active_signals(symbol)
+        signals = (
+            force_signals
+            if force_signals is not None
+            else self.signal_service.get_active_signals(symbol)
+        )
 
         # 过滤低置信度信号
         signals = [s for s in signals if s.confidence >= strategy.min_confidence]
@@ -262,6 +289,14 @@ class StrategyService:
         best_signal = self._select_best_signal(enabled_signals, action, strategy)
         if not best_signal:
             return None
+        directional_signals = [s for s in enabled_signals if s.action == action]
+        analysis = {
+            **analysis,
+            "selected_signal_id": best_signal.signal_id,
+            "selected_signal_source": best_signal.source,
+            "selected_signal_period": best_signal.source_period,
+            "contributing_sources": sorted({s.source for s in directional_signals}),
+        }
 
         # 计算止损止盈
         entry_price = current_price
@@ -302,20 +337,32 @@ class StrategyService:
             return None
 
         # 计算手数
-        volume = self.risk_manager.calculate_volume(symbol, risk_points, strategy)
+        volume = (
+            volume_calculator(symbol, risk_points, strategy)
+            if volume_calculator
+            else self.risk_manager.calculate_volume(symbol, risk_points, strategy)
+        )
         if volume <= 0:
             return None
 
         # 检查持仓限制
-        position_check = self._check_position_limits(symbol, strategy, action)
+        position_check = (
+            position_checker(symbol, strategy, action)
+            if position_checker
+            else self._check_position_limits(symbol, strategy, action)
+        )
 
         # 检查风险限制
-        risk_check = self.risk_manager.check_risk(symbol, volume, risk_points)
+        risk_check = (
+            risk_checker(symbol, volume, risk_points, strategy)
+            if risk_checker
+            else self.risk_manager.check_risk(symbol, volume, risk_points)
+        )
 
         # 如果检查不通过，返回拒绝的决策
         if not position_check.get("allowed", True) or not risk_check.get("allowed", True):
             # 即使被拒绝也要设置冷却，避免频繁推送
-            self._set_cooldown(strategy.strategy_id)
+            self._set_cooldown(cooldown_key, decision_time)
             warnings = (
                 position_check.get("warnings", [])
                 + risk_check.get("warnings", [])
@@ -325,6 +372,7 @@ class StrategyService:
                 symbol=symbol,
                 strategy_id=strategy.strategy_id,
                 strategy_name=strategy.strategy_name,
+                auto_execute=strategy.auto_execute,
                 action=action,
                 decision_type="rejected",
                 signals=[s.to_dict() for s in enabled_signals],
@@ -345,11 +393,12 @@ class StrategyService:
                 position_check=position_check,
                 risk_check=risk_check,
                 status="rejected",
+                created_at=decision_time,
             )
             return decision
 
         # 设置决策冷却
-        self._set_cooldown(strategy.strategy_id)
+        self._set_cooldown(cooldown_key, decision_time)
 
         # 生成决策理由
         decision_reason = self._generate_decision_reason(analysis, best_signal)
@@ -359,6 +408,7 @@ class StrategyService:
             symbol=symbol,
             strategy_id=strategy.strategy_id,
             strategy_name=strategy.strategy_name,
+            auto_execute=strategy.auto_execute,
             action=action,
             decision_type="signal_combined" if len(signals) > 1 else "single_signal",
             signals=[s.to_dict() for s in enabled_signals],
@@ -378,6 +428,7 @@ class StrategyService:
             ),
             position_check=position_check,
             risk_check=risk_check,
+            created_at=decision_time,
         )
 
         print(f"[StrategyService] 生成决策: {decision.decision_id} {action} {symbol} @ {entry_price}")
@@ -472,19 +523,24 @@ class StrategyService:
 
         return " | ".join(reasons)
 
-    def _is_in_cooldown(self, strategy_id: str) -> bool:
+    def _is_in_cooldown(
+        self, cooldown_key: str, current_time: datetime = None
+    ) -> bool:
         """检查是否在冷却期"""
+        current_time = current_time or datetime.now()
         with self._cooldown_lock:
-            if strategy_id in self._decision_cooldowns:
-                last_time = self._decision_cooldowns[strategy_id]
-                elapsed = (datetime.now() - last_time).total_seconds()
+            if cooldown_key in self._decision_cooldowns:
+                last_time = self._decision_cooldowns[cooldown_key]
+                elapsed = (current_time - last_time).total_seconds()
                 return elapsed < self.decision_cooldown
             return False
 
-    def _set_cooldown(self, strategy_id: str) -> None:
+    def _set_cooldown(
+        self, cooldown_key: str, current_time: datetime = None
+    ) -> None:
         """设置冷却"""
         with self._cooldown_lock:
-            self._decision_cooldowns[strategy_id] = datetime.now()
+            self._decision_cooldowns[cooldown_key] = current_time or datetime.now()
 
     # ==================== 执行决策 ====================
 
@@ -505,10 +561,12 @@ class StrategyService:
             print("[StrategyService] 待确认订单服务未设置")
             return None
 
+        order_action = "b" if decision.action == "buy" else "s"
+
         # 创建订单
         order_id = self._pending_order_service.create_order(
             symbol=decision.symbol,
-            action=decision.action,
+            action=order_action,
             price=decision.entry_price,
             mount=decision.volume,
             sl=decision.sl,
@@ -523,7 +581,16 @@ class StrategyService:
         )
 
         decision.order_id = order_id
-        decision.status = "confirmed"
+        decision.status = "pending"
+
+        if decision.auto_execute:
+            confirmed_order = self._pending_order_service.confirm_order(order_id)
+            if confirmed_order:
+                decision.auto_executed = True
+                decision.status = "confirmed"
+                print(f"[StrategyService] 策略自动下单: {order_id}")
+            else:
+                print(f"[StrategyService] 策略自动下单失败: {order_id}")
 
         print(f"[StrategyService] 决策已执行，订单ID: {order_id}")
         return order_id

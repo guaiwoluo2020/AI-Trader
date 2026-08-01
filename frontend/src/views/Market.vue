@@ -122,6 +122,10 @@
               <v-icon small left>mdi-shield-alert</v-icon>
               风控拦截
             </v-chip>
+            <v-chip v-else-if="alert.auto_executed" small color="warning" class="ml-2">
+              <v-icon small left>mdi-robot</v-icon>
+              已自动下单
+            </v-chip>
             <v-chip v-if="alert.confidence" small color="primary" class="ml-2">
               置信度: {{ alert.confidence }}%
             </v-chip>
@@ -252,7 +256,7 @@
           <div v-if="alert.pending_order?.confirmed" class="mt-2">
             <v-chip small color="success">
               <v-icon start small>mdi-check-circle</v-icon>
-              已确认，等待执行
+              {{ alert.pending_order.auto_executed ? '已自动下单，等待 MT5 执行' : '已确认，等待执行' }}
             </v-chip>
           </div>
         </v-alert>
@@ -522,8 +526,9 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { marketAPI } from '@/api/market'
+import { useAccountContext } from '@/composables/useAccountContext'
 import {
   formatTradePrice,
   normalizeTradingDecision,
@@ -558,6 +563,7 @@ export default {
     let newsReconnectTimer = null
     let statusInterval = null
     let isUnmounted = false
+    const { selectedAccountId } = useAccountContext()
 
     // 大模型分析
     const llmStatus = ref({ enabled: false })
@@ -603,7 +609,7 @@ export default {
     // 方法
     const loadStatus = async () => {
       try {
-        const status = await marketAPI.getStatus()
+        const status = await marketAPI.getStatus(selectedAccountId.value)
         marketStatus.value = status
       } catch (err) {
         console.error('加载状态失败:', err)
@@ -622,12 +628,14 @@ export default {
     const connectWebSocket = () => {
       if (
         isUnmounted ||
+        !selectedAccountId.value ||
         ws.value?.readyState === WebSocket.OPEN ||
         ws.value?.readyState === WebSocket.CONNECTING
       ) {
         return
       }
-      ws.value = marketAPI.createWebSocket(
+      const accountId = selectedAccountId.value
+      const socket = marketAPI.createWebSocket(
         // onMessage
         (data) => {
           if (data.type === 'trading_decision') {
@@ -697,16 +705,19 @@ export default {
         },
         // onClose
         () => {
+          if (ws.value !== socket) return
           wsConnected.value = false
           ws.value = null
-          if (!isUnmounted) {
+          if (!isUnmounted && selectedAccountId.value === accountId) {
             clearTimeout(wsReconnectTimer)
             wsReconnectTimer = setTimeout(() => {
               connectWebSocket()
             }, 5000)
           }
-        }
+        },
+        accountId
       )
+      ws.value = socket
     }
 
     const getThresholdLabel = (period) => {
@@ -810,7 +821,7 @@ export default {
       loadingTrend.value = true
       try {
         // 并行加载所有品种的趋势
-        const promises = symbols.map(symbol => marketAPI.getTrend(symbol))
+        const promises = symbols.map(symbol => marketAPI.getTrend(symbol, selectedAccountId.value))
         const results = await Promise.all(promises)
 
         // 合并结果
@@ -830,7 +841,7 @@ export default {
 
     const loadPendingOrders = async () => {
       try {
-        const data = await marketAPI.getPendingOrders()
+        const data = await marketAPI.getPendingOrders(null, selectedAccountId.value)
         pendingOrders.value = data.orders || []
       } catch (err) {
         console.error('加载待确认订单失败:', err)
@@ -840,7 +851,7 @@ export default {
     // 大模型分析相关
     const loadLLMStatus = async () => {
       try {
-        const data = await marketAPI.getLLMStatus()
+        const data = await marketAPI.getLLMStatus(selectedAccountId.value)
         if (data.status === 'ok') {
           llmStatus.value = data.data
           const status = data.data.analysis_status
@@ -858,7 +869,7 @@ export default {
         return
       }
       try {
-        const data = await marketAPI.getLLMAnalysis()
+        const data = await marketAPI.getLLMAnalysis(null, selectedAccountId.value)
         if (data.status === 'ok') {
           llmAnalysis.value = data.data || {}
         }
@@ -870,7 +881,7 @@ export default {
     const triggerLLMAnalysis = async () => {
       llmTriggering.value = true
       try {
-        const data = await marketAPI.triggerLLMAnalysis()
+        const data = await marketAPI.triggerLLMAnalysis(selectedAccountId.value)
         if (data.status === 'accepted' || data.status === 'busy') {
           llmAnalyzing.value = true
           llmAnalysisStatus.value = data.message
@@ -1050,7 +1061,7 @@ export default {
 
     const confirmOrder = async (orderId) => {
       try {
-        const data = await marketAPI.confirmOrder(orderId)
+        const data = await marketAPI.confirmOrder(orderId, selectedAccountId.value)
         if (data.status === 'ok') {
           await loadPendingOrders()
         } else {
@@ -1065,7 +1076,7 @@ export default {
 
     const rejectOrder = async (orderId) => {
       try {
-        const data = await marketAPI.rejectOrder(orderId)
+        const data = await marketAPI.rejectOrder(orderId, selectedAccountId.value)
         if (data.status === 'ok') {
           await loadPendingOrders()
         } else {
@@ -1090,7 +1101,7 @@ export default {
           mount: order.mount,
           sl: order.sl,
           tp: order.tp
-        })
+        }, selectedAccountId.value)
         if (data.status === 'ok') {
           decisionAlerts.value.splice(alertIndex, 1)
           await loadPendingOrders()
@@ -1109,7 +1120,7 @@ export default {
     const rejectDecisionOrder = async (orderId, alertIndex) => {
       rejectingOrderId.value = orderId
       try {
-        const data = await marketAPI.rejectOrder(orderId)
+        const data = await marketAPI.rejectOrder(orderId, selectedAccountId.value)
         if (data.status === 'ok') {
           decisionAlerts.value.splice(alertIndex, 1)
           await loadPendingOrders()
@@ -1203,12 +1214,14 @@ export default {
 
     // 生命周期
     onMounted(async () => {
-      loadStatus()
       loadThresholds()
-      loadPendingOrders()
-      await loadLLMStatus()
-      loadLLMAnalysis()
-      connectWebSocket()
+      if (selectedAccountId.value) {
+        loadStatus()
+        loadPendingOrders()
+        await loadLLMStatus()
+        loadLLMAnalysis()
+        connectWebSocket()
+      }
       // 快讯相关
       fetchLatestFlashNews()
       connectNewsWebSocket()
@@ -1217,12 +1230,30 @@ export default {
 
       // 定时刷新
       statusInterval = setInterval(() => {
+        if (!selectedAccountId.value) return
         loadStatus()
         loadPendingOrders()
         loadLLMStatus().then(loadLLMAnalysis)
         loadTrend()
       }, 10000)
 
+    })
+
+    watch(selectedAccountId, async (value) => {
+      clearTimeout(wsReconnectTimer)
+      ws.value?.close()
+      ws.value = null
+      wsConnected.value = false
+      decisionAlerts.value = []
+      pendingOrders.value = []
+      trendData.value = {}
+      llmAnalysis.value = {}
+      llmStatus.value = { enabled: false }
+      if (!value || isUnmounted) return
+      await Promise.all([loadStatus(), loadPendingOrders(), loadLLMStatus()])
+      await loadLLMAnalysis()
+      loadTrend()
+      connectWebSocket()
     })
 
     onUnmounted(() => {
