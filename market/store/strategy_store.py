@@ -5,6 +5,7 @@
 """
 
 from typing import List, Dict, Optional
+from datetime import datetime
 import threading
 
 from ..models import StrategyLifecycle, TradingStrategy
@@ -73,6 +74,10 @@ class StrategyStore:
 
     # ==================== 策略管理 ====================
 
+    @staticmethod
+    def _created_at_key(strategy: TradingStrategy):
+        return (strategy.created_at or datetime.min, strategy.strategy_id)
+
     def get_strategy(self, symbol: str) -> Optional[TradingStrategy]:
         """兼容旧调用，获取品种创建最早的策略配置。"""
         with self._lock:
@@ -85,11 +90,11 @@ class StrategyStore:
 
     def get_strategies(self, symbol: str) -> List[TradingStrategy]:
         with self._lock:
-            return [
+            return sorted([
                 strategy
                 for strategy in self._strategies.values()
                 if strategy.symbol == symbol
-            ]
+            ], key=self._created_at_key)
 
     def get_or_create_strategy(self, symbol: str) -> TradingStrategy:
         """获取或创建策略配置"""
@@ -182,7 +187,9 @@ class StrategyStore:
     def get_all_strategies(self) -> List[TradingStrategy]:
         """获取所有策略配置"""
         with self._lock:
-            return list(self._strategies.values())
+            return sorted(
+                self._strategies.values(), key=self._created_at_key
+            )
 
     def get_all_strategies_dict(self) -> Dict[str, Dict]:
         """获取所有策略配置字典"""

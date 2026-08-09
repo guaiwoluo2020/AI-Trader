@@ -9,6 +9,7 @@ import os
 import json
 import hashlib
 import re
+import time
 import requests
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -47,6 +48,8 @@ class LLMService:
         self.llm_store = llm_store
         self.kline_service = kline_service
         self._strategy_store = None
+        self._allowed_strategy_ids = None
+        self._source_last_analysis_at = {}
 
         # 从环境变量补充配置
         self._load_env_config()
@@ -57,7 +60,13 @@ class LLMService:
         """注入当前用户的策略仓储，用于约束分析范围。"""
         self._strategy_store = strategy_store
 
-    def _build_ai_analysis_plan(self, available_symbols: List[str]) -> Dict[str, Dict]:
+    def set_allowed_strategy_ids(self, strategy_ids) -> None:
+        """Limit live AI analysis to strategies deployed on this account."""
+        self._allowed_strategy_ids = set(strategy_ids)
+
+    def _build_ai_analysis_plan(
+        self, available_symbols: List[str], due_only: bool = False,
+    ) -> Dict[str, Dict]:
         """聚合同一品种多策略启用的 AI 周期和分析约束。"""
         if self._strategy_store is None:
             return {
@@ -76,34 +85,52 @@ class LLMService:
         for strategy in self._strategy_store.get_all_strategies():
             if not strategy.enabled or strategy.symbol not in available:
                 continue
-
-            ai_config = (strategy.signal_config or {}).get("ai_entry", {})
-            if not ai_config.get("enabled", False):
+            if (
+                self._allowed_strategy_ids is not None
+                and strategy.strategy_id not in self._allowed_strategy_ids
+            ):
                 continue
 
-            enabled_periods = {}
-            for period, config in ai_config.get("periods", {}).items():
-                weight = int(config.get("weight", 0))
-                if config.get("enabled", False) and weight > 0:
-                    enabled_periods[period] = weight
-            if not enabled_periods:
-                continue
-
-            symbol_plan = plan.setdefault(
-                strategy.symbol,
-                {"periods": {}, "strategies": []},
-            )
-            for period, weight in enabled_periods.items():
-                current = symbol_plan["periods"].get(period, {"weight": 0})
-                current["weight"] = max(current["weight"], weight)
+            for source in strategy.get_signal_sources(
+                "ai_entry", enabled_only=True
+            ):
+                params = source.get("params") or {}
+                source_id = source["signal_source_id"]
+                interval = max(
+                    1, int(params.get("analysis_interval_minutes", 5))
+                ) * 60
+                if due_only and (
+                    time.monotonic()
+                    - self._source_last_analysis_at.get(source_id, -interval)
+                    < interval
+                ):
+                    continue
+                period = source["period"]
+                symbol_plan = plan.setdefault(
+                    strategy.symbol,
+                    {"periods": {}, "strategies": []},
+                )
+                current = symbol_plan["periods"].get(
+                    period, {"weight": 0, "kline_count": 0}
+                )
+                current["weight"] = max(current["weight"], int(source["weight"]))
+                current["kline_count"] = max(
+                    current["kline_count"],
+                    max(10, min(500, int(params.get("kline_count", 100)))),
+                )
                 symbol_plan["periods"][period] = current
-            symbol_plan["strategies"].append({
-                "strategy_id": strategy.strategy_id,
-                "strategy_name": strategy.strategy_name,
-                "periods": enabled_periods,
-                "min_confidence": strategy.min_confidence,
-                "min_risk_reward": strategy.min_risk_reward,
-            })
+                symbol_plan["strategies"].append({
+                    "strategy_id": strategy.strategy_id,
+                    "strategy_name": strategy.strategy_name,
+                    "signal_source_id": source_id,
+                    "periods": {period: int(source["weight"])},
+                    "min_confidence": int(
+                        params.get("min_confidence", strategy.min_confidence)
+                    ),
+                    "min_risk_reward": strategy.min_risk_reward,
+                    "analysis_interval_minutes": interval // 60,
+                    "kline_count": int(params.get("kline_count", 100)),
+                })
         return plan
 
     def _load_env_config(self):
@@ -168,7 +195,13 @@ class LLMService:
                 else ['H4', 'H1', 'M15', 'M5', 'M1']
             )
             for period in periods:
-                limit = self.KLINE_LIMITS.get(period, 30)
+                limit = (
+                    int(analysis_plan[symbol]["periods"][period].get(
+                        "kline_count", self.KLINE_LIMITS.get(period, 30)
+                    ))
+                    if analysis_plan and symbol in analysis_plan
+                    else self.KLINE_LIMITS.get(period, 30)
+                )
                 klines = self.kline_service.get_klines(symbol, period, limit)
                 if klines:
                     klines_data[period] = klines
@@ -197,7 +230,8 @@ class LLMService:
                         for period, weight in profile["periods"].items()
                     )
                     constraints.append(
-                        f"- {profile['strategy_name']} ({profile['strategy_id']}): "
+                        f"- {profile['strategy_name']} ({profile['strategy_id']}), "
+                        f"信号源ID {profile.get('signal_source_id', '')}: "
                         f"AI周期 {periods}；最低置信度 "
                         f"{profile['min_confidence']}%；最低盈亏比 "
                         f"{profile['min_risk_reward']}"
@@ -222,9 +256,15 @@ class LLMService:
         template = getattr(
             config, "analysis_prompt_template", DEFAULT_ANALYSIS_PROMPT_TEMPLATE
         )
-        return template.replace(
+        prompt = template.replace(
             "{{strategy_context}}", "\n\n".join(strategy_sections)
         ).replace("{{market_data}}", "\n\n".join(market_sections))
+        return prompt + (
+            "\n\n## 策略归属硬性要求\n"
+            "trade_suggestions 中每条建议必须包含 strategy_id 和 signal_source_id，"
+            "且只能填写上方策略约束中列出的ID；同一周期被多个信号源启用时，必须分别"
+            "输出建议，不得省略或合并。"
+        )
 
     def prompt_hash(self, prompt: str) -> str:
         """同时覆盖 system 和 user prompt，供回测缓存与审计使用。"""
@@ -445,38 +485,69 @@ class LLMService:
                 if entry <= 0 or stop_loss <= 0 or take_profit <= 0 or not valid_levels:
                     continue
 
-                required_rr = max(
-                    [1.0]
-                    + [
-                        float(profile.get("min_risk_reward", 1.0))
-                        for profile in symbol_plan.get("strategies", [])
-                        if period in profile.get("periods", {})
+                profiles = [
+                    profile for profile in symbol_plan.get("strategies", [])
+                    if period in profile.get("periods", {})
+                ]
+                requested_strategy_id = str(
+                    suggestion.get("strategy_id") or ""
+                ).strip()
+                if requested_strategy_id:
+                    profiles = [
+                        profile for profile in profiles
+                        if profile["strategy_id"] == requested_strategy_id
                     ]
-                )
+                requested_source_id = str(
+                    suggestion.get("signal_source_id") or ""
+                ).strip()
+                if requested_source_id:
+                    profiles = [
+                        profile for profile in profiles
+                        if profile.get("signal_source_id") == requested_source_id
+                    ]
+                if not profiles:
+                    continue
+
                 risk = abs(entry - stop_loss)
-                reward = abs(take_profit - entry)
                 if risk <= 0:
                     continue
-                if reward / risk < required_rr:
-                    take_profit = (
-                        entry + risk * required_rr
-                        if direction == "buy"
-                        else entry - risk * required_rr
+                for profile in profiles:
+                    if int(suggestion.get("confidence", 0)) < int(
+                        profile.get("min_confidence", 0)
+                    ):
+                        continue
+                    strategy_suggestion = dict(suggestion)
+                    required_rr = max(
+                        1.0, float(profile.get("min_risk_reward", 1.0))
                     )
-
-                suggestion["period"] = period
-                suggestion["entry_price"] = entry
-                suggestion["stop_loss"] = stop_loss
-                suggestion["take_profit"] = round(take_profit, 8)
-                normalized.append(suggestion)
+                    strategy_tp = take_profit
+                    reward = abs(strategy_tp - entry)
+                    if reward / risk < required_rr:
+                        strategy_tp = (
+                            entry + risk * required_rr
+                            if direction == "buy"
+                            else entry - risk * required_rr
+                        )
+                    strategy_suggestion.update({
+                        "strategy_id": profile["strategy_id"],
+                        "strategy_name": profile["strategy_name"],
+                        "signal_source_id": profile.get("signal_source_id", ""),
+                        "period": period,
+                        "entry_price": entry,
+                        "stop_loss": stop_loss,
+                        "take_profit": round(strategy_tp, 8),
+                    })
+                    normalized.append(strategy_suggestion)
 
             analysis["trade_suggestions"] = normalized
         return response
 
     # ==================== 入场价检测 ====================
 
-    def check_entry_price_nearby(self, symbol: str, current_price: float,
-                                  threshold: float = 0.0001) -> List[Dict]:
+    def check_entry_price_nearby(
+        self, symbol: str, current_price: float, threshold: float = 0.0001,
+        strategy_id: str = "",
+    ) -> List[Dict]:
         """
         检查当前价格是否接近 AI 建议的入场价
 
@@ -495,6 +566,11 @@ class LLMService:
             return matched
 
         for suggestion in result.trade_suggestions:
+            suggestion_strategy_id = str(
+                suggestion.get("strategy_id") or ""
+            )
+            if strategy_id and suggestion_strategy_id != strategy_id:
+                continue
             entry_price = suggestion.get('entry_price')
             period = suggestion.get('period')
             direction = suggestion.get('direction')
@@ -514,12 +590,17 @@ class LLMService:
             if price_diff_pct <= threshold:
                 # 检查冷却
                 can_alert = self.llm_store.check_entry_alert_cooldown(
-                    symbol, period, direction, entry_price
+                    symbol, period, direction, entry_price, strategy_id,
+                    str(suggestion.get("signal_source_id") or ""),
+                    result.analyzed_at or "",
                 )
 
                 if can_alert:
                     matched.append({
                         "symbol": symbol,
+                        "strategy_id": suggestion_strategy_id,
+                        "strategy_name": suggestion.get("strategy_name", ""),
+                        "signal_source_id": suggestion.get("signal_source_id", ""),
                         "period": period,
                         "direction": direction,
                         "entry_price": entry_price,
@@ -541,7 +622,10 @@ class LLMService:
 
     # ==================== 分析执行 ====================
 
-    def run_analysis(self, on_status: callable = None, on_complete: callable = None) -> Dict:
+    def run_analysis(
+        self, on_status: callable = None, on_complete: callable = None,
+        due_only: bool = False,
+    ) -> Dict:
         """
         执行分析
 
@@ -567,7 +651,7 @@ class LLMService:
             report("error", "没有品种数据")
             return {"status": "error", "message": "没有品种数据"}
 
-        analysis_plan = self._build_ai_analysis_plan(symbols)
+        analysis_plan = self._build_ai_analysis_plan(symbols, due_only=due_only)
         if not analysis_plan:
             report("skipped", "没有启用大模型入场信号的策略，跳过 AI 分析")
             return {
@@ -626,9 +710,27 @@ class LLMService:
 
         # 保存结果
         if response:
+            analyzed_source_ids = {
+                profile.get("signal_source_id")
+                for symbol_plan in analysis_plan.values()
+                for profile in symbol_plan.get("strategies", [])
+            }
             for symbol, analysis in response.items():
                 if isinstance(analysis, dict):
+                    previous = self.llm_store.get_analysis_result(symbol)
+                    if previous:
+                        retained = [
+                            item for item in previous.trade_suggestions
+                            if item.get("signal_source_id") not in analyzed_source_ids
+                        ]
+                        analysis["trade_suggestions"] = (
+                            retained + analysis.get("trade_suggestions", [])
+                        )
                     self.llm_store.save_analysis_dict(symbol, analysis)
+            analyzed_at = time.monotonic()
+            for source_id in analyzed_source_ids:
+                if source_id:
+                    self._source_last_analysis_at[source_id] = analyzed_at
 
         if on_complete:
             on_complete(response)

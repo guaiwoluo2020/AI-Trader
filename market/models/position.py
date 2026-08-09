@@ -22,6 +22,7 @@ class PositionData:
     price_open: float
     position_type: str  # "BUY" / "SELL"
     profit: float
+    comment: str = ""
 
     # 止损止盈
     sl: float = 0.0
@@ -30,6 +31,7 @@ class PositionData:
     distance_tp: float = 0.0  # 距离止盈的点数
 
     # 元数据
+    opened_at: datetime = None
     updated_at: datetime = None
 
     def __post_init__(self):
@@ -60,11 +62,13 @@ class PositionData:
             "price_open": self.price_open,
             "type": self.position_type,
             "profit": self.profit,
+            "comment": self.comment,
             "sl": self.sl,
             "tp": self.tp,
             "distance_sl": self.distance_sl,
             "distance_tp": self.distance_tp,
             "direction": self.direction,
+            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None
         }
 
@@ -78,10 +82,15 @@ class PositionData:
             price_open=float(data.get('priceOpen', 0)),
             position_type=data.get('type', 'BUY').upper(),
             profit=float(data.get('profit', 0)),
+            comment=str(data.get('comment', '') or ''),
             sl=float(data.get('sl', 0)),
             tp=float(data.get('tp', 0)),
             distance_sl=float(data.get('distanceSL', 0)),
-            distance_tp=float(data.get('distanceTP', 0))
+            distance_tp=float(data.get('distanceTP', 0)),
+            opened_at=(
+                datetime.fromtimestamp(int(data['openTime']))
+                if data.get('openTime') else None
+            ),
         )
 
     @classmethod
@@ -89,6 +98,9 @@ class PositionData:
         updated_at = data.get("updated_at")
         if isinstance(updated_at, str):
             updated_at = datetime.fromisoformat(updated_at)
+        opened_at = data.get("opened_at")
+        if isinstance(opened_at, str):
+            opened_at = datetime.fromisoformat(opened_at)
         return cls(
             ticket=int(data.get("ticket", 0)),
             symbol=data.get("symbol", ""),
@@ -96,9 +108,11 @@ class PositionData:
             price_open=float(data.get("price_open", data.get("priceOpen", 0))),
             position_type=data.get("type", "BUY").upper(),
             profit=float(data.get("profit", 0)),
+            comment=str(data.get("comment", "") or ""),
             sl=float(data.get("sl", 0)),
             tp=float(data.get("tp", 0)),
             distance_sl=float(data.get("distance_sl", data.get("distanceSL", 0))),
             distance_tp=float(data.get("distance_tp", data.get("distanceTP", 0))),
+            opened_at=opened_at,
             updated_at=updated_at,
         )

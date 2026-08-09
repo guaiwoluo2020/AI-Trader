@@ -218,12 +218,8 @@ class TradingEngineManager:
                     runtime.next_llm_analysis_at = now + 10
                     continue
 
-                interval = getattr(
-                    getattr(engine, "llm_analyzer", None),
-                    "ANALYZE_INTERVAL",
-                    300,
-                )
-                runtime.next_llm_analysis_at = now + max(float(interval), 1)
+                # 每分钟检查到期的 AI 信号源，各实例自行控制调用间隔。
+                runtime.next_llm_analysis_at = now + 60
                 callback = getattr(engine, "run_scheduled_llm_analysis", None)
                 if callback:
                     scheduler.submit((key, "llm_analysis"), callback)

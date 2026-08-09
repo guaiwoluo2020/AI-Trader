@@ -290,7 +290,7 @@ class PivotService:
         return result
 
     def get_pivots(self, symbol: str, period: str, direction: str = None,
-                   count: int = 50) -> List[Dict]:
+                   count: int = 10) -> List[Dict]:
         """获取转折点数据"""
         return self.pivot_store.get_pivots(symbol, period, direction, count)
 

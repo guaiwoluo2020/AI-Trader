@@ -118,6 +118,8 @@
                 type="date"
                 variant="outlined"
                 density="comfortable"
+                hint="可与开始日期相同，表示采集当天完整行情"
+                persistent-hint
               />
             </div>
             <v-select
@@ -331,6 +333,9 @@ const form = reactive({
 
 const warmupOptions = [
   { title: '30 天（推荐）', value: 30 },
+  { title: '7 天（短周期）', value: 7 },
+  { title: '3 天', value: 3 },
+  { title: '1 天（M1 策略）', value: 1 },
   { title: '60 天', value: 60 },
   { title: '90 天', value: 90 },
   { title: '不额外预热', value: 0 },
@@ -367,7 +372,7 @@ const canCreate = computed(() => Boolean(
   form.symbol &&
   form.startDate &&
   form.endDate &&
-  form.startDate < form.endDate
+  form.startDate <= form.endDate
 ))
 
 const needsEaUpgrade = computed(() => {

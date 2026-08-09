@@ -166,15 +166,21 @@ class LLMStore:
 
     # ==================== 入场价提醒管理 ====================
 
-    def check_entry_alert_cooldown(self, symbol: str, period: str, direction: str,
-                                    entry_price: float) -> bool:
+    def check_entry_alert_cooldown(
+        self, symbol: str, period: str, direction: str, entry_price: float,
+        strategy_id: str = "", signal_source_id: str = "",
+        analysis_id: str = "",
+    ) -> bool:
         """
         检查入场价提醒是否在冷却期
 
         Returns:
             True 表示可以提醒，False 表示在冷却期
         """
-        key = (symbol, period, direction, entry_price)
+        key = (
+            analysis_id, strategy_id, signal_source_id, symbol, period,
+            direction, entry_price
+        )
         current_time = datetime.now()
 
         with self._entry_alert_lock:

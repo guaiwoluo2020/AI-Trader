@@ -11,8 +11,10 @@ from backtest_data import (
     DatasetReferencedError,
 )
 from backtest_tasks import BacktestTemplateService
+from market.models import PositionManagementPolicy
 from market.models.trading_strategy import TradingStrategy
 from sqlite_storage import (
+    PositionManagementPolicyRepository,
     SQLiteStorage,
     StrategyConfigRepository,
     TradingAccountRepository,
@@ -31,8 +33,19 @@ class BacktestTemplateTestCase(unittest.TestCase):
             self.storage
         ).create_or_rotate_default(self.user.user_id)
         self.strategy_repository = StrategyConfigRepository(self.storage)
+        PositionManagementPolicyRepository(self.storage).save(
+            PositionManagementPolicy(
+                policy_id="policy-1", user_id=self.user.user_id,
+                name="Test", config={
+                    "initial_stop_rules": [{"type": "signal"}],
+                    "initial_take_profit_rules": [{"type": "signal"}],
+                    "management_rules": [],
+                },
+            )
+        )
         self.strategy = TradingStrategy(
-            symbol="GOLD_", strategy_name="Gold Pivot", enabled=False
+            symbol="GOLD_", strategy_name="Gold Pivot", enabled=False,
+            position_management_policy_id="policy-1",
         )
         self.strategy_repository.save_strategy(self.user.user_id, self.strategy)
         self.dataset_repository = BacktestDatasetRepository(self.storage)
@@ -83,6 +96,7 @@ class BacktestTemplateTestCase(unittest.TestCase):
             "slippage_points": 2,
             "commission_per_lot": 7,
             "max_positions": 2,
+            "max_same_direction": 2,
             "use_strategy_exits": True,
         }
 
@@ -107,6 +121,44 @@ class BacktestTemplateTestCase(unittest.TestCase):
             {first["dataset_id"], second["dataset_id"]},
         )
         self.assertTrue(all(task["status"] == "queued" for task in batch["tasks"]))
+        self.assertEqual(batch["template_snapshot"]["max_same_direction"], 2)
+
+    def test_strategy_context_exposes_template_risk_defaults(self):
+        context = self.service.get_context(self.user.user_id)
+
+        strategy = next(
+            item for item in context["strategies"]
+            if item["strategy_id"] == self.strategy.strategy_id
+        )
+        self.assertEqual(strategy["risk_percent"], self.strategy.risk_percent)
+        self.assertEqual(strategy["max_positions"], self.strategy.max_positions)
+        self.assertEqual(
+            strategy["max_same_direction"], self.strategy.max_same_direction
+        )
+
+    def test_missing_template_limits_default_to_latest_strategy(self):
+        self.strategy.risk_percent = 2.5
+        self.strategy.max_positions = 8
+        self.strategy.max_same_direction = 5
+        self.strategy_repository.save_strategy(self.user.user_id, self.strategy)
+        dataset = self._ready_dataset("Gold defaults")
+        payload = self._payload([dataset["dataset_id"]])
+        for key in ("risk_percent", "max_positions", "max_same_direction"):
+            payload.pop(key)
+
+        template = self.service.create_template(self.user.user_id, payload)
+
+        self.assertEqual(template["risk_percent"], 2.5)
+        self.assertEqual(template["max_positions"], 8)
+        self.assertEqual(template["max_same_direction"], 5)
+
+    def test_same_direction_limit_cannot_exceed_total_limit(self):
+        dataset = self._ready_dataset("Gold limits")
+        payload = self._payload([dataset["dataset_id"]])
+        payload["max_same_direction"] = 3
+
+        with self.assertRaisesRegex(ValueError, "同向最大持仓"):
+            self.service.create_template(self.user.user_id, payload)
 
     def test_each_run_keeps_an_immutable_strategy_snapshot(self):
         dataset = self._ready_dataset("Gold snapshot")
@@ -132,8 +184,19 @@ class BacktestTemplateTestCase(unittest.TestCase):
     def test_other_user_can_use_shared_but_not_private_dataset(self):
         dataset = self._ready_dataset("Shared Gold")
         other = self.users.create_user("shared-runner", "hash", "salt")
+        PositionManagementPolicyRepository(self.storage).save(
+            PositionManagementPolicy(
+                policy_id="other-policy", user_id=other.user_id,
+                name="Other exits", config={
+                    "initial_stop_rules": [{"type": "signal"}],
+                    "initial_take_profit_rules": [{"type": "signal"}],
+                    "management_rules": [],
+                },
+            )
+        )
         other_strategy = TradingStrategy(
-            symbol="GOLD_", strategy_name="Other Gold", enabled=False
+            symbol="GOLD_", strategy_name="Other Gold", enabled=False,
+            position_management_policy_id="other-policy",
         )
         self.strategy_repository.save_strategy(other.user_id, other_strategy)
         other_service = BacktestTemplateService(self.storage)

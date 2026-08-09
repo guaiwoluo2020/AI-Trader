@@ -15,7 +15,10 @@ from .pending_order_service import PendingOrderService
 from .trading_instruction_service import TradingInstructionService
 
 # 信号服务
-from .signal import SignalService, PivotSignalGenerator, KeyLevelSignalGenerator, AIEntrySignalGenerator
+from .signal import (
+    SignalService, KeyLevelSignalGenerator,
+    AIEntrySignalGenerator, MovingAverageSignalGenerator,
+)
 
 # 策略服务
 from .strategy import StrategyService, RiskManager
@@ -24,13 +27,15 @@ from .strategy import StrategyService, RiskManager
 from .statistics_service import StatisticsService
 from .position_service import PositionService
 from .trade_history_service import TradeHistoryService
+from .position_manager import PositionManager
 
 __all__ = [
     'KlineService', 'PivotService', 'LLMService', 'TechService',
     'CalendarService', 'FlashNewsService',
     'PendingOrderService', 'TradingInstructionService',
-    'SignalService', 'PivotSignalGenerator', 'KeyLevelSignalGenerator', 'AIEntrySignalGenerator',
+    'SignalService', 'KeyLevelSignalGenerator',
+    'AIEntrySignalGenerator', 'MovingAverageSignalGenerator',
     'StrategyService', 'RiskManager',
-    'StatisticsService', 'PositionService', 'TradeHistoryService',
+    'StatisticsService', 'PositionService', 'TradeHistoryService', 'PositionManager',
     'calculate_ma', 'calculate_adx', 'calculate_rsi', 'calculate_macd', 'calculate_bollinger_bands'
 ]

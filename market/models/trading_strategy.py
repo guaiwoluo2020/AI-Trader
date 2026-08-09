@@ -91,6 +91,172 @@ class StrategyLifecycle:
         return target in cls.TRANSITIONS.get(current, set())
 
 
+SIGNAL_PERIODS = ("M1", "M5", "M15", "H1", "H4")
+SIGNAL_PERIOD_MINUTES = {
+    "M1": 1,
+    "M5": 5,
+    "M15": 15,
+    "H1": 60,
+    "H4": 240,
+}
+
+
+def signal_source_defaults(source: str, period: str = "M5") -> Dict:
+    """创建一条可独立配置的信号源实例。"""
+    period = period if period in SIGNAL_PERIODS else "M5"
+    params = {}
+    if source == "key_level":
+        params = {
+            "level_mode": "automatic",
+            "levels": [],
+            "expression": "",
+            "proximity_threshold": 0.0008,
+            "cooldown_seconds": 180,
+        }
+    elif source == "ai_entry":
+        params = {
+            "analysis_interval_minutes": max(5, SIGNAL_PERIOD_MINUTES[period]),
+            "kline_count": 100,
+            "min_confidence": 70,
+            "entry_threshold": 0.0001,
+        }
+    elif source == "moving_average":
+        params = {
+            "fast_period": 5,
+            "slow_period": 20,
+            "ma_type": "sma",
+            "min_confidence": 70,
+            "cooldown_seconds": 180,
+        }
+    return {
+        "signal_source_id": uuid.uuid4().hex[:12],
+        "source": source,
+        "enabled": True,
+        "period": period,
+        "weight": 30,
+        "params": params,
+    }
+
+
+def migrate_signal_config(
+    signal_config: Dict, strategy_id: str = "legacy", min_confidence: int = 70,
+) -> List[Dict]:
+    """将旧版多周期配置拆成单周期信号源实例。"""
+    migrated = []
+    for source in ("key_level", "ai_entry"):
+        config = (signal_config or {}).get(source, {})
+        if source == "key_level":
+            if config.get("enabled", True) and int(config.get("weight", 0)) > 0:
+                item = signal_source_defaults(source, "M1")
+                item.update({
+                    "signal_source_id": f"{strategy_id}-key-level-m1",
+                    "weight": int(config.get("weight", 40)),
+                })
+                migrated.append(item)
+            continue
+        for period, period_config in (config.get("periods") or {}).items():
+            if not config.get("enabled", True) or not period_config.get("enabled"):
+                continue
+            weight = int(period_config.get("weight", 0))
+            if weight <= 0:
+                continue
+            item = signal_source_defaults(source, period)
+            item.update({
+                "signal_source_id": f"{strategy_id}-{source}-{period.lower()}",
+                "weight": weight,
+            })
+            if source == "ai_entry":
+                item["params"]["min_confidence"] = int(min_confidence)
+            migrated.append(item)
+    return migrated
+
+
+def normalize_signal_sources(items: Optional[List[Dict]]) -> Optional[List[Dict]]:
+    """校验实例唯一性并补全类型专属默认值。"""
+    if items is None:
+        return None
+    normalized = []
+    occupied = set()
+    source_ids = set()
+    for raw in items:
+        raw = raw or {}
+        source = str(raw.get("source", "")).strip()
+        period = str(raw.get("period", "")).upper()
+        if source == "pivot":
+            raise ValueError("转折点已改为系统基础数据，不再支持作为策略信号源")
+        if source not in {"key_level", "ai_entry", "moving_average"}:
+            raise ValueError(f"不支持的信号源类型: {source}")
+        if period not in SIGNAL_PERIODS:
+            raise ValueError(f"不支持的信号周期: {period}")
+        if (source, period) in occupied:
+            raise ValueError(f"{source} 的 {period} 周期不能重复添加")
+        occupied.add((source, period))
+
+        source_id = str(raw.get("signal_source_id") or uuid.uuid4().hex[:12])
+        if source_id in source_ids:
+            raise ValueError(f"信号源实例ID重复: {source_id}")
+        source_ids.add(source_id)
+        item = signal_source_defaults(source, period)
+        item.update({
+            "signal_source_id": source_id,
+            "enabled": bool(raw.get("enabled", True)),
+            "weight": max(0, min(100, int(raw.get("weight", 30)))),
+        })
+        item["params"].update(raw.get("params") or {})
+        params = item["params"]
+        if source == "key_level":
+            if params["level_mode"] not in {"automatic", "levels", "expression"}:
+                raise ValueError("关键点位来源配置无效")
+            raw_levels = params.get("levels") or []
+            if isinstance(raw_levels, str):
+                raw_levels = raw_levels.replace("，", ",").split(",")
+            params["levels"] = sorted({
+                float(value) for value in raw_levels
+                if str(value).strip() and float(value) > 0
+            })
+            params["expression"] = str(params.get("expression") or "").strip()[:200]
+            params["proximity_threshold"] = max(
+                0.0, min(0.1, float(params["proximity_threshold"]))
+            )
+            params["cooldown_seconds"] = max(
+                0, min(86400, int(params["cooldown_seconds"]))
+            )
+        elif source == "ai_entry":
+            params["analysis_interval_minutes"] = max(
+                SIGNAL_PERIOD_MINUTES[period],
+                min(1440, int(params["analysis_interval_minutes"])),
+            )
+            params["kline_count"] = max(10, min(500, int(params["kline_count"])))
+            params["min_confidence"] = max(
+                0, min(100, int(params["min_confidence"]))
+            )
+            params["entry_threshold"] = max(
+                0.0, min(0.1, float(params["entry_threshold"]))
+            )
+        else:
+            params["fast_period"] = max(1, min(500, int(params["fast_period"])))
+            params["slow_period"] = max(2, min(1000, int(params["slow_period"])))
+            if params["fast_period"] >= params["slow_period"]:
+                raise ValueError("均线快线周期必须小于慢线周期")
+            params["ma_type"] = str(params["ma_type"]).lower()
+            if params["ma_type"] not in {"sma", "ema"}:
+                raise ValueError("均线类型必须是 sma 或 ema")
+            params["min_confidence"] = max(
+                0, min(100, int(params.get("min_confidence", 70)))
+            )
+            for obsolete in (
+                "stop_loss_pct", "risk_reward_ratio", "exit_mode",
+                "trailing_activation_r", "trailing_distance_r",
+                "min_gap_ratio",
+            ):
+                params.pop(obsolete, None)
+            params["cooldown_seconds"] = max(
+                0, min(86400, int(params["cooldown_seconds"]))
+            )
+        normalized.append(item)
+    return normalized
+
+
 @dataclass
 class TradingStrategy:
     """交易策略 - 绑定品种，配置信号权重和决策规则"""
@@ -111,10 +277,6 @@ class TradingStrategy:
     # ==================== 信号源配置（新版：支持周期级别控制）====================
     # 信号源配置结构：
     # {
-    #   "pivot": {
-    #     "enabled": true,
-    #     "periods": {"M1": {"enabled": true, "weight": 15}, "M5": {"enabled": true, "weight": 20}, ...}
-    #   },
     #   "key_level": {"enabled": true, "weight": 40},  # key_level 不区分周期
     #   "ai_entry": {
     #     "enabled": true,
@@ -122,16 +284,6 @@ class TradingStrategy:
     #   }
     # }
     signal_config: Dict = field(default_factory=lambda: {
-        "pivot": {
-            "enabled": True,
-            "periods": {
-                "M1": {"enabled": True, "weight": 15},
-                "M5": {"enabled": True, "weight": 20},
-                "M15": {"enabled": False, "weight": 25},
-                "H1": {"enabled": False, "weight": 20},
-                "H4": {"enabled": False, "weight": 20}
-            }
-        },
         "key_level": {
             "enabled": True,
             "weight": 40
@@ -148,9 +300,12 @@ class TradingStrategy:
         }
     })
 
+    # 新版结构：用户可重复添加同类信号源，但同类信号源的周期必须唯一。
+    # None 表示历史数据尚未迁移，[] 表示用户明确删除了全部信号源。
+    signal_sources: Optional[List[Dict]] = None
+
     # ==================== 信号权重配置（兼容旧版，已废弃）===================
     signal_weights: Dict[str, int] = field(default_factory=lambda: {
-        "pivot": 30,
         "key_level": 40,
         "ai_entry": 30,
     })
@@ -177,14 +332,8 @@ class TradingStrategy:
     max_positions: int = 3
     max_same_direction: int = 2
 
-    # ==================== 止损止盈规则 ====================
-    sl_mode: str = StopLossMode.SIGNAL
-    sl_fixed_points: float = 20.0
-    sl_atr_multiplier: float = 1.5
-
-    tp_mode: str = TakeProfitMode.SIGNAL
-    tp_fixed_points: float = 40.0
-    tp_risk_reward: float = 2.0
+    # ==================== 独立持仓管理 ====================
+    position_management_policy_id: str = ""
 
     # ==================== 过滤条件 ====================
     min_risk_reward: float = 1.0
@@ -223,6 +372,11 @@ class TradingStrategy:
             self.auto_execute = False
         if not self.strategy_name:
             self.strategy_name = f"Strategy_{self.symbol}"
+        self.signal_sources = normalize_signal_sources(self.signal_sources)
+        if self.signal_sources is None:
+            self.signal_sources = migrate_signal_config(
+                self.signal_config, self.strategy_id, self.min_confidence
+            )
 
     def is_runnable(self) -> bool:
         """只有已发布且启用的策略可以生成实盘决策。"""
@@ -289,13 +443,12 @@ class TradingStrategy:
             raise ValueError("策略达到“可用于实盘”状态后才能自动下单")
 
         material_fields = {
-            "signal_config", "signal_weights", "period_weights",
+            "signal_config", "signal_sources", "signal_weights", "period_weights",
             "min_confidence", "consistency_requirement",
             "conflict_resolution", "fixed_volume", "volume_mode",
             "risk_percent", "max_risk_points", "max_positions",
-            "max_same_direction", "sl_mode", "sl_fixed_points",
-            "sl_atr_multiplier", "tp_mode", "tp_fixed_points",
-            "tp_risk_reward", "min_risk_reward", "max_risk_reward",
+            "max_same_direction", "position_management_policy_id",
+            "min_risk_reward", "max_risk_reward",
             "min_sl_points", "max_sl_points", "trading_hours",
             "position_conflict",
         }
@@ -320,6 +473,12 @@ class TradingStrategy:
             self.auto_execute = bool(data["auto_execute"])
         if "signal_config" in data:
             self.signal_config = data["signal_config"]
+            if "signal_sources" not in data:
+                self.signal_sources = migrate_signal_config(
+                    self.signal_config, self.strategy_id, self.min_confidence
+                )
+        if "signal_sources" in data:
+            self.signal_sources = normalize_signal_sources(data["signal_sources"])
         if "signal_weights" in data:
             self.signal_weights = data["signal_weights"]
         if "period_weights" in data:
@@ -340,10 +499,10 @@ class TradingStrategy:
             self.max_positions = int(data["max_positions"])
         if "max_same_direction" in data:
             self.max_same_direction = int(data["max_same_direction"])
-        if "sl_mode" in data:
-            self.sl_mode = data["sl_mode"]
-        if "tp_mode" in data:
-            self.tp_mode = data["tp_mode"]
+        if "position_management_policy_id" in data:
+            self.position_management_policy_id = str(
+                data["position_management_policy_id"] or ""
+            ).strip()
         if "min_risk_reward" in data:
             self.min_risk_reward = float(data["min_risk_reward"])
         if "max_risk_reward" in data:
@@ -378,18 +537,46 @@ class TradingStrategy:
 
         self.updated_at = datetime.now()
 
-    def get_signal_weight(self, source: str, period: str = None) -> int:
+    def get_signal_sources(
+        self, source: str = None, enabled_only: bool = False,
+    ) -> List[Dict]:
+        return [
+            item for item in (self.signal_sources or [])
+            if (source is None or item.get("source") == source)
+            and (not enabled_only or (
+                item.get("enabled", True) and int(item.get("weight", 0)) > 0
+            ))
+        ]
+
+    def get_signal_weight(
+        self, source: str, period: str = None, signal_source_id: str = "",
+    ) -> int:
         """
         获取信号源权重（支持周期级别）
 
         Args:
-            source: 信号源 (pivot/key_level/ai_entry)
+            source: 信号源 (key_level/ai_entry/moving_average)
             period: 周期 (M1/M5/M15/H1/H4)，key_level 不需要周期
 
         Returns:
             权重值
         """
-        # 优先使用新的 signal_config
+        if self.signal_sources is not None:
+            candidates = self.get_signal_sources(source, enabled_only=True)
+            if signal_source_id:
+                candidates = [
+                    item for item in candidates
+                    if item.get("signal_source_id") == signal_source_id
+                ]
+            if period:
+                candidates = [
+                    item for item in candidates if item.get("period") == period
+                ]
+            return max(
+                (int(item.get("weight", 0)) for item in candidates), default=0
+            )
+
+        # 兼容旧版 signal_config
         if self.signal_config and source in self.signal_config:
             config = self.signal_config[source]
             if not config.get("enabled", True):
@@ -412,7 +599,9 @@ class TradingStrategy:
         # 兼容旧版 signal_weights
         return self.signal_weights.get(source, 0)
 
-    def is_signal_enabled(self, source: str, period: str = None) -> bool:
+    def is_signal_enabled(
+        self, source: str, period: str = None, signal_source_id: str = "",
+    ) -> bool:
         """
         检查信号源是否启用
 
@@ -423,6 +612,9 @@ class TradingStrategy:
         Returns:
             是否启用
         """
+        if self.signal_sources is not None:
+            return self.get_signal_weight(source, period, signal_source_id) > 0
+
         if not self.signal_config or source not in self.signal_config:
             # 兼容旧版：signal_weights 中有配置就认为启用
             return source in self.signal_weights and self.signal_weights[source] > 0
@@ -462,6 +654,7 @@ class TradingStrategy:
             ),
             "lifecycle_history": self.lifecycle_history,
             "signal_config": self.signal_config,
+            "signal_sources": self.signal_sources,
             "signal_weights": self.signal_weights,
             "period_weights": self.period_weights,
             "min_confidence": self.min_confidence,
@@ -473,12 +666,7 @@ class TradingStrategy:
             "max_risk_points": self.max_risk_points,
             "max_positions": self.max_positions,
             "max_same_direction": self.max_same_direction,
-            "sl_mode": self.sl_mode,
-            "sl_fixed_points": self.sl_fixed_points,
-            "sl_atr_multiplier": self.sl_atr_multiplier,
-            "tp_mode": self.tp_mode,
-            "tp_fixed_points": self.tp_fixed_points,
-            "tp_risk_reward": self.tp_risk_reward,
+            "position_management_policy_id": self.position_management_policy_id,
             "min_risk_reward": self.min_risk_reward,
             "max_risk_reward": self.max_risk_reward,
             "min_sl_points": self.min_sl_points,
@@ -513,16 +701,6 @@ class TradingStrategy:
 
         # 默认 signal_config
         default_signal_config = {
-            "pivot": {
-                "enabled": True,
-                "periods": {
-                    "M1": {"enabled": True, "weight": 15},
-                    "M5": {"enabled": True, "weight": 20},
-                    "M15": {"enabled": False, "weight": 25},
-                    "H1": {"enabled": False, "weight": 20},
-                    "H4": {"enabled": False, "weight": 20}
-                }
-            },
             "key_level": {
                 "enabled": True,
                 "weight": 40
@@ -548,7 +726,8 @@ class TradingStrategy:
             lifecycle_updated_at=lifecycle_updated_at,
             lifecycle_history=data.get('lifecycle_history', []),
             signal_config=data.get('signal_config', default_signal_config),
-            signal_weights=data.get('signal_weights', {"pivot": 30, "key_level": 40, "ai_entry": 30}),
+            signal_sources=data.get('signal_sources'),
+            signal_weights=data.get('signal_weights', {"key_level": 40, "ai_entry": 30}),
             period_weights=data.get('period_weights', {"H4": 20, "H1": 20, "M15": 25, "M5": 20, "M1": 15}),
             min_confidence=data.get('min_confidence', 50),
             consistency_requirement=data.get('consistency_requirement', ConsistencyRequirement.MAJORITY),
@@ -559,12 +738,9 @@ class TradingStrategy:
             max_risk_points=data.get('max_risk_points', 50.0),
             max_positions=data.get('max_positions', 3),
             max_same_direction=data.get('max_same_direction', 2),
-            sl_mode=data.get('sl_mode', StopLossMode.SIGNAL),
-            sl_fixed_points=data.get('sl_fixed_points', 20.0),
-            sl_atr_multiplier=data.get('sl_atr_multiplier', 1.5),
-            tp_mode=data.get('tp_mode', TakeProfitMode.SIGNAL),
-            tp_fixed_points=data.get('tp_fixed_points', 40.0),
-            tp_risk_reward=data.get('tp_risk_reward', 2.0),
+            position_management_policy_id=data.get(
+                'position_management_policy_id', ''
+            ),
             min_risk_reward=data.get('min_risk_reward', 1.0),
             max_risk_reward=data.get('max_risk_reward', 5.0),
             min_sl_points=data.get('min_sl_points', 5.0),

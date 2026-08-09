@@ -16,6 +16,7 @@ class SignalSource:
     PIVOT = "pivot"              # 转折点信号
     KEY_LEVEL = "key_level"      # 关键点位信号
     AI_ENTRY = "ai_entry"        # AI入场信号
+    MOVING_AVERAGE = "moving_average"  # 均线交叉信号
 
 
 class SignalStatus:
@@ -33,10 +34,16 @@ class TradingSignal:
     symbol: str                       # 品种
     action: str                       # 方向: buy/sell
     confidence: int = 50              # 置信度 0-100
+    market_direction: str = ""        # 市场方向: up/sideways/down
+    state_ready: bool = True          # 当前信号源是否具备足够数据
+    is_entry_trigger: bool = True      # 是否出现新的可入场触发事件
 
     # ==================== 来源 ====================
     source: str = ""                  # pivot/key_level/ai_entry
     source_period: str = ""           # 来源周期 (H4/H1/M15/M5/M1)
+    strategy_id: str = ""             # 归属策略ID，空值兼容历史公共信号
+    strategy_name: str = ""           # 归属策略名称
+    signal_source_id: str = ""        # 归属信号源实例ID
 
     # ==================== 触发信息 ====================
     trigger_price: float = 0.0        # 触发价格
@@ -61,6 +68,10 @@ class TradingSignal:
     # AI Entry信号
     ai_analysis_period: Optional[str] = None
 
+    # MovingAverage信号
+    fast_ma: Optional[float] = None
+    slow_ma: Optional[float] = None
+
     # ==================== 自动生成字段 ====================
     signal_id: str = ""
     status: str = SignalStatus.ACTIVE
@@ -71,6 +82,17 @@ class TradingSignal:
     DEFAULT_TTL: int = field(default=300, repr=False)  # 5分钟
 
     def __post_init__(self):
+        if not self.market_direction:
+            self.market_direction = {
+                "buy": "up", "sell": "down", "none": "sideways",
+            }.get(str(self.action).lower(), "sideways")
+        if self.market_direction not in {"up", "sideways", "down"}:
+            self.market_direction = "sideways"
+        if self.action not in {"buy", "sell", "none"}:
+            self.action = {
+                "up": "buy", "down": "sell", "sideways": "none",
+            }[self.market_direction]
+        self.confidence = max(0, min(100, int(self.confidence)))
         if not self.signal_id:
             self.signal_id = str(uuid.uuid4())[:8]
         if not self.created_at:
@@ -117,8 +139,14 @@ class TradingSignal:
             "symbol": self.symbol,
             "action": self.action,
             "confidence": self.confidence,
+            "market_direction": self.market_direction,
+            "state_ready": self.state_ready,
+            "is_entry_trigger": self.is_entry_trigger,
             "source": self.source,
             "source_period": self.source_period,
+            "strategy_id": self.strategy_id,
+            "strategy_name": self.strategy_name,
+            "signal_source_id": self.signal_source_id,
             "trigger_price": self.trigger_price,
             "trigger_time": self.trigger_time.isoformat() if self.trigger_time else None,
             "trigger_reason": self.trigger_reason,
@@ -131,6 +159,8 @@ class TradingSignal:
             "key_level": self.key_level,
             "distance_pct": self.distance_pct,
             "ai_analysis_period": self.ai_analysis_period,
+            "fast_ma": self.fast_ma,
+            "slow_ma": self.slow_ma,
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
@@ -159,8 +189,14 @@ class TradingSignal:
             symbol=data.get('symbol', ''),
             action=data.get('action', ''),
             confidence=data.get('confidence', 50),
+            market_direction=data.get('market_direction', ''),
+            state_ready=bool(data.get('state_ready', True)),
+            is_entry_trigger=bool(data.get('is_entry_trigger', True)),
             source=data.get('source', ''),
             source_period=data.get('source_period', ''),
+            strategy_id=data.get('strategy_id', ''),
+            strategy_name=data.get('strategy_name', ''),
+            signal_source_id=data.get('signal_source_id', ''),
             trigger_price=data.get('trigger_price', 0.0),
             trigger_time=trigger_time,
             trigger_reason=data.get('trigger_reason', ''),
@@ -173,6 +209,8 @@ class TradingSignal:
             key_level=data.get('key_level'),
             distance_pct=data.get('distance_pct'),
             ai_analysis_period=data.get('ai_analysis_period'),
+            fast_ma=data.get('fast_ma'),
+            slow_ma=data.get('slow_ma'),
             signal_id=data.get('signal_id', ''),
             status=data.get('status', SignalStatus.ACTIVE),
             created_at=created_at,

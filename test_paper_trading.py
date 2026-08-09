@@ -8,7 +8,11 @@ import uuid
 from pathlib import Path
 
 from paper_trading import PaperTradingService
-from sqlite_storage import SQLiteStorage, TradingAccountRepository, UserRepository
+from market.models import PositionManagementPolicy
+from sqlite_storage import (
+    PositionManagementPolicyRepository, SQLiteStorage,
+    TradingAccountRepository, UserRepository,
+)
 
 
 class PaperTradingServiceTests(unittest.TestCase):
@@ -34,7 +38,22 @@ class PaperTradingServiceTests(unittest.TestCase):
             "auto_execute": True,
             "max_positions": 3,
             "max_same_direction": 2,
+            "position_management_policy_id": "policy-1",
         }
+        PositionManagementPolicyRepository(self.storage).save(
+            PositionManagementPolicy(
+                policy_id="policy-1", user_id=self.user.user_id,
+                name="Test exits", config={
+                    "initial_stop_rules": [{"type": "signal"}],
+                    "initial_take_profit_rules": [{"type": "signal"}],
+                    "management_rules": [
+                        {"type": "trailing_stop", "activation_r": 1,
+                         "distance_r": 1},
+                    ],
+                    "min_risk_reward": 0,
+                },
+            )
+        )
         self.storage.execute(
             """
             INSERT INTO user_strategy_configs(
@@ -95,6 +114,61 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertAlmostEqual(detail["trades"][0]["net_profit"], 107.6)
         self.assertAlmostEqual(detail["account"]["balance"], 10107.6)
         self.assertEqual(len(detail["equity_curve"]), 2)
+
+    def test_moving_average_paper_position_uses_trailing_exit(self):
+        row = self.storage.fetchone(
+            "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
+        )
+        config = json.loads(row["config_json"])
+        config["signal_sources"] = [{
+            "signal_source_id": "ma-m1",
+            "source": "moving_average",
+            "enabled": True,
+            "period": "M1",
+            "weight": 100,
+            "params": {
+                "fast_period": 5, "slow_period": 20, "ma_type": "sma",
+                "stop_loss_pct": 0.002, "risk_reward_ratio": 2,
+                "exit_mode": "trailing_reverse",
+                "trailing_activation_r": 1, "trailing_distance_r": 1,
+                "cooldown_seconds": 0,
+            },
+        }]
+        self.storage.execute(
+            "UPDATE user_strategy_configs SET config_json = ? WHERE strategy_id = 'strategy-1'",
+            (json.dumps(config),),
+        )
+        self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        decision = self.decision("ma-trailing")
+        decision["signal_summary"] = {
+            "selected_signal_source": "moving_average",
+            "selected_signal_source_id": "ma-m1",
+        }
+        decision["tp"] = 0
+
+        self.service.enqueue_decisions(self.user.user_id, [decision])
+        self.service.process_tick(
+            self.user.user_id, "GOLD_", 3000, 3000.2, timestamp=1000
+        )
+        order = self.storage.fetchone(
+            "SELECT * FROM paper_orders WHERE decision_id = 'ma-trailing'"
+        )
+        self.assertEqual(order["take_profit"], 0)
+        self.assertEqual(order["exit_mode"], "position_manager")
+        self.service.process_tick(
+            self.user.user_id, "GOLD_", 3012, 3012.2, timestamp=1060
+        )
+        closed = self.service.process_tick(
+            self.user.user_id, "GOLD_", 3001, 3001.2, timestamp=1120
+        )
+        trade = self.storage.fetchone(
+            "SELECT * FROM paper_trades WHERE order_id = ?", (order["order_id"],)
+        )
+
+        self.assertEqual(closed["closed"], 1)
+        self.assertEqual(trade["exit_reason"], "stop_loss")
 
     def test_pausing_deployment_cancels_pending_and_stops_new_orders(self):
         deployment = self.service.deploy(

@@ -98,6 +98,49 @@ class SignalService:
 
         return signals
 
+    def generate_signals_for_strategy(
+        self, symbol: str, current_price: float, strategy,
+    ) -> List[TradingSignal]:
+        """Generate and persist only signals owned by the given strategy."""
+        signals = []
+        for source, generator in self._generators.items():
+            # Period-based sources are checked after generation because their
+            # enablement cannot be determined without a concrete period.
+            if source == "key_level" and not strategy.is_signal_enabled(source):
+                continue
+            try:
+                strategy_generator = getattr(
+                    generator, "generate_signals_for_strategy", None
+                )
+                generated = (
+                    strategy_generator(symbol, current_price, strategy)
+                    if strategy_generator
+                    else generator(symbol, current_price)
+                )
+                if not generated:
+                    continue
+                items = generated if isinstance(generated, list) else [generated]
+                for signal in items:
+                    if not isinstance(signal, TradingSignal):
+                        continue
+                    period = signal.source_period if signal.source != "key_level" else None
+                    if not strategy.is_signal_enabled(
+                        signal.source, period, signal.signal_source_id
+                    ):
+                        continue
+                    signal.strategy_id = strategy.strategy_id
+                    signal.strategy_name = strategy.strategy_name
+                    signals.append(signal)
+            except Exception as exc:
+                print(
+                    f"[SignalService] 策略 {strategy.strategy_id} "
+                    f"信号生成器 {source} 异常: {exc}"
+                )
+
+        for signal in signals:
+            self.store.add_signal(signal)
+        return signals
+
     def add_signal(self, signal: TradingSignal) -> str:
         """添加信号"""
         return self.store.add_signal(signal)

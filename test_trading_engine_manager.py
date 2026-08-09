@@ -16,6 +16,7 @@ from market.models import (
     PendingOrder,
     TradingDecision,
     TradingInstruction as StoredTradingInstruction,
+    TradingStrategy,
 )
 from models import TradeInstruction
 from sqlite_storage import (
@@ -87,6 +88,22 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         os.environ.pop("AI_TRADER_AUTH_FILE", None)
         os.environ.pop("AI_TRADER_DB_FILE", None)
         self.temp_dir.cleanup()
+
+    @staticmethod
+    def _stub_strategy_decision(engine, decision):
+        strategy = TradingStrategy(
+            symbol=decision.symbol,
+            strategy_id=decision.strategy_id,
+            strategy_name=decision.strategy_name,
+        )
+        engine._active_strategy_ids = lambda mode="live": [strategy.strategy_id]
+        engine.strategy_service.get_strategies = lambda symbol: [strategy]
+        engine._signal_service.generate_signals_for_strategy = (
+            lambda symbol, price, current_strategy: [object()]
+        )
+        engine.strategy_service.make_decision = (
+            lambda symbol, price, force_signals=None, strategy=None: decision
+        )
 
     def test_instruction_without_tp_delegates_default_to_ea(self):
         instruction = StoredTradingInstruction(
@@ -429,8 +446,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             decision_reason="test signal",
         )
         broadcasts = []
-        engine._signal_service.generate_signals = lambda symbol, price: [object()]
-        engine.strategy_service.make_decisions = lambda symbol, price: [decision]
+        self._stub_strategy_decision(engine, decision)
         engine._broadcast_decision = lambda current: broadcasts.append(
             current.to_dict()
         )
@@ -463,8 +479,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             volume=0.01,
             decision_reason="auto test signal",
         )
-        engine._signal_service.generate_signals = lambda symbol, price: [object()]
-        engine.strategy_service.make_decisions = lambda symbol, price: [decision]
+        self._stub_strategy_decision(engine, decision)
 
         result = engine.process_price("GOLD#", 3300.0)
         queued_instructions = (
@@ -505,8 +520,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             volume=0.01,
             decision_reason="account control",
         )
-        engine._signal_service.generate_signals = lambda symbol, price: [object()]
-        engine.strategy_service.make_decisions = lambda symbol, price: [decision]
+        self._stub_strategy_decision(engine, decision)
 
         result = engine.process_price("GOLD#", 3300.0)
 

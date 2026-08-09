@@ -73,9 +73,38 @@ export const marketAPI = {
     return response.data
   },
 
+  async cancelBacktestBatch(batchId) {
+    const response = await api.post(
+      `/backtest/batches/${encodeURIComponent(batchId)}/cancel`
+    )
+    return response.data
+  },
+
+  async cancelBacktestTask(taskId) {
+    const response = await api.post(
+      `/backtest/tasks/${encodeURIComponent(taskId)}/cancel`
+    )
+    return response.data
+  },
+
   async getBacktestTaskLedger(taskId) {
     const response = await api.get(
       `/backtest/tasks/${encodeURIComponent(taskId)}/ledger`
+    )
+    return response.data
+  },
+
+  async getBacktestTaskAIAnalysis(taskId) {
+    const response = await api.get(
+      `/backtest/tasks/${encodeURIComponent(taskId)}/ai-analysis`
+    )
+    return response.data
+  },
+
+  async startBacktestTaskAIAnalysis(taskId, regenerate = false) {
+    const response = await api.post(
+      `/backtest/tasks/${encodeURIComponent(taskId)}/ai-analysis`,
+      { regenerate }
     )
     return response.data
   },
@@ -408,6 +437,30 @@ export const marketAPI = {
   },
 
   // ==================== 策略配置 ====================
+
+  async getPositionManagementPolicies() {
+    const response = await api.get('/position-management-policies')
+    return response.data
+  },
+
+  async createPositionManagementPolicy(data) {
+    const response = await api.post('/position-management-policies', data)
+    return response.data
+  },
+
+  async updatePositionManagementPolicy(policyId, data) {
+    const response = await api.put(
+      `/position-management-policies/${encodeURIComponent(policyId)}`, data
+    )
+    return response.data
+  },
+
+  async deletePositionManagementPolicy(policyId) {
+    const response = await api.delete(
+      `/position-management-policies/${encodeURIComponent(policyId)}`
+    )
+    return response.data
+  },
 
   // 获取所有策略配置
   async getStrategies() {

@@ -13,13 +13,16 @@
     @update:model-value="selectAccount"
   >
     <template #selection="{ item }">
-      <span class="account-name">{{ item.raw.account.account_name }}</span>
-      <v-chip :color="item.raw.state.color" size="x-small" variant="flat" class="ml-2">
-        {{ item.raw.state.label }}
-      </v-chip>
+      <template v-if="item?.raw?.account">
+        <span class="account-name">{{ item.raw.account.account_name }}</span>
+        <v-chip :color="item.raw.state.color" size="x-small" variant="flat" class="ml-2">
+          {{ item.raw.state.label }}
+        </v-chip>
+      </template>
+      <span v-else class="account-name">账户加载中</span>
     </template>
     <template #item="{ props, item }">
-      <v-list-item v-bind="props">
+      <v-list-item v-if="item?.raw?.account" v-bind="props">
         <template #prepend>
           <span class="state-dot" :class="`state-${item.raw.state.color}`" />
         </template>

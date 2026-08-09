@@ -44,7 +44,7 @@ class LLMAnalyzer:
         with self._ws_lock:
             self._ws_clients.clear()
 
-    def _run_analysis(self):
+    def _run_analysis(self, due_only: bool = False):
         """执行分析"""
         def on_status(status: str, message: str):
             self._broadcast_analysis_status(status, message)
@@ -53,10 +53,19 @@ class LLMAnalyzer:
             if response:
                 self._broadcast_analysis_update()
 
-        return self.llm_service.run_analysis(
-            on_status=on_status,
-            on_complete=on_complete,
-        )
+        try:
+            return self.llm_service.run_analysis(
+                on_status=on_status,
+                on_complete=on_complete,
+                due_only=due_only,
+            )
+        except TypeError as exc:
+            if "due_only" not in str(exc):
+                raise
+            return self.llm_service.run_analysis(
+                on_status=on_status,
+                on_complete=on_complete,
+            )
 
     def run_scheduled_analysis(self) -> bool:
         """由共享调度器触发，避免同一账户并发分析。"""
@@ -65,7 +74,7 @@ class LLMAnalyzer:
         if not self._analysis_lock.acquire(blocking=False):
             return False
         try:
-            self._run_analysis()
+            self._run_analysis(due_only=True)
             return True
         finally:
             self._analysis_lock.release()
@@ -130,10 +139,14 @@ class LLMAnalyzer:
         status["interval_seconds"] = self.ANALYZE_INTERVAL
         return status
 
-    def check_entry_price_nearby(self, symbol: str, current_price: float,
-                                  threshold: float = 0.0001) -> list:
+    def check_entry_price_nearby(
+        self, symbol: str, current_price: float, threshold: float = 0.0001,
+        strategy_id: str = "",
+    ) -> list:
         """检查入场价是否接近"""
-        return self.llm_service.check_entry_price_nearby(symbol, current_price, threshold)
+        return self.llm_service.check_entry_price_nearby(
+            symbol, current_price, threshold, strategy_id
+        )
 
     # ==================== WebSocket 管理 ====================
 

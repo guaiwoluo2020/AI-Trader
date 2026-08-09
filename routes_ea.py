@@ -248,6 +248,15 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                         str(data.get("symbol", "")),
                         float(bid),
                         float(ask) if ask is not None else None,
+                        pivots=[
+                            item.to_dict()
+                            for period in server.pivot_store.get_all_periods(
+                                str(data.get("symbol", ""))
+                            )
+                            for item in server.pivot_store.get_pivot_objects(
+                                str(data.get("symbol", "")), period
+                            )
+                        ],
                     )
                 except Exception as exc:
                     # 实盘账户上报成功优先，模拟撮合错误单独记录。

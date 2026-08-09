@@ -9,6 +9,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 from market.models import StrategyLifecycle, TradingStrategy
 from market.store.llm_store import LLMStore
@@ -168,17 +169,103 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
             {"TrendGold", "BreakoutGold"},
         )
 
-    def test_disabled_pivot_signal_is_persisted(self):
-        strategy = TradingStrategy(symbol="GOLD#", strategy_name="PivotGold")
-        strategy.signal_config["pivot"]["enabled"] = False
-
-        self.strategy_repo.save_strategy(self.user_a.user_id, strategy)
-
-        reloaded = self.strategy_repo.get_strategy_by_id(
-            self.user_a.user_id, strategy.strategy_id
+    def test_strategies_are_ordered_by_creation_time_ascending(self):
+        created_at = datetime(2026, 1, 1, 9, 0, 0)
+        oldest = TradingStrategy(
+            symbol="ZZZ#", strategy_name="最早策略", created_at=created_at
         )
-        self.assertIsNotNone(reloaded)
-        self.assertFalse(reloaded.signal_config["pivot"]["enabled"])
+        newest = TradingStrategy(
+            symbol="AAA#",
+            strategy_name="最新策略",
+            created_at=created_at + timedelta(minutes=5),
+        )
+        # Reverse insertion and symbol order must not affect display order.
+        self.strategy_repo.save_strategy(self.user_a.user_id, newest)
+        self.strategy_repo.save_strategy(self.user_a.user_id, oldest)
+
+        strategies = self.strategy_repo.get_all_strategies(
+            self.user_a.user_id
+        )
+
+        self.assertEqual(
+            [strategy.strategy_name for strategy in strategies],
+            ["最早策略", "最新策略"],
+        )
+
+    def test_pivot_signal_source_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "不再支持"):
+            TradingStrategy(symbol="GOLD#", signal_sources=[{
+                "signal_source_id": "pivot-m1",
+                "source": "pivot",
+                "period": "M1",
+                "weight": 30,
+                "params": {},
+            }])
+
+    def test_pivot_strategy_migration_removes_backtest_chain(self):
+        pivot_config = json.dumps({
+            "strategy_id": "pivot-strategy",
+            "strategy_name": "Pivot",
+            "symbol": "GOLD#",
+            "signal_sources": [{"source": "pivot", "period": "M1"}],
+        })
+        with self.storage._connect() as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute(
+                "DELETE FROM app_meta WHERE key = ?",
+                ("remove_pivot_signal_strategies_v1",),
+            )
+            conn.execute(
+                """
+                INSERT INTO user_strategy_configs(
+                    user_id, strategy_id, symbol, config_json, created_at, updated_at
+                ) VALUES(?, 'pivot-strategy', 'GOLD#', ?, 1, 1)
+                """,
+                (self.user_a.user_id, pivot_config),
+            )
+            conn.execute(
+                """
+                INSERT INTO backtest_templates(
+                    template_id, user_id, template_name, strategy_id,
+                    created_at, updated_at
+                ) VALUES('pivot-template', ?, 'Pivot Template',
+                         'pivot-strategy', 1, 1)
+                """,
+                (self.user_a.user_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO backtest_batches(
+                    batch_id, template_id, user_id, batch_name, strategy_id,
+                    strategy_name, strategy_snapshot_json,
+                    strategy_snapshot_hash, template_snapshot_json, created_at
+                ) VALUES('pivot-batch', 'pivot-template', ?, 'Pivot Batch',
+                         'pivot-strategy', 'Pivot', '{}', 'hash', '{}', 1)
+                """,
+                (self.user_a.user_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO backtest_tasks(
+                    task_id, batch_id, user_id, dataset_file_path,
+                    dataset_snapshot_json, created_at
+                ) VALUES('pivot-task', 'pivot-batch', ?, '', '{}', 1)
+                """,
+                (self.user_a.user_id,),
+            )
+            SQLiteStorage._remove_pivot_signal_strategies(conn)
+
+            for table in (
+                "user_strategy_configs", "backtest_templates",
+                "backtest_batches", "backtest_tasks",
+            ):
+                self.assertEqual(
+                    conn.execute(f"SELECT COUNT(*) FROM {table} WHERE " + (
+                        "strategy_id = 'pivot-strategy'" if table != "backtest_tasks"
+                        else "task_id = 'pivot-task'"
+                    )).fetchone()[0],
+                    0,
+                )
 
     def test_strategy_lifecycle_is_persisted(self):
         strategy = TradingStrategy(

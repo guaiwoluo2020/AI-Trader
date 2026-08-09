@@ -44,7 +44,9 @@ DEFAULT_ANALYSIS_PROMPT_TEMPLATE = """你是一位专业的金融分析师。请
     "overall_trend": {"direction": "方向", "strength": 强度, "summary": "总结"},
     "key_levels": {"resistance": [压力位1, 压力位2, 压力位3], "support": [支撑位1, 支撑位2, 支撑位3]},
     "trade_suggestions": [{
-      "period": "策略启用周期", "direction": "buy或sell", "confidence": 置信度,
+      "strategy_id": "策略ID", "signal_source_id": "信号源实例ID",
+      "period": "策略启用周期",
+      "direction": "buy或sell", "confidence": 置信度,
       "entry_price": 入场价格, "stop_loss": 止损价格, "take_profit": 止盈价格,
       "reason": "交易理由"
     }]

@@ -6,16 +6,20 @@ import gzip
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from backtest_engine import (
+    BacktestCanceled,
     BacktestLLMCache,
     BacktestTaskRepository,
     BacktestWorker,
     M1BacktestEngine,
     ReplaySignalEngine,
+    aggregate_replay_bars,
     build_result,
     combine_signals,
     detect_confirmed_pivots,
+    position_limit_reason,
 )
 from backtest_tasks import BacktestTaskStatus, BacktestTemplateService
 from market.services.signal.ai_entry_signal import AIEntrySignalGenerator
@@ -56,8 +60,16 @@ def strategy_snapshot():
         "min_risk_reward": 1,
         "volume_mode": "fixed",
         "fixed_volume": 0.1,
-        "sl_mode": "signal",
-        "tp_mode": "signal",
+        "position_management_policy_id": "policy-1",
+        "position_management_policy_snapshot": {
+            "policy_id": "policy-1", "user_id": 1, "name": "Test exits",
+            "enabled": True,
+            "config": {
+                "initial_stop_rules": [{"type": "signal"}],
+                "initial_take_profit_rules": [{"type": "signal"}],
+                "management_rules": [], "min_risk_reward": 1,
+            },
+        },
     }
 
 
@@ -123,7 +135,13 @@ class M1BacktestEngineTests(unittest.TestCase):
 
     def test_five_bar_barrier_has_no_future_data_and_fills_next_open(self):
         provider = FakeLLMProvider()
-        result = M1BacktestEngine(llm_provider=provider).run(self.task())
+        progress_updates = []
+        usage_updates = []
+        result = M1BacktestEngine(
+            llm_provider=provider,
+            progress_callback=progress_updates.append,
+            llm_usage_callback=usage_updates.append,
+        ).run(self.task())
 
         self.assertEqual(len(provider.calls), 2)
         first = provider.calls[0]
@@ -133,6 +151,10 @@ class M1BacktestEngineTests(unittest.TestCase):
         self.assertEqual(result["trade_count"], 1)
         self.assertEqual(result["trades"][0]["opened_at"], self.start + 5 * 60)
         self.assertEqual(result["trades"][0]["entry_price"], 105.0)
+        self.assertGreaterEqual(len(progress_updates), 4)
+        self.assertGreater(progress_updates[0], 0)
+        self.assertEqual(usage_updates, [False, False])
+        self.assertEqual(result["llm_call_count"], 2)
 
     def test_llm_failure_stops_replay_instead_of_skipping(self):
         class FailedProvider:
@@ -141,6 +163,53 @@ class M1BacktestEngineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "LLM unavailable"):
             M1BacktestEngine(llm_provider=FailedProvider()).run(self.task())
+
+    def test_cancel_callback_stops_replay_cooperatively(self):
+        checkpoints = []
+        engine = M1BacktestEngine(
+            llm_provider=FakeLLMProvider(),
+            checkpoint_callback=lambda progress, ledger: checkpoints.append(
+                (progress, ledger)
+            ),
+            cancel_callback=lambda: True,
+        )
+
+        with self.assertRaisesRegex(BacktestCanceled, "用户停止"):
+            engine.run(self.task())
+
+        self.assertEqual(checkpoints[0][0], 0)
+        self.assertEqual(checkpoints[0][1]["account"]["status"], "running")
+
+    def test_runtime_checkpoint_contains_account_and_orders(self):
+        checkpoints = []
+        M1BacktestEngine(
+            llm_provider=FakeLLMProvider(),
+            checkpoint_callback=lambda progress, ledger: checkpoints.append(
+                (progress, ledger)
+            ),
+        ).run(self.task())
+
+        self.assertGreaterEqual(len(checkpoints), 2)
+        self.assertEqual(checkpoints[-1][1]["account"]["initial_balance"], 100000)
+        self.assertGreaterEqual(len(checkpoints[-1][1]["orders"]), 1)
+        self.assertEqual(len(checkpoints[-1][1]["replay_bars"]), 11)
+        self.assertEqual(checkpoints[-1][1]["replay_bars"][-1]["close"], 110.5)
+
+    def test_replay_bars_are_ohlc_aggregated_without_losing_range(self):
+        bars = [
+            {"time": index * 60, "open": index, "high": index + 2,
+             "low": index - 1, "close": index + 1, "tick_volume": 10}
+            for index in range(10)
+        ]
+
+        replay = aggregate_replay_bars(bars, max_points=3)
+
+        self.assertEqual(len(replay), 3)
+        self.assertEqual(replay[0]["bar_count"], 4)
+        self.assertEqual(replay[0]["open"], 0)
+        self.assertEqual(replay[0]["close"], 4)
+        self.assertEqual(replay[0]["high"], 5)
+        self.assertEqual(replay[0]["low"], -1)
 
     def test_key_level_signal_is_replayed_when_enabled(self):
         task = self.task()
@@ -223,6 +292,60 @@ class M1BacktestEngineTests(unittest.TestCase):
         self.assertEqual(replay_signal.suggested_tp, live_signal.suggested_tp)
         self.assertEqual(replay_signal.confidence, live_signal.confidence)
 
+    def test_ai_recommendation_emits_once_per_analysis(self):
+        suggestion = {
+            "_analysis_id": "analysis-1",
+            "period": "M1",
+            "direction": "buy",
+            "confidence": 88,
+            "entry_price": 3000.05,
+            "stop_loss": 2990,
+            "take_profit": 3020,
+        }
+        engine = ReplaySignalEngine(strategy_snapshot())
+
+        first = engine.generate(
+            [], 3000.05, self.start, {"trade_suggestions": [suggestion]}
+        )
+        repeated = engine.generate(
+            [], 3000.05, self.start + 600,
+            {"trade_suggestions": [suggestion]},
+        )
+        refreshed = engine.generate(
+            [], 3000.05, self.start + 601,
+            {"trade_suggestions": [{**suggestion, "_analysis_id": "analysis-2"}]},
+        )
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(repeated), 1)
+        self.assertFalse(repeated[0].is_entry_trigger)
+        self.assertFalse(repeated[0].state_ready)
+        self.assertEqual(len(refreshed), 1)
+
+    def test_live_ai_recommendation_emits_once_per_analysis(self):
+        match = {
+            "analyzed_at": "2026-08-02T10:00:00",
+            "period": "M1",
+            "direction": "buy",
+            "confidence": 88,
+            "entry_price": 3000.05,
+            "stop_loss": 2990,
+            "take_profit": 3020,
+        }
+
+        class Analyzer:
+            @staticmethod
+            def check_entry_price_nearby(*_args, **_kwargs):
+                return [match]
+
+        generator = AIEntrySignalGenerator()
+        generator.set_llm_analyzer(Analyzer())
+
+        self.assertEqual(len(generator.generate_signals("GOLD_", 3000.05)), 1)
+        self.assertEqual(generator.generate_signals("GOLD_", 3000.05), [])
+        match["analyzed_at"] = "2026-08-02T10:05:00"
+        self.assertEqual(len(generator.generate_signals("GOLD_", 3000.05)), 1)
+
     def test_pivot_requires_right_hand_confirmation_bars(self):
         bars = []
         for index in range(13):
@@ -242,7 +365,7 @@ class M1BacktestEngineTests(unittest.TestCase):
         self.assertEqual(confirmed[0]["direction"], "low")
         self.assertEqual(confirmed[0]["time"], "6")
 
-    def test_confirmed_pivot_signal_fills_on_following_bar(self):
+    def test_pivot_configuration_no_longer_creates_backtest_trade(self):
         task = self.task()
         task["strategy_snapshot"]["signal_config"] = {
             "pivot": {
@@ -274,9 +397,7 @@ class M1BacktestEngineTests(unittest.TestCase):
 
         result = M1BacktestEngine(llm_provider=FakeLLMProvider()).run(task)
 
-        self.assertEqual(result["trade_count"], 1)
-        self.assertEqual(result["trades"][0]["signal_source"], "pivot")
-        self.assertEqual(result["trades"][0]["opened_at"], self.start + 13 * 60)
+        self.assertEqual(result["trade_count"], 0)
 
     def test_signal_combination_uses_strategy_weights(self):
         strategy = strategy_snapshot()
@@ -301,11 +422,12 @@ class M1BacktestEngineTests(unittest.TestCase):
 
         decision = combine_signals(signals, strategy)
 
-        self.assertEqual(decision["direction"], "buy")
-        self.assertEqual(decision["source"], "pivot")
+        self.assertEqual(decision["direction"], "sell")
+        self.assertEqual(decision["source"], "key_level")
 
     def test_template_allows_multiple_concurrent_positions(self):
         task = self.task()
+        task["dataset_snapshot"]["requested_end"] = self.start + 20 * 60
         task["template_snapshot"]["max_positions"] = 3
         task["strategy_snapshot"]["max_positions"] = 3
         task["strategy_snapshot"]["max_same_direction"] = 3
@@ -315,7 +437,7 @@ class M1BacktestEngineTests(unittest.TestCase):
                 "tick_volume", "real_volume", "spread",
             ])
             writer.writeheader()
-            for index in range(11):
+            for index in range(21):
                 writer.writerow({
                     "time": self.start + index * 60,
                     "open": 105,
@@ -332,6 +454,21 @@ class M1BacktestEngineTests(unittest.TestCase):
         self.assertEqual(result["max_concurrent_positions"], 3)
         self.assertEqual(len(result["_ledger"]["positions"]), 3)
         self.assertGreater(result["order_status_counts"].get("rejected", 0), 0)
+
+    def test_template_position_limits_override_live_strategy_limits(self):
+        positions = [
+            SimpleNamespace(direction="buy")
+            for index in range(2)
+        ]
+
+        reason = position_limit_reason(
+            "buy",
+            positions,
+            {"max_positions": 3, "max_same_direction": 2},
+            {"max_positions": 10, "max_same_direction": 10},
+        )
+
+        self.assertEqual(reason, "")
 
     def test_report_metrics_and_attribution(self):
         day = 86400
@@ -518,6 +655,11 @@ class BacktestPersistenceTests(unittest.TestCase):
                 "time": 220, "balance": 10100, "equity": 10100,
                 "open_positions": 0,
             }],
+            "replay_bars": [{
+                "time": 160, "end_time": 160, "open": 3000,
+                "high": 3012, "low": 2998, "close": 3011,
+                "tick_volume": 20, "bar_count": 1,
+            }],
         }
 
         BacktestTaskRepository(self.storage).complete(
@@ -526,7 +668,7 @@ class BacktestPersistenceTests(unittest.TestCase):
 
         for table in (
             "backtest_accounts", "backtest_orders", "backtest_positions",
-            "backtest_trades", "backtest_equity_points",
+            "backtest_trades", "backtest_equity_points", "backtest_replay_bars",
         ):
             count = self.storage.fetchone(
                 f"SELECT COUNT(*) AS count FROM {table} WHERE task_id = ?",
@@ -541,6 +683,7 @@ class BacktestPersistenceTests(unittest.TestCase):
         saved = service.get_task_ledger(self.user.user_id, "task-ledger")
         self.assertEqual(saved["orders"][0]["contributing_sources"], ["pivot"])
         self.assertEqual(saved["account"]["balance"], 10100)
+        self.assertEqual(saved["replay_bars"][0]["close"], 3011)
         other_user = UserRepository(self.storage).create_user(
             "other-user", "hash", "salt"
         )
@@ -578,6 +721,87 @@ class BacktestPersistenceTests(unittest.TestCase):
             "SELECT status FROM backtest_tasks WHERE task_id = 'task-stale'"
         )
         self.assertEqual(row["status"], BacktestTaskStatus.QUEUED)
+
+    def test_cancel_queued_task_finishes_batch_as_canceled(self):
+        with self.storage._lock, self.storage._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO backtest_batches(
+                    batch_id, user_id, batch_name, status, task_count,
+                    strategy_id, strategy_name, strategy_snapshot_json,
+                    strategy_snapshot_hash, template_snapshot_json, created_at
+                ) VALUES('batch-cancel', ?, 'Cancel', 'queued', 1, 's', 'S',
+                         '{}', 'h', '{}', 1)
+                """,
+                (self.user.user_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO backtest_tasks(
+                    task_id, batch_id, user_id, status, dataset_file_path,
+                    dataset_snapshot_json, created_at
+                ) VALUES('task-cancel', 'batch-cancel', ?, 'queued', 'x', '{}', 1)
+                """,
+                (self.user.user_id,),
+            )
+            conn.commit()
+
+        result = BacktestTaskRepository(self.storage).request_cancel_task(
+            self.user.user_id, "task-cancel"
+        )
+
+        self.assertEqual(result["status"], BacktestTaskStatus.CANCELED)
+        batch = self.storage.fetchone(
+            "SELECT * FROM backtest_batches WHERE batch_id = 'batch-cancel'"
+        )
+        self.assertEqual(batch["status"], BacktestTaskStatus.CANCELED)
+        self.assertEqual(batch["canceled_tasks"], 1)
+
+    def test_checkpoint_persists_live_account_and_cancel_request(self):
+        with self.storage._lock, self.storage._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO backtest_batches(
+                    batch_id, user_id, batch_name, status, task_count,
+                    strategy_id, strategy_name, strategy_snapshot_json,
+                    strategy_snapshot_hash, template_snapshot_json, created_at
+                ) VALUES('batch-live', ?, 'Live', 'running', 1, 's', 'S',
+                         '{}', 'h', '{}', 1)
+                """,
+                (self.user.user_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO backtest_tasks(
+                    task_id, batch_id, user_id, status, dataset_file_path,
+                    dataset_snapshot_json, created_at
+                ) VALUES('task-live', 'batch-live', ?, 'running', 'x', '{}', 1)
+                """,
+                (self.user.user_id,),
+            )
+            conn.commit()
+        ledger = {
+            "account": {
+                "initial_balance": 10000, "balance": 10050, "equity": 10075,
+                "free_margin": 10075, "margin": 0, "status": "running",
+            },
+            "orders": [], "positions": [], "trades": [],
+            "equity_points": [],
+        }
+        repository = BacktestTaskRepository(self.storage)
+
+        self.assertTrue(repository.checkpoint("task-live", 42.5, ledger))
+        saved = BacktestTemplateService(self.storage).get_task_ledger(
+            self.user.user_id, "task-live"
+        )
+        self.assertEqual(saved["account"]["equity"], 10075)
+        repository.request_cancel_task(self.user.user_id, "task-live")
+        self.assertTrue(repository.is_cancel_requested("task-live"))
+        repository.cancel("task-live")
+        task = self.storage.fetchone(
+            "SELECT status FROM backtest_tasks WHERE task_id = 'task-live'"
+        )
+        self.assertEqual(task["status"], BacktestTaskStatus.CANCELED)
 
 
 if __name__ == "__main__":

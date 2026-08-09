@@ -35,11 +35,26 @@ class SignalStore:
     def add_signal(self, signal: TradingSignal) -> str:
         """添加信号"""
         with self._lock:
+            # Strategy-scoped sources expose a continuously refreshed state.
+            # Keep only the newest state for each source instance.
+            if signal.strategy_id and signal.signal_source_id:
+                retained = []
+                for existing in self._signals_by_symbol[signal.symbol]:
+                    same_source = (
+                        existing.strategy_id == signal.strategy_id
+                        and existing.signal_source_id == signal.signal_source_id
+                    )
+                    if same_source:
+                        self._signals_by_id.pop(existing.signal_id, None)
+                    else:
+                        retained.append(existing)
+                self._signals_by_symbol[signal.symbol] = retained
             signal.DEFAULT_TTL = self.default_ttl
             self._signals_by_symbol[signal.symbol].append(signal)
             self._signals_by_id[signal.signal_id] = signal
 
-            print(f"[SignalStore] 添加信号: {signal.signal_id} {signal.symbol} {signal.action} (来源: {signal.source})")
+            if signal.is_entry_trigger:
+                print(f"[SignalStore] 添加信号: {signal.signal_id} {signal.symbol} {signal.action} (来源: {signal.source})")
             return signal.signal_id
 
     # ==================== 查询信号 ====================

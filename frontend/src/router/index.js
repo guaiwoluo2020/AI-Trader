@@ -15,6 +15,7 @@ import Mt5Setup from '../views/Mt5Setup.vue'
 import BacktestDatasets from '../views/BacktestDatasets.vue'
 import BacktestTasks from '../views/BacktestTasks.vue'
 import Accounts from '../views/Accounts.vue'
+import PositionManagement from '../views/PositionManagement.vue'
 
 const routes = [
   {
@@ -81,6 +82,12 @@ const routes = [
     path: '/strategy-settings',
     name: 'StrategySettings',
     component: StrategySettings,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/position-management',
+    name: 'PositionManagement',
+    component: PositionManagement,
     meta: { requiresAuth: true }
   },
   {

@@ -19,6 +19,7 @@ from market.services import PivotService
 from sqlite_storage import (
     LLMAccessRepository,
     LLMConfigRepository,
+    PositionManagementPolicyRepository,
     StrategyConfigRepository,
     TradeConfigRepository,
     TradingAccountRepository,
@@ -39,6 +40,7 @@ def create_market_routes(
     KLINE_LOG_PROBABILITY = 0.05
     trade_config_repo = TradeConfigRepository()
     strategy_repo = StrategyConfigRepository()
+    position_policy_repo = PositionManagementPolicyRepository()
     llm_config_repo = LLMConfigRepository()
     llm_access_repo = LLMAccessRepository()
     admission_service = StrategyAdmissionService(engine_manager.paper_trading)
@@ -252,7 +254,7 @@ def create_market_routes(
         symbol: str,
         period: str = Query(None, description="周期，不指定则返回全部"),
         direction: str = Query(None, description="方向: high/low"),
-        count: int = Query(50, description="返回条数"),
+        count: int = Query(10, ge=1, le=10, description="返回条数（最多10条）"),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取转折点数据"""
@@ -572,6 +574,73 @@ def create_market_routes(
 
     # ==================== 策略决策接口 ====================
 
+    @protected_router.get("/position-management-policies")
+    async def list_position_management_policies(
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        policies = position_policy_repo.list(user.user_id)
+        return {
+            "status": "ok", "count": len(policies),
+            "policies": [policy.to_dict() for policy in policies],
+        }
+
+    @protected_router.post("/position-management-policies")
+    async def create_position_management_policy(
+        request: Request, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        from market.models import PositionManagementPolicy
+
+        try:
+            data = await request.json()
+            policy = PositionManagementPolicy(
+                user_id=user.user_id, name=data.get("name", ""),
+                enabled=bool(data.get("enabled", True)),
+                config=data.get("config") or None,
+            )
+            position_policy_repo.save(policy)
+            return {"status": "ok", "policy": policy.to_dict()}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @protected_router.put("/position-management-policies/{policy_id}")
+    async def update_position_management_policy(
+        policy_id: str, request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        from market.models import normalize_position_management_config
+
+        policy = position_policy_repo.get(user.user_id, policy_id)
+        if policy is None:
+            raise HTTPException(status_code=404, detail="持仓管理方案不存在")
+        try:
+            data = await request.json()
+            policy.name = str(data.get("name", policy.name)).strip()
+            if not policy.name:
+                raise ValueError("持仓管理方案名称不能为空")
+            policy.enabled = bool(data.get("enabled", policy.enabled))
+            if "config" in data:
+                policy.config = normalize_position_management_config(data["config"])
+            policy.version += 1
+            position_policy_repo.save(policy)
+            position_policy_repo.invalidate_linked_strategies(
+                user.user_id, policy.policy_id
+            )
+            engine_manager.refresh_user_strategies(user.user_id)
+            return {"status": "ok", "policy": policy.to_dict()}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @protected_router.delete("/position-management-policies/{policy_id}")
+    async def delete_position_management_policy(
+        policy_id: str, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        try:
+            if not position_policy_repo.delete(user.user_id, policy_id):
+                raise HTTPException(status_code=404, detail="持仓管理方案不存在")
+            return {"status": "ok", "message": "持仓管理方案已删除"}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
     @protected_router.get("/strategy")
     async def get_all_strategies(user: AuthUser = Depends(require_auth)) -> Dict:
         """获取所有策略配置"""
@@ -593,6 +662,9 @@ def create_market_routes(
             symbol = str(data.get("symbol", "")).strip()
             if not symbol:
                 return {"status": "error", "message": "请选择交易品种"}
+            policy_id = str(data.get("position_management_policy_id", "")).strip()
+            if not policy_id or not position_policy_repo.get(user.user_id, policy_id):
+                return {"status": "error", "message": "请选择有效的持仓管理方案"}
             engine = engine_manager.get_engine_for_user(user.user_id)
             strategy = engine.strategy_service.strategy_store.create_strategy(
                 symbol, data
@@ -642,6 +714,10 @@ def create_market_routes(
         try:
             engine = engine_manager.get_engine_for_user(user.user_id)
             data = await request.json()
+            if "position_management_policy_id" in data:
+                policy_id = str(data.get("position_management_policy_id", "")).strip()
+                if not policy_id or not position_policy_repo.get(user.user_id, policy_id):
+                    return {"status": "error", "message": "请选择有效的持仓管理方案"}
             strategy = (
                 engine.strategy_service.strategy_store.get_strategy_by_id(strategy_ref)
                 or engine.strategy_service.strategy_store.get_strategy(strategy_ref)

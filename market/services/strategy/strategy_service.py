@@ -9,16 +9,21 @@ from typing import Callable, List, Dict, Optional
 from datetime import datetime
 import threading
 
-from ...models import TradingSignal, TradingStrategy, TradingDecision
+from ...models import (
+    PositionManagementPolicy, TradingSignal, TradingStrategy, TradingDecision,
+)
 from ...models import ConsistencyRequirement, ConflictResolution
-from ...models import StopLossMode, TakeProfitMode
 from ...store import StrategyStore
+from sqlite_storage import PositionManagementPolicyRepository
 from ..signal import SignalService
+from ..position_manager import PositionManager
 from .risk_manager import RiskManager
 
 
 class StrategyService:
     """策略决策服务"""
+
+    MAJORITY_THRESHOLD = 0.60
 
     def __init__(self, strategy_store: StrategyStore = None,
                  signal_service: SignalService = None,
@@ -26,6 +31,9 @@ class StrategyService:
         self.strategy_store = strategy_store or StrategyStore()
         self.signal_service = signal_service or SignalService()
         self.risk_manager = risk_manager or RiskManager()
+        self.position_manager = PositionManager()
+        self.position_policy_repository = PositionManagementPolicyRepository()
+        self._pivot_service = None
 
         # 持仓服务引用（外部设置）
         self._position_service = None
@@ -38,6 +46,7 @@ class StrategyService:
         self._cooldown_lock = threading.Lock()
         self.decision_cooldown = 60  # 60秒冷却
         self._allowed_strategy_ids: Optional[set] = None
+        self._consensus_directions: Dict[str, str] = {}
 
         print("[StrategyService] 策略决策服务已初始化")
 
@@ -48,6 +57,9 @@ class StrategyService:
     def set_pending_order_service(self, service) -> None:
         """设置待确认订单服务"""
         self._pending_order_service = service
+
+    def set_pivot_service(self, service) -> None:
+        self._pivot_service = service
 
     def set_allowed_strategy_ids(self, strategy_ids: List[str]) -> None:
         """限制当前账户可参与实盘决策的策略。"""
@@ -93,47 +105,53 @@ class StrategyService:
         Returns:
             分析结果
         """
-        if not signals:
-            return {
-                "total_count": 0,
-                "buy_count": 0,
-                "sell_count": 0,
-                "buy_weighted_score": 0,
-                "sell_weighted_score": 0,
-                "consistency": 0,
-                "direction": None,
-                "action": "none",
-            }
+        enabled_sources = strategy.get_signal_sources(enabled_only=True)
+        total_sources = len(enabled_sources)
 
-        # 过滤掉未启用的信号
-        filtered_signals = []
-        for s in signals:
-            period = s.source_period if s.source != "key_level" else None
-            if strategy.is_signal_enabled(s.source, period):
-                filtered_signals.append(s)
+        # Keep one latest state per configured source instance. Tests and manual
+        # signals without an instance id fall back to source + period identity.
+        latest = {}
+        filtered_out = 0
+        for signal in signals or []:
+            period = signal.source_period if signal.source != "key_level" else None
+            if not strategy.is_signal_enabled(
+                signal.source, period, signal.signal_source_id
+            ):
+                filtered_out += 1
+                continue
+            key = signal.signal_source_id or f"{signal.source}:{signal.source_period}"
+            previous = latest.get(key)
+            if previous is None or signal.created_at >= previous.created_at:
+                latest[key] = signal
+        filtered_signals = list(latest.values())
+        if total_sources == 0:
+            total_sources = len(filtered_signals)
 
-        if not filtered_signals:
-            return {
-                "total_count": 0,
-                "buy_count": 0,
-                "sell_count": 0,
-                "buy_weighted_score": 0,
-                "sell_weighted_score": 0,
-                "consistency": 0,
-                "direction": None,
-                "action": "none",
-                "filtered_out": len(signals),
-            }
-
-        buy_signals = [s for s in filtered_signals if s.action == "buy"]
-        sell_signals = [s for s in filtered_signals if s.action == "sell"]
+        ready_signals = [
+            signal for signal in filtered_signals if signal.state_ready
+        ]
+        up_signals = [
+            signal for signal in ready_signals
+            if signal.market_direction == "up"
+        ]
+        down_signals = [
+            signal for signal in ready_signals
+            if signal.market_direction == "down"
+        ]
+        sideways_signals = [
+            signal for signal in ready_signals
+            if signal.market_direction == "sideways"
+        ]
 
         def aggregate_confidence(direction_signals: List[TradingSignal]) -> float:
             """Return a normalized 0-100 confidence, not a weighted contribution."""
             weighted = [
                 (
                     signal.confidence,
-                    strategy.get_signal_weight(signal.source, signal.source_period),
+                    strategy.get_signal_weight(
+                        signal.source, signal.source_period,
+                        signal.signal_source_id,
+                    ),
                 )
                 for signal in direction_signals
             ]
@@ -148,57 +166,96 @@ class StrategyService:
 
         # 计算加权分数（使用新的周期级别权重）
         buy_score = sum(
-            s.confidence * strategy.get_signal_weight(s.source, s.source_period) / 100
-            for s in buy_signals
+            s.confidence * strategy.get_signal_weight(
+                s.source, s.source_period, s.signal_source_id
+            ) / 100
+            for s in up_signals
         )
         sell_score = sum(
-            s.confidence * strategy.get_signal_weight(s.source, s.source_period) / 100
-            for s in sell_signals
+            s.confidence * strategy.get_signal_weight(
+                s.source, s.source_period, s.signal_source_id
+            ) / 100
+            for s in down_signals
         )
 
-        # 计算一致性
-        total = len(filtered_signals)
-        majority_count = max(len(buy_signals), len(sell_signals))
-        consistency = majority_count / total if total > 0 else 0
-
-        # 确定方向
+        # Votes determine direction; weights only affect confidence.
         direction = None
-        if buy_score > sell_score:
+        directional_count = 0
+        if len(up_signals) > len(down_signals):
             direction = "buy"
-        elif sell_score > buy_score:
+            directional_count = len(up_signals)
+        elif len(down_signals) > len(up_signals):
             direction = "sell"
+            directional_count = len(down_signals)
+        elif up_signals and down_signals:
+            # ANY may still resolve an equal vote by score. Majority/ALL do not.
+            if strategy.consistency_requirement == ConsistencyRequirement.ANY:
+                if buy_score > sell_score:
+                    direction = "buy"
+                    directional_count = len(up_signals)
+                elif sell_score > buy_score:
+                    direction = "sell"
+                    directional_count = len(down_signals)
+        consistency = (
+            directional_count / total_sources if total_sources > 0 else 0
+        )
+        direction_signals = up_signals if direction == "buy" else down_signals
+        direction_confidence = aggregate_confidence(direction_signals)
 
         # 检查一致性要求
         action = "none"
         has_skipped_conflict = (
             strategy.conflict_resolution == ConflictResolution.SKIP
-            and bool(buy_signals)
-            and bool(sell_signals)
+            and bool(up_signals)
+            and bool(down_signals)
         )
         if direction and not has_skipped_conflict:
             if strategy.consistency_requirement == ConsistencyRequirement.ANY:
-                action = direction
+                if direction_confidence >= strategy.min_confidence:
+                    action = direction
             elif strategy.consistency_requirement == ConsistencyRequirement.MAJORITY:
-                if consistency >= 0.5:
+                if (
+                    consistency >= self.MAJORITY_THRESHOLD
+                    and direction_confidence >= strategy.min_confidence
+                ):
                     action = direction
             elif strategy.consistency_requirement == ConsistencyRequirement.ALL:
-                if consistency == 1.0:
+                if (
+                    directional_count == total_sources
+                    and len(ready_signals) == total_sources
+                    and direction_confidence >= strategy.min_confidence
+                ):
                     action = direction
 
+        triggered = any(
+            signal.is_entry_trigger
+            and signal.market_direction == (
+                "up" if action == "buy" else "down"
+            )
+            for signal in direction_signals
+        ) if action != "none" else False
+
         return {
-            "total_count": total,
-            "buy_count": len(buy_signals),
-            "sell_count": len(sell_signals),
+            "total_count": total_sources,
+            "reported_count": len(filtered_signals),
+            "ready_count": len(ready_signals),
+            "missing_count": max(0, total_sources - len(filtered_signals)),
+            "buy_count": len(up_signals),
+            "sell_count": len(down_signals),
+            "sideways_count": len(sideways_signals),
             "buy_weighted_score": round(buy_score, 2),
             "sell_weighted_score": round(sell_score, 2),
-            "buy_confidence": aggregate_confidence(buy_signals),
-            "sell_confidence": aggregate_confidence(sell_signals),
+            "buy_confidence": aggregate_confidence(up_signals),
+            "sell_confidence": aggregate_confidence(down_signals),
             "consistency": round(consistency, 2),
+            "majority_threshold": self.MAJORITY_THRESHOLD,
             "direction": direction,
             "action": action,
-            "buy_signals": [s.signal_id for s in buy_signals],
-            "sell_signals": [s.signal_id for s in sell_signals],
-            "filtered_out": len(signals) - len(filtered_signals),
+            "triggered": triggered,
+            "buy_signals": [s.signal_id for s in up_signals],
+            "sell_signals": [s.signal_id for s in down_signals],
+            "sideways_signals": [s.signal_id for s in sideways_signals],
+            "filtered_out": filtered_out,
         }
 
     # ==================== 决策生成 ====================
@@ -233,7 +290,9 @@ class StrategyService:
                      decision_time: datetime = None,
                      volume_calculator: Callable = None,
                      position_checker: Callable = None,
-                     risk_checker: Callable = None) -> Optional[TradingDecision]:
+                     risk_checker: Callable = None,
+                     position_policy: PositionManagementPolicy = None,
+                     position_context: Optional[Dict] = None) -> Optional[TradingDecision]:
         """
         做出交易决策
 
@@ -252,8 +311,6 @@ class StrategyService:
 
         # 同一品种的多个策略独立冷却，互不阻塞。
         cooldown_key = f"{cooldown_scope}:{strategy.strategy_id}"
-        if self._is_in_cooldown(cooldown_key, decision_time):
-            return None
 
         # 获取信号
         signals = (
@@ -262,19 +319,28 @@ class StrategyService:
             else self.signal_service.get_active_signals(symbol)
         )
 
-        # 过滤低置信度信号
-        signals = [s for s in signals if s.confidence >= strategy.min_confidence]
-
-        if not signals:
-            return None
+        # Strategy-scoped signals must never leak into another strategy.
+        signals = [
+            signal for signal in signals
+            if not getattr(signal, "strategy_id", "")
+            or signal.strategy_id == strategy.strategy_id
+        ]
 
         # 分析信号
         analysis = self.analyze_signals(symbol, signals, strategy)
 
         if analysis["action"] == "none":
+            self._consensus_directions[cooldown_key] = "none"
             return None
 
         action = analysis["action"]
+        previous_direction = self._consensus_directions.get(cooldown_key, "none")
+        consensus_changed = previous_direction != action
+        analysis["consensus_changed"] = consensus_changed
+        if not analysis["triggered"] and not consensus_changed:
+            return None
+        if self._is_in_cooldown(cooldown_key, decision_time):
+            return None
 
         enabled_signals = [
             signal
@@ -282,6 +348,7 @@ class StrategyService:
             if strategy.is_signal_enabled(
                 signal.source,
                 signal.source_period if signal.source != "key_level" else None,
+                signal.signal_source_id,
             )
         ]
 
@@ -289,18 +356,75 @@ class StrategyService:
         best_signal = self._select_best_signal(enabled_signals, action, strategy)
         if not best_signal:
             return None
-        directional_signals = [s for s in enabled_signals if s.action == action]
+        market_direction = "up" if action == "buy" else "down"
+        directional_signals = [
+            signal for signal in enabled_signals
+            if signal.state_ready and signal.market_direction == market_direction
+        ]
         analysis = {
             **analysis,
             "selected_signal_id": best_signal.signal_id,
             "selected_signal_source": best_signal.source,
             "selected_signal_period": best_signal.source_period,
+            "selected_signal_source_id": best_signal.signal_source_id,
             "contributing_sources": sorted({s.source for s in directional_signals}),
         }
 
-        # 计算止损止盈
+        # 持仓管理器先生成初始保护方案，后续仓位管理继续使用同一快照。
         entry_price = current_price
-        sl, tp = self._calculate_sl_tp(entry_price, best_signal, strategy)
+        if position_policy is None and strategy.position_management_policy_id:
+            user_id = int(getattr(self.strategy_store, "_user_id", 0) or 0)
+            position_policy = self.position_policy_repository.get(
+                user_id, strategy.position_management_policy_id
+            )
+        # Directly constructed strategies are used by isolated engines/tests.
+        if position_policy is None:
+            position_policy = PositionManagementPolicy(
+                name="默认持仓管理", user_id=0,
+                config={
+                    "initial_stop_rules": [
+                        {"type": "signal"},
+                        {"type": "fixed_percent", "value": 0.003},
+                    ],
+                    "initial_take_profit_rules": [
+                        {"type": "signal"},
+                        {"type": "risk_reward", "value": 2},
+                    ],
+                    "management_rules": [],
+                    "min_risk_reward": strategy.min_risk_reward,
+                },
+            )
+        context = position_context or {}
+        pivots = context.get("pivots")
+        if pivots is None and self._pivot_service is not None:
+            pivots = []
+            for period in self._pivot_service.pivot_store.get_all_periods(symbol):
+                pivots.extend(
+                    item.to_dict()
+                    for item in self._pivot_service.pivot_store.get_pivot_objects(
+                        symbol, period
+                    )
+                )
+        try:
+            plan = self.position_manager.create_plan(
+                position_policy, action, entry_price,
+                signal_stop_loss=best_signal.suggested_sl,
+                signal_take_profit=best_signal.suggested_tp,
+                pivots=pivots or [], atr=float(context.get("atr", 0)),
+                current_time=int(context.get("time", 0) or 0),
+            )
+        except ValueError as exc:
+            print(f"[StrategyService] 持仓管理方案无法生成开仓计划: {exc}")
+            return None
+        sl, tp = plan.stop_loss, plan.take_profit
+        analysis["position_management"] = {
+            "policy_id": plan.policy_id,
+            "policy_snapshot": plan.policy_snapshot,
+            "stop_rule": plan.stop_rule,
+            "take_profit_rule": plan.take_profit_rule,
+            "initial_risk": plan.initial_risk,
+            "explanation": plan.explanation,
+        }
 
         if not sl or not tp or sl == 0 or tp == 0:
             print(f"[StrategyService] 无效的止损止盈: sl={sl}, tp={tp}")
@@ -363,6 +487,7 @@ class StrategyService:
         if not position_check.get("allowed", True) or not risk_check.get("allowed", True):
             # 即使被拒绝也要设置冷却，避免频繁推送
             self._set_cooldown(cooldown_key, decision_time)
+            self._consensus_directions[cooldown_key] = action
             warnings = (
                 position_check.get("warnings", [])
                 + risk_check.get("warnings", [])
@@ -399,6 +524,7 @@ class StrategyService:
 
         # 设置决策冷却
         self._set_cooldown(cooldown_key, decision_time)
+        self._consensus_directions[cooldown_key] = action
 
         # 生成决策理由
         decision_reason = self._generate_decision_reason(analysis, best_signal)
@@ -438,49 +564,25 @@ class StrategyService:
     def _select_best_signal(self, signals: List[TradingSignal],
                            action: str, strategy: TradingStrategy) -> Optional[TradingSignal]:
         """选择最佳信号"""
-        filtered = [s for s in signals if s.action == action]
+        market_direction = "up" if action == "buy" else "down"
+        filtered = [
+            signal for signal in signals
+            if signal.state_ready and signal.market_direction == market_direction
+        ]
         if not filtered:
             return None
 
+        triggered = [signal for signal in filtered if signal.is_entry_trigger]
+        candidates = triggered or filtered
+
         if strategy.conflict_resolution == ConflictResolution.HIGHEST_CONFIDENCE:
-            return max(filtered, key=lambda s: s.confidence)
+            return max(candidates, key=lambda s: s.confidence)
         elif strategy.conflict_resolution == ConflictResolution.HIGHEST_WEIGHT:
-            return max(filtered, key=lambda s: s.confidence * strategy.get_signal_weight(s.source, s.source_period))
+            return max(candidates, key=lambda s: s.confidence * strategy.get_signal_weight(
+                s.source, s.source_period, s.signal_source_id
+            ))
         else:
-            return filtered[0]
-
-    def _calculate_sl_tp(self, entry_price: float, signal: TradingSignal,
-                        strategy: TradingStrategy) -> tuple:
-        """计算止损止盈"""
-        # 止损
-        if strategy.sl_mode == StopLossMode.SIGNAL:
-            sl = signal.suggested_sl
-        elif strategy.sl_mode == StopLossMode.FIXED_POINTS:
-            if signal.action == "buy":
-                sl = entry_price - strategy.sl_fixed_points
-            else:
-                sl = entry_price + strategy.sl_fixed_points
-        else:
-            sl = signal.suggested_sl
-
-        # 止盈
-        if strategy.tp_mode == TakeProfitMode.SIGNAL:
-            tp = signal.suggested_tp
-        elif strategy.tp_mode == TakeProfitMode.FIXED_POINTS:
-            if signal.action == "buy":
-                tp = entry_price + strategy.tp_fixed_points
-            else:
-                tp = entry_price - strategy.tp_fixed_points
-        elif strategy.tp_mode == TakeProfitMode.RISK_REWARD:
-            risk = abs(entry_price - sl)
-            if signal.action == "buy":
-                tp = entry_price + risk * strategy.tp_risk_reward
-            else:
-                tp = entry_price - risk * strategy.tp_risk_reward
-        else:
-            tp = signal.suggested_tp
-
-        return sl, tp
+            return candidates[0]
 
     def _check_position_limits(self, symbol: str, strategy: TradingStrategy,
                                action: str) -> Dict:
@@ -511,14 +613,21 @@ class StrategyService:
         total = analysis["total_count"]
         buy_count = analysis["buy_count"]
         sell_count = analysis["sell_count"]
+        sideways_count = analysis.get("sideways_count", 0)
+        missing_count = analysis.get("missing_count", 0)
         direction = analysis["direction"]
 
         if total == 1:
             reasons.append(f"单一信号({signal.source})建议{direction}")
         else:
-            reasons.append(f"{total}个信号中{buy_count}个买入、{sell_count}个卖出")
+            reasons.append(
+                f"{total}个信号源中{buy_count}个上升、{sell_count}个下降、"
+                f"{sideways_count}个震荡、{missing_count}个未就绪"
+            )
 
-        reasons.append(f"综合判断: {direction}")
+        reasons.append(
+            f"综合判断: {direction}，一致率{analysis.get('consistency', 0):.0%}"
+        )
         reasons.append(f"风险回报比: {signal.risk_reward_ratio:.2f}")
 
         return " | ".join(reasons)
@@ -562,6 +671,15 @@ class StrategyService:
             return None
 
         order_action = "b" if decision.action == "buy" else "s"
+        source = str(decision.signal_summary.get("selected_signal_source", ""))
+        source_id = str(
+            decision.signal_summary.get("selected_signal_source_id", "")
+        )
+        stored_strategy = (
+            self.strategy_store.get_strategy_by_id(decision.strategy_id)
+            if hasattr(self.strategy_store, "get_strategy_by_id") else None
+        )
+        description = f"AIT|{decision.strategy_id}|{source_id}"
 
         # 创建订单
         order_id = self._pending_order_service.create_order(
@@ -572,12 +690,14 @@ class StrategyService:
             sl=decision.sl,
             tp=decision.tp,
             reason=decision.decision_reason,
-            description=(
-                f"Strategy: {decision.strategy_name} ({decision.strategy_id})"
-            ),
+            description=description,
             source="strategy_decision",
             strategy_id=decision.strategy_id,
             strategy_name=decision.strategy_name,
+            signal_source_id=source_id,
+            exit_mode="position_manager",
+            trailing_activation_r=1.0,
+            trailing_distance_r=1.0,
         )
 
         decision.order_id = order_id

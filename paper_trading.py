@@ -12,9 +12,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-from market.models import TradingStrategy
+from market.models import PositionManagementPolicy, TradingStrategy
+from market.services.position_manager import PositionManager
 from sqlite_storage import (
-    SQLiteStorage, StrategyConfigRepository, TradingAccountRepository, get_storage,
+    PositionManagementPolicyRepository, SQLiteStorage,
+    StrategyConfigRepository, TradingAccountRepository, get_storage,
 )
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 
@@ -36,6 +38,8 @@ class PaperTradingService:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
         self.accounts = TradingAccountRepository(self.storage)
+        self.position_policies = PositionManagementPolicyRepository(self.storage)
+        self.position_manager = PositionManager()
         self._lock = threading.RLock()
         self._quotes: Dict[Tuple[int, str], Tuple[float, float]] = {}
 
@@ -86,6 +90,11 @@ class PaperTradingService:
         ).to_dict()
         if strategy_fingerprint(strategy) != strategy_fingerprint(current_strategy):
             raise ValueError("回测策略快照与当前策略版本不一致，请重新回测")
+        policy_id = str(strategy.get("position_management_policy_id", ""))
+        policy = self.position_policies.get(user_id, policy_id)
+        if policy is None or not policy.enabled:
+            raise ValueError("策略必须绑定一个已启用的持仓管理方案")
+        strategy["position_management_policy_snapshot"] = policy.to_dict()
         lifecycle = strategy.get("lifecycle_status", "production")
         if account.account_type == "paper":
             if lifecycle not in {"backtest_passed", "paper_trading", "production"}:
@@ -346,7 +355,6 @@ class PaperTradingService:
         )
         if not deployments:
             return 0
-        signals = strategy_service.signal_service.get_active_signals(symbol)
         created = 0
         now = int(time.time())
         for deployment in deployments:
@@ -356,7 +364,55 @@ class PaperTradingService:
                 )
             except ValueError:
                 continue
+            signals = [
+                signal for signal in
+                strategy_service.signal_service.get_active_signals(symbol)
+                if getattr(signal, "strategy_id", "") == strategy.strategy_id
+            ]
+            expected_source_ids = {
+                item["signal_source_id"]
+                for item in strategy.get_signal_sources(enabled_only=True)
+            }
+            reported_source_ids = {
+                signal.signal_source_id for signal in signals
+                if signal.signal_source_id
+            }
+            generator = getattr(
+                strategy_service.signal_service,
+                "generate_signals_for_strategy",
+                None,
+            )
+            if (
+                generator is not None
+                and not expected_source_ids.issubset(reported_source_ids)
+            ):
+                signals = generator(symbol, current_price, strategy)
             account_id = int(deployment["account_id"])
+            policy_snapshot = self._deployment_strategy(user_id, deployment)[
+                "position_management_policy_snapshot"
+            ]
+            reverse_enabled = any(
+                rule.get("type") == "reverse_signal"
+                for rule in policy_snapshot["config"].get("management_rules", [])
+            )
+            for signal in signals:
+                if (
+                    getattr(signal, "strategy_id", "") == strategy.strategy_id
+                    and getattr(signal, "is_entry_trigger", True)
+                    and getattr(signal, "action", "") in {"buy", "sell"}
+                    and reverse_enabled
+                ):
+                    self.storage.execute(
+                        """
+                        UPDATE paper_positions SET close_reason = 'reverse_signal'
+                        WHERE account_id = ? AND deployment_id = ?
+                          AND status = 'open' AND direction != ?
+                        """,
+                        (
+                            account_id, deployment["deployment_id"],
+                            getattr(signal, "action", ""),
+                        ),
+                    )
             decision = strategy_service.make_decision(
                 symbol,
                 current_price,
@@ -373,6 +429,11 @@ class PaperTradingService:
                 risk_checker=lambda s, volume, risk, st, aid=account_id, px=current_price: (
                     self._paper_risk_check(aid, s, volume, px)
                 ),
+                position_policy=PositionManagementPolicy.from_dict(
+                    self._deployment_strategy(user_id, deployment)[
+                        "position_management_policy_snapshot"
+                    ]
+                ),
             )
             if decision and self._create_order(
                 user_id, deployment, decision.to_dict(), now
@@ -387,6 +448,7 @@ class PaperTradingService:
         bid: float,
         ask: Optional[float] = None,
         timestamp: Optional[int] = None,
+        pivots: Optional[List[Dict]] = None,
     ) -> Dict:
         bid = float(bid)
         ask = float(ask if ask is not None else bid)
@@ -417,7 +479,7 @@ class PaperTradingService:
             summary = {"filled": 0, "closed": 0, "rejected": 0}
             for row in account_rows:
                 result = self._process_account_tick(
-                    user_id, int(row["id"]), symbol, bid, ask, now
+                    user_id, int(row["id"]), symbol, bid, ask, now, pivots or []
                 )
                 for key in summary:
                     summary[key] += result[key]
@@ -776,6 +838,13 @@ class PaperTradingService:
         entry = float(decision.get("entry_price", 0))
         sl = float(decision.get("sl", 0))
         tp = float(decision.get("tp", 0))
+        summary = decision.get("signal_summary") or {}
+        source_id = str(summary.get("selected_signal_source_id", ""))
+        source = str(summary.get("selected_signal_source", ""))
+        management = summary.get("position_management") or {}
+        policy_snapshot = management.get("policy_snapshot") or strategy.get(
+            "position_management_policy_snapshot", {}
+        )
         requested_volume = max(0.01, float(decision.get("volume", 0.01)))
         if requested_volume > float(account_limits["max_single_volume"]):
             reason = "超过账户单笔最大手数"
@@ -790,15 +859,20 @@ class PaperTradingService:
                     order_id, user_id, account_id, deployment_id, strategy_id,
                     decision_id, symbol, direction, status, requested_volume,
                     requested_price, stop_loss, take_profit, confidence,
+                    signal_source_id, exit_mode, trailing_activation_r,
+                    trailing_distance_r, position_policy_snapshot_json,
                     rejection_reason, requested_at, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order_id, user_id, account_id, deployment["deployment_id"],
                     deployment["strategy_id"], decision["decision_id"],
                     decision["symbol"], decision["action"], status,
                     requested_volume, entry, sl, tp,
-                    float(decision.get("confidence_score", 0)), reason, now, now, now,
+                    float(decision.get("confidence_score", 0)), source_id,
+                    "position_manager", 1.0, 1.0,
+                    json.dumps(policy_snapshot, ensure_ascii=False),
+                    reason, now, now, now,
                 ),
             )
             return True
@@ -809,7 +883,7 @@ class PaperTradingService:
 
     def _process_account_tick(
         self, user_id: int, account_id: int, symbol: str,
-        bid: float, ask: float, now: int,
+        bid: float, ask: float, now: int, pivots: List[Dict],
     ) -> Dict:
         point_size, contract_size = market_spec(symbol)
         settings = self._settings(account_id)
@@ -889,15 +963,23 @@ class PaperTradingService:
                         position_id, user_id, account_id, order_id, deployment_id,
                         strategy_id, symbol, direction, status, volume,
                         entry_price, stop_loss, take_profit, open_commission,
-                        current_price, opened_at, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        current_price, signal_source_id, exit_mode,
+                        trailing_activation_r, trailing_distance_r, initial_risk,
+                        favorable_price, position_policy_snapshot_json,
+                        opened_at, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         position_id, user_id, account_id, order["order_id"],
                         order["deployment_id"], order["strategy_id"], symbol,
                         order["direction"], volume, fill_price, order["stop_loss"],
                         order["take_profit"], commission,
-                        bid if order["direction"] == "buy" else ask, now, now, now,
+                        bid if order["direction"] == "buy" else ask,
+                        order["signal_source_id"], order["exit_mode"],
+                        order["trailing_activation_r"], order["trailing_distance_r"],
+                        abs(fill_price - float(order["stop_loss"])), fill_price,
+                        order["position_policy_snapshot_json"],
+                        now, now, now,
                     ),
                 )
                 open_count += 1
@@ -913,17 +995,86 @@ class PaperTradingService:
             ).fetchall()
             for position in positions:
                 mark = bid if position["direction"] == "buy" else ask
-                reason = ""
+                reason = str(position["close_reason"] or "")
                 if position["direction"] == "buy":
                     if mark <= float(position["stop_loss"]):
                         reason = "stop_loss"
-                    elif mark >= float(position["take_profit"]):
+                    elif (
+                        float(position["take_profit"]) > 0
+                        and mark >= float(position["take_profit"])
+                    ):
                         reason = "take_profit"
                 else:
                     if mark >= float(position["stop_loss"]):
                         reason = "stop_loss"
-                    elif mark <= float(position["take_profit"]):
+                    elif (
+                        float(position["take_profit"]) > 0
+                        and mark <= float(position["take_profit"])
+                    ):
                         reason = "take_profit"
+                if not reason and position["exit_mode"] == "trailing_reverse":
+                    initial_risk = float(position["initial_risk"])
+                    favorable = float(position["favorable_price"])
+                    if position["direction"] == "buy":
+                        favorable = max(favorable, mark)
+                        activated = favorable - float(position["entry_price"]) >= (
+                            initial_risk * float(position["trailing_activation_r"])
+                        )
+                        trailing_price = favorable - initial_risk * float(
+                            position["trailing_distance_r"]
+                        )
+                        if activated and mark <= trailing_price:
+                            reason = "trailing_stop"
+                    else:
+                        favorable = min(favorable, mark)
+                        activated = float(position["entry_price"]) - favorable >= (
+                            initial_risk * float(position["trailing_activation_r"])
+                        )
+                        trailing_price = favorable + initial_risk * float(
+                            position["trailing_distance_r"]
+                        )
+                        if activated and mark >= trailing_price:
+                            reason = "trailing_stop"
+                    conn.execute(
+                        "UPDATE paper_positions SET favorable_price = ? WHERE position_id = ?",
+                        (favorable, position["position_id"]),
+                    )
+                if not reason and position["exit_mode"] == "position_manager":
+                    policy_snapshot = json.loads(
+                        position["position_policy_snapshot_json"] or "{}"
+                    )
+                    favorable = float(position["favorable_price"] or position["entry_price"])
+                    favorable = (
+                        max(favorable, mark) if position["direction"] == "buy"
+                        else min(favorable, mark)
+                    )
+                    position_state = dict(position)
+                    position_state["favorable_price"] = favorable
+                    max_bars = 0
+                    period_seconds = {
+                        "M1": 60, "M5": 300, "M15": 900,
+                        "H1": 3600, "H4": 14400,
+                    }
+                    for rule in policy_snapshot.get("config", {}).get("management_rules", []):
+                        if rule.get("type") == "max_holding_bars":
+                            seconds = period_seconds.get(rule.get("period", "M1"), 60)
+                            max_bars = max(max_bars, (now - int(position["opened_at"])) // seconds)
+                    position_state["holding_bars"] = max_bars
+                    action = self.position_manager.evaluate(
+                        policy_snapshot.get("config", {}), position_state,
+                        {"price": mark, "time": now}, pivots=pivots,
+                    )
+                    if action.action == "close":
+                        reason = action.reason
+                    elif action.action == "modify_sl" and action.stop_loss:
+                        conn.execute(
+                            """
+                            UPDATE paper_positions SET stop_loss = ?, favorable_price = ?,
+                                holding_bars = ?, updated_at = ? WHERE position_id = ?
+                            """,
+                            (action.stop_loss, favorable, max_bars, now,
+                             position["position_id"]),
+                        )
                 if reason:
                     exit_price = bid - slippage if position["direction"] == "buy" else ask + slippage
                     multiplier = 1 if position["direction"] == "buy" else -1
@@ -1149,8 +1300,10 @@ class PaperTradingService:
 
     @staticmethod
     def _valid_exits(direction: str, entry: float, sl: float, tp: float) -> bool:
-        if min(entry, sl, tp) <= 0:
+        if min(entry, sl) <= 0 or tp < 0:
             return False
+        if tp == 0:
+            return sl < entry if direction == "buy" else entry < sl
         return sl < entry < tp if direction == "buy" else tp < entry < sl
 
     @staticmethod

@@ -10,7 +10,10 @@ import uuid
 from typing import Dict, List, Optional
 
 from backtest_data import BacktestDatasetRepository, DatasetStatus
-from sqlite_storage import SQLiteStorage, StrategyConfigRepository, get_storage
+from sqlite_storage import (
+    PositionManagementPolicyRepository, SQLiteStorage,
+    StrategyConfigRepository, get_storage,
+)
 
 
 class BacktestTaskStatus:
@@ -29,6 +32,7 @@ class BacktestTemplateService:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
         self.strategies = StrategyConfigRepository(self.storage)
+        self.position_policies = PositionManagementPolicyRepository(self.storage)
         self.datasets = BacktestDatasetRepository(self.storage)
 
     def get_context(self, user_id: int) -> Dict:
@@ -38,6 +42,10 @@ class BacktestTemplateService:
                 "strategy_name": item.strategy_name,
                 "symbol": item.symbol,
                 "lifecycle_status": item.lifecycle_status,
+                "fixed_volume": item.fixed_volume,
+                "risk_percent": item.risk_percent,
+                "max_positions": item.max_positions,
+                "max_same_direction": item.max_same_direction,
             }
             for item in self.strategies.get_all_strategies(user_id)
         ]
@@ -86,8 +94,8 @@ class BacktestTemplateService:
                     description, initial_capital, position_sizing_mode,
                     fixed_volume, risk_percent, spread_points,
                     slippage_points, commission_per_lot, max_positions,
-                    use_strategy_exits, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_same_direction, use_strategy_exits, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     template_id,
@@ -104,6 +112,7 @@ class BacktestTemplateService:
                     values["slippage_points"],
                     values["commission_per_lot"],
                     values["max_positions"],
+                    values["max_same_direction"],
                     int(values["use_strategy_exits"]),
                     now,
                     now,
@@ -131,7 +140,8 @@ class BacktestTemplateService:
                     initial_capital = ?, position_sizing_mode = ?,
                     fixed_volume = ?, risk_percent = ?, spread_points = ?,
                     slippage_points = ?, commission_per_lot = ?,
-                    max_positions = ?, use_strategy_exits = ?, updated_at = ?
+                    max_positions = ?, max_same_direction = ?,
+                    use_strategy_exits = ?, updated_at = ?
                 WHERE user_id = ? AND template_id = ?
                 """,
                 (
@@ -147,6 +157,7 @@ class BacktestTemplateService:
                     values["slippage_points"],
                     values["commission_per_lot"],
                     values["max_positions"],
+                    values["max_same_direction"],
                     int(values["use_strategy_exits"]),
                     now,
                     user_id,
@@ -213,6 +224,16 @@ class BacktestTemplateService:
             raise ValueError("模板至少需要一个可用数据集")
 
         strategy_snapshot = strategy.to_dict()
+        if not strategy.position_management_policy_id:
+            raise ValueError("策略尚未绑定持仓管理方案")
+        position_policy = self.position_policies.get(
+            int(template_owner_id), strategy.position_management_policy_id
+        )
+        if position_policy is None or not position_policy.enabled:
+            raise ValueError("策略绑定的持仓管理方案不存在或已停用")
+        strategy_snapshot["position_management_policy_snapshot"] = (
+            position_policy.to_dict()
+        )
         strategy_json = self._canonical_json(strategy_snapshot)
         strategy_hash = hashlib.sha256(strategy_json.encode("utf-8")).hexdigest()
         template_snapshot = {
@@ -314,6 +335,21 @@ class BacktestTemplateService:
         )
         return self._batch_to_dict(row, include_tasks=True) if row else None
 
+    def cancel_task(self, user_id: int, task_id: str) -> Optional[Dict]:
+        from backtest_engine import BacktestTaskRepository
+
+        return BacktestTaskRepository(self.storage).request_cancel_task(
+            user_id, task_id
+        )
+
+    def cancel_batch(self, user_id: int, batch_id: str) -> Optional[Dict]:
+        from backtest_engine import BacktestTaskRepository
+
+        result = BacktestTaskRepository(self.storage).request_cancel_batch(
+            user_id, batch_id
+        )
+        return self.get_batch(user_id, batch_id) if result else None
+
     def get_task_ledger(self, user_id: int, task_id: str) -> Optional[Dict]:
         task = self.storage.fetchone(
             """
@@ -358,6 +394,15 @@ class BacktestTemplateService:
             """,
             (task_id,),
         )
+        replay_rows = self.storage.fetchall(
+            """
+            SELECT bar_time AS time, end_time, open, high, low, close,
+                   tick_volume, bar_count
+            FROM backtest_replay_bars
+            WHERE task_id = ? ORDER BY bar_time
+            """,
+            (task_id,),
+        )
         orders = []
         for row in order_rows:
             item = dict(row)
@@ -373,6 +418,7 @@ class BacktestTemplateService:
             "positions": [dict(row) for row in position_rows],
             "trades": [dict(row) for row in trade_rows],
             "equity_curve": [dict(row) for row in equity_rows],
+            "replay_bars": [dict(row) for row in replay_rows],
         }
 
     def _validate_template(self, user_id: int, payload: Dict) -> Dict:
@@ -418,12 +464,15 @@ class BacktestTemplateService:
             "description": str(payload.get("description", "")).strip()[:500],
             "initial_capital": float(payload.get("initial_capital", 100000)),
             "position_sizing_mode": mode,
-            "fixed_volume": float(payload.get("fixed_volume", 0.01)),
-            "risk_percent": float(payload.get("risk_percent", 1)),
+            "fixed_volume": float(payload.get("fixed_volume", strategy.fixed_volume)),
+            "risk_percent": float(payload.get("risk_percent", strategy.risk_percent)),
             "spread_points": float(payload.get("spread_points", 0)),
             "slippage_points": float(payload.get("slippage_points", 0)),
             "commission_per_lot": float(payload.get("commission_per_lot", 0)),
-            "max_positions": int(payload.get("max_positions", 1)),
+            "max_positions": int(payload.get("max_positions", strategy.max_positions)),
+            "max_same_direction": int(
+                payload.get("max_same_direction", strategy.max_same_direction)
+            ),
             "use_strategy_exits": bool(payload.get("use_strategy_exits", True)),
         }
         if values["initial_capital"] <= 0:
@@ -438,6 +487,8 @@ class BacktestTemplateService:
             raise ValueError("点差、滑点和手续费不能为负数")
         if not 1 <= values["max_positions"] <= 100:
             raise ValueError("最大持仓数必须在 1 到 100 之间")
+        if not 1 <= values["max_same_direction"] <= values["max_positions"]:
+            raise ValueError("同向最大持仓必须在 1 到最大持仓数之间")
         return values
 
     def _get_runnable_dataset(
@@ -485,6 +536,26 @@ class BacktestTemplateService:
 
     def _batch_to_dict(self, row, include_tasks: bool) -> Dict:
         data = dict(row)
+        llm_usage = self.storage.fetchone(
+            """
+            SELECT COALESCE(SUM(llm_analysis_count), 0) AS analysis_count,
+                   COALESCE(SUM(llm_call_count), 0) AS call_count,
+                   COALESCE(SUM(llm_cache_hits), 0) AS cache_hits
+            FROM backtest_tasks WHERE batch_id = ?
+            """,
+            (data["batch_id"],),
+        )
+        data["llm_analysis_count"] = int(llm_usage["analysis_count"])
+        data["llm_call_count"] = int(llm_usage["call_count"])
+        data["llm_cache_hits"] = int(llm_usage["cache_hits"])
+        canceling = self.storage.fetchone(
+            """
+            SELECT COUNT(*) AS count FROM backtest_tasks
+            WHERE batch_id = ? AND status = 'running' AND cancel_requested = 1
+            """,
+            (data["batch_id"],),
+        )
+        data["cancel_requested"] = bool(canceling and canceling["count"])
         data["strategy_snapshot"] = json.loads(data.pop("strategy_snapshot_json"))
         data["template_snapshot"] = json.loads(data.pop("template_snapshot_json"))
         data["strategy_snapshot_hash"] = data["strategy_snapshot_hash"][:12]
@@ -492,8 +563,9 @@ class BacktestTemplateService:
             task_rows = self.storage.fetchall(
                 """
                 SELECT task_id, batch_id, dataset_id, status, progress,
+                       llm_analysis_count, llm_call_count, llm_cache_hits,
                        dataset_snapshot_json, result_json, error_message,
-                       engine_version, worker_id, heartbeat_at,
+                       engine_version, worker_id, heartbeat_at, cancel_requested,
                        created_at, started_at, completed_at
                 FROM backtest_tasks WHERE batch_id = ? ORDER BY created_at, task_id
                 """,
@@ -502,8 +574,24 @@ class BacktestTemplateService:
             data["tasks"] = []
             for task_row in task_rows:
                 task = dict(task_row)
+                task["cancel_requested"] = bool(task["cancel_requested"])
                 task["dataset"] = json.loads(task.pop("dataset_snapshot_json"))
                 task["result"] = json.loads(task.pop("result_json"))
+                analysis_row = self.storage.fetchone(
+                    """
+                    SELECT task_id, status, model, prompt_hash, result_json,
+                           error_message, created_at, updated_at, completed_at
+                    FROM backtest_ai_analyses WHERE task_id = ?
+                    """,
+                    (task["task_id"],),
+                )
+                if analysis_row:
+                    task["ai_analysis"] = dict(analysis_row)
+                    task["ai_analysis"]["result"] = json.loads(
+                        task["ai_analysis"].pop("result_json") or "{}"
+                    )
+                else:
+                    task["ai_analysis"] = {"task_id": task["task_id"], "status": "idle", "result": {}}
                 data["tasks"].append(task)
         return data
 

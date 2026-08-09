@@ -16,6 +16,8 @@ from ..models import PivotPoint
 class PivotStore:
     """转折点存储（只负责数据CRUD）"""
 
+    MAX_PIVOTS_PER_PERIOD = 10
+
     def __init__(self):
         # 存储转折点: {SYMBOL: {PERIOD: [PivotPoint, ...]}}
         self._pivots = defaultdict(lambda: defaultdict(list))
@@ -39,14 +41,21 @@ class PivotStore:
             timeline: 时间线转折点列表（可选）
         """
         with self._lock:
-            self._pivots[symbol][period] = list(pivots)
+            self._pivots[symbol][period] = self._latest(pivots)
             if timeline is not None:
-                self._pivots_timeline[symbol][period] = list(timeline)
+                self._pivots_timeline[symbol][period] = self._latest(timeline)
             else:
-                self._pivots_timeline[symbol][period] = list(pivots)
+                self._pivots_timeline[symbol][period] = self._latest(pivots)
+
+    @classmethod
+    def _latest(cls, pivots: List[PivotPoint]) -> List[PivotPoint]:
+        """每个品种、周期只保留最新的少量转折点作为基础数据。"""
+        return sorted(
+            list(pivots), key=lambda item: str(item.timestamp)
+        )[-cls.MAX_PIVOTS_PER_PERIOD:]
 
     def get_pivots(self, symbol: str, period: str, direction: str = None,
-                   count: int = 50) -> List[Dict]:
+                   count: int = 10) -> List[Dict]:
         """获取转折点数据"""
         with self._lock:
             pivots = list(self._pivots[symbol][period])
@@ -54,7 +63,10 @@ class PivotStore:
             if direction:
                 pivots = [p for p in pivots if p.direction == direction]
 
-            pivots = sorted(pivots, key=lambda x: str(x.timestamp), reverse=True)[:count]
+            limit = max(0, min(int(count), self.MAX_PIVOTS_PER_PERIOD))
+            pivots = sorted(
+                pivots, key=lambda x: str(x.timestamp), reverse=True
+            )[:limit]
             return [p.to_dict() for p in pivots]
 
     def get_pivot_objects(self, symbol: str, period: str = None) -> List[PivotPoint]:

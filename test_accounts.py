@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from market.models import PositionManagementPolicy
 from sqlite_storage import (
+    PositionManagementPolicyRepository,
     EAActivationRepository,
     SQLiteStorage,
     StrategyDeploymentRepository,
@@ -183,11 +185,22 @@ class TradingAccountRepositoryTests(unittest.TestCase):
             second_code, mt5_login="10002", mt5_server="Broker-Demo"
         )
         now = 100
+        PositionManagementPolicyRepository(self.storage).save(
+            PositionManagementPolicy(
+                policy_id="policy-1", user_id=self.user.user_id,
+                name="Live exits", config={
+                    "initial_stop_rules": [{"type": "signal"}],
+                    "initial_take_profit_rules": [{"type": "signal"}],
+                    "management_rules": [],
+                },
+            )
+        )
         for strategy_id, name in (("trend-1", "趋势"), ("breakout-1", "突破")):
             config = {
                 "strategy_id": strategy_id, "strategy_name": name,
                 "symbol": "GOLD_", "enabled": True,
                 "lifecycle_status": "production",
+                "position_management_policy_id": "policy-1",
             }
             self.storage.execute(
                 """

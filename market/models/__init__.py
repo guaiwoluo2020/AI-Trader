@@ -22,6 +22,10 @@ from .trading_strategy import (
 from .statistics import StatisticsData
 from .position import PositionData
 from .trade_history import TradeDeal
+from .position_management import (
+    PositionAction, PositionManagementPolicy, PositionPlan,
+    default_position_management_config, normalize_position_management_config,
+)
 
 __all__ = [
     'KlineData', 'PivotPoint',
@@ -33,5 +37,7 @@ __all__ = [
     'TradingStrategy', 'TradingDecision',
     'ConsistencyRequirement', 'ConflictResolution', 'VolumeMode',
     'StopLossMode', 'TakeProfitMode', 'PositionConflict', 'StrategyLifecycle',
-    'StatisticsData', 'PositionData', 'TradeDeal'
+    'StatisticsData', 'PositionData', 'TradeDeal',
+    'PositionAction', 'PositionManagementPolicy', 'PositionPlan',
+    'default_position_management_config', 'normalize_position_management_config'
 ]

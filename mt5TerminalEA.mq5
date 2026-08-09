@@ -38,6 +38,11 @@ uint g_lastPythonRequestTime = 0;
 uint g_pythonRequestInterval = 100;  // 毫秒
 uint g_lastHistoryTaskPollTime = 0;
 uint g_historyTaskPollInterval = 5000;  // 历史数据任务每5秒处理一个分片
+bool g_historyTaskActive = false;
+string g_historyRetryDatasetId = "";
+int g_historyRetryChunkIndex = -1;
+int g_historyNotFoundRetryCount = 0;
+int g_historyNotFoundRetryLimit = 3;
 
 // 统计数据 - 每分钟重置
 datetime g_lastStatisticTime = 0;
@@ -352,9 +357,8 @@ int OnInit()
    Print("Pushing historical K-line data...");
    PushAllKlineData(true);  // is_full = true
 
-//--- 启动时获取财经日历
-   Print("Fetching calendar data...");
-   CheckAndUpdateCalendar();
+//--- 财经日历查询较慢，放到定时器中延迟执行，避免阻塞EA初始化
+   Print("Calendar data will be fetched after initialization.");
 
 //--- 启动时上报交易历史
    Print("Reporting trade history...");
@@ -426,6 +430,7 @@ string GetPositionsSummary(bool onlyCurrentSymbol = true)
       double posProfit = PositionGetDouble(POSITION_PROFIT);
       double posSL = PositionGetDouble(POSITION_SL);
       double posTP = PositionGetDouble(POSITION_TP);
+      string posComment = PositionGetString(POSITION_COMMENT);
       ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
       // 获取当前价格（需要根据品种获取对应的bid/ask）
@@ -453,8 +458,10 @@ string GetPositionsSummary(bool onlyCurrentSymbol = true)
       summary += "\"symbol\":\"" + posSymbol + "\",";
       summary += "\"volume\":" + DoubleToString(posVolume, 2) + ",";
       summary += "\"priceOpen\":" + DoubleToString(posPriceOpen, _Digits) + ",";
+      summary += "\"openTime\":" + IntegerToString(PositionGetInteger(POSITION_TIME)) + ",";
       summary += "\"type\":\"" + (posType == POSITION_TYPE_BUY ? "BUY" : "SELL") + "\",";
       summary += "\"profit\":" + DoubleToString(posProfit, 2) + ",";
+      summary += "\"comment\":\"" + EscapeJsonString(posComment) + "\",";
       summary += "\"sl\":" + DoubleToString(posSL, _Digits) + ",";
       summary += "\"tp\":" + DoubleToString(posTP, _Digits) + ",";
       summary += "\"distanceSL\":" + DoubleToString(distanceSL, _Digits) + ",";
@@ -662,6 +669,36 @@ void ParseAndExecuteTrades(string jsonData)
            }
         }
      }
+
+   int updatesPos = StringFind(jsonData, "\"position_updates\":");
+   if(updatesPos != -1)
+     {
+      int updatesStart = StringFind(jsonData, "[", updatesPos);
+      int updatesEnd = StringFind(jsonData, "]", updatesStart);
+      if(updatesStart != -1 && updatesEnd != -1 && updatesEnd > updatesStart + 1)
+        {
+         string updatesJson = StringSubstr(jsonData, updatesStart + 1, updatesEnd - updatesStart - 1);
+         int cursor = 0;
+         while(cursor < StringLen(updatesJson))
+           {
+            int objectStart = StringFind(updatesJson, "{", cursor);
+            int objectEnd = StringFind(updatesJson, "}", objectStart);
+            if(objectStart == -1 || objectEnd == -1) break;
+            string updateJson = StringSubstr(updatesJson, objectStart, objectEnd - objectStart + 1);
+            long ticket = (long)ExtractJsonDouble(updateJson, "ticket");
+            double sl = ExtractJsonDouble(updateJson, "sl");
+            double tp = ExtractJsonDouble(updateJson, "tp");
+            if(ticket > 0 && PositionSelectByTicket(ticket))
+              {
+               if(trade.PositionModify(ticket, sl, tp))
+                  Print("[持仓更新成功] Ticket: ", ticket, " SL: ", sl, " TP: ", tp);
+               else
+                  Print("[持仓更新失败] Ticket: ", ticket, " Retcode: ", trade.ResultRetcodeDescription());
+              }
+            cursor = objectEnd + 1;
+           }
+        }
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -776,6 +813,7 @@ void ExecuteTradeFromJson(string tradeJson)
    double volume = ExtractJsonDouble(tradeJson, "mount");
    double sl = ExtractJsonDouble(tradeJson, "sl");
    double tp = ExtractJsonDouble(tradeJson, "tp");
+   string exitMode = ExtractJsonString(tradeJson, "exit_mode");
    string description = ExtractJsonString(tradeJson, "description");
 
    Print("[EA] 收到交易指令: symbol=", symbol, " action=", action, " volume=", volume, " sl=", sl, " tp=", tp, " description=", description);
@@ -805,7 +843,7 @@ void ExecuteTradeFromJson(string tradeJson)
    ENUM_ORDER_TYPE orderType = (action == "b") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
 
    Print("[EA] 准备执行交易: ", (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"), " ", volume, " ", symbol, " desc=", description);
-   ExecuteTrade(orderType, volume, sl, tp, description,
+   ExecuteTrade(orderType, volume, sl, tp, description, exitMode,
                 instructionId, orderId, requestedPrice, action);
   }
 
@@ -851,7 +889,7 @@ double ExtractJsonDouble(string json, string key)
 //| 执行交易                                                          |
 //+------------------------------------------------------------------+
 void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp,
-                  string description, string instructionId, string orderId,
+                  string description, string exitMode, string instructionId, string orderId,
                   double requestedPrice, string action)
   {
    if(volume <= 0)
@@ -869,12 +907,17 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
       else
          sl = price * (1.0 + 0.001);
      }
-   if(tp <= 0)
+   if(tp <= 0 && exitMode == "fixed_rr")
      {
       if(orderType == ORDER_TYPE_BUY)
          tp = price * (1.0 + 0.001);
       else
          tp = price * (1.0 - 0.001);
+     }
+   else if(exitMode != "fixed_rr")
+     {
+      // Dynamic exits are managed by the server; MT5 keeps the initial SL only.
+      tp = 0;
      }
 
    // 标准化手数
@@ -1116,6 +1159,8 @@ void OnTimer()
   {
 //--- 历史任务不依赖实时Tick，休市期间也可以继续下载
    CheckHistoricalDataTask();
+   if(g_historyTaskActive)
+      return;  // 采集期间优先处理历史分片，避免被财经日历长时间阻塞
 
 //--- 检查最后一次Tick时间，如果超过10秒无Tick则跳过（可能休市）
    datetime now = TimeCurrent();
@@ -1360,7 +1405,11 @@ void CheckHistoricalDataTask()
    );
    string datasetId = ExtractJsonString(response, "dataset_id");
    if(StringLen(datasetId) == 0)
+     {
+      g_historyTaskActive = false;
       return;
+     }
+   g_historyTaskActive = true;
 
    int chunkIndex = (int)ExtractJsonDouble(response, "chunk_index");
    long rangeStart = (long)ExtractJsonDouble(response, "range_start");
@@ -1394,12 +1443,40 @@ bool UploadHistoricalDataChunk(
    );
    if(copied < 0)
      {
+      int copyError = GetLastError();
+      bool isSameChunk = (
+         g_historyRetryDatasetId == datasetId
+         && g_historyRetryChunkIndex == chunkIndex
+      );
+      if(!isSameChunk)
+        {
+         g_historyRetryDatasetId = datasetId;
+         g_historyRetryChunkIndex = chunkIndex;
+         g_historyNotFoundRetryCount = 0;
+        }
+
+      // 4401 表示该时间片没有历史数据，常见于周末、节假日或券商历史起点之前。
+      // 有限重试后上传空分片，避免整个数据集永久卡在同一时间段。
+      if(copyError == 4401)
+         g_historyNotFoundRetryCount++;
+      if(copyError != 4401
+         || g_historyNotFoundRetryCount < g_historyNotFoundRetryLimit)
+        {
+         Print(
+            "[历史数据] CopyRates暂未就绪，将稍后重试。error=",
+            copyError, ", retry=", g_historyNotFoundRetryCount,
+            ", from=", TimeToString(rangeStart),
+            ", to=", TimeToString(rangeEnd)
+         );
+         return false;
+        }
+
       Print(
-         "[历史数据] CopyRates暂未就绪，将稍后重试。error=",
-         GetLastError(), ", from=", TimeToString(rangeStart),
+         "[历史数据] 该时间片无历史数据，按空分片继续。error=",
+         copyError, ", from=", TimeToString(rangeStart),
          ", to=", TimeToString(rangeEnd)
       );
-      return false;
+      copied = 0;
      }
 
    string json = "{";
@@ -1471,6 +1548,9 @@ bool UploadHistoricalDataChunk(
       ", progress=", DoubleToString(progress, 1), "%",
       ", status=", datasetStatus
    );
+   g_historyRetryDatasetId = "";
+   g_historyRetryChunkIndex = -1;
+   g_historyNotFoundRetryCount = 0;
    return true;
   }
 

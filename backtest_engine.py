@@ -18,28 +18,37 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from backtest_tasks import BacktestTaskStatus
-from market.models import TradingSignal, TradingStrategy
+from market.models import (
+    PositionManagementPolicy, SignalSource, TradingSignal, TradingStrategy,
+)
+from market.services.position_manager import PositionManager
 from market.services.llm_service import LLMService
 from market.services.signal.signal_rules import (
     build_ai_entry_signal,
-    build_key_level_signal,
-    build_pivot_signal,
+    build_key_level_state_signal,
+    build_moving_average_state_signal,
+    direction_action,
+    evaluate_moving_average_state,
+    extract_ai_trend_state,
     valid_exits as shared_valid_exits,
 )
+from market.services.signal.key_level_signal import evaluate_key_level_expression
 from market.services.strategy.strategy_service import StrategyService
 from market.store.llm_store import LLMStore
 from sqlite_storage import SQLiteStorage, get_storage
 
 
-ENGINE_VERSION = "shared-decision-5"
+ENGINE_VERSION = "direction-consensus-2"
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
 PERIOD_LIMITS = {"M1": 60, "M5": 48, "M15": 40, "H1": 30, "H4": 30}
-PIVOT_STRENGTH = {"M1": 6, "M5": 4, "M15": 3, "H1": 3, "H4": 3}
-PIVOT_THRESHOLD = {"M1": 0.0002, "M5": 0.0005, "M15": 0.0015, "H1": 0.0015, "H4": 0.0015}
 
 
 class BacktestEngineError(RuntimeError):
     """A task cannot produce a trustworthy backtest result."""
+
+
+class BacktestCanceled(BacktestEngineError):
+    """A user requested a cooperative stop of the current replay."""
 
 
 class BacktestTaskRepository:
@@ -51,14 +60,37 @@ class BacktestTaskRepository:
     def recover_stale(self, stale_seconds: int = 600) -> int:
         now = int(time.time())
         with self.storage._lock, self.storage._connect() as conn:
+            canceled_batches = [
+                row["batch_id"] for row in conn.execute(
+                    """
+                    SELECT DISTINCT batch_id FROM backtest_tasks
+                    WHERE status = ? AND cancel_requested = 1
+                    """,
+                    (BacktestTaskStatus.RUNNING,),
+                ).fetchall()
+            ]
+            conn.execute(
+                """
+                UPDATE backtest_tasks
+                SET status = ?, completed_at = ?, heartbeat_at = ?, worker_id = ''
+                WHERE status = ? AND cancel_requested = 1
+                """,
+                (
+                    BacktestTaskStatus.CANCELED, now, now,
+                    BacktestTaskStatus.RUNNING,
+                ),
+            )
             cursor = conn.execute(
                 """
                 UPDATE backtest_tasks
                 SET status = ?, worker_id = '', error_message = '', heartbeat_at = NULL
-                WHERE status = ? AND COALESCE(heartbeat_at, started_at, 0) < ?
+                WHERE status = ? AND cancel_requested = 0
+                  AND COALESCE(heartbeat_at, started_at, 0) < ?
                 """,
                 (BacktestTaskStatus.QUEUED, BacktestTaskStatus.RUNNING, now - stale_seconds),
             )
+            for batch_id in canceled_batches:
+                self._refresh_batch(conn, batch_id, now)
             conn.commit()
             return cursor.rowcount
 
@@ -73,7 +105,7 @@ class BacktestTaskRepository:
                        b.template_snapshot_json
                 FROM backtest_tasks t
                 JOIN backtest_batches b ON b.batch_id = t.batch_id
-                WHERE t.status = ?
+                WHERE t.status = ? AND t.cancel_requested = 0
                 ORDER BY t.created_at, t.task_id
                 LIMIT 1
                 """,
@@ -87,8 +119,10 @@ class BacktestTaskRepository:
                 UPDATE backtest_tasks
                 SET status = ?, progress = 0, started_at = COALESCE(started_at, ?),
                     heartbeat_at = ?, worker_id = ?, engine_version = ?,
-                    error_message = ''
-                WHERE task_id = ? AND status = ?
+                    error_message = '', cancel_requested = 0,
+                    llm_analysis_count = 0, llm_call_count = 0,
+                    llm_cache_hits = 0
+                WHERE task_id = ? AND status = ? AND cancel_requested = 0
                 """,
                 (
                     BacktestTaskStatus.RUNNING,
@@ -119,19 +153,181 @@ class BacktestTaskRepository:
             conn.commit()
             return self._decode_task(dict(row))
 
-    def heartbeat(self, task_id: str, progress: float) -> None:
+    def heartbeat(self, task_id: str, progress: float) -> bool:
+        with self.storage._lock, self.storage._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE backtest_tasks SET progress = ?, heartbeat_at = ?
+                WHERE task_id = ? AND status = ? AND cancel_requested = 0
+                """,
+                (
+                    max(0.0, min(99.9, float(progress))),
+                    int(time.time()),
+                    task_id,
+                    BacktestTaskStatus.RUNNING,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def is_cancel_requested(self, task_id: str) -> bool:
+        row = self.storage.fetchone(
+            "SELECT status, cancel_requested FROM backtest_tasks WHERE task_id = ?",
+            (task_id,),
+        )
+        return row is None or row["status"] != BacktestTaskStatus.RUNNING or bool(
+            row["cancel_requested"]
+        )
+
+    def record_llm_analysis(self, task_id: str, cache_hit: bool) -> None:
+        """Record live LLM usage without rewriting the simulated account ledger."""
         self.storage.execute(
             """
-            UPDATE backtest_tasks SET progress = ?, heartbeat_at = ?
+            UPDATE backtest_tasks
+            SET llm_analysis_count = llm_analysis_count + 1,
+                llm_call_count = llm_call_count + ?,
+                llm_cache_hits = llm_cache_hits + ?,
+                heartbeat_at = ?
             WHERE task_id = ? AND status = ?
             """,
             (
-                max(0.0, min(99.9, float(progress))),
+                0 if cache_hit else 1,
+                1 if cache_hit else 0,
                 int(time.time()),
                 task_id,
                 BacktestTaskStatus.RUNNING,
             ),
         )
+
+    def checkpoint(self, task_id: str, progress: float, ledger: Dict) -> bool:
+        """Persist a throttled live account snapshot for the running task."""
+        now = int(time.time())
+        with self.storage._lock, self.storage._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT user_id FROM backtest_tasks
+                WHERE task_id = ? AND status = ? AND cancel_requested = 0
+                """,
+                (task_id, BacktestTaskStatus.RUNNING),
+            ).fetchone()
+            if row is None:
+                return False
+            self._persist_ledger(conn, task_id, int(row["user_id"]), ledger, now)
+            conn.execute(
+                """
+                UPDATE backtest_tasks SET progress = ?, heartbeat_at = ?
+                WHERE task_id = ? AND status = ? AND cancel_requested = 0
+                """,
+                (
+                    max(0.0, min(99.9, float(progress))), now, task_id,
+                    BacktestTaskStatus.RUNNING,
+                ),
+            )
+            conn.commit()
+            return True
+
+    def request_cancel_task(self, user_id: int, task_id: str) -> Optional[Dict]:
+        now = int(time.time())
+        with self.storage._lock, self.storage._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT task_id, batch_id, status, cancel_requested
+                FROM backtest_tasks WHERE task_id = ? AND user_id = ?
+                """,
+                (task_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["status"] == BacktestTaskStatus.QUEUED:
+                conn.execute(
+                    """
+                    UPDATE backtest_tasks
+                    SET status = ?, cancel_requested = 1, completed_at = ?,
+                        heartbeat_at = ?, worker_id = ''
+                    WHERE task_id = ? AND status = ?
+                    """,
+                    (
+                        BacktestTaskStatus.CANCELED, now, now, task_id,
+                        BacktestTaskStatus.QUEUED,
+                    ),
+                )
+            elif row["status"] == BacktestTaskStatus.RUNNING:
+                conn.execute(
+                    "UPDATE backtest_tasks SET cancel_requested = 1 WHERE task_id = ?",
+                    (task_id,),
+                )
+            self._refresh_batch(conn, row["batch_id"], now)
+            conn.commit()
+            updated = conn.execute(
+                """
+                SELECT task_id, batch_id, status, progress, cancel_requested
+                FROM backtest_tasks WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            return dict(updated)
+
+    def request_cancel_batch(self, user_id: int, batch_id: str) -> Optional[Dict]:
+        now = int(time.time())
+        with self.storage._lock, self.storage._connect() as conn:
+            batch = conn.execute(
+                "SELECT batch_id FROM backtest_batches WHERE batch_id = ? AND user_id = ?",
+                (batch_id, user_id),
+            ).fetchone()
+            if batch is None:
+                return None
+            conn.execute(
+                """
+                UPDATE backtest_tasks
+                SET status = ?, cancel_requested = 1, completed_at = ?,
+                    heartbeat_at = ?, worker_id = ''
+                WHERE batch_id = ? AND status = ?
+                """,
+                (
+                    BacktestTaskStatus.CANCELED, now, now, batch_id,
+                    BacktestTaskStatus.QUEUED,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE backtest_tasks SET cancel_requested = 1
+                WHERE batch_id = ? AND status = ?
+                """,
+                (batch_id, BacktestTaskStatus.RUNNING),
+            )
+            self._refresh_batch(conn, batch_id, now)
+            conn.commit()
+            return {"batch_id": batch_id}
+
+    def cancel(self, task_id: str, ledger: Optional[Dict] = None) -> None:
+        now = int(time.time())
+        with self.storage._lock, self.storage._connect() as conn:
+            row = conn.execute(
+                "SELECT batch_id, user_id FROM backtest_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return
+            if ledger:
+                self._persist_ledger(conn, task_id, int(row["user_id"]), ledger, now)
+            conn.execute(
+                """
+                UPDATE backtest_accounts SET status = 'canceled', updated_at = ?
+                WHERE task_id = ?
+                """,
+                (now, task_id),
+            )
+            conn.execute(
+                """
+                UPDATE backtest_tasks
+                SET status = ?, cancel_requested = 1, completed_at = ?,
+                    heartbeat_at = ?, worker_id = ''
+                WHERE task_id = ?
+                """,
+                (BacktestTaskStatus.CANCELED, now, now, task_id),
+            )
+            self._refresh_batch(conn, row["batch_id"], now)
+            conn.commit()
 
     def complete(self, task_id: str, result: Dict) -> None:
         now = int(time.time())
@@ -139,10 +335,30 @@ class BacktestTaskRepository:
         ledger = public_result.pop("_ledger", None)
         with self.storage._lock, self.storage._connect() as conn:
             row = conn.execute(
-                "SELECT batch_id, user_id FROM backtest_tasks WHERE task_id = ?",
+                """
+                SELECT batch_id, user_id, cancel_requested
+                FROM backtest_tasks WHERE task_id = ?
+                """,
                 (task_id,),
             ).fetchone()
             if row is None:
+                return
+            if row["cancel_requested"]:
+                if ledger:
+                    ledger["account"]["status"] = "canceled"
+                    self._persist_ledger(
+                        conn, task_id, int(row["user_id"]), ledger, now
+                    )
+                conn.execute(
+                    """
+                    UPDATE backtest_tasks
+                    SET status = ?, completed_at = ?, heartbeat_at = ?, worker_id = ''
+                    WHERE task_id = ?
+                    """,
+                    (BacktestTaskStatus.CANCELED, now, now, task_id),
+                )
+                self._refresh_batch(conn, row["batch_id"], now)
+                conn.commit()
                 return
             if ledger:
                 self._persist_ledger(
@@ -152,7 +368,7 @@ class BacktestTaskRepository:
                 """
                 UPDATE backtest_tasks
                 SET status = ?, progress = 100, result_json = ?, completed_at = ?,
-                    heartbeat_at = ?, error_message = ''
+                    heartbeat_at = ?, error_message = '', worker_id = ''
                 WHERE task_id = ?
                 """,
                 (
@@ -171,7 +387,8 @@ class BacktestTaskRepository:
         conn.execute("PRAGMA foreign_keys=ON")
         for table in (
             "backtest_trades", "backtest_positions", "backtest_orders",
-            "backtest_equity_points", "backtest_accounts",
+            "backtest_equity_points", "backtest_replay_bars",
+            "backtest_accounts",
         ):
             conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
 
@@ -253,15 +470,51 @@ class BacktestTaskRepository:
                 item["open_positions"],
             ) for item in ledger["equity_points"]],
         )
+        conn.executemany(
+            """
+            INSERT INTO backtest_replay_bars(
+                task_id, bar_time, end_time, user_id, open, high, low, close,
+                tick_volume, bar_count
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [(
+                task_id, item["time"], item.get("end_time", item["time"]),
+                user_id, item["open"], item["high"], item["low"],
+                item["close"], item.get("tick_volume", 0),
+                item.get("bar_count", 1),
+            ) for item in ledger.get("replay_bars", [])],
+        )
 
     def fail(self, task_id: str, message: str) -> None:
         now = int(time.time())
         with self.storage._lock, self.storage._connect() as conn:
             row = conn.execute(
-                "SELECT batch_id FROM backtest_tasks WHERE task_id = ?",
+                """
+                SELECT batch_id, cancel_requested
+                FROM backtest_tasks WHERE task_id = ?
+                """,
                 (task_id,),
             ).fetchone()
             if row is None:
+                return
+            if row["cancel_requested"]:
+                conn.execute(
+                    """
+                    UPDATE backtest_tasks
+                    SET status = ?, completed_at = ?, heartbeat_at = ?, worker_id = ''
+                    WHERE task_id = ?
+                    """,
+                    (BacktestTaskStatus.CANCELED, now, now, task_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE backtest_accounts SET status = 'canceled', updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (now, task_id),
+                )
+                self._refresh_batch(conn, row["batch_id"], now)
+                conn.commit()
                 return
             conn.execute(
                 """
@@ -297,21 +550,24 @@ class BacktestTaskRepository:
         running = counts.get(BacktestTaskStatus.RUNNING, 0)
         completed = counts.get(BacktestTaskStatus.COMPLETED, 0)
         failed = counts.get(BacktestTaskStatus.FAILED, 0)
+        canceled = counts.get(BacktestTaskStatus.CANCELED, 0)
         if queued or running:
             status = BacktestTaskStatus.RUNNING
             completed_at = None
         else:
-            status = (
-                BacktestTaskStatus.FAILED if failed else BacktestTaskStatus.COMPLETED
+            status = BacktestTaskStatus.FAILED if failed else (
+                BacktestTaskStatus.CANCELED
+                if canceled else BacktestTaskStatus.COMPLETED
             )
             completed_at = now
         conn.execute(
             """
             UPDATE backtest_batches
-            SET status = ?, completed_tasks = ?, failed_tasks = ?, completed_at = ?
+            SET status = ?, completed_tasks = ?, failed_tasks = ?,
+                canceled_tasks = ?, completed_at = ?
             WHERE batch_id = ?
             """,
-            (status, completed, failed, completed_at, batch_id),
+            (status, completed, failed, canceled, completed_at, batch_id),
         )
 
 
@@ -403,6 +659,55 @@ def aggregate_period(m1_bars: List[Dict], period: str, limit: int) -> List[Dict]
     return [{key: value for key, value in item.items() if key != "bucket"} for item in result]
 
 
+class ReplayPivotProvider:
+    """Incrementally exposes pivots only after right-side bars confirm them."""
+
+    # Keep replay confirmation identical to the live PivotService.
+    STRENGTH = {"M1": 6, "M5": 4, "M15": 3, "H1": 3, "H4": 3}
+
+    def __init__(self):
+        self._pivots: Dict[Tuple[str, str, str], Dict] = {}
+
+    def update(self, seen: List[Dict], simulated_time: int) -> List[Dict]:
+        for period, seconds in PERIOD_SECONDS.items():
+            strength = self.STRENGTH[period]
+            bars = aggregate_period(seen, period, 2 * strength + 12)
+            closed = [
+                bar for bar in bars
+                if int(datetime.fromisoformat(bar["timestamp"]).timestamp()) + seconds
+                <= simulated_time
+            ]
+            if len(closed) < 2 * strength + 1:
+                continue
+            index = len(closed) - strength - 1
+            candidate = closed[index]
+            left = closed[index - strength:index]
+            right = closed[index + 1:index + strength + 1]
+            checks = (
+                ("high", candidate["high"], all(
+                    item["high"] < candidate["high"] for item in left + right
+                )),
+                ("low", candidate["low"], all(
+                    item["low"] > candidate["low"] for item in left + right
+                )),
+            )
+            for direction, price, confirmed in checks:
+                if confirmed:
+                    key = (period, candidate["timestamp"], direction)
+                    self._pivots[key] = {
+                        "period": period, "timestamp": candidate["timestamp"],
+                        "confirmed_at": simulated_time, "direction": direction,
+                        "price": float(price), "strength": strength,
+                    }
+        by_period: Dict[str, List[Dict]] = {}
+        for pivot in self._pivots.values():
+            by_period.setdefault(pivot["period"], []).append(pivot)
+        result = []
+        for items in by_period.values():
+            result.extend(sorted(items, key=lambda item: item["confirmed_at"])[-10:])
+        return result
+
+
 class CachedLLMProvider:
     """Calls the user's approved LLM config and caches immutable responses."""
 
@@ -422,6 +727,7 @@ class CachedLLMProvider:
         strategy: Dict,
         dataset_hash: str,
         strategy_hash: str,
+        signal_source_ids: Optional[List[str]] = None,
     ) -> Tuple[Dict, bool]:
         service = self._services.get(user_id)
         if service is None:
@@ -431,7 +737,7 @@ class CachedLLMProvider:
         if not config.enabled:
             raise BacktestEngineError("当前用户未开通或未配置大模型分析")
 
-        plan = {symbol: build_analysis_plan(strategy)}
+        plan = {symbol: build_analysis_plan(strategy, signal_source_ids)}
         prompt = service.build_analysis_prompt({symbol: klines}, plan)
         prompt_hash = service.prompt_hash(prompt)
         cache_key = hashlib.sha256(
@@ -451,6 +757,7 @@ class CachedLLMProvider:
                 break
         if not response:
             raise BacktestEngineError("大模型分析连续失败，回测已暂停")
+        response = service._normalize_analysis_response(response, plan)
         analysis = response.get(symbol, response)
         if not isinstance(analysis, dict):
             raise BacktestEngineError("大模型返回的分析结果格式无效")
@@ -469,21 +776,41 @@ class CachedLLMProvider:
         return analysis, False
 
 
-def build_analysis_plan(strategy: Dict) -> Dict:
+def build_analysis_plan(
+    strategy: Dict, signal_source_ids: Optional[List[str]] = None,
+) -> Dict:
     periods = {}
-    ai_config = (strategy.get("signal_config") or {}).get("ai_entry", {})
-    for period, config in (ai_config.get("periods") or {}).items():
-        if config.get("enabled") and int(config.get("weight", 0)) > 0:
-            periods[period] = {"weight": int(config["weight"])}
-    return {
-        "periods": periods,
-        "strategies": [{
+    profiles = []
+    allowed = set(signal_source_ids) if signal_source_ids is not None else None
+    model = TradingStrategy.from_dict(strategy)
+    for source in model.get_signal_sources("ai_entry", enabled_only=True):
+        source_id = source["signal_source_id"]
+        if allowed is not None and source_id not in allowed:
+            continue
+        period = source["period"]
+        params = source.get("params") or {}
+        current = periods.setdefault(period, {"weight": 0, "kline_count": 0})
+        current["weight"] = max(current["weight"], int(source["weight"]))
+        current["kline_count"] = max(
+            current["kline_count"], int(params.get("kline_count", 100))
+        )
+        profiles.append({
             "strategy_id": strategy.get("strategy_id", ""),
             "strategy_name": strategy.get("strategy_name", ""),
-            "periods": {key: value["weight"] for key, value in periods.items()},
-            "min_confidence": int(strategy.get("min_confidence", 50)),
+            "signal_source_id": source_id,
+            "periods": {period: int(source["weight"])},
+            "min_confidence": int(params.get(
+                "min_confidence", strategy.get("min_confidence", 50)
+            )),
             "min_risk_reward": float(strategy.get("min_risk_reward", 1)),
-        }],
+            "analysis_interval_minutes": int(
+                params.get("analysis_interval_minutes", 5)
+            ),
+            "kline_count": int(params.get("kline_count", 100)),
+        })
+    return {
+        "periods": periods,
+        "strategies": profiles,
     }
 
 
@@ -494,7 +821,10 @@ class ReplaySignalEngine:
 
     def __init__(self, strategy: Dict):
         self.strategy = strategy
+        self.signal_sources = TradingStrategy.from_dict(strategy).signal_sources
         self._cooldowns: Dict[str, int] = {}
+        self._consumed_ai_recommendations = set()
+        self._pending_ma_crosses: Dict[str, Dict] = {}
 
     def generate(
         self,
@@ -504,127 +834,190 @@ class ReplaySignalEngine:
         llm_analysis: Optional[Dict],
     ) -> List[TradingSignal]:
         signals = []
-        if signal_source_enabled(self.strategy, "pivot"):
-            signals.extend(
-                self._pivot_signals(seen_bars, current_price, simulated_time)
-            )
-        if signal_source_enabled(self.strategy, "key_level"):
-            signal = self._key_level_signal(current_price, simulated_time)
-            if signal:
-                signals.append(signal)
-        if signal_source_enabled(self.strategy, "ai_entry") and llm_analysis:
-            signals.extend(
-                self._ai_signals(llm_analysis, current_price, simulated_time)
-            )
-        return signals
-
-    def _pivot_signals(
-        self, seen_bars, current_price, simulated_time
-    ) -> List[TradingSignal]:
-        config = (self.strategy.get("signal_config") or {}).get("pivot", {})
-        periods = [
-            period for period, item in (config.get("periods") or {}).items()
-            if item.get("enabled") and int(item.get("weight", 0)) > 0
-            and period in PERIOD_SECONDS
-        ]
-        pivots_by_period = {}
-        all_pivots = []
-        for period in periods:
-            period_bars = aggregate_period(seen_bars, period, 500)
-            pivots = detect_confirmed_pivots(
-                period_bars, PIVOT_STRENGTH.get(period, 3)
-            )
-            pivots_by_period[period] = pivots
-            all_pivots.extend(pivots)
-
-        signals = []
-        for period in periods:
-            threshold = PIVOT_THRESHOLD.get(period, 0.001)
-            candidates = []
-            for pivot in pivots_by_period[period]:
-                price = float(pivot["price"])
-                if pivot["direction"] == "high" and current_price < price:
-                    distance = (price - current_price) / current_price
-                elif pivot["direction"] == "low" and current_price > price:
-                    distance = (current_price - price) / current_price
-                else:
-                    continue
-                if distance <= threshold:
-                    candidates.append((distance, pivot))
-            if not candidates:
+        for config in self.signal_sources:
+            if not config.get("enabled", True) or int(config.get("weight", 0)) <= 0:
                 continue
-            _, pivot = min(candidates, key=lambda item: item[0])
-            pivot_price = float(pivot["price"])
-            cooldown_key = f"pivot:{period}:{pivot_price:.8f}"
-            if not self._can_emit(cooldown_key, simulated_time, 180):
-                continue
-            opposite = "high" if pivot["direction"] == "low" else "low"
-            valid_opposite = [
-                float(item["price"])
-                for item in all_pivots
-                if item["direction"] == opposite
-                and (
-                    (pivot["direction"] == "low" and float(item["price"]) > current_price)
-                    or (pivot["direction"] == "high" and float(item["price"]) < current_price)
+            if config["source"] == "key_level":
+                signal = self._key_level_signal(
+                    config, current_price, simulated_time
                 )
-            ]
-            opposite_price = (
-                min(valid_opposite, key=lambda value: abs(value - current_price))
-                if valid_opposite else None
-            )
-            signal = build_pivot_signal(
-                self.strategy.get("symbol", ""),
-                current_price,
-                period,
-                pivot_price,
-                pivot["direction"],
-                opposite_price,
-                replay_datetime(simulated_time),
-            )
-            if not signal:
-                continue
-            self._mark_emitted(cooldown_key, simulated_time)
-            signals.append(signal)
+                if signal:
+                    signals.append(signal)
+            elif config["source"] == "ai_entry":
+                signals.extend(self._ai_signals(
+                    config, llm_analysis or {}, current_price, simulated_time
+                ))
+            elif config["source"] == "moving_average":
+                signal = self._moving_average_signal(
+                    config, seen_bars, current_price, simulated_time
+                )
+                if signal:
+                    signals.append(signal)
         return signals
 
     def _key_level_signal(
-        self, current_price: float, simulated_time: int
+        self, config, current_price: float, simulated_time: int
     ) -> Optional[TradingSignal]:
-        signal = build_key_level_signal(
+        params = config.get("params") or {}
+        mode = params.get("level_mode", "automatic")
+        levels = None
+        if mode == "levels":
+            levels = [float(item) for item in params.get("levels", [])]
+        elif mode == "expression":
+            levels = evaluate_key_level_expression(
+                params.get("expression", ""), current_price
+            )
+        signal = build_key_level_state_signal(
             self.strategy.get("symbol", ""),
             current_price,
+            levels=levels,
             signal_time=replay_datetime(simulated_time),
+            threshold=float(params.get("proximity_threshold", 0.0008)),
         )
-        if not signal:
-            return None
-        cooldown_key = f"key_level:{signal.key_level:.8f}"
-        if not self._can_emit(cooldown_key, simulated_time, 180):
-            return None
-        self._mark_emitted(cooldown_key, simulated_time)
+        cooldown_key = (
+            f"key_level:{config['signal_source_id']}:"
+            f"{float(signal.key_level or 0):.8f}"
+        )
+        cooldown = max(0, int(params.get("cooldown_seconds", 180)))
+        if signal.is_entry_trigger:
+            if not self._can_emit(cooldown_key, simulated_time, cooldown):
+                signal.is_entry_trigger = False
+            else:
+                self._mark_emitted(cooldown_key, simulated_time)
+        signal.source_period = config["period"]
+        signal.signal_source_id = config["signal_source_id"]
         return signal
 
-    def _ai_signals(self, analysis, current_price, simulated_time) -> List[Dict]:
-        signals = []
+    def _ai_signals(self, config, analysis, current_price, simulated_time) -> List[Dict]:
+        trigger = None
         for suggestion in analysis.get("trade_suggestions", []) or []:
             period = str(suggestion.get("period", "")).upper()
             entry = float(suggestion.get("entry_price") or 0)
-            if not signal_period_enabled(self.strategy, "ai_entry", period):
+            if period != config["period"] or suggestion.get(
+                "signal_source_id"
+            ) not in {None, "", config["signal_source_id"]}:
+                continue
+            params = config.get("params") or {}
+            if int(suggestion.get("confidence", 0)) < int(
+                params.get("min_confidence", self.strategy.get("min_confidence", 50))
+            ):
                 continue
             direction = str(suggestion.get("direction", "")).lower()
-            cooldown_key = f"ai:{period}:{direction}:{entry:.8f}"
-            if not self._can_emit(cooldown_key, simulated_time, 300):
+            analysis_id = str(suggestion.get("_analysis_id") or "legacy")
+            recommendation_key = (
+                analysis_id,
+                config["signal_source_id"],
+                period,
+                direction,
+                round(entry, 8),
+            )
+            if recommendation_key in self._consumed_ai_recommendations:
                 continue
-            signal = build_ai_entry_signal(
+            candidate = build_ai_entry_signal(
                 self.strategy.get("symbol", ""),
                 current_price,
                 suggestion,
                 replay_datetime(simulated_time),
+                threshold=float(params.get("entry_threshold", 0.0001)),
             )
-            if not signal:
+            if not candidate:
                 continue
-            self._mark_emitted(cooldown_key, simulated_time)
-            signals.append(signal)
-        return signals
+            self._consumed_ai_recommendations.add(recommendation_key)
+            if trigger is None or candidate.confidence > trigger.confidence:
+                trigger = candidate
+        state = extract_ai_trend_state(analysis, config["period"])
+        if trigger is not None and not state["ready"]:
+            state = {
+                "ready": True,
+                "direction": "up" if trigger.action == "buy" else "down",
+                "confidence": trigger.confidence,
+                "reason": trigger.trigger_reason,
+            }
+        if trigger is None:
+            trigger = TradingSignal(
+                symbol=self.strategy.get("symbol", ""),
+                action=direction_action(state["direction"]),
+                market_direction=state["direction"],
+                state_ready=state["ready"],
+                is_entry_trigger=False,
+                confidence=state["confidence"],
+                source=SignalSource.AI_ENTRY,
+                source_period=config["period"],
+                trigger_price=current_price,
+                trigger_time=replay_datetime(simulated_time),
+                trigger_reason=state["reason"],
+                suggested_entry=current_price,
+                created_at=replay_datetime(simulated_time),
+            )
+        else:
+            trigger_direction = trigger.action
+            trigger.market_direction = state["direction"]
+            trigger.action = direction_action(state["direction"])
+            trigger.state_ready = state["ready"]
+            trigger.confidence = state["confidence"]
+            trigger.is_entry_trigger = (
+                state["direction"] in {"up", "down"}
+                and trigger_direction == direction_action(state["direction"])
+            )
+            trigger.trigger_reason = state["reason"] or trigger.trigger_reason
+        trigger.signal_source_id = config["signal_source_id"]
+        return [trigger]
+
+    def _moving_average_signal(
+        self, config, seen_bars, current_price: float, simulated_time: int,
+    ) -> Optional[TradingSignal]:
+        period = config["period"]
+        if simulated_time % PERIOD_SECONDS[period] != 0:
+            return None
+        params = config.get("params") or {}
+        fast_period = int(params.get("fast_period", 5))
+        slow_period = int(params.get("slow_period", 20))
+        ma_type = str(params.get("ma_type", "sma")).lower()
+        min_confidence = max(0, min(100, int(params.get("min_confidence", 70))))
+        period_bars = aggregate_period(seen_bars, period, slow_period + 2)
+        state = evaluate_moving_average_state(
+            [float(bar["close"]) for bar in period_bars],
+            fast_period, slow_period, ma_type,
+        )
+        source_id = config["signal_source_id"]
+        cooldown = max(0, int(params.get("cooldown_seconds", 180)))
+        cooldown_key = f"moving_average:{source_id}"
+        intent_key = f"moving_average:{source_id}"
+        cross = state.get("cross")
+        if cross in {"buy", "sell"}:
+            self._pending_ma_crosses[intent_key] = {
+                "direction": cross,
+                "created_at": simulated_time,
+            }
+        pending = self._pending_ma_crosses.get(intent_key) or {}
+        pending_direction = pending.get("direction")
+        qualified = (
+            pending_direction in {"buy", "sell"}
+            and state.get("direction") == (
+                "up" if pending_direction == "buy" else "down"
+            )
+            and int(state.get("confidence") or 0) >= min_confidence
+        )
+        trigger = qualified and self._can_emit(
+            cooldown_key, simulated_time, cooldown
+        )
+        signal = build_moving_average_state_signal(
+            symbol=self.strategy.get("symbol", ""),
+            current_price=current_price,
+            period=period,
+            state=state,
+            fast_period=fast_period,
+            slow_period=slow_period,
+            ma_type=ma_type,
+            is_entry_trigger=trigger,
+            signal_time=replay_datetime(simulated_time),
+        )
+        if signal:
+            signal.signal_source_id = source_id
+            if trigger:
+                self._mark_emitted(cooldown_key, simulated_time)
+                self._pending_ma_crosses.pop(intent_key, None)
+        return signal
 
     def _can_emit(self, key: str, now: int, cooldown: int) -> bool:
         return now - self._cooldowns.get(key, -cooldown) >= cooldown
@@ -639,7 +1032,9 @@ def replay_datetime(simulated_time: int) -> datetime:
     )
 
 
-def detect_confirmed_pivots(bars: List[Dict], strength: int) -> List[Dict]:
+def detect_confirmed_pivots(
+    bars: List[Dict], strength: int, merge_distance: float = 0.0004,
+) -> List[Dict]:
     """A pivot appears only after `strength` right-hand bars have closed."""
     if len(bars) < strength * 2 + 1:
         return []
@@ -660,10 +1055,12 @@ def detect_confirmed_pivots(bars: List[Dict], strength: int) -> List[Dict]:
                 "price": float(current["low"]),
                 "direction": "low",
             })
-    return merge_nearby_pivots(pivots)
+    return merge_nearby_pivots(pivots, merge_distance)
 
 
-def merge_nearby_pivots(pivots: List[Dict]) -> List[Dict]:
+def merge_nearby_pivots(
+    pivots: List[Dict], merge_distance: float = 0.0004,
+) -> List[Dict]:
     merged = []
     for direction in ("high", "low"):
         items = [item for item in pivots if item["direction"] == direction]
@@ -672,7 +1069,10 @@ def merge_nearby_pivots(pivots: List[Dict]) -> List[Dict]:
             group = [items[index]]
             cursor = index + 1
             while cursor < len(items):
-                if abs(items[cursor]["price"] - items[index]["price"]) / items[index]["price"] > 0.0004:
+                if (
+                    abs(items[cursor]["price"] - items[index]["price"])
+                    / items[index]["price"] > merge_distance
+                ):
                     break
                 group.append(items[cursor])
                 cursor += 1
@@ -686,37 +1086,26 @@ def merge_nearby_pivots(pivots: List[Dict]) -> List[Dict]:
 
 
 def signal_source_enabled(strategy: Dict, source: str) -> bool:
-    config = (strategy.get("signal_config") or {}).get(source)
-    if config is None:
-        return float((strategy.get("signal_weights") or {}).get(source, 0)) > 0
-    if not config.get("enabled", True):
-        return False
-    if source == "key_level":
-        return int(config.get("weight", 0)) > 0
-    return any(
-        item.get("enabled") and int(item.get("weight", 0)) > 0
-        for item in (config.get("periods") or {}).values()
+    return bool(
+        TradingStrategy.from_dict(strategy).get_signal_sources(
+            source, enabled_only=True
+        )
     )
 
 
 def signal_period_enabled(strategy: Dict, source: str, period: str) -> bool:
-    if source == "key_level":
-        return signal_source_enabled(strategy, source)
-    config = (strategy.get("signal_config") or {}).get(source)
-    if config is None:
-        return float((strategy.get("signal_weights") or {}).get(source, 0)) > 0
-    item = (config.get("periods") or {}).get(period, {})
-    return bool(config.get("enabled", True) and item.get("enabled") and int(item.get("weight", 0)) > 0)
+    return any(
+        item.get("period") == period
+        for item in TradingStrategy.from_dict(strategy).get_signal_sources(
+            source, enabled_only=True
+        )
+    )
 
 
 def signal_weight(strategy: Dict, signal: Dict) -> int:
-    source = signal["source"]
-    config = (strategy.get("signal_config") or {}).get(source)
-    if config is None:
-        return int((strategy.get("signal_weights") or {}).get(source, 0))
-    if source == "key_level":
-        return int(config.get("weight", 0))
-    return int((config.get("periods") or {}).get(signal["period"], {}).get("weight", 0))
+    return TradingStrategy.from_dict(strategy).get_signal_weight(
+        signal["source"], signal.get("period"), signal.get("signal_source_id", "")
+    )
 
 
 def combine_signals(signals: List[Dict], strategy: Dict) -> Optional[Dict]:
@@ -726,18 +1115,18 @@ def combine_signals(signals: List[Dict], strategy: Dict) -> Optional[Dict]:
             symbol=strategy_model.symbol,
             action=signal.get("direction", signal.get("action", "")),
             confidence=int(signal.get("confidence", 0)),
+            market_direction=signal.get("market_direction", ""),
+            state_ready=bool(signal.get("state_ready", True)),
+            is_entry_trigger=bool(signal.get("is_entry_trigger", True)),
             source=signal.get("source", ""),
             source_period=signal.get("period", signal.get("source_period", "")),
+            signal_source_id=signal.get("signal_source_id", ""),
             trigger_price=float(signal.get("trigger_price", 0)),
             suggested_entry=float(signal.get("trigger_price", 0)),
             suggested_sl=float(signal.get("stop_loss", signal.get("suggested_sl", 0))),
             suggested_tp=float(signal.get("take_profit", signal.get("suggested_tp", 0))),
         )
         for signal in signals
-    ]
-    normalized = [
-        signal for signal in normalized
-        if signal.confidence >= strategy_model.min_confidence
     ]
     service = StrategyService(
         strategy_store=object(), signal_service=object(), risk_manager=object()
@@ -753,6 +1142,7 @@ def combine_signals(signals: List[Dict], strategy: Dict) -> Optional[Dict]:
         if strategy_model.is_signal_enabled(
             signal.source,
             signal.source_period if signal.source != "key_level" else None,
+            signal.signal_source_id,
         )
     ]
     best = service._select_best_signal(enabled, direction, strategy_model)
@@ -767,6 +1157,7 @@ def combine_signals(signals: List[Dict], strategy: Dict) -> Optional[Dict]:
         ),
         "period": best.source_period,
         "source": best.source,
+        "signal_source_id": best.signal_source_id,
         "contributing_sources": sorted({item.source for item in directional}),
         "stop_loss": best.suggested_sl,
         "take_profit": best.suggested_tp,
@@ -788,12 +1179,17 @@ class SimOrder:
     period: str
     signal_source: str
     contributing_sources: List[str]
+    signal_source_id: str = ""
+    exit_mode: str = "fixed_rr"
+    trailing_activation_r: float = 1.0
+    trailing_distance_r: float = 1.0
     status: str = "pending"
     filled_volume: float = 0.0
     filled_price: Optional[float] = None
     filled_at: Optional[int] = None
     canceled_at: Optional[int] = None
     rejection_reason: str = ""
+    position_policy_snapshot: Dict = None
 
     def reject(self, reason: str) -> None:
         self.status = "rejected"
@@ -814,6 +1210,8 @@ class SimOrder:
             "take_profit": self.take_profit,
             "signal_source": self.signal_source,
             "contributing_sources": self.contributing_sources,
+            "signal_source_id": self.signal_source_id,
+            "exit_mode": self.exit_mode,
             "confidence": self.confidence,
             "rejection_reason": self.rejection_reason,
             "requested_at": self.requested_at,
@@ -838,11 +1236,19 @@ class SimPosition:
     signal_source: str
     contributing_sources: List[str]
     open_commission: float
+    signal_source_id: str = ""
+    exit_mode: str = "fixed_rr"
+    trailing_activation_r: float = 1.0
+    trailing_distance_r: float = 1.0
+    initial_risk: float = 0.0
+    favorable_price: float = 0.0
     status: str = "open"
     closed_at: Optional[int] = None
     close_price: Optional[float] = None
     close_reason: str = ""
     net_profit: float = 0.0
+    position_policy_snapshot: Dict = None
+    holding_bars: int = 0
 
     def to_record(self) -> Dict:
         return {
@@ -860,6 +1266,8 @@ class SimPosition:
             "close_price": self.close_price,
             "close_reason": self.close_reason,
             "net_profit": self.net_profit,
+            "signal_source_id": self.signal_source_id,
+            "exit_mode": self.exit_mode,
         }
 
 
@@ -870,9 +1278,17 @@ class M1BacktestEngine:
         self,
         llm_provider=None,
         progress_callback: Optional[Callable[[float], None]] = None,
+        checkpoint_callback: Optional[Callable[[float, Dict], None]] = None,
+        cancel_callback: Optional[Callable[[], bool]] = None,
+        llm_usage_callback: Optional[Callable[[bool], None]] = None,
     ):
         self.llm_provider = llm_provider or CachedLLMProvider()
         self.progress_callback = progress_callback or (lambda progress: None)
+        self.checkpoint_callback = checkpoint_callback or (
+            lambda progress, ledger: None
+        )
+        self.cancel_callback = cancel_callback or (lambda: False)
+        self.llm_usage_callback = llm_usage_callback or (lambda cache_hit: None)
 
     def run(self, task: Dict) -> Dict:
         dataset = task["dataset_snapshot"]
@@ -897,14 +1313,33 @@ class M1BacktestEngine:
         trades: List[Dict] = []
         equity_curve: List[Dict] = []
         equity_points: List[Dict] = []
+        replay_bars: List[Dict] = []
         seen: List[Dict] = []
         llm_analyses = 0
         llm_cache_hits = 0
         point_size, contract_size = market_spec(dataset.get("symbol", ""), bars)
-        enabled_periods = list(build_analysis_plan(strategy)["periods"].keys())
-        ai_enabled = bool(enabled_periods)
-        signal_engine = ReplaySignalEngine(strategy)
         strategy_model = TradingStrategy.from_dict(strategy)
+        policy_snapshot = strategy.get("position_management_policy_snapshot")
+        if not policy_snapshot:
+            raise BacktestEngineError("回测任务缺少持仓管理方案快照")
+        position_policy = PositionManagementPolicy.from_dict(policy_snapshot)
+        position_manager = PositionManager()
+        pivot_provider = ReplayPivotProvider()
+        available_pivots: List[Dict] = []
+        ai_sources = strategy_model.get_signal_sources(
+            "ai_entry", enabled_only=True
+        )
+        next_ai_analysis_at = {
+            source["signal_source_id"]: start + max(
+                1,
+                int((source.get("params") or {}).get(
+                    "analysis_interval_minutes", 5
+                )),
+            ) * 60
+            for source in ai_sources
+        }
+        ai_enabled = bool(ai_sources)
+        signal_engine = ReplaySignalEngine(strategy)
         decision_service = StrategyService(
             strategy_store=object(), signal_service=object(), risk_manager=object()
         )
@@ -912,11 +1347,24 @@ class M1BacktestEngine:
         latest_llm_analysis: Optional[Dict] = None
         test_index = 0
         max_concurrent_positions = 0
+        last_checkpoint_progress = -1.0
+        last_checkpoint_at = 0.0
+
+        self.checkpoint_callback(
+            0.0,
+            self._live_ledger(
+                initial, balance, balance, orders, all_positions, trades,
+                equity_points, replay_bars,
+            ),
+        )
 
         for index, bar in enumerate(bars):
+            if self.cancel_callback():
+                raise BacktestCanceled("回测任务已由用户停止")
             timestamp = int(bar["time"])
             if timestamp >= start:
                 test_index += 1
+                replay_bars.append(bar)
                 for order in pending_orders:
                     reason = position_limit_reason(
                         order.direction, positions, strategy, template
@@ -949,10 +1397,35 @@ class M1BacktestEngine:
 
             seen.append(bar)
             if timestamp >= start:
-                if ai_enabled and test_index % 5 == 0:
+                simulated_time = timestamp + 60
+                available_pivots = pivot_provider.update(seen, simulated_time)
+                due_ai_sources = [
+                    source for source in ai_sources
+                    if simulated_time >= next_ai_analysis_at[
+                        source["signal_source_id"]
+                    ]
+                ]
+                if ai_enabled and due_ai_sources:
+                    if self.cancel_callback():
+                        raise BacktestCanceled("回测任务已由用户停止")
+                    ai_progress = test_index / len(test_bars) * 100
+                    # LLM calls dominate AI replay time, so keep the task heartbeat
+                    # fresh before and after every external request.
+                    self.progress_callback(ai_progress)
+                    due_source_ids = [
+                        source["signal_source_id"] for source in due_ai_sources
+                    ]
+                    due_plan = build_analysis_plan(strategy, due_source_ids)
                     klines = {
-                        period: aggregate_period(seen, period, PERIOD_LIMITS[period])
-                        for period in enabled_periods
+                        period: aggregate_period(
+                            seen,
+                            period,
+                            max(
+                                PERIOD_LIMITS[period],
+                                int(config.get("kline_count", PERIOD_LIMITS[period])),
+                            ),
+                        )
+                        for period, config in due_plan["periods"].items()
                     }
                     analysis, cache_hit = self.llm_provider.analyze(
                         user_id=int(task["user_id"]),
@@ -962,10 +1435,44 @@ class M1BacktestEngine:
                         strategy=strategy,
                         dataset_hash=dataset.get("data_hash", ""),
                         strategy_hash=task["strategy_snapshot_hash"],
+                        signal_source_ids=due_source_ids,
                     )
+                    self.progress_callback(ai_progress)
+                    analysis = dict(analysis)
+                    analysis_id = hashlib.sha256(
+                        f"{task['task_id']}:{timestamp + 60}:{','.join(sorted(due_source_ids))}".encode(
+                            "utf-8"
+                        )
+                    ).hexdigest()[:16]
+                    analysis["trade_suggestions"] = [
+                        {**suggestion, "_analysis_id": analysis_id}
+                        for suggestion in analysis.get("trade_suggestions", [])
+                        if isinstance(suggestion, dict)
+                    ]
                     llm_analyses += 1
                     llm_cache_hits += int(cache_hit)
-                    latest_llm_analysis = analysis
+                    self.llm_usage_callback(bool(cache_hit))
+                    retained = []
+                    if latest_llm_analysis:
+                        retained = [
+                            item for item in latest_llm_analysis.get(
+                                "trade_suggestions", []
+                            )
+                            if item.get("signal_source_id") not in due_source_ids
+                        ]
+                    latest_llm_analysis = dict(analysis)
+                    latest_llm_analysis["trade_suggestions"] = (
+                        retained + analysis.get("trade_suggestions", [])
+                    )
+                    for source in due_ai_sources:
+                        interval = max(1, int(
+                            (source.get("params") or {}).get(
+                                "analysis_interval_minutes", 5
+                            )
+                        ))
+                        next_ai_analysis_at[source["signal_source_id"]] = (
+                            simulated_time + interval * 60
+                        )
 
                 generated_signals = signal_engine.generate(
                     seen,
@@ -973,12 +1480,58 @@ class M1BacktestEngine:
                     timestamp + 60,
                     latest_llm_analysis,
                 )
+                reverse_directions = {
+                    signal.action for signal in generated_signals
+                    if signal.is_entry_trigger and signal.action in {"buy", "sell"}
+                }
+                remaining_positions = []
+                for position in positions:
+                    position.holding_bars += 1
+                    position.favorable_price = (
+                        max(position.favorable_price, float(bar["high"]))
+                        if position.direction == "buy"
+                        else min(position.favorable_price, float(bar["low"]))
+                    )
+                    action = position_manager.evaluate(
+                        position.position_policy_snapshot["config"],
+                        position.__dict__,
+                        {"price": float(bar["close"]), "time": simulated_time},
+                        pivots=available_pivots,
+                        reverse_signal=(
+                            bool(reverse_directions)
+                            and position.direction not in reverse_directions
+                        ),
+                    )
+                    if action.action == "close":
+                        trade, balance = self._close_at_market(
+                            position, bar, balance, template, point_size,
+                            contract_size, action.reason,
+                        )
+                        trades.append(trade)
+                    else:
+                        if action.action == "modify_sl" and action.stop_loss:
+                            position.stop_loss = float(action.stop_loss)
+                        remaining_positions.append(position)
+                positions = remaining_positions
                 decision_time = datetime.fromtimestamp(
                     timestamp + 60, timezone.utc
                 ).replace(tzinfo=None)
                 active_signals = [
                     signal for signal in active_signals
                     if signal.expires_at >= decision_time
+                ]
+                generated_keys = {
+                    signal.signal_source_id or (
+                        f"{signal.source}:{signal.source_period}"
+                    )
+                    for signal in generated_signals
+                }
+                active_signals = [
+                    signal for signal in active_signals
+                    if (
+                        signal.signal_source_id
+                        or f"{signal.source}:{signal.source_period}"
+                    ) not in generated_keys
                 ]
                 active_signals.extend(generated_signals)
                 decision = decision_service.make_decision(
@@ -1000,6 +1553,10 @@ class M1BacktestEngine:
                         )
                     ),
                     risk_checker=lambda *_args: {"allowed": True, "warnings": []},
+                    position_policy=position_policy,
+                    position_context={
+                        "pivots": available_pivots, "time": simulated_time,
+                    },
                 )
                 if decision:
                     order = self._create_order(
@@ -1027,10 +1584,26 @@ class M1BacktestEngine:
                     "equity": equity_point["equity"],
                 })
 
-                progress = (index + 1) / len(bars) * 100
+                progress = test_index / len(test_bars) * 100
                 if test_index % 50 == 0 or index == len(bars) - 1:
                     self.progress_callback(progress)
+                    now_monotonic = time.monotonic()
+                    if (
+                        progress - last_checkpoint_progress >= 1.0
+                        or now_monotonic - last_checkpoint_at >= 2.0
+                    ):
+                        self.checkpoint_callback(
+                            progress,
+                            self._live_ledger(
+                                initial, balance, equity, orders, all_positions,
+                                trades, equity_points, replay_bars,
+                            ),
+                        )
+                        last_checkpoint_progress = progress
+                        last_checkpoint_at = now_monotonic
 
+        if self.cancel_callback():
+            raise BacktestCanceled("回测任务已由用户停止")
         ending_time = int(test_bars[-1]["time"]) + 60
         for order in pending_orders:
             order.status = "canceled"
@@ -1077,8 +1650,36 @@ class M1BacktestEngine:
             "positions": [position.to_record() for position in all_positions],
             "trades": trades,
             "equity_points": downsample_records(equity_points, 5000),
+            "replay_bars": aggregate_replay_bars(replay_bars),
         }
         return result
+
+    @staticmethod
+    def _live_ledger(
+        initial: float,
+        balance: float,
+        equity: float,
+        orders: List[SimOrder],
+        positions: List[SimPosition],
+        trades: List[Dict],
+        equity_points: List[Dict],
+        replay_bars: List[Dict],
+    ) -> Dict:
+        return {
+            "account": {
+                "initial_balance": round(initial, 2),
+                "balance": round(balance, 2),
+                "equity": round(equity, 2),
+                "free_margin": round(equity, 2),
+                "margin": 0,
+                "status": "running",
+            },
+            "orders": [order.to_record() for order in orders],
+            "positions": [position.to_record() for position in positions],
+            "trades": list(trades),
+            "equity_points": downsample_records(equity_points, 5000),
+            "replay_bars": aggregate_replay_bars(replay_bars),
+        }
 
     @staticmethod
     def _create_order(
@@ -1087,6 +1688,11 @@ class M1BacktestEngine:
         summary = decision.signal_summary or {}
         source = str(summary.get("selected_signal_source", "unknown"))
         period = str(summary.get("selected_signal_period", ""))
+        source_id = str(summary.get("selected_signal_source_id", ""))
+        management = summary.get("position_management") or {}
+        policy_snapshot = management.get("policy_snapshot") or strategy.get(
+            "position_management_policy_snapshot"
+        )
         order = SimOrder(
             order_id=uuid.uuid4().hex[:16],
             strategy_id=str(strategy.get("strategy_id", "")),
@@ -1101,6 +1707,9 @@ class M1BacktestEngine:
             period=period,
             signal_source=source,
             contributing_sources=list(summary.get("contributing_sources", [source])),
+            signal_source_id=source_id,
+            exit_mode="position_manager",
+            position_policy_snapshot=policy_snapshot,
         )
         if decision.status == "rejected":
             order.reject(decision.decision_reason or "共享策略风控未通过")
@@ -1115,9 +1724,16 @@ class M1BacktestEngine:
         spread_points = float(template.get("spread_points", 0)) or float(bar.get("spread", 0))
         adjustment = (spread_points / 2 + adverse_points) * point_size
         entry = float(bar["open"]) + adjustment * (1 if direction == "buy" else -1)
-        if not valid_exits(
-            direction, entry, order.stop_loss, order.take_profit
-        ):
+        valid_stop = (
+            order.stop_loss < entry if direction == "buy"
+            else order.stop_loss > entry
+        )
+        valid_take_profit = (
+            order.take_profit == 0
+            or (order.take_profit > entry if direction == "buy"
+                else order.take_profit < entry)
+        )
+        if not valid_stop or not valid_take_profit:
             order.reject("开盘跳空后止盈止损方向无效")
             return None, balance
         volume = order.requested_volume
@@ -1141,6 +1757,13 @@ class M1BacktestEngine:
             signal_source=order.signal_source,
             contributing_sources=order.contributing_sources,
             open_commission=commission,
+            signal_source_id=order.signal_source_id,
+            exit_mode=order.exit_mode,
+            trailing_activation_r=order.trailing_activation_r,
+            trailing_distance_r=order.trailing_distance_r,
+            initial_risk=abs(entry - order.stop_loss),
+            favorable_price=entry,
+            position_policy_snapshot=order.position_policy_snapshot,
         ), balance - commission
 
     def _maybe_close(
@@ -1152,7 +1775,7 @@ class M1BacktestEngine:
                     position, bar, balance, template, point_size,
                     contract_size, position.stop_loss, "stop_loss"
                 )
-            if float(bar["high"]) >= position.take_profit:
+            if position.take_profit > 0 and float(bar["high"]) >= position.take_profit:
                 return self._close_at_price(
                     position, bar, balance, template, point_size,
                     contract_size, position.take_profit, "take_profit"
@@ -1163,7 +1786,7 @@ class M1BacktestEngine:
                     position, bar, balance, template, point_size,
                     contract_size, position.stop_loss, "stop_loss"
                 )
-            if float(bar["low"]) <= position.take_profit:
+            if position.take_profit > 0 and float(bar["low"]) <= position.take_profit:
                 return self._close_at_price(
                     position, bar, balance, template, point_size,
                     contract_size, position.take_profit, "take_profit"
@@ -1288,17 +1911,17 @@ def position_limit_reason(
     template: Dict,
 ) -> str:
     strategy_max = max(1, int(strategy.get("max_positions", 3)))
-    template_max = max(1, int(template.get("max_positions", strategy_max)))
-    max_positions = min(strategy_max, template_max)
+    max_positions = max(1, int(template.get("max_positions", strategy_max)))
     if len(positions) >= max_positions:
         return f"已达到最大持仓数 {max_positions}"
 
     same_direction = sum(
         1 for position in positions if position.direction == direction
     )
-    max_same_direction = max(
-        1, int(strategy.get("max_same_direction", max_positions))
-    )
+    strategy_same_direction = strategy.get("max_same_direction", max_positions)
+    max_same_direction = max(1, int(
+        template.get("max_same_direction", strategy_same_direction)
+    ))
     if same_direction + 1 > max_same_direction:
         return f"同向持仓将超过限制 {max_same_direction}"
 
@@ -1349,6 +1972,29 @@ def downsample_records(records: List[Dict], max_points: int) -> List[Dict]:
     if sampled[-1] != records[-1]:
         sampled.append(records[-1])
     return sampled
+
+
+def aggregate_replay_bars(
+    bars: List[Dict], max_points: int = 1200,
+) -> List[Dict]:
+    """Compress elapsed M1 bars into OHLC buckets without losing the trend."""
+    if not bars:
+        return []
+    step = max(1, math.ceil(len(bars) / max_points))
+    replay = []
+    for offset in range(0, len(bars), step):
+        bucket = bars[offset:offset + step]
+        replay.append({
+            "time": int(bucket[0]["time"]),
+            "end_time": int(bucket[-1]["time"]),
+            "open": float(bucket[0]["open"]),
+            "high": max(float(item["high"]) for item in bucket),
+            "low": min(float(item["low"]) for item in bucket),
+            "close": float(bucket[-1]["close"]),
+            "tick_volume": sum(int(item.get("tick_volume", 0)) for item in bucket),
+            "bar_count": len(bucket),
+        })
+    return replay
 
 
 def trade_group_stats(trades: List[Dict], key: str) -> List[Dict]:
@@ -1457,12 +2103,16 @@ def build_result(
         source = trade.get("signal_source", "unknown")
         source_counts[source] = source_counts.get(source, 0) + 1
     enabled_sources = [
-        source for source in ("pivot", "key_level", "ai_entry")
+        source for source in (
+            "key_level", "ai_entry", "moving_average"
+        )
         if signal_source_enabled(strategy, source)
     ]
     return {
         "engine_version": ENGINE_VERSION,
-        "supported_signal_sources": ["pivot", "key_level", "ai_entry"],
+        "supported_signal_sources": [
+            "key_level", "ai_entry", "moving_average"
+        ],
         "enabled_signal_sources": enabled_sources,
         "signal_source_trade_counts": source_counts,
         "warnings": [],
@@ -1505,6 +2155,7 @@ def build_result(
         "exit_reason_stats": trade_group_stats(trades, "exit_reason"),
         "monthly_stats": monthly_stats,
         "llm_analysis_count": llm_analyses,
+        "llm_call_count": llm_analyses - llm_cache_hits,
         "llm_cache_hits": llm_cache_hits,
         "point_size": point_size,
         "contract_size": contract_size,
@@ -1552,12 +2203,30 @@ class BacktestWorker:
         if task is None:
             return False
         try:
-            engine = self.engine_factory(
-                progress_callback=lambda value: self.tasks.heartbeat(
-                    task["task_id"], value
-                )
+            progress_callback = lambda value: self.tasks.heartbeat(
+                task["task_id"], value
             )
+            try:
+                engine = self.engine_factory(
+                    progress_callback=progress_callback,
+                    checkpoint_callback=lambda value, ledger: self.tasks.checkpoint(
+                        task["task_id"], value, ledger
+                    ),
+                    cancel_callback=lambda: self.tasks.is_cancel_requested(
+                        task["task_id"]
+                    ),
+                    llm_usage_callback=lambda cache_hit: self.tasks.record_llm_analysis(
+                        task["task_id"], cache_hit
+                    ),
+                )
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                # Preserve compatibility with lightweight external/test engines.
+                engine = self.engine_factory(progress_callback=progress_callback)
             self.tasks.complete(task["task_id"], engine.run(task))
+        except BacktestCanceled:
+            self.tasks.cancel(task["task_id"])
         except Exception as exc:
             self.tasks.fail(task["task_id"], str(exc))
         return True

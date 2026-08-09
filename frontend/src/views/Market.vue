@@ -1141,7 +1141,8 @@ export default {
       const colors = {
         'pivot': 'primary',
         'key_level': 'success',
-        'ai_entry': 'info'
+        'ai_entry': 'info',
+        'moving_average': 'warning'
       }
       return colors[source] || 'grey'
     }
@@ -1151,20 +1152,24 @@ export default {
       const source = signal.source || ''
       const period = signal.source_period || signal.ai_analysis_period || ''
       const confidence = signal.confidence || 0
+      const direction = {
+        up: '上升', sideways: '震荡', down: '下降'
+      }[signal.market_direction] || '未就绪'
 
       // 显示信号源名称
       const sourceNames = {
         'pivot': 'Pivot',
         'key_level': 'KeyLevel',
-        'ai_entry': 'AI'
+        'ai_entry': 'AI',
+        'moving_average': '均线'
       }
       const sourceName = sourceNames[source] || source
 
       // 如果有周期，显示周期
       if (period) {
-        return `${sourceName}[${period}] (${confidence}%)`
+        return `${sourceName}[${period}] ${direction} (${confidence}%)`
       }
-      return `${sourceName} (${confidence}%)`
+      return `${sourceName} ${direction} (${confidence}%)`
     }
 
     // 获取可见的信号列表

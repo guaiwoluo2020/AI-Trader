@@ -89,6 +89,38 @@ class _StrategyStore:
 
 
 class LLMAnalysisTestCase(unittest.TestCase):
+    def test_due_ai_plan_respects_each_source_interval(self):
+        strategy = TradingStrategy(
+            symbol="GOLD_",
+            signal_sources=[
+                {
+                    "signal_source_id": "ai-m5",
+                    "source": "ai_entry",
+                    "period": "M5",
+                    "weight": 30,
+                    "params": {"analysis_interval_minutes": 5},
+                },
+                {
+                    "signal_source_id": "ai-m15",
+                    "source": "ai_entry",
+                    "period": "M15",
+                    "weight": 30,
+                    "params": {"analysis_interval_minutes": 15},
+                },
+            ],
+        )
+        service = LLMService(_Store(), _Klines())
+        service.set_strategy_store(_StrategyStore([strategy]))
+        service._source_last_analysis_at = {"ai-m5": 1000, "ai-m15": 1000}
+
+        with patch("market.services.llm_service.time.monotonic", return_value=1301):
+            plan = service._build_ai_analysis_plan(["GOLD_"], due_only=True)
+
+        self.assertEqual(set(plan["GOLD_"]["periods"]), {"M5"})
+        self.assertEqual(
+            plan["GOLD_"]["strategies"][0]["signal_source_id"], "ai-m5"
+        )
+
     def test_provider_error_is_returned_and_saved(self):
         store = _Store()
         service = LLMService(store, _Klines())
@@ -260,6 +292,80 @@ class LLMAnalysisTestCase(unittest.TestCase):
         risk = suggestion["stop_loss"] - suggestion["entry_price"]
         reward = suggestion["entry_price"] - suggestion["take_profit"]
         self.assertAlmostEqual(reward / risk, 1.3)
+
+    def test_ai_suggestions_are_split_and_bound_to_each_strategy(self):
+        strategies = [
+            TradingStrategy(
+                symbol="GOLD_",
+                strategy_name=name,
+                signal_config={
+                    "ai_entry": {
+                        "enabled": True,
+                        "periods": {"M5": {"enabled": True, "weight": 30}},
+                    },
+                },
+                min_risk_reward=min_rr,
+            )
+            for name, min_rr in (("稳健策略", 1.5), ("进取策略", 2.0))
+        ]
+        service = LLMService(_Store(), _Klines())
+        service.set_strategy_store(_StrategyStore(strategies))
+        plan = service._build_ai_analysis_plan(["GOLD_"])
+        response = {
+            "GOLD_": {
+                "trade_suggestions": [{
+                    "period": "M5",
+                    "direction": "buy",
+                    "entry_price": 4100.0,
+                    "stop_loss": 4090.0,
+                    "take_profit": 4112.0,
+                    "confidence": 82,
+                }],
+            },
+        }
+
+        suggestions = service._normalize_analysis_response(
+            response, plan
+        )["GOLD_"]["trade_suggestions"]
+
+        self.assertEqual(len(suggestions), 2)
+        self.assertEqual(
+            {item["strategy_id"] for item in suggestions},
+            {strategy.strategy_id for strategy in strategies},
+        )
+        self.assertEqual(
+            {item["strategy_name"] for item in suggestions},
+            {strategy.strategy_name for strategy in strategies},
+        )
+        self.assertEqual(
+            sorted(item["take_profit"] for item in suggestions),
+            [4115.0, 4120.0],
+        )
+
+    def test_ai_plan_only_contains_strategies_deployed_on_account(self):
+        strategies = [
+            TradingStrategy(
+                symbol="GOLD_",
+                strategy_name=name,
+                signal_config={
+                    "ai_entry": {
+                        "enabled": True,
+                        "periods": {"M5": {"enabled": True, "weight": 30}},
+                    },
+                },
+            )
+            for name in ("账户策略", "未绑定策略")
+        ]
+        service = LLMService(_Store(), _Klines())
+        service.set_strategy_store(_StrategyStore(strategies))
+        service.set_allowed_strategy_ids([strategies[0].strategy_id])
+
+        plan = service._build_ai_analysis_plan(["GOLD_"])
+
+        self.assertEqual(
+            [item["strategy_id"] for item in plan["GOLD_"]["strategies"]],
+            [strategies[0].strategy_id],
+        )
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
@@ -171,6 +172,21 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_llm_access_requests_status
                     ON llm_access_requests(status, requested_at);
+
+                    CREATE TABLE IF NOT EXISTS position_management_policies (
+                        policy_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        name TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        config_json TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_position_management_policies_user
+                    ON position_management_policies(user_id, created_at, policy_id);
 
                     CREATE TABLE IF NOT EXISTS user_strategy_configs (
                         user_id INTEGER NOT NULL,
@@ -374,6 +390,7 @@ class SQLiteStorage:
                         slippage_points REAL NOT NULL DEFAULT 0,
                         commission_per_lot REAL NOT NULL DEFAULT 0,
                         max_positions INTEGER NOT NULL DEFAULT 1,
+                        max_same_direction INTEGER NOT NULL DEFAULT 1,
                         use_strategy_exits INTEGER NOT NULL DEFAULT 1,
                         created_at INTEGER NOT NULL,
                         updated_at INTEGER NOT NULL,
@@ -401,6 +418,7 @@ class SQLiteStorage:
                         task_count INTEGER NOT NULL DEFAULT 0,
                         completed_tasks INTEGER NOT NULL DEFAULT 0,
                         failed_tasks INTEGER NOT NULL DEFAULT 0,
+                        canceled_tasks INTEGER NOT NULL DEFAULT 0,
                         strategy_id TEXT NOT NULL,
                         strategy_name TEXT NOT NULL,
                         strategy_snapshot_json TEXT NOT NULL,
@@ -423,6 +441,10 @@ class SQLiteStorage:
                         dataset_id TEXT,
                         status TEXT NOT NULL DEFAULT 'queued',
                         progress REAL NOT NULL DEFAULT 0,
+                        llm_analysis_count INTEGER NOT NULL DEFAULT 0,
+                        llm_call_count INTEGER NOT NULL DEFAULT 0,
+                        llm_cache_hits INTEGER NOT NULL DEFAULT 0,
+                        cancel_requested INTEGER NOT NULL DEFAULT 0,
                         dataset_file_path TEXT NOT NULL,
                         dataset_snapshot_json TEXT NOT NULL,
                         result_json TEXT NOT NULL DEFAULT '{}',
@@ -458,6 +480,24 @@ class SQLiteStorage:
                     ON backtest_llm_cache(
                         user_id, dataset_hash, strategy_hash, analysis_time
                     );
+
+                    CREATE TABLE IF NOT EXISTS backtest_ai_analyses (
+                        task_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        model TEXT NOT NULL DEFAULT '',
+                        prompt_hash TEXT NOT NULL DEFAULT '',
+                        result_json TEXT NOT NULL DEFAULT '{}',
+                        error_message TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        completed_at INTEGER,
+                        FOREIGN KEY(task_id) REFERENCES backtest_tasks(task_id) ON DELETE CASCADE,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_backtest_ai_analyses_owner
+                    ON backtest_ai_analyses(user_id, updated_at DESC);
 
                     CREATE TABLE IF NOT EXISTS backtest_accounts (
                         task_id TEXT PRIMARY KEY,
@@ -566,6 +606,22 @@ class SQLiteStorage:
                         equity REAL NOT NULL,
                         open_positions INTEGER NOT NULL DEFAULT 0,
                         PRIMARY KEY(task_id, point_time),
+                        FOREIGN KEY(task_id) REFERENCES backtest_tasks(task_id) ON DELETE CASCADE,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS backtest_replay_bars (
+                        task_id TEXT NOT NULL,
+                        bar_time INTEGER NOT NULL,
+                        end_time INTEGER NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        open REAL NOT NULL,
+                        high REAL NOT NULL,
+                        low REAL NOT NULL,
+                        close REAL NOT NULL,
+                        tick_volume INTEGER NOT NULL DEFAULT 0,
+                        bar_count INTEGER NOT NULL DEFAULT 1,
+                        PRIMARY KEY(task_id, bar_time),
                         FOREIGN KEY(task_id) REFERENCES backtest_tasks(task_id) ON DELETE CASCADE,
                         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                     );
@@ -734,6 +790,10 @@ class SQLiteStorage:
                     conn, "backtest_tasks", "engine_version", "TEXT NOT NULL DEFAULT ''"
                 )
                 self._ensure_column(
+                    conn, "position_management_policies", "version",
+                    "INTEGER NOT NULL DEFAULT 1",
+                )
+                self._ensure_column(
                     conn, "strategy_deployments", "strategy_snapshot_hash",
                     "TEXT NOT NULL DEFAULT ''",
                 )
@@ -759,6 +819,32 @@ class SQLiteStorage:
                     conn, "user_llm_configs", "analysis_prompt_template",
                     "TEXT NOT NULL DEFAULT ''",
                 )
+                for table in ("paper_orders", "paper_positions"):
+                    self._ensure_column(
+                        conn, table, "signal_source_id", "TEXT NOT NULL DEFAULT ''",
+                    )
+                    self._ensure_column(
+                        conn, table, "exit_mode", "TEXT NOT NULL DEFAULT 'fixed_rr'",
+                    )
+                    self._ensure_column(
+                        conn, table, "trailing_activation_r", "REAL NOT NULL DEFAULT 1",
+                    )
+                    self._ensure_column(
+                        conn, table, "trailing_distance_r", "REAL NOT NULL DEFAULT 1",
+                    )
+                    self._ensure_column(
+                        conn, table, "position_policy_snapshot_json",
+                        "TEXT NOT NULL DEFAULT '{}'",
+                    )
+                self._ensure_column(
+                    conn, "paper_positions", "initial_risk", "REAL NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "paper_positions", "favorable_price", "REAL NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "paper_positions", "holding_bars", "INTEGER NOT NULL DEFAULT 0",
+                )
                 self._ensure_column(
                     conn, "user_llm_configs", "prompt_version",
                     "INTEGER NOT NULL DEFAULT 1",
@@ -767,6 +853,26 @@ class SQLiteStorage:
                     conn, "backtest_tasks", "worker_id", "TEXT NOT NULL DEFAULT ''"
                 )
                 self._ensure_column(conn, "backtest_tasks", "heartbeat_at", "INTEGER")
+                self._ensure_column(
+                    conn, "backtest_tasks", "llm_analysis_count",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "backtest_tasks", "llm_call_count",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "backtest_tasks", "llm_cache_hits",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "backtest_tasks", "cancel_requested",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "backtest_batches", "canceled_tasks",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
                 self._ensure_column(conn, "trading_accounts", "mt5_login", "TEXT")
                 self._ensure_column(conn, "trading_accounts", "mt5_server", "TEXT")
                 self._ensure_column(conn, "trading_accounts", "ea_version", "TEXT")
@@ -886,6 +992,19 @@ class SQLiteStorage:
                     "visibility",
                     "TEXT NOT NULL DEFAULT 'shared'",
                 )
+                self._ensure_column(
+                    conn,
+                    "backtest_templates",
+                    "max_same_direction",
+                    "INTEGER",
+                )
+                conn.execute(
+                    """
+                    UPDATE backtest_templates
+                    SET max_same_direction = max_positions
+                    WHERE max_same_direction IS NULL
+                    """
+                )
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_backtest_templates_visibility
@@ -906,6 +1025,7 @@ class SQLiteStorage:
                 )
                 self._migrate_ea_activation_codes(conn)
                 self._migrate_strategy_configs(conn)
+                self._remove_pivot_signal_strategies(conn)
                 migration_key = "account_strategy_bindings_v1"
                 migration = conn.execute(
                     "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
@@ -947,6 +1067,122 @@ class SQLiteStorage:
                 conn.commit()
 
             self._initialized = True
+
+    @staticmethod
+    def _remove_pivot_signal_strategies(conn: sqlite3.Connection) -> None:
+        """删除以转折点为信号源的历史策略及其回测数据。"""
+        migration_key = "remove_pivot_signal_strategies_v1"
+        if conn.execute(
+            "SELECT 1 FROM app_meta WHERE key = ?", (migration_key,)
+        ).fetchone() is not None:
+            return
+
+        conn.execute(
+            """
+            CREATE TEMP TABLE pivot_strategy_removal (
+                user_id INTEGER NOT NULL,
+                strategy_id TEXT NOT NULL,
+                PRIMARY KEY(user_id, strategy_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO pivot_strategy_removal(user_id, strategy_id)
+            SELECT user_id, strategy_id
+            FROM user_strategy_configs
+            WHERE json_valid(config_json)
+              AND EXISTS (
+                  SELECT 1
+                  FROM json_each(config_json, '$.signal_sources')
+                  WHERE json_extract(value, '$.source') = 'pivot'
+              )
+            """
+        )
+        strategy_count = conn.execute(
+            "SELECT COUNT(*) FROM pivot_strategy_removal"
+        ).fetchone()[0]
+        template_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM backtest_templates t
+            WHERE EXISTS (
+                SELECT 1 FROM pivot_strategy_removal p
+                WHERE p.user_id = t.user_id AND p.strategy_id = t.strategy_id
+            )
+            """
+        ).fetchone()[0]
+        batch_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM backtest_batches b
+            WHERE EXISTS (
+                SELECT 1 FROM pivot_strategy_removal p
+                WHERE p.user_id = b.user_id AND p.strategy_id = b.strategy_id
+            )
+            """
+        ).fetchone()[0]
+        task_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM backtest_tasks t
+            JOIN backtest_batches b ON b.batch_id = t.batch_id
+            WHERE EXISTS (
+                SELECT 1 FROM pivot_strategy_removal p
+                WHERE p.user_id = b.user_id AND p.strategy_id = b.strategy_id
+            )
+            """
+        ).fetchone()[0]
+
+        conn.execute(
+            """
+            DELETE FROM backtest_batches
+            WHERE EXISTS (
+                SELECT 1 FROM pivot_strategy_removal p
+                WHERE p.user_id = backtest_batches.user_id
+                  AND p.strategy_id = backtest_batches.strategy_id
+            )
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM backtest_templates
+            WHERE EXISTS (
+                SELECT 1 FROM pivot_strategy_removal p
+                WHERE p.user_id = backtest_templates.user_id
+                  AND p.strategy_id = backtest_templates.strategy_id
+            )
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM strategy_deployments
+            WHERE EXISTS (
+                SELECT 1 FROM pivot_strategy_removal p
+                WHERE p.user_id = strategy_deployments.user_id
+                  AND p.strategy_id = strategy_deployments.strategy_id
+            )
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM user_strategy_configs
+            WHERE EXISTS (
+                SELECT 1 FROM pivot_strategy_removal p
+                WHERE p.user_id = user_strategy_configs.user_id
+                  AND p.strategy_id = user_strategy_configs.strategy_id
+            )
+            """
+        )
+        conn.execute("DROP TABLE pivot_strategy_removal")
+        summary = json.dumps({
+            "strategies": strategy_count,
+            "templates": template_count,
+            "batches": batch_count,
+            "tasks": task_count,
+            "removed_at": _now_ts(),
+        }, ensure_ascii=False)
+        conn.execute(
+            "INSERT INTO app_meta(key, value) VALUES(?, ?)",
+            (migration_key, summary),
+        )
 
     @staticmethod
     def _migrate_ea_activation_codes(conn: sqlite3.Connection) -> None:
@@ -2372,6 +2608,106 @@ class LLMAccessRepository:
         return self.get_status(int(row["user_id"])) if row else None
 
 
+class PositionManagementPolicyRepository:
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or get_storage()
+
+    def list(self, user_id: int, enabled_only: bool = False):
+        from market.models import PositionManagementPolicy
+
+        sql = "SELECT * FROM position_management_policies WHERE user_id = ?"
+        params = [int(user_id)]
+        if enabled_only:
+            sql += " AND enabled = 1"
+        sql += " ORDER BY created_at, policy_id"
+        return [
+            PositionManagementPolicy.from_dict({
+                "policy_id": row["policy_id"], "user_id": row["user_id"],
+                "version": row["version"],
+                "name": row["name"], "enabled": bool(row["enabled"]),
+                "config": json.loads(row["config_json"]),
+                "created_at": datetime.fromtimestamp(row["created_at"]),
+                "updated_at": datetime.fromtimestamp(row["updated_at"]),
+            })
+            for row in self.storage.fetchall(sql, tuple(params))
+        ]
+
+    def get(self, user_id: int, policy_id: str):
+        return next((item for item in self.list(user_id)
+                     if item.policy_id == policy_id), None)
+
+    def save(self, policy):
+        now = _now_ts()
+        self.storage.execute(
+            """
+            INSERT INTO position_management_policies(
+                policy_id, user_id, name, version, enabled, config_json,
+                created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(policy_id) DO UPDATE SET
+                name = excluded.name, version = excluded.version,
+                enabled = excluded.enabled,
+                config_json = excluded.config_json, updated_at = excluded.updated_at
+            """,
+            (policy.policy_id, policy.user_id, policy.name, policy.version,
+             int(policy.enabled),
+             json.dumps(policy.config, ensure_ascii=False),
+             int(policy.created_at.timestamp()), now),
+        )
+        policy.updated_at = datetime.fromtimestamp(now)
+        return policy
+
+    def invalidate_linked_strategies(
+        self, user_id: int, policy_id: str,
+        reason: str = "持仓管理方案已修改，需要重新验证",
+    ) -> int:
+        rows = self.storage.fetchall(
+            "SELECT strategy_id, config_json FROM user_strategy_configs WHERE user_id = ?",
+            (user_id,),
+        )
+        changed = 0
+        now = datetime.now()
+        for row in rows:
+            data = json.loads(row["config_json"])
+            if data.get("position_management_policy_id") != policy_id:
+                continue
+            previous = data.get("lifecycle_status", "draft")
+            if previous != "draft":
+                data.setdefault("lifecycle_history", []).append({
+                    "from_status": previous, "to_status": "draft",
+                    "changed_at": now.isoformat(), "reason": reason,
+                })
+            data["lifecycle_status"] = "draft"
+            data["lifecycle_updated_at"] = now.isoformat()
+            data["enabled"] = False
+            data["auto_execute"] = False
+            data["updated_at"] = now.isoformat()
+            self.storage.execute(
+                "UPDATE user_strategy_configs SET config_json = ?, updated_at = ? WHERE user_id = ? AND strategy_id = ?",
+                (json.dumps(data, ensure_ascii=False), _now_ts(), user_id,
+                 row["strategy_id"]),
+            )
+            changed += 1
+        return changed
+
+    def delete(self, user_id: int, policy_id: str) -> bool:
+        referenced = self.storage.fetchone(
+            """
+            SELECT COUNT(*) AS count FROM user_strategy_configs
+            WHERE user_id = ? AND json_extract(config_json, '$.position_management_policy_id') = ?
+            """, (user_id, policy_id),
+        )
+        if referenced and int(referenced["count"]):
+            raise ValueError("持仓管理方案正在被策略引用，不能删除")
+        if not self.get(user_id, policy_id):
+            return False
+        self.storage.execute(
+            "DELETE FROM position_management_policies WHERE user_id = ? AND policy_id = ?",
+            (user_id, policy_id),
+        )
+        return True
+
+
 class StrategyConfigRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
@@ -2389,7 +2725,17 @@ class StrategyConfigRepository:
             (user_id,),
         )
         if rows:
-            return [TradingStrategy.from_dict(json.loads(row["config_json"])) for row in rows]
+            strategies = [
+                TradingStrategy.from_dict(json.loads(row["config_json"]))
+                for row in rows
+            ]
+            return sorted(
+                strategies,
+                key=lambda strategy: (
+                    strategy.created_at or datetime.min,
+                    strategy.strategy_id,
+                ),
+            )
 
         legacy_strategies = self._read_legacy_strategies()
         if legacy_strategies:

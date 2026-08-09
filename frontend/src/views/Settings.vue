@@ -309,138 +309,75 @@
                     </div>
                   </v-alert>
 
-                  <!-- 信号权重 -->
-                  <div class="text-subtitle-2 mb-2">信号源配置</div>
-                  <v-row class="mb-3">
-                    <v-col cols="12">
-                      <v-table density="compact">
-                        <template v-slot:default>
-                          <thead>
-                            <tr>
-                              <th>信号源</th>
-                              <th>启用</th>
-                              <th>M1</th>
-                              <th>M5</th>
-                              <th>M15</th>
-                              <th>H1</th>
-                              <th>H4</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            <!-- Pivot 信号 -->
-                            <tr>
-                              <td>
-                                <v-chip size="x-small" color="primary">Pivot</v-chip>
-                                <span class="ml-2 text-caption">转折点信号</span>
-                              </td>
-                              <td>
-                                <v-checkbox
-                                  :model-value="getSignalConfig(strategy, 'pivot').enabled"
-                                  density="compact"
-                                  hide-details
-                                  @update:model-value="onSignalEnabledChange(strategy, 'pivot', $event)"
-                                ></v-checkbox>
-                              </td>
-                              <td v-for="period in ['M1', 'M5', 'M15', 'H1', 'H4']" :key="period">
-                                <div class="d-flex align-center">
-                                  <v-checkbox
-                                    :model-value="getPeriodConfig(strategy, 'pivot', period).enabled"
-                                    density="compact"
-                                    hide-details
-                                    :disabled="!getSignalConfig(strategy, 'pivot').enabled"
-                                    @update:model-value="onPeriodEnabledChange(strategy, 'pivot', period, $event)"
-                                  ></v-checkbox>
-                                  <v-text-field
-                                    v-model.number="getPeriodConfig(strategy, 'pivot', period).weight"
-                                    type="number"
-                                    min="0"
-                                    max="100"
-                                    density="compact"
-                                    hide-details
-                                    style="width: 50px"
-                                    :disabled="!getSignalConfig(strategy, 'pivot').enabled || !getPeriodConfig(strategy, 'pivot', period).enabled"
-                                    @change="onSignalConfigChange(strategy, 'pivot')"
-                                  ></v-text-field>
-                                </div>
-                              </td>
-                            </tr>
-                            <!-- KeyLevel 信号 -->
-                            <tr>
-                              <td>
-                                <v-chip size="x-small" color="success">KeyLevel</v-chip>
-                                <span class="ml-2 text-caption">关键点位信号</span>
-                              </td>
-                              <td>
-                                <v-checkbox
-                                  :model-value="getSignalConfig(strategy, 'key_level').enabled"
-                                  density="compact"
-                                  hide-details
-                                  @update:model-value="onSignalEnabledChange(strategy, 'key_level', $event)"
-                                ></v-checkbox>
-                              </td>
-                              <td colspan="5">
-                                <v-text-field
-                                  v-model.number="getSignalConfig(strategy, 'key_level').weight"
-                                  label="权重"
-                                  type="number"
-                                  min="0"
-                                  max="100"
-                                  density="compact"
-                                  hide-details
-                                  style="width: 80px"
-                                  :disabled="!getSignalConfig(strategy, 'key_level').enabled"
-                                  @change="onSignalConfigChange(strategy, 'key_level')"
-                                ></v-text-field>
-                                <span class="text-caption grey--text ml-2">（不区分周期）</span>
-                              </td>
-                            </tr>
-                            <!-- AI Entry 信号 -->
-                            <tr>
-                              <td>
-                                <v-chip size="x-small" color="info">AI Entry</v-chip>
-                                <span class="ml-2 text-caption">AI入场信号</span>
-                              </td>
-                              <td>
-                                <v-checkbox
-                                  :model-value="getSignalConfig(strategy, 'ai_entry').enabled"
-                                  density="compact"
-                                  hide-details
-                                  @update:model-value="onSignalEnabledChange(strategy, 'ai_entry', $event)"
-                                ></v-checkbox>
-                              </td>
-                              <td v-for="period in ['M1', 'M5', 'M15', 'H1', 'H4']" :key="period">
-                                <div class="d-flex align-center">
-                                  <v-checkbox
-                                    :model-value="getPeriodConfig(strategy, 'ai_entry', period).enabled"
-                                    density="compact"
-                                    hide-details
-                                    :disabled="!getSignalConfig(strategy, 'ai_entry').enabled"
-                                    @update:model-value="onPeriodEnabledChange(strategy, 'ai_entry', period, $event)"
-                                  ></v-checkbox>
-                                  <v-text-field
-                                    v-model.number="getPeriodConfig(strategy, 'ai_entry', period).weight"
-                                    type="number"
-                                    min="0"
-                                    max="100"
-                                    density="compact"
-                                    hide-details
-                                    style="width: 50px"
-                                    :disabled="!getSignalConfig(strategy, 'ai_entry').enabled || !getPeriodConfig(strategy, 'ai_entry', period).enabled"
-                                    @change="onSignalConfigChange(strategy, 'ai_entry')"
-                                  ></v-text-field>
-                                </div>
-                              </td>
-                            </tr>
-                          </tbody>
-                        </template>
-                      </v-table>
-                    </v-col>
-                  </v-row>
+                  <div class="signal-source-heading mb-3">
+                    <div>
+                      <div class="text-subtitle-2">信号源配置</div>
+                      <div class="text-caption text-medium-emphasis">
+                        每条信号源只使用一个周期；同类信号源可添加多个，但周期不能重复。
+                      </div>
+                    </div>
+                    <v-btn size="small" color="primary" variant="tonal" @click="openSignalSourceDialog(strategy)">
+                      <v-icon start>mdi-plus</v-icon>添加信号源
+                    </v-btn>
+                  </div>
 
-                  <!-- 兼容旧版信号权重（隐藏但保留数据） -->
-                  <div class="text-caption grey--text mb-2">
-                    <v-icon small>mdi-information</v-icon>
-                    勾选启用周期，设置权重值。KeyLevel信号不区分周期，只需设置权重。
+                  <v-alert
+                    v-if="!ensureSignalSources(strategy).length"
+                    type="info"
+                    variant="tonal"
+                    density="compact"
+                    class="mb-3"
+                  >当前策略还没有信号源，请先添加。</v-alert>
+
+                  <div class="signal-source-list mb-4">
+                    <article
+                      v-for="source in ensureSignalSources(strategy)"
+                      :key="source.signal_source_id"
+                      class="signal-source-card"
+                    >
+                      <div class="signal-source-card__head">
+                        <div class="d-flex align-center flex-wrap ga-2">
+                          <v-chip size="small" :color="signalSourceMeta[source.source].color">
+                            {{ signalSourceMeta[source.source].label }}
+                          </v-chip>
+                          <v-chip size="x-small" variant="outlined">{{ source.period }}</v-chip>
+                          <v-switch v-model="source.enabled" color="success" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-switch>
+                        </div>
+                        <v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" @click="removeSignalSource(strategy, source)"></v-btn>
+                      </div>
+
+                      <v-row dense>
+                        <v-col cols="12" sm="4">
+                          <v-select v-model="source.period" :items="periodOptionsFor(strategy, source)" label="周期" density="compact" hide-details @update:model-value="onSignalPeriodChange(strategy, source)"></v-select>
+                        </v-col>
+                        <v-col cols="12" sm="4">
+                          <v-text-field v-model.number="source.weight" label="信号权重" type="number" min="1" max="100" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field>
+                        </v-col>
+                      </v-row>
+
+                      <v-row v-if="source.source === 'key_level'" dense class="mt-2">
+                        <v-col cols="12" sm="4"><v-select v-model="source.params.level_mode" :items="keyLevelModeOptions" label="关键点位来源" density="compact" hide-details @update:model-value="onSignalConfigChange(strategy)"></v-select></v-col>
+                        <v-col v-if="source.params.level_mode === 'levels'" cols="12" sm="8"><v-text-field v-model="source.params.levels_text" label="关键点位数字（逗号分隔）" placeholder="4000, 4050, 4100" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                        <v-col v-if="source.params.level_mode === 'expression'" cols="12" sm="8"><v-text-field v-model="source.params.expression" label="计算表达式" placeholder="round(price / 100) * 100" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                        <v-col cols="12" class="text-caption text-medium-emphasis">表达式变量为 price，可使用 floor、ceil、round、abs、min、max。</v-col>
+                      </v-row>
+
+                      <v-row v-else-if="source.source === 'moving_average'" dense class="mt-2">
+                        <v-col cols="6" md="3"><v-text-field v-model.number="source.params.fast_period" label="快线周期" type="number" min="1" max="500" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                        <v-col cols="6" md="3"><v-text-field v-model.number="source.params.slow_period" label="慢线周期" type="number" min="2" max="1000" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                        <v-col cols="6" md="3"><v-select v-model="source.params.ma_type" :items="movingAverageTypeOptions" label="均线类型" density="compact" hide-details @update:model-value="onSignalConfigChange(strategy)"></v-select></v-col>
+                        <v-col cols="6" md="3"><v-text-field v-model.number="source.params.cooldown_seconds" label="信号冷却（秒）" type="number" min="0" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                        <v-col cols="6" md="3"><v-text-field v-model.number="source.params.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                        <v-col cols="12" class="text-caption text-medium-emphasis">交叉先生成潜在信号；方向一致且置信度达标后才触发入场，触发后失效，反向交叉会刷新方向。</v-col>
+                      </v-row>
+
+                      <v-row v-else dense class="mt-2">
+                        <v-col cols="6" md="3"><v-select v-model.number="source.params.analysis_interval_minutes" :items="aiIntervalOptionsFor(source)" label="调用间隔" suffix="分钟" :hint="`${source.period} 周期不能低于 ${periodMinutes(source.period)} 分钟`" persistent-hint density="compact" @update:model-value="onSignalConfigChange(strategy)"></v-select></v-col>
+                        <v-col cols="6" md="3"><v-text-field v-model.number="source.params.kline_count" label="分析K线数量" type="number" min="10" max="500" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                        <v-col cols="6" md="3"><v-text-field v-model.number="source.params.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                        <v-col cols="6" md="3"><v-text-field v-model.number="source.params.entry_threshold" label="入场价接近阈值" type="number" step="0.0001" min="0" density="compact" hide-details @change="onSignalConfigChange(strategy)"></v-text-field></v-col>
+                      </v-row>
+                    </article>
                   </div>
 
                   <!-- 仓位管理 -->
@@ -494,52 +431,23 @@
                     </v-col>
                   </v-row>
 
-                  <!-- 止损止盈 -->
-                  <div class="text-subtitle-2 mb-2">止损止盈规则</div>
+                  <!-- 独立持仓管理 -->
+                  <div class="text-subtitle-2 mb-2">持仓管理方案</div>
                   <v-row class="mb-3">
-                    <v-col cols="3">
+                    <v-col cols="12" md="7">
                       <v-select
-                        v-model="strategy.sl_mode"
-                        :items="slModeOptions"
-                        label="止损模式"
+                        v-model="strategy.position_management_policy_id"
+                        :items="positionPolicyOptions"
+                        label="选择持仓管理方案"
                         dense
                         hide-details
                         @change="updateStrategy(strategy)"
                       ></v-select>
                     </v-col>
-                    <v-col cols="3">
-                      <v-select
-                        v-model="strategy.tp_mode"
-                        :items="tpModeOptions"
-                        label="止盈模式"
-                        dense
-                        hide-details
-                        @change="updateStrategy(strategy)"
-                      ></v-select>
-                    </v-col>
-                    <v-col cols="3">
-                      <v-text-field
-                        v-model.number="strategy.min_risk_reward"
-                        label="最小盈亏比"
-                        type="number"
-                        min="0.5"
-                        step="0.5"
-                        dense
-                        hide-details
-                        @change="updateStrategy(strategy)"
-                      ></v-text-field>
-                    </v-col>
-                    <v-col cols="3">
-                      <v-text-field
-                        v-model.number="strategy.tp_risk_reward"
-                        label="止盈盈亏比"
-                        type="number"
-                        min="1"
-                        step="0.5"
-                        dense
-                        hide-details
-                        @change="updateStrategy(strategy)"
-                      ></v-text-field>
+                    <v-col cols="12" md="5" class="d-flex align-center">
+                      <v-btn to="/position-management" variant="outlined" color="primary" prepend-icon="mdi-shield-edit-outline">
+                        管理止盈止损方案
+                      </v-btn>
                     </v-col>
                   </v-row>
 
@@ -567,7 +475,7 @@
 
             <!-- 添加新策略 -->
             <v-row class="mt-4" align="center">
-              <v-col cols="4">
+              <v-col cols="12" md="3">
                 <v-select
                   v-model="newStrategySymbol"
                   :items="strategySymbolOptions"
@@ -576,7 +484,7 @@
                   hide-details
                 ></v-select>
               </v-col>
-              <v-col cols="4">
+              <v-col cols="12" md="3">
                 <v-text-field
                   v-model="newStrategyName"
                   label="策略名称（可选）"
@@ -585,7 +493,16 @@
                   placeholder="默认：Strategy_{品种}"
                 ></v-text-field>
               </v-col>
-              <v-col cols="4">
+              <v-col cols="12" md="3">
+                <v-select
+                  v-model="newStrategyPolicyId"
+                  :items="positionPolicyOptions"
+                  label="持仓管理方案"
+                  dense
+                  hide-details
+                ></v-select>
+              </v-col>
+              <v-col cols="12" md="3">
                 <v-btn color="primary" small @click="addStrategy" :loading="strategySaving === 'new'">
                   <v-icon start small>mdi-plus</v-icon>
                   添加策略
@@ -894,6 +811,30 @@
       </v-col>
     </v-row>
 
+    <v-dialog v-model="signalSourceDialog" max-width="520">
+      <v-card>
+        <v-card-title>添加信号源</v-card-title>
+        <v-card-text>
+          <v-select
+            v-model="newSignalSource.source"
+            :items="signalSourceTypeOptions"
+            item-title="title"
+            item-value="value"
+            item-props
+            label="信号源类型"
+            class="mb-3"
+            @update:model-value="onNewSignalSourceTypeChange"
+          ></v-select>
+          <v-select v-model="newSignalSource.period" :items="availablePeriodsForNewSource" label="分析周期" :no-data-text="'该信号源的所有周期都已添加'"></v-select>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="signalSourceDialog = false">取消</v-btn>
+          <v-btn color="primary" :disabled="!newSignalSource.period" @click="addSignalSource">添加</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <!-- 错误提示 -->
     <v-snackbar v-model="showError" color="error" timeout="5000" location="top">
       {{ errorMessage }}
@@ -907,7 +848,7 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { marketAPI } from '@/api/market'
 import { authAPI } from '@/api/trading'
 import { authState } from '@/auth'
@@ -1305,26 +1246,90 @@ export default {
     const strategySaving = ref(null)
     const strategyLifecycleSaving = ref(null)
     const strategyAdmissions = ref({})
+    const positionPolicies = ref([])
+    const positionPolicyOptions = computed(() => positionPolicies.value
+      .filter(policy => policy.enabled)
+      .map(policy => ({ title: policy.name, value: policy.policy_id })))
     const newStrategySymbol = ref('')
     const newStrategyName = ref('')
+    const newStrategyPolicyId = ref('')
+    const signalSourceDialog = ref(false)
+    const signalSourceTarget = ref(null)
+    const newSignalSource = reactive({ source: 'key_level', period: 'M1' })
+    const signalPeriods = ['M1', 'M5', 'M15', 'H1', 'H4']
+    const signalSourceMeta = {
+      key_level: { label: '关键点位信号', color: 'success' },
+      ai_entry: { label: 'AI 入场信号', color: 'info' },
+      moving_average: { label: '均线交叉信号', color: 'orange-darken-2' }
+    }
+    const signalSourceTypeOptions = computed(() => Object.entries(signalSourceMeta).map(([value, item]) => ({
+      title: item.label,
+      value,
+      disabled: Boolean(signalSourceTarget.value) && !availablePeriodsForSource(value).length
+    })))
+    const keyLevelModeOptions = [
+      { title: '系统自动计算', value: 'automatic' },
+      { title: '固定数字列表', value: 'levels' },
+      { title: '价格表达式', value: 'expression' }
+    ]
+    const movingAverageTypeOptions = [
+      { title: '简单移动平均线（SMA）', value: 'sma' },
+      { title: '指数移动平均线（EMA）', value: 'ema' }
+    ]
+    const periodMinuteMap = { M1: 1, M5: 5, M15: 15, H1: 60, H4: 240 }
+    const aiIntervalValues = [1, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
+    const periodMinutes = (period) => periodMinuteMap[period] || 1
+    const aiIntervalOptionsFor = (source) => aiIntervalValues
+      .filter(value => value >= periodMinutes(source.period))
+      .map(value => ({ title: `${value} 分钟`, value }))
+
+    const normalizeAIInterval = (source) => {
+      if (source.source !== 'ai_entry') return
+      source.params ||= {}
+      const minimum = periodMinutes(source.period)
+      const current = Number(source.params.analysis_interval_minutes)
+      source.params.analysis_interval_minutes = Math.max(
+        minimum, Number.isFinite(current) ? current : minimum
+      )
+    }
+
+    const sourceDefaults = (source, period) => ({
+      signal_source_id: crypto.randomUUID().replaceAll('-', '').slice(0, 12),
+      source,
+      enabled: true,
+      period,
+      weight: 30,
+      params: source === 'key_level'
+          ? {
+              level_mode: 'automatic', levels: [], levels_text: '',
+              expression: '', proximity_threshold: 0.0008, cooldown_seconds: 180
+            }
+          : source === 'moving_average'
+            ? {
+                fast_period: 5, slow_period: 20, ma_type: 'sma',
+                min_confidence: 70,
+                cooldown_seconds: 180
+              }
+            : {
+              analysis_interval_minutes: Math.max(5, periodMinutes(period)), kline_count: 100,
+              min_confidence: 70, entry_threshold: 0.0001
+            }
+    })
 
     // 策略选项
     const consistencyOptions = [
       { title: '任一信号即可', value: 'any' },
-      { title: '多数信号一致', value: 'majority' },
+      { title: '多数信号一致（至少60%同向）', value: 'majority' },
       { title: '所有信号一致', value: 'all' }
     ]
 
-    const slModeOptions = [
-      { title: '使用信号建议', value: 'signal' },
-      { title: '固定点数', value: 'fixed_points' }
-    ]
-
-    const tpModeOptions = [
-      { title: '使用信号建议', value: 'signal' },
-      { title: '固定点数', value: 'fixed_points' },
-      { title: '风险回报比', value: 'risk_reward' }
-    ]
+    const loadPositionPolicies = async () => {
+      const data = await marketAPI.getPositionManagementPolicies()
+      positionPolicies.value = data.policies || []
+      if (!newStrategyPolicyId.value) {
+        newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
+      }
+    }
 
     const lifecycleMeta = {
       draft: {
@@ -1435,11 +1440,15 @@ export default {
     const loadStrategies = async () => {
       strategiesLoading.value = true
       try {
-        const [data, admissionData] = await Promise.all([
-          marketAPI.getStrategies(), marketAPI.getStrategyAdmission()
+        const [data, admissionData, policyData] = await Promise.all([
+          marketAPI.getStrategies(), marketAPI.getStrategyAdmission(),
+          marketAPI.getPositionManagementPolicies()
         ])
+        positionPolicies.value = policyData.policies || []
+        if (!newStrategyPolicyId.value) newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
         if (data.status === 'ok') {
           strategies.value = data.strategies || []
+          strategies.value.forEach(ensureSignalSources)
         }
         if (admissionData.status === 'ok') {
           strategyAdmissions.value = Object.fromEntries(
@@ -1471,49 +1480,19 @@ export default {
       }
       strategySaving.value = strategy.strategy_id
       try {
-        // 确保signal_config存在
-        if (!strategy.signal_config) {
-          strategy.signal_config = {
-            pivot: {
-              enabled: true,
-              periods: {
-                M1: { enabled: true, weight: 15 },
-                M5: { enabled: true, weight: 20 },
-                M15: { enabled: false, weight: 25 },
-                H1: { enabled: false, weight: 20 },
-                H4: { enabled: false, weight: 20 }
-              }
-            },
-            key_level: { enabled: true, weight: 40 },
-            ai_entry: {
-              enabled: true,
-              periods: {
-                M1: { enabled: false, weight: 15 },
-                M5: { enabled: true, weight: 20 },
-                M15: { enabled: true, weight: 30 },
-                H1: { enabled: true, weight: 25 },
-                H4: { enabled: false, weight: 20 }
-              }
-            }
-          }
-        }
-
         const data = await marketAPI.updateStrategy(strategy.strategy_id, {
           enabled: strategy.enabled,
           auto_execute: Boolean(strategy.auto_execute),
           strategy_name: strategy.strategy_name,
           min_confidence: strategy.min_confidence,
           consistency_requirement: strategy.consistency_requirement,
-          signal_config: strategy.signal_config,
+          signal_sources: serializeSignalSources(strategy),
           signal_weights: strategy.signal_weights,
           fixed_volume: strategy.fixed_volume,
           max_positions: strategy.max_positions,
           max_same_direction: strategy.max_same_direction,
           risk_percent: strategy.risk_percent,
-          sl_mode: strategy.sl_mode,
-          tp_mode: strategy.tp_mode,
-          min_risk_reward: strategy.min_risk_reward,
-          tp_risk_reward: strategy.tp_risk_reward
+          position_management_policy_id: strategy.position_management_policy_id
         })
         if (data.status === 'ok') {
           successMessage.value = `${strategy.symbol} 策略配置已保存`
@@ -1521,6 +1500,7 @@ export default {
           // 更新本地策略数据
           if (data.strategy) {
             Object.assign(strategy, data.strategy)
+            ensureSignalSources(strategy)
           }
         } else {
           errorMessage.value = data.message || '保存失败'
@@ -1536,38 +1516,90 @@ export default {
       }
     }
 
-    // 获取信号源配置
-    const getSignalConfig = (strategy, source) => {
-      if (!strategy.signal_config) {
-        strategy.signal_config = {
-          pivot: { enabled: true, periods: {} },
-          key_level: { enabled: true, weight: 40 },
-          ai_entry: { enabled: true, periods: {} }
+    function ensureSignalSources (strategy) {
+      if (!Array.isArray(strategy.signal_sources)) strategy.signal_sources = []
+      strategy.signal_sources = strategy.signal_sources.filter(
+        source => source.source !== 'pivot'
+      )
+      strategy.signal_sources.forEach(source => {
+        source.params ||= {}
+        normalizeAIInterval(source)
+        if (source.source === 'key_level' && source.params.levels_text === undefined) {
+          source.params.levels_text = (source.params.levels || []).join(', ')
         }
-      }
-      if (!strategy.signal_config[source]) {
-        if (source === 'key_level') {
-          strategy.signal_config[source] = { enabled: true, weight: 40 }
-        } else {
-          strategy.signal_config[source] = { enabled: true, periods: {} }
-        }
-      }
-      return strategy.signal_config[source]
+      })
+      return strategy.signal_sources
     }
 
-    // 获取周期配置
-    const getPeriodConfig = (strategy, source, period) => {
-      const config = getSignalConfig(strategy, source)
-      if (source === 'key_level') {
-        return { enabled: true, weight: config.weight || 40 }
+    const serializeSignalSources = (strategy) => ensureSignalSources(strategy).map(source => {
+      normalizeAIInterval(source)
+      const clean = JSON.parse(JSON.stringify(source))
+      if (clean.source === 'key_level') {
+        clean.params.levels = String(clean.params.levels_text || '')
+          .split(/[,，\s]+/)
+          .map(Number)
+          .filter(value => Number.isFinite(value) && value > 0)
+        delete clean.params.levels_text
       }
-      if (!config.periods) {
-        config.periods = {}
-      }
-      if (!config.periods[period]) {
-        config.periods[period] = { enabled: false, weight: 20 }
-      }
-      return config.periods[period]
+      return clean
+    })
+
+    const periodOptionsFor = (strategy, current) => {
+      const occupied = new Set(
+        ensureSignalSources(strategy)
+          .filter(item => item.source === current.source && item.signal_source_id !== current.signal_source_id)
+          .map(item => item.period)
+      )
+      return signalPeriods.filter(period => !occupied.has(period))
+    }
+
+    const availablePeriodsForSource = (sourceType) => {
+      if (!signalSourceTarget.value) return []
+      const occupied = new Set(
+        ensureSignalSources(signalSourceTarget.value)
+          .filter(item => item.source === sourceType)
+          .map(item => item.period)
+      )
+      return signalPeriods.filter(period => !occupied.has(period))
+    }
+
+    const availablePeriodsForNewSource = computed(
+      () => availablePeriodsForSource(newSignalSource.source)
+    )
+
+    const selectFirstAvailablePeriod = (sourceType = newSignalSource.source) => {
+      newSignalSource.period = availablePeriodsForSource(sourceType)[0] || ''
+    }
+
+    const onNewSignalSourceTypeChange = (sourceType) => {
+      newSignalSource.source = sourceType
+      selectFirstAvailablePeriod(sourceType)
+    }
+
+    const openSignalSourceDialog = (strategy) => {
+      signalSourceTarget.value = strategy
+      const firstAvailableType = Object.keys(signalSourceMeta).find(
+        sourceType => availablePeriodsForSource(sourceType).length
+      ) || 'key_level'
+      newSignalSource.source = firstAvailableType
+      selectFirstAvailablePeriod(firstAvailableType)
+      signalSourceDialog.value = true
+    }
+
+    const addSignalSource = () => {
+      if (!signalSourceTarget.value || !newSignalSource.period) return
+      ensureSignalSources(signalSourceTarget.value).push(
+        sourceDefaults(newSignalSource.source, newSignalSource.period)
+      )
+      signalSourceDialog.value = false
+      scheduleSignalConfigSave(signalSourceTarget.value)
+    }
+
+    const removeSignalSource = (strategy, source) => {
+      strategy.signal_sources = ensureSignalSources(strategy).filter(
+        item => item.signal_source_id !== source.signal_source_id
+      )
+      scheduleSignalConfigSave(strategy)
     }
 
     // 合并同一策略短时间内的信号配置变更，避免父子开关产生乱序保存。
@@ -1582,17 +1614,12 @@ export default {
       strategySaveTimers.set(strategy.strategy_id, timer)
     }
 
-    const onSignalEnabledChange = (strategy, source, enabled) => {
-      getSignalConfig(strategy, source).enabled = Boolean(enabled)
-      scheduleSignalConfigSave(strategy)
-    }
-
-    const onPeriodEnabledChange = (strategy, source, period, enabled) => {
-      getPeriodConfig(strategy, source, period).enabled = Boolean(enabled)
-      scheduleSignalConfigSave(strategy)
-    }
-
     const onSignalConfigChange = (strategy) => {
+      scheduleSignalConfigSave(strategy)
+    }
+
+    const onSignalPeriodChange = (strategy, source) => {
+      normalizeAIInterval(source)
       scheduleSignalConfigSave(strategy)
     }
 
@@ -1617,13 +1644,18 @@ export default {
 
     // 添加策略
     const addStrategy = async () => {
-      if (!newStrategySymbol.value) return
+      if (!newStrategySymbol.value || !newStrategyPolicyId.value) {
+        errorMessage.value = '请先选择品种和持仓管理方案'
+        showError.value = true
+        return
+      }
       strategySaving.value = 'new'
       try {
         const data = await marketAPI.createStrategy({
           symbol: newStrategySymbol.value,
           enabled: false,
           auto_execute: false,
+          position_management_policy_id: newStrategyPolicyId.value,
           strategy_name: newStrategyName.value || `Strategy_${newStrategySymbol.value}`
         })
         if (data.status === 'ok') {
@@ -1722,8 +1754,9 @@ export default {
       newStrategySymbol,
       newStrategyName,
       consistencyOptions,
-      slModeOptions,
-      tpModeOptions,
+      positionPolicies,
+      positionPolicyOptions,
+      newStrategyPolicyId,
       strategySymbolOptions,
       loadStrategies,
       updateStrategy,
@@ -1736,11 +1769,24 @@ export default {
       isLifecycleActionDisabled,
       transitionStrategyLifecycle,
       // 信号配置
-      getSignalConfig,
-      getPeriodConfig,
-      onSignalEnabledChange,
-      onPeriodEnabledChange,
-      onSignalConfigChange
+      signalSourceDialog,
+      newSignalSource,
+      signalSourceMeta,
+      signalSourceTypeOptions,
+      keyLevelModeOptions,
+      movingAverageTypeOptions,
+      periodMinutes,
+      aiIntervalOptionsFor,
+      ensureSignalSources,
+      periodOptionsFor,
+      availablePeriodsForNewSource,
+      selectFirstAvailablePeriod,
+      onNewSignalSourceTypeChange,
+      openSignalSourceDialog,
+      addSignalSource,
+      removeSignalSource,
+      onSignalConfigChange,
+      onSignalPeriodChange
     }
   }
 }
@@ -1755,5 +1801,9 @@ export default {
 .admission-stages article>div:first-child { display: flex; align-items: center; gap: 7px; }.admission-stages p { margin: 6px 0; color: #718079; font-size: .72rem; }
 .admission-checks { display: flex; flex-wrap: wrap; gap: 5px; }
 .prompt-template-editor :deep(textarea) { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .78rem; line-height: 1.55; }
+.signal-source-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.signal-source-list { display: grid; gap: 12px; }
+.signal-source-card { padding: 16px; border: 1px solid #dce7e2; border-radius: 14px; background: linear-gradient(135deg, #fbfdfc 0%, #fffaf3 100%); }
+.signal-source-card__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 @media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; } }
 </style>

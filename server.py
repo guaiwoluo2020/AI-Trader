@@ -23,12 +23,16 @@ from market.store import StatisticsStore, PositionStore, TradeHistoryStore
 from market.services import KlineService, PivotService, LLMService, TechService
 from market.services import PendingOrderService, TradingInstructionService
 from market.services import SignalService, StrategyService, RiskManager
-from market.services import PivotSignalGenerator, KeyLevelSignalGenerator, AIEntrySignalGenerator
+from market.services import (
+    KeyLevelSignalGenerator, AIEntrySignalGenerator,
+    MovingAverageSignalGenerator,
+)
 from market.services import StatisticsService, PositionService, TradeHistoryService
 from market.trade_config import TradeConfig
 from market.llm_analyzer import LLMAnalyzer
 from market.system_log import SystemLog
 from sqlite_storage import (
+    PositionManagementPolicyRepository,
     RuntimeStateRepository,
     StrategyDeploymentRepository,
     TradingAccountRepository,
@@ -144,6 +148,10 @@ class TradingServer:
             else None
         )
         self._close_position_instructions = defaultdict(list)
+        self._position_update_instructions = defaultdict(dict)
+        self._managed_position_state = {}
+        self._position_policy_repository = PositionManagementPolicyRepository()
+        self._ma_trailing_extremes = {}
         if self._runtime_repository:
             for item in self._runtime_repository.list_entities(
                 "close_instruction",
@@ -165,6 +173,7 @@ class TradingServer:
 
         # 策略服务使用持仓服务进行风险管理
         self.strategy_service.set_position_service(self.position_service)
+        self.strategy_service.set_pivot_service(self.pivot_service)
 
         # 风险管理器使用统计服务获取账户信息
         self._risk_manager.set_statistics_service(self.statistics_service)
@@ -194,14 +203,6 @@ class TradingServer:
 
     def _setup_signal_generators(self):
         """设置信号生成器"""
-        # 转折点信号生成器
-        pivot_generator = PivotSignalGenerator(
-            pivot_service=self.pivot_service,
-            pivot_store=self.pivot_store,
-            kline_store=self.kline_store
-        )
-        self._signal_service.register_generator("pivot", pivot_generator)
-
         # 关键点位信号生成器
         key_level_generator = KeyLevelSignalGenerator()
         self._signal_service.register_generator("key_level", key_level_generator)
@@ -210,6 +211,11 @@ class TradingServer:
         ai_entry_generator = AIEntrySignalGenerator()
         ai_entry_generator.set_llm_analyzer(self.llm_analyzer)
         self._signal_service.register_generator("ai_entry", ai_entry_generator)
+
+        moving_average_generator = MovingAverageSignalGenerator(self.kline_store)
+        self._signal_service.register_generator(
+            "moving_average", moving_average_generator
+        )
 
     # ==================== WebSocket 管理 ====================
 
@@ -263,7 +269,17 @@ class TradingServer:
         return self._signal_service.cleanup_expired()
 
     def run_scheduled_llm_analysis(self) -> bool:
+        self.llm_service.set_allowed_strategy_ids(
+            self._active_strategy_ids("live")
+        )
         return self.llm_analyzer.run_scheduled_analysis()
+
+    def _active_strategy_ids(self, mode: str = "live") -> List[str]:
+        if self.user_id is None:
+            return []
+        return self.strategy_deployments.list_active_strategy_ids(
+            self.user_id, self.account_id or 0, mode
+        )
 
     def _broadcast(self, data: Dict):
         """广播数据到所有WebSocket客户端"""
@@ -352,19 +368,35 @@ class TradingServer:
                 daily_order_limit=account.daily_order_limit,
             )
 
-        # 1. 信号层生成信号
-        signals = self._signal_service.generate_signals(symbol, current_price)
-        result["signals_generated"] = len(signals)
-
-        if signals:
-            print(f"[TradingServer] {symbol} 生成了 {len(signals)} 个信号")
-
-        # 2. 策略层做决策
-        strategy_ids = self.strategy_deployments.list_active_strategy_ids(
-            self.user_id, self.account_id or 0, "live"
-        ) if self.user_id is not None else []
+        # Each deployed strategy owns its signal generation and cooldown state.
+        strategy_ids = self._active_strategy_ids("live")
         self.strategy_service.set_allowed_strategy_ids(strategy_ids)
-        decisions = self.strategy_service.make_decisions(symbol, current_price)
+        allowed_ids = set(strategy_ids)
+        decisions = []
+        for strategy in self.strategy_service.get_strategies(symbol):
+            if strategy.strategy_id not in allowed_ids:
+                continue
+            signals = self._signal_service.generate_signals_for_strategy(
+                symbol, current_price, strategy
+            )
+            self._manage_strategy_positions(
+                strategy, symbol, current_price, signals
+            )
+            trigger_count = sum(
+                1 for signal in signals
+                if getattr(signal, "is_entry_trigger", True)
+            )
+            result["signals_generated"] += trigger_count
+            if trigger_count:
+                print(
+                    f"[TradingServer] {symbol} 策略 {strategy.strategy_id} "
+                    f"生成了 {trigger_count} 个入场触发"
+                )
+            decision = self.strategy_service.make_decision(
+                symbol, current_price, force_signals=signals, strategy=strategy
+            )
+            if decision is not None:
+                decisions.append(decision)
 
         for decision in decisions:
             if account is not None and not account.auto_trading_enabled:
@@ -403,6 +435,76 @@ class TradingServer:
             result["pending_order"] = result["pending_orders"][0]
 
         return result
+
+    def _manage_strategy_positions(
+        self, strategy, symbol: str, current_price: float, signals: List[TradingSignal],
+    ) -> None:
+        """Evaluate EA positions with the strategy's independent manager."""
+        from market.services import PositionManager
+
+        policy = self._position_policy_repository.get(
+            int(self.user_id or 0), strategy.position_management_policy_id
+        )
+        if policy is None:
+            return
+        pivots = [
+            item.to_dict()
+            for period in self.pivot_store.get_all_periods(symbol)
+            for item in self.pivot_store.get_pivot_objects(symbol, period)
+        ]
+        reverse = any(
+            getattr(signal, "is_entry_trigger", True)
+            and getattr(signal, "action", "") in {"buy", "sell"}
+            for signal in signals
+        )
+        manager = PositionManager()
+        for position in self.position_service.get_position_objects(symbol):
+            parts = str(position.comment or "").split("|")
+            if len(parts) != 3 or parts[0] != "AIT":
+                continue
+            position_strategy_id, source_id = parts[1], parts[2]
+            if position_strategy_id != strategy.strategy_id:
+                continue
+            ticket = int(position.ticket)
+            state = self._managed_position_state.setdefault(ticket, {
+                "direction": position.direction,
+                "entry_price": float(position.price_open),
+                "stop_loss": float(position.sl),
+                "take_profit": float(position.tp),
+                "initial_risk": abs(float(position.price_open) - float(position.sl)),
+                "favorable_price": float(position.price_open),
+                "holding_bars": 0,
+                "opened_at": position.opened_at or datetime.now(),
+            })
+            state["stop_loss"] = float(position.sl or state["stop_loss"])
+            state["take_profit"] = float(position.tp or state["take_profit"])
+            state["favorable_price"] = (
+                max(state["favorable_price"], current_price)
+                if position.is_buy else min(state["favorable_price"], current_price)
+            )
+            action = manager.evaluate(
+                policy.config, state,
+                {"price": current_price, "time": int(datetime.now().timestamp())},
+                pivots=pivots,
+                reverse_signal=(
+                    reverse and any(
+                        getattr(signal, "is_entry_trigger", True)
+                        and getattr(signal, "action", "") in {"buy", "sell"}
+                        and getattr(signal, "action", "") != position.direction
+                        for signal in signals
+                    )
+                ),
+            )
+            if action.action == "close":
+                self.add_close_position_instruction(symbol, position.ticket)
+                self._managed_position_state.pop(ticket, None)
+            elif action.action == "modify_sl" and action.stop_loss:
+                state["stop_loss"] = float(action.stop_loss)
+                self._position_update_instructions[symbol][ticket] = {
+                    "ticket": ticket, "sl": round(float(action.stop_loss), 8),
+                    "tp": round(float(position.tp or 0), 8),
+                    "reason": action.reason,
+                }
 
     # ==================== 订单确认回调 ====================
 
@@ -452,11 +554,15 @@ class TradingServer:
 
         # 获取平仓指令
         close_tickets = self.get_close_position_instructions(symbol)
+        position_updates = list(
+            self._position_update_instructions.pop(symbol, {}).values()
+        )
 
         return {
             "trades": trades,
             "pending_orders": pending_orders,
             "close_tickets": close_tickets,
+            "position_updates": position_updates,
             "process_result": process_result
         }
 
@@ -618,6 +724,9 @@ class TradingServer:
 
     def trigger_llm_analysis(self) -> Dict:
         """手动触发大模型分析"""
+        self.llm_service.set_allowed_strategy_ids(
+            self._active_strategy_ids("live")
+        )
         return self.llm_analyzer.trigger_analysis()
 
     def configure_llm(

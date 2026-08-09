@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Position management policy and runtime result models."""
+
+from __future__ import annotations
+
+import copy
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional
+
+
+RULE_TYPES = {
+    "signal", "pivot", "atr", "fixed_points", "fixed_percent",
+    "risk_reward", "none",
+}
+MANAGEMENT_RULE_TYPES = {
+    "break_even", "pivot_trailing", "trailing_stop",
+    "reverse_signal", "max_holding_bars",
+}
+PERIODS = {"M1", "M5", "M15", "H1", "H4"}
+
+
+def default_position_management_config() -> Dict:
+    return {
+        "initial_stop_rules": [
+            {"type": "pivot", "period": "M5", "selection": "nearest",
+             "max_age_bars": 100,
+             "buffer": {"type": "fixed_points", "value": 0}},
+            {"type": "fixed_percent", "value": 0.003},
+        ],
+        "initial_take_profit_rules": [
+            {"type": "risk_reward", "value": 2.0},
+        ],
+        "management_rules": [
+            {"type": "break_even", "activation_r": 1.0, "offset_r": 0.0},
+            {"type": "pivot_trailing", "period": "M5",
+             "buffer": {"type": "fixed_points", "value": 0}},
+            {"type": "trailing_stop", "activation_r": 1.5,
+             "distance_r": 0.8},
+        ],
+        "min_risk_reward": 1.0,
+        "min_stop_distance": 0.0,
+        "max_stop_distance": 0.0,
+    }
+
+
+def _positive(value, label: str, allow_zero: bool = False) -> float:
+    number = float(value)
+    if number < 0 or (number == 0 and not allow_zero):
+        raise ValueError(f"{label}必须大于{'等于' if allow_zero else ''}0")
+    return number
+
+
+def normalize_position_management_config(config: Optional[Dict]) -> Dict:
+    normalized = copy.deepcopy(config or default_position_management_config())
+    stop_rules = list(normalized.get("initial_stop_rules") or [])
+    take_rules = list(normalized.get("initial_take_profit_rules") or [])
+    management_rules = list(normalized.get("management_rules") or [])
+    if not stop_rules:
+        raise ValueError("至少需要一条初始止损规则")
+    if not take_rules:
+        raise ValueError("至少需要一条初始止盈规则")
+
+    for group, rules in (("初始止损", stop_rules), ("初始止盈", take_rules)):
+        for rule in rules:
+            rule_type = str(rule.get("type", "")).strip()
+            if rule_type not in RULE_TYPES:
+                raise ValueError(f"{group}包含不支持的规则: {rule_type}")
+            rule["type"] = rule_type
+            if rule_type == "pivot":
+                period = str(rule.get("period", "M5")).upper()
+                if period not in PERIODS:
+                    raise ValueError(f"转折点周期无效: {period}")
+                rule["period"] = period
+                rule["max_age_bars"] = max(1, int(rule.get("max_age_bars", 100)))
+            if rule_type in {"fixed_points", "fixed_percent", "atr", "risk_reward"}:
+                rule["value"] = _positive(rule.get("value", 0), f"{group}规则值")
+
+    for rule in management_rules:
+        rule_type = str(rule.get("type", "")).strip()
+        if rule_type not in MANAGEMENT_RULE_TYPES:
+            raise ValueError(f"包含不支持的持仓管理规则: {rule_type}")
+        rule["type"] = rule_type
+        if rule_type == "pivot_trailing":
+            period = str(rule.get("period", "M5")).upper()
+            if period not in PERIODS:
+                raise ValueError(f"转折点周期无效: {period}")
+            rule["period"] = period
+        elif rule_type == "break_even":
+            rule["activation_r"] = _positive(rule.get("activation_r", 1), "保本启动R")
+            rule["offset_r"] = _positive(rule.get("offset_r", 0), "保本偏移R", True)
+        elif rule_type == "trailing_stop":
+            rule["activation_r"] = _positive(rule.get("activation_r", 1.5), "移动止损启动R")
+            rule["distance_r"] = _positive(rule.get("distance_r", 0.8), "移动止损距离R")
+        elif rule_type == "max_holding_bars":
+            rule["period"] = str(rule.get("period", "M1")).upper()
+            rule["bars"] = max(1, int(rule.get("bars", 1)))
+
+    normalized["initial_stop_rules"] = stop_rules
+    normalized["initial_take_profit_rules"] = take_rules
+    normalized["management_rules"] = management_rules
+    normalized["min_risk_reward"] = _positive(
+        normalized.get("min_risk_reward", 1), "最小盈亏比", True
+    )
+    normalized["min_stop_distance"] = _positive(
+        normalized.get("min_stop_distance", 0), "最小止损距离", True
+    )
+    normalized["max_stop_distance"] = _positive(
+        normalized.get("max_stop_distance", 0), "最大止损距离", True
+    )
+    if (normalized["max_stop_distance"] > 0
+            and normalized["max_stop_distance"] < normalized["min_stop_distance"]):
+        raise ValueError("最大止损距离不能小于最小止损距离")
+    return normalized
+
+
+@dataclass
+class PositionManagementPolicy:
+    name: str
+    user_id: int
+    config: Dict = field(default_factory=default_position_management_config)
+    policy_id: str = ""
+    version: int = 1
+    enabled: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    def __post_init__(self):
+        self.name = str(self.name or "").strip()
+        if not self.name:
+            raise ValueError("持仓管理方案名称不能为空")
+        self.policy_id = self.policy_id or uuid.uuid4().hex[:12]
+        self.config = normalize_position_management_config(self.config)
+        self.created_at = self.created_at or datetime.now()
+        self.updated_at = self.updated_at or self.created_at
+
+    def to_dict(self) -> Dict:
+        return {
+            "policy_id": self.policy_id,
+            "version": self.version,
+            "user_id": self.user_id,
+            "name": self.name,
+            "enabled": self.enabled,
+            "config": copy.deepcopy(self.config),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "PositionManagementPolicy":
+        def parse(value):
+            return datetime.fromisoformat(value) if isinstance(value, str) else value
+        return cls(
+            policy_id=str(data.get("policy_id", "")),
+            version=max(1, int(data.get("version", 1))),
+            user_id=int(data.get("user_id", 0)),
+            name=data.get("name", ""),
+            enabled=bool(data.get("enabled", True)),
+            config=data.get("config") or {},
+            created_at=parse(data.get("created_at")),
+            updated_at=parse(data.get("updated_at")),
+        )
+
+
+@dataclass
+class PositionPlan:
+    stop_loss: float
+    take_profit: float
+    initial_risk: float
+    risk_reward: float
+    policy_id: str
+    policy_snapshot: Dict
+    stop_rule: Dict
+    take_profit_rule: Dict
+    explanation: List[str] = field(default_factory=list)
+
+
+@dataclass
+class PositionAction:
+    action: str = "none"
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    reason: str = ""

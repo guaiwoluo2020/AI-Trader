@@ -6,12 +6,14 @@ from typing import Dict
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from auth import AuthUser, require_auth
+from backtest_ai_analysis import BacktestAIAnalysisService
 from backtest_tasks import BacktestTemplateService
 
 
 def create_backtest_task_routes() -> APIRouter:
     router = APIRouter()
     service = BacktestTemplateService()
+    ai_analysis_service = BacktestAIAnalysisService(service.storage)
 
     @router.get("/backtest/templates/context")
     async def get_template_context(
@@ -98,6 +100,40 @@ def create_backtest_task_routes() -> APIRouter:
             )
         return {"status": "ok", "batch": batch}
 
+    @router.post("/backtest/batches/{batch_id}/cancel")
+    async def cancel_batch(
+        batch_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        batch = service.cancel_batch(user.user_id, batch_id)
+        if batch is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="回测批次不存在",
+            )
+        return {
+            "status": "ok",
+            "message": "已提交批次停止请求",
+            "batch": batch,
+        }
+
+    @router.post("/backtest/tasks/{task_id}/cancel")
+    async def cancel_task(
+        task_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        task = service.cancel_task(user.user_id, task_id)
+        if task is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="回测任务不存在",
+            )
+        return {
+            "status": "ok",
+            "message": "已提交任务停止请求",
+            "task": task,
+        }
+
     @router.get("/backtest/tasks/{task_id}/ledger")
     async def get_task_ledger(
         task_id: str,
@@ -110,5 +146,44 @@ def create_backtest_task_routes() -> APIRouter:
                 detail="回测任务不存在",
             )
         return {"status": "ok", "ledger": ledger}
+
+    @router.get("/backtest/tasks/{task_id}/ai-analysis")
+    async def get_task_ai_analysis(
+        task_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        analysis = ai_analysis_service.get_analysis(user.user_id, task_id)
+        if analysis is None:
+            raise HTTPException(status_code=404, detail="回测任务不存在")
+        return {"status": "ok", "analysis": analysis}
+
+    @router.post("/backtest/tasks/{task_id}/ai-analysis")
+    async def start_task_ai_analysis(
+        task_id: str,
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        try:
+            data = await request.json()
+        except ValueError:
+            data = {}
+        try:
+            analysis = ai_analysis_service.start_analysis(
+                user.user_id,
+                user.role,
+                task_id,
+                regenerate=bool(data.get("regenerate", False)),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "status": "ok",
+            "message": "回测 AI 分析任务已提交",
+            "analysis": analysis,
+        }
 
     return router
