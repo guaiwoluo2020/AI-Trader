@@ -738,42 +738,64 @@ class CachedLLMProvider:
             raise BacktestEngineError("当前用户未开通或未配置大模型分析")
 
         plan = {symbol: build_analysis_plan(strategy, signal_source_ids)}
-        prompt = service.build_analysis_prompt({symbol: klines}, plan)
-        prompt_hash = service.prompt_hash(prompt)
-        cache_key = hashlib.sha256(
-            "|".join((
-                str(user_id), dataset_hash, strategy_hash, str(analysis_time),
-                config.model, prompt_hash,
-            )).encode("utf-8")
-        ).hexdigest()
-        cached = self.cache.get(cache_key)
-        if cached is not None:
-            return cached, True
+        groups = service._group_analysis_plans(plan)
+        combined_response: Dict = {}
+        all_cache_hits = True
+        for group in groups:
+            group_plan = group["plan"]
+            prompt = service.build_analysis_prompt(
+                {symbol: klines},
+                group_plan,
+                analysis_prompt_template=group["analysis_prompt_template"],
+                reference_context=service._shared_reference_context(
+                    group["reference_runtime_ids"]
+                ),
+            )
+            prompt_hash = service.prompt_hash(prompt, group["system_prompt"])
+            cache_key = hashlib.sha256(
+                "|".join((
+                    str(user_id), dataset_hash, strategy_hash, str(analysis_time),
+                    group["model"], prompt_hash,
+                )).encode("utf-8")
+            ).hexdigest()
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                group_response = {symbol: cached}
+            else:
+                all_cache_hits = False
+                group_response = None
+                for _ in range(self.retries):
+                    group_response = service.call_llm(
+                        prompt,
+                        model=group["model"],
+                        system_prompt=group["system_prompt"],
+                    )
+                    if group_response:
+                        break
+                if not group_response:
+                    raise BacktestEngineError("大模型分析连续失败，回测已暂停")
+                group_response = service._normalize_analysis_response(
+                    group_response, group_plan
+                )
+                group_analysis = group_response.get(symbol, group_response)
+                self.cache.save(
+                    {
+                        "cache_key": cache_key,
+                        "user_id": user_id,
+                        "dataset_hash": dataset_hash,
+                        "strategy_hash": strategy_hash,
+                        "analysis_time": analysis_time,
+                        "model": group["model"],
+                        "prompt_hash": prompt_hash,
+                    },
+                    group_analysis,
+                )
+            service._merge_analysis_results(combined_response, group_response)
 
-        response = None
-        for _ in range(self.retries):
-            response = service.call_llm(prompt)
-            if response:
-                break
-        if not response:
-            raise BacktestEngineError("大模型分析连续失败，回测已暂停")
-        response = service._normalize_analysis_response(response, plan)
-        analysis = response.get(symbol, response)
+        analysis = combined_response.get(symbol, combined_response)
         if not isinstance(analysis, dict):
             raise BacktestEngineError("大模型返回的分析结果格式无效")
-        self.cache.save(
-            {
-                "cache_key": cache_key,
-                "user_id": user_id,
-                "dataset_hash": dataset_hash,
-                "strategy_hash": strategy_hash,
-                "analysis_time": analysis_time,
-                "model": config.model,
-                "prompt_hash": prompt_hash,
-            },
-            analysis,
-        )
-        return analysis, False
+        return analysis, all_cache_hits
 
 
 def build_analysis_plan(
@@ -807,6 +829,18 @@ def build_analysis_plan(
                 params.get("analysis_interval_minutes", 5)
             ),
             "kline_count": int(params.get("kline_count", 100)),
+            "model": str(params.get("model") or ""),
+            "system_prompt": str(params.get("system_prompt") or ""),
+            "analysis_prompt_template": str(
+                params.get("analysis_prompt_template") or ""
+            ),
+            "share_runtime_data": bool(params.get("share_runtime_data", False)),
+            "reference_runtime_ids": list(
+                params.get("reference_runtime_ids") or []
+            ),
+            "signal_params": dict(params),
+            "symbol": strategy.get("symbol", ""),
+            "strategy_lifecycle": strategy.get("lifecycle_status", "draft"),
         })
     return {
         "periods": periods,

@@ -105,30 +105,14 @@ def create_app():
         # 记录系统启动日志
         system_log.add_log("system_startup", message="服务已启动")
 
-        # 启动市场事件监控后台任务
-        from market.market_event_monitor import get_market_event_monitor
-        monitor = get_market_event_monitor()
-        monitor.set_event_loop(loop)
-        app.state.market_monitor = monitor
-        app.state.market_monitor_task = asyncio.create_task(monitor.run())
         app.state.backtest_worker = backtest_worker
         backtest_worker.start()
 
         print("[Startup] 事件循环已设置")
-        print("[Startup] 市场事件监控已启动")
         print("[Startup] 回测任务 Worker 已启动")
 
     @app.on_event("shutdown")
     async def shutdown_event():
-        monitor = getattr(app.state, "market_monitor", None)
-        monitor_task = getattr(app.state, "market_monitor_task", None)
-
-        if monitor_task is not None:
-            monitor_task.cancel()
-            await asyncio.gather(monitor_task, return_exceptions=True)
-        if monitor is not None:
-            await monitor.stop()
-
         backtest_worker.stop()
         engine_manager.close_all()
 

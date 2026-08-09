@@ -9,8 +9,6 @@ from .pivot import PivotPoint
 from .llm_config import LLMConfig
 from .llm_analysis import LLMAnalysisResult
 from .tech_analysis import TechTrendState, TechTrendChange, TechResonanceResult, TechTradeSuggestion
-from .calendar_event import CalendarEvent
-from .flash_news import FlashNews
 from .pending_order import PendingOrder
 from .trading_instruction import TradingInstruction
 from .trading_signal import TradingSignal, SignalSource, SignalStatus
@@ -31,7 +29,6 @@ __all__ = [
     'KlineData', 'PivotPoint',
     'LLMConfig', 'LLMAnalysisResult',
     'TechTrendState', 'TechTrendChange', 'TechResonanceResult', 'TechTradeSuggestion',
-    'CalendarEvent', 'FlashNews',
     'PendingOrder', 'TradingInstruction',
     'TradingSignal', 'SignalSource', 'SignalStatus',
     'TradingStrategy', 'TradingDecision',

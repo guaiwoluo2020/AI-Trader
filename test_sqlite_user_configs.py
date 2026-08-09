@@ -12,10 +12,12 @@ import unittest
 from datetime import datetime, timedelta
 
 from market.models import StrategyLifecycle, TradingStrategy
+from market.models.trading_strategy import signal_source_defaults
 from market.store.llm_store import LLMStore
 from sqlite_storage import (
     LLMAccessRepository,
     LLMConfigRepository,
+    SharedAIRuntimeRepository,
     StrategyConfigRepository,
     SQLiteStorage,
     TradeConfigRepository,
@@ -37,6 +39,7 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.trade_repo = TradeConfigRepository(self.storage)
         self.llm_repo = LLMConfigRepository(self.storage)
         self.llm_access_repo = LLMAccessRepository(self.storage)
+        self.shared_ai_runtime_repo = SharedAIRuntimeRepository(self.storage)
         self.strategy_repo = StrategyConfigRepository(self.storage)
 
         self.user_a = self.user_repo.create_user("alice", "hash-a", "salt-a")
@@ -74,6 +77,82 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.assertEqual(config_a.model, "model-a")
         self.assertEqual(config_b.api_key, "")
         self.assertNotEqual(config_a.api_base, config_b.api_base)
+
+    def test_ai_signal_model_and_prompt_are_validated(self):
+        source = signal_source_defaults("ai_entry", "M5")
+        source["params"].update({
+            "model": "qwen3.8-max",
+            "system_prompt": "你是短线交易分析师",
+            "analysis_prompt_template": (
+                "策略={{strategy_context}}\n行情={{market_data}}"
+            ),
+            "share_runtime_data": True,
+            "reference_runtime_ids": ["share-a", "share-a", "share-b"],
+        })
+        strategy = TradingStrategy(symbol="GOLD#", signal_sources=[source])
+
+        normalized = strategy.get_signal_sources("ai_entry")[0]["params"]
+
+        self.assertEqual(normalized["model"], "qwen3.8-max")
+        self.assertEqual(normalized["reference_runtime_ids"], ["share-a", "share-b"])
+        invalid = signal_source_defaults("ai_entry", "M5")
+        invalid["params"]["model"] = "unsupported-model"
+        with self.assertRaisesRegex(ValueError, "不支持的大模型"):
+            TradingStrategy(symbol="GOLD#", signal_sources=[invalid])
+
+    def test_shared_ai_runtime_data_is_listed_by_symbol(self):
+        source = signal_source_defaults("ai_entry", "M5")
+        strategy = TradingStrategy(
+            symbol="GOLD#", strategy_name="共享黄金AI", signal_sources=[source]
+        )
+        published = self.shared_ai_runtime_repo.publish(
+            self.user_a.user_id,
+            strategy.to_dict(),
+            source,
+            {"trade_suggestions": [{"direction": "buy"}]},
+            "deepseek-v4-flash",
+            "系统提示词",
+            "{{strategy_context}} {{market_data}}",
+        )
+
+        btc_source = signal_source_defaults("ai_entry", "M15")
+        btc_strategy = TradingStrategy(
+            symbol="BTCUSD.a", strategy_name="共享比特币AI",
+            signal_sources=[btc_source],
+        )
+        self.shared_ai_runtime_repo.publish(
+            self.user_a.user_id, btc_strategy.to_dict(), btc_source,
+            {"trade_suggestions": []}, "glm-5.2", "系统提示词",
+            "{{strategy_context}} {{market_data}}",
+        )
+
+        visible = self.shared_ai_runtime_repo.list_shared(
+            self.user_b.user_id, "XAUUSD.r"
+        )
+
+        self.assertEqual(len(visible), 2)
+        self.assertEqual(visible[0]["share_id"], published["share_id"])
+        self.assertEqual(visible[0]["symbol_similarity"], 0.98)
+        self.assertFalse(visible[0]["is_owner"])
+        self.assertEqual(visible[0]["strategy_name"], "共享黄金AI")
+        self.assertEqual(
+            visible[0]["result"]["trade_suggestions"][0]["direction"], "buy"
+        )
+        btc_visible = self.shared_ai_runtime_repo.list_shared(
+            self.user_b.user_id, "BTCUSD"
+        )
+        self.assertEqual(btc_visible[0]["strategy_name"], "共享比特币AI")
+
+        self.shared_ai_runtime_repo.remove_for_source(
+            self.user_a.user_id, strategy.strategy_id, source["signal_source_id"]
+        )
+        self.shared_ai_runtime_repo.remove_for_source(
+            self.user_a.user_id, btc_strategy.strategy_id,
+            btc_source["signal_source_id"],
+        )
+        self.assertEqual(
+            self.shared_ai_runtime_repo.list_shared(self.user_b.user_id), []
+        )
 
     def test_llm_prompt_configuration_is_versioned_and_validated(self):
         initial = self.llm_repo.get_config(self.user_a.user_id)
@@ -152,6 +231,63 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
 
         self.assertEqual(alice_strategy.strategy_name, "AliceGold")
         self.assertEqual(bob_strategy.strategy_name, "BobGold")
+
+    def test_shared_strategy_library_only_lists_shared_items(self):
+        shared = TradingStrategy(
+            symbol="GOLD#",
+            strategy_name="AliceShared",
+            visibility="shared",
+        )
+        private = TradingStrategy(
+            symbol="BTCUSD",
+            strategy_name="AlicePrivate",
+        )
+        self.strategy_repo.save_strategy(self.user_a.user_id, shared)
+        self.strategy_repo.save_strategy(self.user_a.user_id, private)
+
+        shared_items = self.strategy_repo.list_shared_strategies(
+            self.user_b.user_id
+        )
+
+        self.assertEqual(len(shared_items), 1)
+        self.assertEqual(shared_items[0]["strategy_name"], "AliceShared")
+        self.assertEqual(shared_items[0]["owner_user_id"], self.user_a.user_id)
+        self.assertEqual(shared_items[0]["owner_username"], "alice")
+
+    def test_copy_shared_strategy_creates_private_draft_for_target_user(self):
+        source = TradingStrategy(
+            symbol="GOLD#",
+            strategy_name="平台策略",
+            visibility="shared",
+            enabled=True,
+            auto_execute=True,
+            lifecycle_status=StrategyLifecycle.PRODUCTION,
+            position_management_policy_id="alice-policy",
+        )
+        self.strategy_repo.save_strategy(self.user_a.user_id, source)
+
+        copied = self.strategy_repo.copy_shared_strategy(
+            self.user_b.user_id,
+            self.user_a.user_id,
+            source.strategy_id,
+            "bob-policy",
+        )
+
+        self.assertIsNotNone(copied)
+        self.assertNotEqual(copied.strategy_id, source.strategy_id)
+        self.assertEqual(copied.visibility, "private")
+        self.assertFalse(copied.enabled)
+        self.assertFalse(copied.auto_execute)
+        self.assertEqual(copied.lifecycle_status, StrategyLifecycle.DRAFT)
+        self.assertEqual(copied.position_management_policy_id, "bob-policy")
+        self.assertEqual(copied.source_strategy_id, source.strategy_id)
+        self.assertEqual(copied.source_owner_user_id, self.user_a.user_id)
+
+        bob_strategies = self.strategy_repo.get_all_strategies(
+            self.user_b.user_id
+        )
+        self.assertEqual(len(bob_strategies), 1)
+        self.assertEqual(bob_strategies[0].strategy_name, "平台策略（副本）")
 
     def test_same_user_can_store_multiple_strategies_for_symbol(self):
         first = TradingStrategy(symbol="GOLD#", strategy_name="TrendGold")

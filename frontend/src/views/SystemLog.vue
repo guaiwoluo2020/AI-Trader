@@ -130,9 +130,6 @@ export default {
       { text: 'EA推送增量K线', value: 'ea_kline_incremental' },
       { text: 'K线数据过期', value: 'ea_kline_stale' },
       { text: 'EA请求交易指令', value: 'ea_trade_request' },
-      // MT5财经日历推送
-      { text: 'MT5财经日历上报', value: 'mt5_calendar_update' },
-      { text: 'MT5事件结果上报', value: 'mt5_event_result' },
       // 转折点相关
       { text: '转折点检测完成', value: 'pivot_detected' },
       { text: '转折点提醒', value: 'pivot_alert' },
@@ -143,18 +140,6 @@ export default {
       { text: '平仓指令', value: 'close_position' },
       // 持仓相关
       { text: '持仓数据更新', value: 'position_update' },
-      // 新闻爬虫相关
-      { text: '新闻爬虫启动', value: 'news_crawler_start' },
-      { text: '财经日历获取', value: 'news_calendar_fetch' },
-      { text: '财经日历更新', value: 'news_calendar_update' },
-      { text: '财经日历获取失败', value: 'news_calendar_fetch_error' },
-      { text: '快讯获取', value: 'news_flash_fetch' },
-      { text: '快讯获取失败', value: 'news_flash_fetch_error' },
-      { text: '事件调度创建', value: 'news_event_scheduled' },
-      { text: '事件发布前提醒', value: 'news_event_reminder' },
-      { text: '事件结果获取', value: 'news_event_result' },
-      { text: '影响分析完成', value: 'news_impact_analysis' },
-      { text: '新闻WebSocket推送', value: 'news_ws_broadcast' },
       // 系统事件
       { text: '系统启动', value: 'system_startup' },
       { text: '系统关闭', value: 'system_shutdown' },
@@ -254,9 +239,6 @@ export default {
         'ea_kline_incremental': 'primary',
         'ea_kline_stale': 'warning',
         'ea_trade_request': 'success',
-        // MT5财经日历推送
-        'mt5_calendar_update': 'primary',
-        'mt5_event_result': 'success',
         // 转折点相关
         'pivot_detected': 'warning',
         'pivot_alert': 'warning',
@@ -267,18 +249,6 @@ export default {
         'close_position': 'error',
         // 持仓相关
         'position_update': 'info',
-        // 新闻爬虫相关
-        'news_crawler_start': 'success',
-        'news_calendar_fetch': 'info',
-        'news_calendar_update': 'success',
-        'news_calendar_fetch_error': 'error',
-        'news_flash_fetch': 'info',
-        'news_flash_fetch_error': 'error',
-        'news_event_scheduled': 'warning',
-        'news_event_reminder': 'warning',
-        'news_event_result': 'success',
-        'news_impact_analysis': 'primary',
-        'news_ws_broadcast': 'info',
         // 系统事件
         'system_startup': 'success',
         'system_shutdown': 'error',
@@ -418,54 +388,4 @@ export default {
   padding-left: 8px;
 }
 
-/* 新闻爬虫相关样式 */
-.log-news_crawler_start {
-  border-left: 3px solid #4caf50;
-  padding-left: 8px;
-}
-
-.log-news_calendar_fetch {
-  border-left: 3px solid #2196f3;
-  padding-left: 8px;
-}
-
-.log-news_calendar_update {
-  border-left: 3px solid #4caf50;
-  padding-left: 8px;
-}
-
-.log-news_calendar_fetch_error {
-  border-left: 3px solid #f44336;
-  padding-left: 8px;
-}
-
-.log-news_flash_fetch {
-  border-left: 3px solid #00bcd4;
-  padding-left: 8px;
-}
-
-.log-news_flash_fetch_error {
-  border-left: 3px solid #ff5722;
-  padding-left: 8px;
-}
-
-.log-news_event_scheduled {
-  border-left: 3px solid #ff9800;
-  padding-left: 8px;
-}
-
-.log-news_event_reminder {
-  border-left: 3px solid #ffc107;
-  padding-left: 8px;
-}
-
-.log-news_event_result {
-  border-left: 3px solid #8bc34a;
-  padding-left: 8px;
-}
-
-.log-news_impact_analysis {
-  border-left: 3px solid #9c27b0;
-  padding-left: 8px;
-}
 </style>

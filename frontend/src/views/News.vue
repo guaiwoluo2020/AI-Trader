@@ -1,685 +1,376 @@
 <template>
-  <v-container fluid>
-    <!-- 页面标题 -->
-    <v-row class="mb-4">
-      <v-col cols="12">
-        <h2 class="text-h4">
-          <v-icon large class="mr-2">mdi-newspaper-variant-outline</v-icon>
-          财经日历与新闻
-        </h2>
-      </v-col>
-    </v-row>
+  <div class="event-page">
+    <section class="event-hero">
+      <div>
+        <div class="eyebrow">PUBLIC MARKET INTELLIGENCE</div>
+        <h1>市场事件</h1>
+        <p>统一展示外部数据源灌入的财经日历、关键事件和实时市场快讯。</p>
+      </div>
+      <div class="live-state" :class="{ online: wsConnected }">
+        <span class="live-dot"></span>
+        {{ wsConnected ? '快讯实时通道已连接' : '快讯实时通道重连中' }}
+      </div>
+    </section>
 
-    <!-- 状态卡片 -->
-    <v-row class="mb-4">
-      <v-col cols="12" md="3">
-        <v-card outlined>
-          <v-card-text class="d-flex align-center">
-            <v-icon large color="primary" class="mr-3">mdi-calendar-check</v-icon>
-            <div>
-              <div class="text-caption text-grey">日历天数</div>
-              <div class="text-h5">{{ status.store_status?.calendar_dates || 0 }}</div>
-            </div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-      <v-col cols="12" md="3">
-        <v-card outlined>
-          <v-card-text class="d-flex align-center">
-            <v-icon large color="warning" class="mr-3">mdi-alert-circle</v-icon>
-            <div>
-              <div class="text-caption text-grey">重要事件</div>
-              <div class="text-h5">{{ status.store_status?.calendar_events || 0 }}</div>
-            </div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-      <v-col cols="12" md="3">
-        <v-card outlined>
-          <v-card-text class="d-flex align-center">
-            <v-icon large color="info" class="mr-3">mdi-lightning-bolt</v-icon>
-            <div>
-              <div class="text-caption text-grey">快讯数量</div>
-              <div class="text-h5">{{ status.store_status?.flash_news_count || 0 }}</div>
-            </div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-      <v-col cols="12" md="3">
-        <v-card outlined>
-          <v-card-text class="d-flex align-center">
-            <v-icon large :color="status.running ? 'success' : 'error'" class="mr-3">
-              {{ status.running ? 'mdi-check-circle' : 'mdi-close-circle' }}
-            </v-icon>
-            <div>
-              <div class="text-caption text-grey">监控状态</div>
-              <div class="text-h5">{{ status.running ? '运行中' : '已停止' }}</div>
-            </div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
+    <v-alert
+      v-if="errorMessage"
+      type="error"
+      variant="tonal"
+      closable
+      class="mb-5"
+      @click:close="errorMessage = ''"
+    >
+      {{ errorMessage }}
+    </v-alert>
 
-    <!-- 标签页 -->
-    <v-card>
-      <v-tabs v-model="activeTab" background-color="primary" dark>
-        <v-tab>
-          <v-icon class="mr-2">mdi-calendar</v-icon>
-          财经日历
-        </v-tab>
-        <v-tab>
-          <v-icon class="mr-2">mdi-lightning-bolt</v-icon>
-          实时快讯
-        </v-tab>
-        <v-tab>
-          <v-icon class="mr-2">mdi-chart-timeline-variant</v-icon>
-          品种影响
-        </v-tab>
-      </v-tabs>
+    <section class="metric-grid">
+      <article class="metric-card calendar">
+        <span>财经日历</span>
+        <strong>{{ status.calendar_count || 0 }}</strong>
+        <small>公共事件总数</small>
+      </article>
+      <article class="metric-card key-event">
+        <span>关键事件</span>
+        <strong>{{ status.key_event_count || 0 }}</strong>
+        <small>重点市场事件</small>
+      </article>
+      <article class="metric-card flash">
+        <span>市场快讯</span>
+        <strong>{{ status.flash_news_count || 0 }}</strong>
+        <small>SQLite 已保存</small>
+      </article>
+    </section>
 
-      <!-- 财经日历 -->
-      <v-tab-item>
-        <v-card-text>
-          <!-- 筛选栏 -->
-          <v-row class="mb-4">
-            <v-col cols="12" md="4">
-              <v-select
-                v-model="selectedImportance"
-                :items="importanceOptions"
-                label="重要性筛选"
-                item-title="text"
-                item-value="value"
-                outlined
-                dense
-                hide-details
-                clearable
-              ></v-select>
-            </v-col>
-            <v-col cols="12" md="4">
-              <v-select
-                v-model="selectedCurrency"
-                :items="currencyOptions"
-                label="货币筛选"
-                item-title="text"
-                item-value="value"
-                outlined
-                dense
-                hide-details
-                clearable
-              ></v-select>
-            </v-col>
-            <v-col cols="12" md="4">
-              <v-btn color="primary" @click="fetchCalendar" :loading="loading">
-                <v-icon class="mr-2">mdi-refresh</v-icon>
-                刷新
-              </v-btn>
-            </v-col>
-          </v-row>
-
-          <!-- 事件列表 -->
-          <v-data-table
-            :headers="calendarHeaders"
-            :items="filteredCalendar"
+    <v-card class="event-card" elevation="0">
+      <div class="toolbar">
+        <v-tabs v-model="activeTab" color="primary" density="comfortable">
+          <v-tab value="calendar" prepend-icon="mdi-calendar-month-outline">财经日历</v-tab>
+          <v-tab value="key-events" prepend-icon="mdi-star-four-points-outline">关键事件</v-tab>
+          <v-tab value="flash" prepend-icon="mdi-flash-outline">市场快讯</v-tab>
+        </v-tabs>
+        <div class="toolbar-actions">
+          <v-text-field
+            v-if="activeTab !== 'flash'"
+            v-model="selectedDate"
+            type="date"
+            label="数据日期"
+            variant="outlined"
+            density="compact"
+            hide-details
+            @update:model-value="loadDailyData"
+          />
+          <v-btn
+            variant="tonal"
+            color="primary"
+            prepend-icon="mdi-refresh"
             :loading="loading"
-            item-key="id"
-            class="elevation-1"
-            :items-per-page="20"
+            @click="loadActiveData"
           >
-            <!-- 重要性 -->
-            <template v-slot:item.importance="{ item }">
-              <v-chip
-                :color="getImportanceColor(item.importance)"
-                small
-                dark
-              >
-                {{ getImportanceText(item.importance) }}
-              </v-chip>
-            </template>
+            刷新
+          </v-btn>
+        </div>
+      </div>
 
-            <!-- 发布时间 -->
-            <template v-slot:item.publish_time="{ item }">
-              <div>
-                <div class="font-weight-medium">{{ formatDate(item.publish_time) }}</div>
-                <div class="text-caption text-grey">{{ formatTime(item.publish_time) }}</div>
+      <v-window v-model="activeTab">
+        <v-window-item value="calendar">
+          <div v-if="calendar.length" class="calendar-list">
+            <article v-for="item in calendar" :key="item.id" class="calendar-row">
+              <time>{{ formatEventTime(item.publish_time || item.event_time) }}</time>
+              <div class="event-copy">
+                <div class="event-title-line">
+                  <strong>{{ item.name }}</strong>
+                  <v-chip v-if="item.currency" size="x-small" variant="tonal">{{ item.currency }}</v-chip>
+                  <v-chip size="x-small" :color="importanceColor(item.importance)" variant="tonal">
+                    {{ importanceLabel(item.importance) }}
+                  </v-chip>
+                </div>
+                <span>{{ item.country || '全球' }} · {{ item.source || 'external' }}</span>
               </div>
-            </template>
+              <div class="value-strip">
+                <span>前值 <b>{{ displayValue(item.previous) }}</b></span>
+                <span>预期 <b>{{ displayValue(item.forecast ?? item.consensus) }}</b></span>
+                <span>公布 <b class="actual">{{ displayValue(item.actual) }}</b></span>
+              </div>
+            </article>
+          </div>
+          <EmptyState v-else icon="mdi-calendar-blank-outline" text="该日期暂无财经日历数据" />
+        </v-window-item>
 
-            <!-- 影响品种 -->
-            <template v-slot:item.symbols="{ item }">
-              <v-chip
-                v-for="symbol in item.symbols"
-                :key="symbol"
-                :color="getSymbolColor(symbol)"
-                small
-                class="mr-1"
-              >
-                {{ symbol }}
-              </v-chip>
-            </template>
+        <v-window-item value="key-events">
+          <div v-if="keyEvents.length" class="key-grid">
+            <article v-for="item in keyEvents" :key="item.id" class="key-card">
+              <div class="key-time">{{ formatEventTime(item.event_time) }}</div>
+              <div class="event-title-line">
+                <v-chip size="x-small" :color="importanceColor(item.importance)" variant="tonal">
+                  {{ importanceLabel(item.importance) }}
+                </v-chip>
+                <span>{{ item.category || '重要事件' }}</span>
+              </div>
+              <h3>{{ item.title }}</h3>
+              <p>{{ item.summary || item.description || item.content || '暂无补充说明' }}</p>
+              <div class="symbol-row">
+                <v-chip v-for="symbol in item.symbols || []" :key="symbol" size="x-small" variant="outlined">
+                  {{ symbol }}
+                </v-chip>
+                <small>{{ item.source || 'external' }}</small>
+              </div>
+            </article>
+          </div>
+          <EmptyState v-else icon="mdi-star-off-outline" text="该日期暂无关键事件数据" />
+        </v-window-item>
 
-            <!-- 数值 -->
-            <template v-slot:item.values="{ item }">
-              <div class="text-caption">
-                <div>预期: <span class="font-weight-medium">{{ item.forecast || '--' }}</span></div>
-                <div>前值: <span class="text-grey">{{ item.previous || '--' }}</span></div>
-                <div v-if="item.actual" class="success--text">
-                  实际: {{ item.actual }}
+        <v-window-item value="flash">
+          <div v-if="flashNews.length" class="flash-list">
+            <article v-for="item in flashNews" :key="item.id" class="flash-row">
+              <div class="flash-time">{{ formatDateTime(item.published_at || item.time) }}</div>
+              <div class="flash-body">
+                <div class="event-title-line">
+                  <v-chip
+                    v-if="Number(item.importance) >= 2"
+                    size="x-small"
+                    color="warning"
+                    variant="tonal"
+                  >
+                    重要
+                  </v-chip>
+                  <span class="flash-source">{{ item.source || 'external' }}</span>
+                </div>
+                <h3 v-if="item.title && item.title !== item.content">{{ item.title }}</h3>
+                <p>{{ item.content }}</p>
+                <div class="symbol-row">
+                  <v-chip v-for="symbol in item.symbols || []" :key="symbol" size="x-small" variant="outlined">
+                    {{ symbol }}
+                  </v-chip>
+                  <v-chip v-for="keyword in (item.keywords || []).slice(0, 5)" :key="keyword" size="x-small" variant="text">
+                    #{{ keyword }}
+                  </v-chip>
                 </div>
               </div>
-            </template>
-
-            <!-- 结果 -->
-            <template v-slot:item.result="{ item }">
-              <v-chip
-                v-if="item.result"
-                :color="getResultColor(item.result)"
-                small
-                dark
-              >
-                {{ getResultText(item.result) }}
-              </v-chip>
-              <span v-else class="text-grey">待发布</span>
-            </template>
-          </v-data-table>
-        </v-card-text>
-      </v-tab-item>
-
-      <!-- 实时快讯 -->
-      <v-tab-item>
-        <v-card-text>
-          <v-btn color="primary" class="mb-4" @click="fetchFlashNews" :loading="loading">
-            <v-icon class="mr-2">mdi-refresh</v-icon>
-            刷新快讯
-          </v-btn>
-
-          <v-timeline v-if="flashNews.length > 0" dense>
-            <v-timeline-item
-              v-for="news in flashNews"
-              :key="news.id"
-              :color="news.importance >= 2 ? 'error' : 'info'"
-              small
-            >
-              <v-card outlined class="mb-2">
-                <v-card-text>
-                  <div class="d-flex justify-space-between align-start">
-                    <div class="flex-grow-1">
-                      <!-- 讲话者标签 -->
-                      <v-chip
-                        v-if="news.speaker"
-                        color="primary"
-                        small
-                        class="mr-2 mb-2"
-                      >
-                        <v-icon small class="mr-1">mdi-account</v-icon>
-                        {{ news.speaker }}
-                        <span v-if="news.speaker_title" class="ml-1">({{ news.speaker_title }})</span>
-                      </v-chip>
-
-                      <!-- 内容 -->
-                      <div class="text-body-1 mb-2">{{ news.content }}</div>
-
-                      <!-- 影响分析 -->
-                      <div v-if="news.impact && Object.keys(news.impact).length > 0" class="mt-2">
-                        <div class="text-caption text-grey mb-1">影响分析:</div>
-                        <v-chip
-                          v-for="(impact, symbol) in news.impact"
-                          :key="symbol"
-                          :color="getImpactColor(impact.direction)"
-                          small
-                          class="mr-1 mb-1"
-                        >
-                          {{ symbol }}: {{ impact.direction }}
-                          <span v-if="impact.reason" class="ml-1">- {{ impact.reason }}</span>
-                        </v-chip>
-                      </div>
-                    </div>
-
-                    <div class="text-caption text-grey ml-4">
-                      {{ formatDateTime(news.time) }}
-                    </div>
-                  </div>
-                </v-card-text>
-              </v-card>
-            </v-timeline-item>
-          </v-timeline>
-
-          <v-alert v-else type="info" text>
-            暂无快讯数据
-          </v-alert>
-        </v-card-text>
-      </v-tab-item>
-
-      <!-- 品种影响 -->
-      <v-tab-item>
-        <v-card-text>
-          <v-row class="mb-4">
-            <v-col cols="12" md="6">
-              <v-select
-                v-model="selectedSymbol"
-                :items="symbolOptions"
-                label="选择品种"
-                outlined
-                @change="fetchSymbolImpact"
-              ></v-select>
-            </v-col>
-          </v-row>
-
-          <v-row v-if="symbolEvents.length > 0">
-            <v-col
-              v-for="event in symbolEvents"
-              :key="event.id"
-              cols="12"
-              md="6"
-            >
-              <v-card outlined class="mb-3">
-                <v-card-text>
-                  <div class="d-flex justify-space-between align-start mb-2">
-                    <div>
-                      <v-chip
-                        :color="getImportanceColor(event.importance)"
-                        small
-                        dark
-                        class="mr-2"
-                      >
-                        {{ getImportanceText(event.importance) }}
-                      </v-chip>
-                      <span class="font-weight-medium">{{ event.name }}</span>
-                    </div>
-                    <v-chip small>{{ event.currency }}</v-chip>
-                  </div>
-
-                  <div class="text-caption text-grey mb-2">
-                    {{ formatDateTime(event.publish_time) }}
-                  </div>
-
-                  <v-row>
-                    <v-col cols="4">
-                      <div class="text-caption text-grey">预期</div>
-                      <div class="font-weight-medium">{{ event.forecast || '--' }}</div>
-                    </v-col>
-                    <v-col cols="4">
-                      <div class="text-caption text-grey">前值</div>
-                      <div class="font-weight-medium">{{ event.previous || '--' }}</div>
-                    </v-col>
-                    <v-col cols="4">
-                      <div class="text-caption text-grey">实际</div>
-                      <div class="font-weight-medium success--text">{{ event.actual || '待发布' }}</div>
-                    </v-col>
-                  </v-row>
-                </v-card-text>
-              </v-card>
-            </v-col>
-          </v-row>
-
-          <v-alert v-else-if="selectedSymbol" type="info" text>
-            该品种暂无即将发布的重要事件
-          </v-alert>
-        </v-card-text>
-      </v-tab-item>
+            </article>
+          </div>
+          <EmptyState v-else icon="mdi-flash-off-outline" text="暂无市场快讯数据" />
+        </v-window-item>
+      </v-window>
     </v-card>
-
-    <!-- 新闻提醒弹窗 -->
-    <v-snackbar
-      v-model="snackbar.show"
-      :color="snackbar.color"
-      :timeout="5000"
-      top
-      right
-    >
-      <v-icon class="mr-2">{{ snackbar.icon }}</v-icon>
-      {{ snackbar.message }}
-      <template v-slot:action>
-        <v-btn text @click="snackbar.show = false">关闭</v-btn>
-      </template>
-    </v-snackbar>
-  </v-container>
+  </div>
 </template>
 
-<script>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import axios from 'axios'
+<script setup>
+import { defineComponent, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { marketAPI } from '../api/market'
 
-export default {
-  name: 'News',
-  setup() {
-    const activeTab = ref(0)
-    const loading = ref(false)
-    const status = ref({
-      running: false,
-      ws_clients: 0,
-      store_status: {
-        calendar_dates: 0,
-        total_events: 0,
-        flash_news_count: 0
-      },
-      scheduled_events: 0
-    })
+const EmptyState = defineComponent({
+  props: { icon: String, text: String },
+  setup(props) {
+    return () => h('div', { class: 'empty-state' }, [
+      h('span', { class: `mdi ${props.icon}` }),
+      h('p', props.text),
+    ])
+  },
+})
 
-    const calendar = ref([])
-    const flashNews = ref([])
-    const symbolEvents = ref([])
+function localDateInput(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+  return local.toISOString().slice(0, 10)
+}
 
-    const selectedImportance = ref(null)
-    const selectedCurrency = ref(null)
-    const selectedSymbol = ref('GOLD')
+const activeTab = ref('calendar')
+const selectedDate = ref(localDateInput())
+const status = ref({})
+const calendar = ref([])
+const keyEvents = ref([])
+const flashNews = ref([])
+const loading = ref(false)
+const errorMessage = ref('')
+const wsConnected = ref(false)
+let socket = null
+let reconnectTimer = null
+let unmounted = false
 
-    const ws = ref(null)
-    const snackbar = ref({
-      show: false,
-      color: 'info',
-      icon: 'mdi-bell',
-      message: ''
-    })
+async function loadStatus() {
+  const response = await marketAPI.getMarketEventStatus()
+  status.value = response.data || {}
+}
 
-    const importanceOptions = [
-      { text: '高影响', value: 3 },
-      { text: '中等影响', value: 2 },
-      { text: '低影响', value: 1 }
-    ]
+async function loadCalendar() {
+  const response = await marketAPI.getMarketCalendar(selectedDate.value)
+  calendar.value = response.data || []
+}
 
-    // 货币选项（动态生成）
-    const currencyOptions = computed(() => {
-      const currencies = new Set()
-      calendar.value.forEach(e => {
-        if (e.currency) currencies.add(e.currency)
-      })
-      const currencyNames = {
-        'USD': '美元 (USD)',
-        'EUR': '欧元 (EUR)',
-        'GBP': '英镑 (GBP)',
-        'JPY': '日元 (JPY)',
-        'AUD': '澳元 (AUD)',
-        'CAD': '加元 (CAD)',
-        'CHF': '瑞郎 (CHF)',
-        'NZD': '纽元 (NZD)'
-      }
-      return Array.from(currencies).sort().map(c => ({
-        text: currencyNames[c] || c,
-        value: c
-      }))
-    })
+async function loadKeyEvents() {
+  const response = await marketAPI.getMarketKeyEvents(selectedDate.value)
+  keyEvents.value = response.data || []
+}
 
-    const symbolOptions = [
-      { text: '黄金 (GOLD)', value: 'GOLD' },
-      { text: '原油 (OIL)', value: 'OIL' },
-      { text: '比特币 (BTC)', value: 'BTC' },
-      { text: '标普500 (SPX)', value: 'SPX' },
-      { text: '美日 (USDJPY)', value: 'USDJPY' }
-    ]
+async function loadFlashNews() {
+  const response = await marketAPI.getMarketFlashNews(100)
+  flashNews.value = response.data || []
+}
 
-    const calendarHeaders = [
-      { text: '重要性', value: 'importance', width: 100 },
-      { text: '事件', value: 'name', width: 200 },
-      { text: '货币', value: 'currency', width: 80 },
-      { text: '发布时间', value: 'publish_time', width: 150 },
-      { text: '数值', value: 'values', width: 120 },
-      { text: '结果', value: 'result', width: 100 },
-      { text: '影响品种', value: 'symbols', width: 200 }
-    ]
-
-    const filteredCalendar = computed(() => {
-      let items = calendar.value
-
-      if (selectedImportance.value) {
-        items = items.filter(e => e.importance === selectedImportance.value)
-      }
-
-      if (selectedCurrency.value) {
-        items = items.filter(e => e.currency === selectedCurrency.value)
-      }
-
-      return items
-    })
-
-    // 获取状态
-    const fetchStatus = async () => {
-      try {
-        const response = await axios.get('/api/news/status')
-        status.value = response.data.data
-      } catch (error) {
-        console.error('获取状态失败:', error)
-      }
-    }
-
-    // 获取财经日历
-    const fetchCalendar = async () => {
-      loading.value = true
-      try {
-        const response = await axios.get('/api/news/upcoming', {
-          params: { hours: 168 } // 未来7天
-        })
-        calendar.value = response.data.data || []
-      } catch (error) {
-        console.error('获取日历失败:', error)
-      } finally {
-        loading.value = false
-      }
-    }
-
-    // 获取快讯
-    const fetchFlashNews = async () => {
-      loading.value = true
-      try {
-        const response = await axios.get('/api/news/flash', {
-          params: { count: 30 }
-        })
-        flashNews.value = response.data.data || []
-      } catch (error) {
-        console.error('获取快讯失败:', error)
-      } finally {
-        loading.value = false
-      }
-    }
-
-    // 获取品种影响
-    const fetchSymbolImpact = async () => {
-      if (!selectedSymbol.value) return
-
-      loading.value = true
-      try {
-        const response = await axios.get(`/api/news/impact/${selectedSymbol.value}`)
-        symbolEvents.value = response.data.data || []
-      } catch (error) {
-        console.error('获取品种影响失败:', error)
-      } finally {
-        loading.value = false
-      }
-    }
-
-    // WebSocket连接
-    const connectWebSocket = () => {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${protocol}//${window.location.host}/api/news/ws`
-
-      ws.value = new WebSocket(wsUrl)
-
-      ws.value.onopen = () => {
-        console.log('新闻WebSocket已连接')
-      }
-
-      ws.value.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          handleWebSocketMessage(data)
-        } catch (error) {
-          console.error('解析WebSocket消息失败:', error)
-        }
-      }
-
-      ws.value.onerror = (error) => {
-        console.error('WebSocket错误:', error)
-      }
-
-      ws.value.onclose = () => {
-        console.log('新闻WebSocket已断开，5秒后重连...')
-        setTimeout(connectWebSocket, 5000)
-      }
-    }
-
-    // 处理WebSocket消息
-    const handleWebSocketMessage = (data) => {
-      switch (data.type) {
-        case 'event_reminder':
-          showNotification('warning', 'mdi-clock-alert', data.message)
-          fetchCalendar()
-          break
-
-        case 'event_result':
-          showNotification('success', 'mdi-check-circle', data.message)
-          fetchCalendar()
-          break
-
-        case 'flash_news':
-          showNotification('info', 'mdi-lightning-bolt', data.news?.content?.substring(0, 50) + '...')
-          fetchFlashNews()
-          break
-
-        case 'calendar_update':
-          fetchCalendar()
-          break
-      }
-    }
-
-    // 显示通知
-    const showNotification = (color, icon, message) => {
-      snackbar.value = {
-        show: true,
-        color,
-        icon,
-        message
-      }
-    }
-
-    // 格式化函数
-    const formatDate = (dateStr) => {
-      if (!dateStr) return '--'
-      const date = new Date(dateStr)
-      return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
-    }
-
-    const formatTime = (dateStr) => {
-      if (!dateStr) return '--'
-      const date = new Date(dateStr)
-      return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-    }
-
-    const formatDateTime = (dateStr) => {
-      if (!dateStr) return '--'
-      const date = new Date(dateStr)
-      return date.toLocaleString('zh-CN', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      })
-    }
-
-    const getImportanceColor = (importance) => {
-      switch (importance) {
-        case 3: return 'error'
-        case 2: return 'warning'
-        case 1: return 'info'
-        default: return 'grey'
-      }
-    }
-
-    const getImportanceText = (importance) => {
-      switch (importance) {
-        case 3: return '高'
-        case 2: return '中'
-        case 1: return '低'
-        default: return '--'
-      }
-    }
-
-    const getSymbolColor = (symbol) => {
-      const colors = {
-        'GOLD': 'amber',
-        'OIL': 'black',
-        'BTC': 'orange',
-        'SPX': 'blue',
-        'USDJPY': 'red'
-      }
-      return colors[symbol] || 'grey'
-    }
-
-    const getResultColor = (result) => {
-      switch (result) {
-        case 'better': return 'success'
-        case 'worse': return 'error'
-        case 'in_line': return 'info'
-        default: return 'grey'
-      }
-    }
-
-    const getResultText = (result) => {
-      switch (result) {
-        case 'better': return '好于预期'
-        case 'worse': return '差于预期'
-        case 'in_line': return '符合预期'
-        default: return '--'
-      }
-    }
-
-    const getImpactColor = (direction) => {
-      switch (direction) {
-        case '利好': return 'success'
-        case '利空': return 'error'
-        case '中性': return 'info'
-        default: return 'grey'
-      }
-    }
-
-    onMounted(() => {
-      fetchStatus()
-      fetchCalendar()
-      fetchFlashNews()
-      fetchSymbolImpact()
-      connectWebSocket()
-    })
-
-    onUnmounted(() => {
-      if (ws.value) {
-        ws.value.close()
-      }
-    })
-
-    return {
-      activeTab,
-      loading,
-      status,
-      calendar,
-      flashNews,
-      symbolEvents,
-      selectedImportance,
-      selectedCurrency,
-      selectedSymbol,
-      importanceOptions,
-      currencyOptions,
-      symbolOptions,
-      calendarHeaders,
-      filteredCalendar,
-      snackbar,
-      fetchStatus,
-      fetchCalendar,
-      fetchFlashNews,
-      fetchSymbolImpact,
-      formatDate,
-      formatTime,
-      formatDateTime,
-      getImportanceColor,
-      getImportanceText,
-      getSymbolColor,
-      getResultColor,
-      getResultText,
-      getImpactColor
-    }
+async function runLoad(loaders) {
+  loading.value = true
+  errorMessage.value = ''
+  try {
+    await Promise.all(loaders.map(loader => loader()))
+  } catch (error) {
+    errorMessage.value = error.response?.data?.detail || '加载市场事件数据失败'
+  } finally {
+    loading.value = false
   }
 }
+
+function loadDailyData() {
+  return runLoad([
+    activeTab.value === 'calendar' ? loadCalendar : loadKeyEvents,
+    loadStatus,
+  ])
+}
+
+function loadActiveData() {
+  const loader = activeTab.value === 'calendar'
+    ? loadCalendar
+    : activeTab.value === 'key-events' ? loadKeyEvents : loadFlashNews
+  return runLoad([loader, loadStatus])
+}
+
+function mergeRealtimeFlash(items) {
+  const byId = new Map(flashNews.value.map(item => [item.id, item]))
+  for (const item of items || []) byId.set(item.id, item)
+  flashNews.value = [...byId.values()]
+    .sort((left, right) => String(right.published_at || '').localeCompare(String(left.published_at || '')))
+    .slice(0, 100)
+  status.value.flash_news_count = Math.max(
+    Number(status.value.flash_news_count || 0),
+    flashNews.value.length,
+  )
+}
+
+function connectRealtime() {
+  if (unmounted || socket) return
+  socket = marketAPI.createMarketEventWebSocket((message) => {
+    if (message.type === 'connected') {
+      wsConnected.value = true
+      loadStatus().catch(() => {})
+    }
+    if (message.type === 'market_flash_news_updated') {
+      mergeRealtimeFlash(message.items)
+      loadStatus().catch(() => {})
+    }
+  }, () => {
+    socket = null
+    wsConnected.value = false
+    if (!unmounted) reconnectTimer = window.setTimeout(connectRealtime, 5000)
+  })
+}
+
+function formatEventTime(value) {
+  if (!value) return '待定'
+  if (/^\d{1,2}:\d{2}/.test(value)) return value.slice(0, 5)
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+function formatDateTime(value) {
+  if (!value) return '--'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('zh-CN', {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+}
+
+function displayValue(value) {
+  return value === null || value === undefined || value === '' ? '--' : value
+}
+
+function importanceLabel(value) {
+  const level = Number(value || 0)
+  if (level >= 3) return '高影响'
+  if (level === 2) return '中影响'
+  if (level === 1) return '低影响'
+  return '未评级'
+}
+
+function importanceColor(value) {
+  const level = Number(value || 0)
+  if (level >= 3) return 'error'
+  if (level === 2) return 'warning'
+  return 'grey'
+}
+
+onMounted(() => {
+  runLoad([loadStatus, loadCalendar, loadKeyEvents, loadFlashNews])
+  connectRealtime()
+})
+
+watch(activeTab, () => {
+  loadActiveData()
+})
+
+onUnmounted(() => {
+  unmounted = true
+  window.clearTimeout(reconnectTimer)
+  socket?.close()
+  socket = null
+})
 </script>
 
 <style scoped>
-.v-timeline-item {
-  padding-bottom: 0;
+.event-page {
+  min-height: 100%;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 92% 4%, rgba(211, 154, 57, .17), transparent 28%),
+    linear-gradient(145deg, #f4f0e7 0%, #edf3ef 54%, #f8f6ef 100%);
+}
+.event-hero { display: flex; justify-content: space-between; align-items: end; gap: 24px; padding: 34px 38px; margin-bottom: 20px; color: #f7f0df; border-radius: 24px; background: linear-gradient(120deg, #102f2a, #1f5d4e 72%, #8c652c); box-shadow: 0 20px 44px rgba(20, 61, 51, .2); }
+.eyebrow { color: #e4bd72; font-size: .72rem; font-weight: 800; letter-spacing: .17em; }
+.event-hero h1 { margin: 5px 0 8px; font-family: Georgia, serif; font-size: clamp(2.2rem, 5vw, 3.8rem); line-height: 1; }
+.event-hero p { margin: 0; color: rgba(255,255,255,.72); }
+.live-state { display: flex; align-items: center; gap: 9px; padding: 10px 14px; white-space: nowrap; border: 1px solid rgba(255,255,255,.18); border-radius: 99px; background: rgba(0,0,0,.12); font-size: .78rem; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: #d17b63; }
+.live-state.online .live-dot { background: #79d8a7; box-shadow: 0 0 0 5px rgba(121,216,167,.13); }
+.metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+.metric-card { padding: 18px 20px; border: 1px solid rgba(22,65,53,.09); border-radius: 16px; background: rgba(255,255,255,.86); }
+.metric-card span, .metric-card small { display: block; color: #78837e; }
+.metric-card strong { display: block; margin: 3px 0; color: #173f35; font: 700 1.8rem Georgia, serif; }
+.metric-card.calendar { border-top: 3px solid #277d66; }
+.metric-card.key-event { border-top: 3px solid #c18b36; }
+.metric-card.flash { border-top: 3px solid #c45e45; }
+.event-card { overflow: hidden; border: 1px solid rgba(22,65,53,.1); border-radius: 20px; background: rgba(255,255,255,.92); }
+.toolbar { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 8px 18px; border-bottom: 1px solid #e2e8e4; }
+.toolbar-actions { display: flex; align-items: center; gap: 10px; min-width: 330px; }
+.toolbar-actions :deep(.v-input) { flex: 1; }
+.calendar-list, .flash-list { padding: 8px 20px 24px; }
+.calendar-row { display: grid; grid-template-columns: 80px minmax(220px, 1fr) auto; align-items: center; gap: 18px; padding: 18px 8px; border-bottom: 1px solid #e7ebe8; }
+.calendar-row time { color: #1d6755; font: 700 1.05rem Georgia, serif; }
+.event-title-line, .symbol-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.event-copy > span, .flash-source { color: #87908c; font-size: .75rem; }
+.value-strip { display: flex; gap: 20px; color: #808a85; font-size: .75rem; }
+.value-strip span { display: grid; gap: 3px; }
+.value-strip b { color: #344c45; font-size: .85rem; }
+.value-strip .actual { color: #b24f39; }
+.key-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; padding: 20px; }
+.key-card { position: relative; padding: 20px; border: 1px solid #e0e7e2; border-radius: 16px; background: #fbfcfa; }
+.key-time { position: absolute; top: 18px; right: 18px; color: #1d6755; font-weight: 800; }
+.key-card h3 { margin: 14px 0 8px; color: #263f38; font-family: Georgia, serif; }
+.key-card p { min-height: 42px; color: #697771; font-size: .88rem; line-height: 1.55; }
+.symbol-row small { margin-left: auto; color: #929b97; }
+.flash-row { display: grid; grid-template-columns: 125px 1fr; gap: 18px; padding: 20px 8px; border-bottom: 1px solid #e7ebe8; }
+.flash-time { color: #8d7060; font: 700 .78rem Georgia, serif; }
+.flash-body h3 { margin: 7px 0; color: #293f39; }
+.flash-body p { margin: 8px 0 12px; color: #3f514b; line-height: 1.65; }
+.empty-state { padding: 90px 20px; text-align: center; color: #8b9690; }
+.empty-state .mdi { font-size: 3rem; }
+.empty-state p { margin-top: 10px; }
+@media (max-width: 800px) {
+  .event-page { padding: 14px; }
+  .event-hero, .toolbar { align-items: flex-start; flex-direction: column; }
+  .metric-grid { grid-template-columns: 1fr; }
+  .toolbar-actions { width: 100%; min-width: 0; }
+  .calendar-row, .flash-row { grid-template-columns: 1fr; gap: 8px; }
+  .value-strip { flex-wrap: wrap; }
+  .key-grid { grid-template-columns: 1fr; }
 }
 </style>

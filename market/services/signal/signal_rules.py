@@ -232,9 +232,12 @@ def build_key_level_signal(
     levels: Optional[Iterable[float]] = None,
     signal_time: Optional[datetime] = None,
     threshold: float = 0.0008,
+    previous_price: Optional[float] = None,
+    trigger_config: Optional[Dict] = None,
 ) -> Optional[TradingSignal]:
     signal = build_key_level_state_signal(
-        symbol, current_price, levels, signal_time, threshold
+        symbol, current_price, levels, signal_time, threshold,
+        previous_price=previous_price, trigger_config=trigger_config,
     )
     return signal if signal.is_entry_trigger else None
 
@@ -245,8 +248,11 @@ def build_key_level_state_signal(
     levels: Optional[Iterable[float]] = None,
     signal_time: Optional[datetime] = None,
     threshold: float = 0.0008,
+    previous_price: Optional[float] = None,
+    trigger_config: Optional[Dict] = None,
 ) -> TradingSignal:
     """Describe key-level direction continuously; proximity remains the trigger."""
+    trigger_config = trigger_config or {}
     candidates = list(levels or automatic_key_levels(current_price))
     if current_price <= 0 or not candidates:
         return TradingSignal(
@@ -259,43 +265,81 @@ def build_key_level_state_signal(
     nearest = min(candidates, key=lambda level: abs(current_price - level))
     distance = abs(current_price - nearest) / current_price
     near = distance <= threshold
-    if not near or current_price == nearest:
+    previous = float(previous_price) if previous_price else None
+    upward_breakout = (
+        previous is not None and previous < nearest <= current_price
+    )
+    downward_breakout = (
+        previous is not None and previous > nearest >= current_price
+    )
+    upward_approach = near and current_price < nearest
+    downward_approach = near and current_price > nearest
+    trigger_type = ""
+    action = "none"
+    direction = "sideways"
+    if upward_breakout and trigger_config.get("upward_breakout_buy", True):
+        trigger_type = "upward_breakout"
+        action = "buy"
+        direction = "up"
+    elif downward_breakout and trigger_config.get("downward_breakout_sell", True):
+        trigger_type = "downward_breakout"
+        action = "sell"
+        direction = "down"
+    elif upward_approach and trigger_config.get("upward_approach_sell", True):
+        trigger_type = "upward_approach"
+        action = "sell"
+        direction = "down"
+    elif downward_approach and trigger_config.get("downward_approach_buy", True):
+        trigger_type = "downward_approach"
+        action = "buy"
+        direction = "up"
+    elif current_price > nearest:
+        direction = "up"
+    elif current_price < nearest:
+        direction = "down"
+
+    sl = tp = 0
+
+    if not near and not upward_breakout and not downward_breakout:
         direction = "sideways"
         confidence = 60 if near else max(35, int(60 - min(25, distance * 10000)))
         reason = (
             f"价格位于关键位 {nearest}，等待方向确认"
             if near else f"价格尚未接近关键位 {nearest}"
         )
-        sl = tp = 0
+    elif trigger_type == "upward_breakout":
+        confidence = 86
+        reason = f"价格向上突破关键位 {nearest}，按配置触发买入"
+    elif trigger_type == "downward_breakout":
+        confidence = 86
+        reason = f"价格向下突破关键位 {nearest}，按配置触发卖出"
+    elif trigger_type == "upward_approach":
+        confidence = min(90, 65 + int((threshold - distance) / max(threshold, 1e-12) * 20))
+        reason = f"价格从下方向上接近关键位 {nearest}，按配置触发卖出"
+    elif trigger_type == "downward_approach":
+        confidence = min(90, 65 + int((threshold - distance) / max(threshold, 1e-12) * 20))
+        reason = f"价格从上方向下接近关键位 {nearest}，按配置触发买入"
     elif current_price > nearest:
-        direction = "up"
-        confidence = min(90, 65 + int((threshold - distance) / max(threshold, 1e-12) * 20))
-        sl = nearest - nearest * 0.006
-        risk = current_price - sl
-        tp = current_price + risk * 1.5
-        reason = f"价格位于关键位 {nearest} 上方，支撑方向成立"
+        confidence = min(80, 55 + int(max(0, threshold - distance) / max(threshold, 1e-12) * 15))
+        reason = f"价格位于关键位 {nearest} 上方，当前配置未触发入场"
     else:
-        direction = "down"
-        confidence = min(90, 65 + int((threshold - distance) / max(threshold, 1e-12) * 20))
-        sl = nearest + nearest * 0.006
-        risk = sl - current_price
-        tp = current_price - risk * 1.5
-        reason = f"价格位于关键位 {nearest} 下方，压力方向成立"
+        confidence = min(80, 55 + int(max(0, threshold - distance) / max(threshold, 1e-12) * 15))
+        reason = f"价格位于关键位 {nearest} 下方，当前配置未触发入场"
     return TradingSignal(
         symbol=symbol,
-        action=direction_action(direction),
+        action=action if action in {"buy", "sell"} else direction_action(direction),
         market_direction=direction,
         state_ready=True,
-        is_entry_trigger=near and direction in {"up", "down"},
+        is_entry_trigger=bool(trigger_type and action in {"buy", "sell"}),
         confidence=confidence,
         source=SignalSource.KEY_LEVEL,
         trigger_price=current_price,
         trigger_time=signal_time,
         trigger_reason=reason,
         suggested_entry=current_price,
-        suggested_sl=round(sl, 2) if sl else 0,
-        suggested_tp=round(tp, 2) if tp else 0,
-        risk_reward_ratio=1.5 if sl and tp else 0,
+        suggested_sl=0,
+        suggested_tp=0,
+        risk_reward_ratio=0,
         key_level=nearest,
         distance_pct=round(distance * 100, 4),
         created_at=signal_time,

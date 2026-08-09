@@ -9,8 +9,6 @@ from .pivot_service import PivotService
 from .llm_service import LLMService
 from .tech_indicators import calculate_ma, calculate_adx, calculate_rsi, calculate_macd, calculate_bollinger_bands
 from .tech_service import TechService
-from .calendar_service import CalendarService
-from .flash_news_service import FlashNewsService
 from .pending_order_service import PendingOrderService
 from .trading_instruction_service import TradingInstructionService
 
@@ -31,7 +29,6 @@ from .position_manager import PositionManager
 
 __all__ = [
     'KlineService', 'PivotService', 'LLMService', 'TechService',
-    'CalendarService', 'FlashNewsService',
     'PendingOrderService', 'TradingInstructionService',
     'SignalService', 'KeyLevelSignalGenerator',
     'AIEntrySignalGenerator', 'MovingAverageSignalGenerator',

@@ -106,7 +106,7 @@ export default {
         title: '市场资讯',
         icon: 'mdi-chart-timeline-variant-shimmer',
         items: [
-          { title: '财经日历', path: '/news', icon: 'mdi-newspaper-variant-outline' },
+          { title: '市场事件', path: '/news', icon: 'mdi-newspaper-variant-outline' },
         ],
       },
       {

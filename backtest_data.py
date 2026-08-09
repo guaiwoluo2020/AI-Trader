@@ -483,6 +483,7 @@ class BacktestDatasetService:
     """数据集任务编排、分片存储和质量校验。"""
 
     CHUNK_SECONDS = 2 * 24 * 60 * 60
+    MIN_RANGE_SECONDS = 2 * 60 * 60
 
     def __init__(
         self,
@@ -510,7 +511,9 @@ class BacktestDatasetService:
         if not normalized_symbol:
             raise ValueError("请选择交易品种")
         if requested_end <= requested_start:
-            raise ValueError("结束日期必须晚于开始日期")
+            raise ValueError("结束时间必须晚于开始时间")
+        if requested_end - requested_start < self.MIN_RANGE_SECONDS:
+            raise ValueError("历史数据集时间范围不能少于 2 小时")
         if requested_end - requested_start > 2 * 366 * 24 * 60 * 60:
             raise ValueError("第一版单个数据集最多支持两年")
         if visibility not in {"shared", "private"}:

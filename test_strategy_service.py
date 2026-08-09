@@ -252,6 +252,27 @@ class StrategyServiceTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不能重复添加"):
             TradingStrategy(symbol="GOLD_", signal_sources=duplicate)
 
+    def test_key_level_cannot_mix_with_ai_or_moving_average_on_update(self):
+        strategy = TradingStrategy(symbol="GOLD_", signal_sources=[])
+
+        with self.assertRaisesRegex(ValueError, "不能和AI/均线信号源同时存在"):
+            strategy.update({"signal_sources": [
+                {
+                    "signal_source_id": "key",
+                    "source": "key_level",
+                    "period": "M1",
+                    "weight": 30,
+                    "params": {},
+                },
+                {
+                    "signal_source_id": "ai",
+                    "source": "ai_entry",
+                    "period": "M5",
+                    "weight": 30,
+                    "params": {},
+                },
+            ]})
+
     def test_legacy_periods_are_migrated_to_independent_sources(self):
         strategy = TradingStrategy(
             symbol="GOLD_",
@@ -312,6 +333,38 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(len(signals), 1)
         self.assertEqual(signals[0].key_level, 4100.0)
         self.assertEqual(signals[0].signal_source_id, "key-expression")
+
+    def test_key_level_breakout_uses_configured_trigger_rules(self):
+        strategy = TradingStrategy(
+            symbol="GOLD_",
+            signal_sources=[{
+                "signal_source_id": "key-breakout",
+                "source": "key_level",
+                "period": "M15",
+                "weight": 40,
+                "params": {
+                    "level_mode": "levels",
+                    "levels": [4100],
+                    "order_distance": 0.001,
+                    "cooldown_seconds": 0,
+                    "upward_approach_sell": False,
+                    "downward_approach_buy": False,
+                    "upward_breakout_buy": True,
+                    "downward_breakout_sell": True,
+                },
+            }],
+        )
+        generator = KeyLevelSignalGenerator()
+
+        first = generator.generate_signals_for_strategy("GOLD_", 4098.0, strategy)
+        second = generator.generate_signals_for_strategy("GOLD_", 4101.0, strategy)
+
+        self.assertFalse(first[0].is_entry_trigger)
+        self.assertTrue(second[0].is_entry_trigger)
+        self.assertEqual(second[0].action, "buy")
+        self.assertEqual(second[0].source_period, "M1")
+        self.assertEqual(second[0].suggested_sl, 0)
+        self.assertEqual(second[0].suggested_tp, 0)
 
     def test_signal_generation_assigns_each_signal_to_its_strategy(self):
         service = SignalService()

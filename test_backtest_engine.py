@@ -213,6 +213,12 @@ class M1BacktestEngineTests(unittest.TestCase):
 
     def test_key_level_signal_is_replayed_when_enabled(self):
         task = self.task()
+        task["strategy_snapshot"]["position_management_policy_snapshot"][
+            "config"
+        ].update({
+            "initial_stop_rules": [{"type": "fixed_percent", "value": 0.002}],
+            "initial_take_profit_rules": [{"type": "risk_reward", "value": 2}],
+        })
         task["strategy_snapshot"]["signal_config"] = {
             "key_level": {"enabled": True, "weight": 100},
             "pivot": {"enabled": False, "periods": {}},

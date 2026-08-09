@@ -100,6 +100,13 @@ SIGNAL_PERIOD_MINUTES = {
     "H4": 240,
 }
 
+AI_SIGNAL_MODELS = (
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "glm-5.2",
+    "qwen3.7-max",
+    "qwen3.8-max",
+)
 
 def signal_source_defaults(source: str, period: str = "M5") -> Dict:
     """创建一条可独立配置的信号源实例。"""
@@ -111,6 +118,11 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "levels": [],
             "expression": "",
             "proximity_threshold": 0.0008,
+            "order_distance": 0.0008,
+            "upward_approach_sell": True,
+            "downward_approach_buy": True,
+            "upward_breakout_buy": True,
+            "downward_breakout_sell": True,
             "cooldown_seconds": 180,
         }
     elif source == "ai_entry":
@@ -119,6 +131,11 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "kline_count": 100,
             "min_confidence": 70,
             "entry_threshold": 0.0001,
+            "model": AI_SIGNAL_MODELS[0],
+            "system_prompt": "",
+            "analysis_prompt_template": "",
+            "share_runtime_data": False,
+            "reference_runtime_ids": [],
         }
     elif source == "moving_average":
         params = {
@@ -171,10 +188,21 @@ def migrate_signal_config(
     return migrated
 
 
-def normalize_signal_sources(items: Optional[List[Dict]]) -> Optional[List[Dict]]:
+def normalize_signal_sources(
+    items: Optional[List[Dict]], enforce_mutex: bool = False,
+) -> Optional[List[Dict]]:
     """校验实例唯一性并补全类型专属默认值。"""
     if items is None:
         return None
+    if enforce_mutex:
+        sources = {
+            str((raw or {}).get("source", "")).strip()
+            for raw in items
+        }
+        if "key_level" in sources and (
+            "ai_entry" in sources or "moving_average" in sources
+        ):
+            raise ValueError("关键点位信号源不能和AI/均线信号源同时存在")
     normalized = []
     occupied = set()
     source_ids = set()
@@ -186,11 +214,16 @@ def normalize_signal_sources(items: Optional[List[Dict]]) -> Optional[List[Dict]
             raise ValueError("转折点已改为系统基础数据，不再支持作为策略信号源")
         if source not in {"key_level", "ai_entry", "moving_average"}:
             raise ValueError(f"不支持的信号源类型: {source}")
+        if source == "key_level":
+            period = "M1"
         if period not in SIGNAL_PERIODS:
             raise ValueError(f"不支持的信号周期: {period}")
-        if (source, period) in occupied:
+        occupied_key = source if source == "key_level" else (source, period)
+        if occupied_key in occupied:
+            if source == "key_level":
+                raise ValueError("关键点位信号源不能重复添加")
             raise ValueError(f"{source} 的 {period} 周期不能重复添加")
-        occupied.add((source, period))
+        occupied.add(occupied_key)
 
         source_id = str(raw.get("signal_source_id") or uuid.uuid4().hex[:12])
         if source_id in source_ids:
@@ -215,9 +248,26 @@ def normalize_signal_sources(items: Optional[List[Dict]]) -> Optional[List[Dict]
                 if str(value).strip() and float(value) > 0
             })
             params["expression"] = str(params.get("expression") or "").strip()[:200]
-            params["proximity_threshold"] = max(
-                0.0, min(0.1, float(params["proximity_threshold"]))
+            params["order_distance"] = max(
+                0.0,
+                min(0.1, float(params.get(
+                    "order_distance",
+                    params.get("proximity_threshold", 0.0008),
+                ))),
             )
+            params["proximity_threshold"] = max(
+                0.0,
+                min(0.1, float(params.get(
+                    "proximity_threshold",
+                    params["order_distance"],
+                ))),
+            )
+            params.pop("stop_loss_distance", None)
+            for flag in (
+                "upward_approach_sell", "downward_approach_buy",
+                "upward_breakout_buy", "downward_breakout_sell",
+            ):
+                params[flag] = bool(params.get(flag, True))
             params["cooldown_seconds"] = max(
                 0, min(86400, int(params["cooldown_seconds"]))
             )
@@ -233,6 +283,32 @@ def normalize_signal_sources(items: Optional[List[Dict]]) -> Optional[List[Dict]
             params["entry_threshold"] = max(
                 0.0, min(0.1, float(params["entry_threshold"]))
             )
+            params["model"] = str(params.get("model") or AI_SIGNAL_MODELS[0])
+            if params["model"] not in AI_SIGNAL_MODELS:
+                raise ValueError("AI入场信号选择了不支持的大模型")
+            params["system_prompt"] = str(
+                params.get("system_prompt") or ""
+            ).strip()
+            params["analysis_prompt_template"] = str(
+                params.get("analysis_prompt_template") or ""
+            ).strip()
+            if len(params["system_prompt"]) > 10000:
+                raise ValueError("AI系统提示词不能超过10000个字符")
+            if len(params["analysis_prompt_template"]) > 50000:
+                raise ValueError("AI分析提示词不能超过50000个字符")
+            if params["analysis_prompt_template"]:
+                for placeholder in ("{{strategy_context}}", "{{market_data}}"):
+                    if placeholder not in params["analysis_prompt_template"]:
+                        raise ValueError(f"AI分析提示词必须包含 {placeholder}")
+            params["share_runtime_data"] = bool(
+                params.get("share_runtime_data", False)
+            )
+            references = params.get("reference_runtime_ids") or []
+            if not isinstance(references, list):
+                raise ValueError("共享AI运行数据引用格式无效")
+            params["reference_runtime_ids"] = list(dict.fromkeys(
+                str(value).strip() for value in references if str(value).strip()
+            ))[:10]
         else:
             params["fast_period"] = max(1, min(500, int(params["fast_period"])))
             params["slow_period"] = max(2, min(1000, int(params["slow_period"])))
@@ -264,6 +340,7 @@ class TradingStrategy:
     # ==================== 基本信息 ====================
     symbol: str                       # 绑定的品种
     strategy_name: str = ""           # 策略名称
+    visibility: str = "private"       # private/shared，共享后其他用户只能复制
 
     # ==================== 启用状态 ====================
     enabled: bool = True              # 是否启用
@@ -353,10 +430,16 @@ class TradingStrategy:
 
     # ==================== 自动生成字段 ====================
     strategy_id: str = ""
+    source_strategy_id: str = ""
+    source_owner_user_id: int = 0
+    source_owner_username: str = ""
     created_at: datetime = None
     updated_at: datetime = None
 
     def __post_init__(self):
+        if self.visibility not in {"private", "shared"}:
+            self.visibility = "private"
+        self.source_owner_user_id = int(self.source_owner_user_id or 0)
         if not self.strategy_id:
             self.strategy_id = str(uuid.uuid4())[:8]
         if not self.created_at:
@@ -467,6 +550,11 @@ class TradingStrategy:
             raise ValueError("已停用策略不可修改，请创建新策略重新验证")
         if "strategy_name" in data:
             self.strategy_name = str(data["strategy_name"]).strip()
+        if "visibility" in data or "is_shared" in data:
+            visibility = data.get("visibility")
+            if visibility is None:
+                visibility = "shared" if data.get("is_shared") else "private"
+            self.visibility = "shared" if visibility == "shared" else "private"
         if "enabled" in data:
             self.enabled = bool(data["enabled"])
         if "auto_execute" in data:
@@ -478,7 +566,9 @@ class TradingStrategy:
                     self.signal_config, self.strategy_id, self.min_confidence
                 )
         if "signal_sources" in data:
-            self.signal_sources = normalize_signal_sources(data["signal_sources"])
+            self.signal_sources = normalize_signal_sources(
+                data["signal_sources"], enforce_mutex=True
+            )
         if "signal_weights" in data:
             self.signal_weights = data["signal_weights"]
         if "period_weights" in data:
@@ -644,6 +734,8 @@ class TradingStrategy:
             "strategy_id": self.strategy_id,
             "strategy_name": self.strategy_name,
             "symbol": self.symbol,
+            "visibility": self.visibility,
+            "is_shared": self.visibility == "shared",
             "enabled": self.enabled,
             "auto_execute": self.auto_execute,
             "lifecycle_status": self.lifecycle_status,
@@ -673,6 +765,9 @@ class TradingStrategy:
             "max_sl_points": self.max_sl_points,
             "trading_hours": self.trading_hours,
             "position_conflict": self.position_conflict,
+            "source_strategy_id": self.source_strategy_id,
+            "source_owner_user_id": self.source_owner_user_id,
+            "source_owner_username": self.source_owner_username,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -720,6 +815,11 @@ class TradingStrategy:
         return cls(
             symbol=data.get('symbol', ''),
             strategy_name=data.get('strategy_name', ''),
+            visibility=(
+                'shared'
+                if data.get('is_shared') and not data.get('visibility')
+                else data.get('visibility', 'private')
+            ),
             enabled=data.get('enabled', True),
             auto_execute=data.get('auto_execute', False),
             lifecycle_status=lifecycle_status,
@@ -748,6 +848,9 @@ class TradingStrategy:
             trading_hours=data.get('trading_hours', {"start": "00:00", "end": "23:59", "exclude_hours": []}),
             position_conflict=data.get('position_conflict', PositionConflict.ALLOW_OPPOSITE),
             strategy_id=data.get('strategy_id', ''),
+            source_strategy_id=data.get('source_strategy_id', ''),
+            source_owner_user_id=data.get('source_owner_user_id', 0),
+            source_owner_username=data.get('source_owner_username', ''),
             created_at=created_at,
             updated_at=updated_at,
         )

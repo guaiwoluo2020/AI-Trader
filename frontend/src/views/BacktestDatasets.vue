@@ -71,7 +71,7 @@
           <div class="section-tag">NEW DATASET</div>
           <h2>建立历史行情任务</h2>
           <p class="section-copy">
-            创建后，匹配品种的 MT5 EA 会自动领取并分片上传。收益统计从回测开始日期计算，预热数据仅用于指标初始化。
+            创建后，匹配品种的 MT5 EA 会自动领取并分片上传。时间可精确到小时，最短采集 2 小时；预热数据仅用于指标初始化。
           </p>
 
           <v-form @submit.prevent="createDataset">
@@ -107,18 +107,21 @@
             <div class="date-grid">
               <v-text-field
                 v-model="form.startDate"
-                label="回测开始日期"
-                type="date"
+                label="回测开始时间"
+                type="datetime-local"
+                step="3600"
                 variant="outlined"
                 density="comfortable"
               />
               <v-text-field
                 v-model="form.endDate"
-                label="回测结束日期"
-                type="date"
+                label="回测结束时间"
+                type="datetime-local"
+                step="3600"
                 variant="outlined"
                 density="comfortable"
-                hint="可与开始日期相同，表示采集当天完整行情"
+                :error="rangeTooShort"
+                :hint="rangeTooShort ? '结束时间至少要比开始时间晚 2 小时' : '按浏览器本地时间选择，最短采集区间为 2 小时'"
                 persistent-hint
               />
             </div>
@@ -222,7 +225,7 @@
                 <div class="dataset-details">
                   <div>
                     <span>回测区间</span>
-                    <strong>{{ formatDate(dataset.requested_start) }} 至 {{ formatDate(dataset.requested_end) }}</strong>
+                    <strong>{{ formatDateTime(dataset.requested_start) }} 至 {{ formatDateTime(dataset.requested_end) }}</strong>
                   </div>
                   <div>
                     <span>已接收</span>
@@ -312,21 +315,22 @@ const message = ref('')
 const messageType = ref('success')
 let refreshTimer = null
 
-function toDateInput(date) {
-  return date.toISOString().slice(0, 10)
+function toDateTimeInput(date) {
+  const localTime = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000)
+  return localTime.toISOString().slice(0, 16)
 }
 
-const yesterday = new Date()
-yesterday.setUTCDate(yesterday.getUTCDate() - 1)
-const sixMonthsAgo = new Date(yesterday)
-sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6)
+const minimumRangeSeconds = 2 * 60 * 60
+const defaultEnd = new Date()
+defaultEnd.setMinutes(0, 0, 0)
+const defaultStart = new Date(defaultEnd.getTime() - minimumRangeSeconds * 1000)
 
 const form = reactive({
   accountId: null,
   datasetName: '',
   symbol: '',
-  startDate: toDateInput(sixMonthsAgo),
-  endDate: toDateInput(yesterday),
+  startDate: toDateTimeInput(defaultStart),
+  endDate: toDateTimeInput(defaultEnd),
   warmupDays: 30,
   isShared: true,
 })
@@ -366,13 +370,26 @@ const accountOptions = computed(() => context.accounts.map(item => ({
   title: `${item.account_name} · ${item.mt5_server || '未知服务器'} · ${item.mt5_login || '未知账号'}${item.connected ? ' · 在线' : ' · 离线'}`,
 })))
 
+function parseLocalDateTime(value) {
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : 0
+}
+
+const requestedStart = computed(() => parseLocalDateTime(form.startDate))
+const requestedEnd = computed(() => parseLocalDateTime(form.endDate))
+const rangeTooShort = computed(() => Boolean(
+  form.startDate &&
+  form.endDate &&
+  requestedEnd.value - requestedStart.value < minimumRangeSeconds
+))
+
 const canCreate = computed(() => Boolean(
   selectedAccount.value &&
   form.datasetName &&
   form.symbol &&
   form.startDate &&
   form.endDate &&
-  form.startDate <= form.endDate
+  !rangeTooShort.value
 ))
 
 const needsEaUpgrade = computed(() => {
@@ -398,9 +415,16 @@ function isActive(status) {
   return ['pending', 'downloading', 'validating'].includes(status)
 }
 
-function formatDate(timestamp) {
+function formatDateTime(timestamp) {
   if (!timestamp) return '--'
-  return new Date(timestamp * 1000).toLocaleDateString('zh-CN', { timeZone: 'UTC' })
+  return new Date(timestamp * 1000).toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }
 
 function formatNumber(value) {
@@ -435,14 +459,12 @@ async function createDataset() {
   if (!canCreate.value) return
   creating.value = true
   try {
-    const start = Math.floor(Date.parse(`${form.startDate}T00:00:00Z`) / 1000)
-    const end = Math.floor(Date.parse(`${form.endDate}T23:59:59Z`) / 1000)
     const data = await marketAPI.createBacktestDataset({
       dataset_name: form.datasetName,
       account_id: form.accountId,
       symbol: form.symbol,
-      requested_start: start,
-      requested_end: end,
+      requested_start: requestedStart.value,
+      requested_end: requestedEnd.value,
       warmup_days: form.warmupDays,
       visibility: form.isShared ? 'shared' : 'private',
     })

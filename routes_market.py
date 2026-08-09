@@ -16,9 +16,15 @@ import random
 from auth import AuthUser, get_auth_manager, require_admin, require_auth
 from ea_auth import EAIdentity, require_ea_auth
 from market.services import PivotService
+from market.models.llm_config import (
+    DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
+    DEFAULT_SYSTEM_PROMPT,
+)
+from market.models.trading_strategy import AI_SIGNAL_MODELS
 from sqlite_storage import (
     LLMAccessRepository,
     LLMConfigRepository,
+    SharedAIRuntimeRepository,
     PositionManagementPolicyRepository,
     StrategyConfigRepository,
     TradeConfigRepository,
@@ -43,7 +49,25 @@ def create_market_routes(
     position_policy_repo = PositionManagementPolicyRepository()
     llm_config_repo = LLMConfigRepository()
     llm_access_repo = LLMAccessRepository()
+    shared_ai_runtime_repo = SharedAIRuntimeRepository()
     admission_service = StrategyAdmissionService(engine_manager.paper_trading)
+
+    def validate_ai_signal_configuration(user: AuthUser, data: Dict) -> None:
+        ai_sources = [
+            source for source in (data.get("signal_sources") or [])
+            if source.get("source") == "ai_entry"
+        ]
+        if not ai_sources:
+            return
+        access = llm_access_repo.get_status(user.user_id, user.role)
+        if not access["access_granted"]:
+            raise ValueError("AI入场信号仅对已开通大模型分析的付费用户开放")
+        for source in ai_sources:
+            params = source.get("params") or {}
+            for share_id in params.get("reference_runtime_ids") or []:
+                shared = shared_ai_runtime_repo.get_shared(str(share_id))
+                if shared is None:
+                    raise ValueError("选择的共享AI运行数据不存在或已取消共享")
 
     # ==================== EA端接口 ====================
 
@@ -662,12 +686,16 @@ def create_market_routes(
             symbol = str(data.get("symbol", "")).strip()
             if not symbol:
                 return {"status": "error", "message": "请选择交易品种"}
+            validate_ai_signal_configuration(user, data)
             policy_id = str(data.get("position_management_policy_id", "")).strip()
             if not policy_id or not position_policy_repo.get(user.user_id, policy_id):
                 return {"status": "error", "message": "请选择有效的持仓管理方案"}
             engine = engine_manager.get_engine_for_user(user.user_id)
             strategy = engine.strategy_service.strategy_store.create_strategy(
                 symbol, data
+            )
+            shared_ai_runtime_repo.sync_strategy_visibility(
+                user.user_id, strategy.to_dict()
             )
             engine_manager.refresh_user_strategies(user.user_id)
             return {
@@ -691,6 +719,59 @@ def create_market_routes(
             "status": "ok",
             "count": len(decisions),
             "decisions": decisions
+        }
+
+    @protected_router.get("/strategy/shared")
+    async def get_shared_strategies(
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """获取平台共享策略库；共享策略只能复制，不能直接修改。"""
+        strategies = strategy_repo.list_shared_strategies(user.user_id)
+        return {
+            "status": "ok",
+            "count": len(strategies),
+            "strategies": strategies,
+        }
+
+    @protected_router.post("/strategy/shared/{owner_user_id}/{strategy_id}/copy")
+    async def copy_shared_strategy(
+        owner_user_id: int,
+        strategy_id: str,
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """把共享策略复制为当前用户的私有草稿。"""
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        policy_id = str(data.get("position_management_policy_id", "")).strip()
+        if policy_id and not position_policy_repo.get(user.user_id, policy_id):
+            return {"status": "error", "message": "请选择有效的持仓管理方案"}
+        if not policy_id:
+            policy = next(
+                iter(position_policy_repo.list(user.user_id, enabled_only=True)),
+                None,
+            )
+            if policy is None:
+                return {
+                    "status": "error",
+                    "message": "请先创建并启用一个持仓管理方案",
+                }
+            policy_id = policy.policy_id
+
+        strategy = strategy_repo.copy_shared_strategy(
+            user.user_id, owner_user_id, strategy_id, policy_id
+        )
+        if strategy is None:
+            return {"status": "error", "message": "共享策略不存在或未开放复制"}
+
+        engine_manager.refresh_user_strategies(user.user_id)
+        return {
+            "status": "ok",
+            "message": "共享策略已复制为你的私有草稿",
+            "strategy": strategy.to_dict(),
         }
 
     @protected_router.get("/strategy/{strategy_ref}")
@@ -724,10 +805,15 @@ def create_market_routes(
             )
             if strategy is None:
                 return {"status": "error", "message": "策略配置不存在"}
+            if "signal_sources" in data:
+                validate_ai_signal_configuration(user, data)
             strategy = engine.strategy_service.update_strategy(
                 strategy.symbol,
                 data,
                 strategy.strategy_id,
+            )
+            shared_ai_runtime_repo.sync_strategy_visibility(
+                user.user_id, strategy.to_dict()
             )
             engine_manager.refresh_user_strategies(user.user_id)
 
@@ -766,6 +852,9 @@ def create_market_routes(
             )
             if strategy is None:
                 return {"status": "error", "message": "策略配置不存在"}
+            shared_ai_runtime_repo.sync_strategy_visibility(
+                user.user_id, strategy.to_dict()
+            )
             engine_manager.refresh_user_strategies(user.user_id)
             return {
                 "status": "ok",
@@ -799,8 +888,20 @@ def create_market_routes(
         strategy = store.get_strategy_by_id(strategy_ref)
         if strategy:
             success = store.delete_strategy(strategy.symbol, strategy.strategy_id)
+            if success:
+                shared_ai_runtime_repo.remove_for_strategy(
+                    user.user_id, strategy.strategy_id
+                )
         else:
+            strategy_ids = [
+                item.strategy_id for item in store.get_strategies(strategy_ref)
+            ]
             success = store.delete_strategy(strategy_ref)
+            if success:
+                for strategy_id in strategy_ids:
+                    shared_ai_runtime_repo.remove_for_strategy(
+                        user.user_id, strategy_id
+                    )
         if success:
             engine_manager.refresh_user_strategies(user.user_id)
             return {"status": "ok", "message": "策略配置已删除"}
@@ -937,6 +1038,36 @@ def create_market_routes(
                 ),
             },
         }
+
+    @protected_router.get("/llm/signal-options")
+    async def get_llm_signal_options(
+        symbol: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Return AI signal configuration capabilities and shared references."""
+        access = llm_access_repo.get_status(user.user_id, user.role)
+        shared = [
+            item for item in shared_ai_runtime_repo.list_shared(
+                user.user_id, symbol
+            )
+            if not item["is_owner"]
+        ]
+        return {
+            "status": "ok",
+            "access_granted": access["access_granted"],
+            "models": list(AI_SIGNAL_MODELS),
+            "default_system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "default_analysis_prompt_template": DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
+            "shared_runtime_data": shared,
+        }
+
+    @protected_router.get("/llm/runtime-shares")
+    async def get_shared_ai_runtime_data(
+        symbol: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        items = shared_ai_runtime_repo.list_shared(user.user_id, symbol)
+        return {"status": "ok", "count": len(items), "items": items}
 
     @protected_router.post("/llm/access/request")
     async def request_llm_access(user: AuthUser = Depends(require_auth)) -> Dict:

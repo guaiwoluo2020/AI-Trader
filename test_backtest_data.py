@@ -38,7 +38,7 @@ class BacktestDatasetTestCase(unittest.TestCase):
 
     def _create_dataset(self):
         start = 1767225600
-        end = start + 60 * 10
+        end = start + 2 * 60 * 60
         dataset = self.service.create_dataset(
             self.user.user_id,
             self.account.account_id,
@@ -49,6 +49,31 @@ class BacktestDatasetTestCase(unittest.TestCase):
             warmup_days=0,
         )
         return dataset, start, end
+
+    def test_dataset_range_accepts_two_hours_and_rejects_shorter_range(self):
+        start = 1767225600
+
+        dataset = self.service.create_dataset(
+            self.user.user_id,
+            self.account.account_id,
+            "Two hours",
+            "GOLD_",
+            start,
+            start + 2 * 60 * 60,
+            warmup_days=0,
+        )
+
+        self.assertEqual(dataset["requested_end"], start + 2 * 60 * 60)
+        with self.assertRaisesRegex(ValueError, "不能少于 2 小时"):
+            self.service.create_dataset(
+                self.user.user_id,
+                self.account.account_id,
+                "Too short",
+                "GOLD_",
+                start,
+                start + 2 * 60 * 60 - 1,
+                warmup_days=0,
+            )
 
     @staticmethod
     def _bars(start, end):
@@ -85,7 +110,7 @@ class BacktestDatasetTestCase(unittest.TestCase):
 
         ready = result["dataset"]
         self.assertEqual(ready["status"], DatasetStatus.READY)
-        self.assertEqual(ready["received_bars"], 11)
+        self.assertEqual(ready["received_bars"], 121)
         self.assertEqual(ready["quality_score"], 100.0)
         self.assertEqual(ready["broker_server"], "DemoBroker")
         self.assertTrue(Path(ready["file_path"]).exists())
@@ -110,7 +135,7 @@ class BacktestDatasetTestCase(unittest.TestCase):
 
         self.assertEqual(duplicate["result"], "duplicate")
         self.assertEqual(
-            duplicate["dataset"]["received_bars"], 11
+            duplicate["dataset"]["received_bars"], 121
         )
 
     def test_task_is_scoped_to_mt5_account_and_symbol(self):

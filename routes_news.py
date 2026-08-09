@@ -1,206 +1,311 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-新闻路由
-财经日历、快讯查询和WebSocket推送
-"""
+"""Public market event ingestion, query, and realtime update routes."""
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
-from typing import Optional
+from __future__ import annotations
 
-from auth import require_auth
+import asyncio
+import hashlib
+import json
+from datetime import date, datetime
+from typing import Dict, List, Optional
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+
+from auth import AuthUser, get_auth_manager, require_admin, require_auth
+from market.utils.ws_manager import WebSocketManager
+from market_event_repository import MarketEventRepository
+
+
+class MarketEventHub:
+    """Authenticated WebSocket hub for market event page updates."""
+
+    def __init__(self):
+        self.ws_manager = WebSocketManager("market_events")
+
+    async def broadcast(self, message: Dict) -> None:
+        await self.ws_manager.broadcast(message)
+
+
+_market_event_hub: Optional[MarketEventHub] = None
+
+
+def get_market_event_hub() -> MarketEventHub:
+    global _market_event_hub
+    if _market_event_hub is None:
+        _market_event_hub = MarketEventHub()
+    return _market_event_hub
+
+
+def _validate_day(value: object) -> str:
+    try:
+        return date.fromisoformat(str(value)).isoformat()
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="date 必须是 YYYY-MM-DD 格式",
+        ) from exc
+
+
+def _stable_id(prefix: str, *parts: object) -> str:
+    raw = "|".join(str(part or "").strip() for part in parts)
+    return f"{prefix}_{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _normalize_importance(value: object) -> int:
+    try:
+        return max(0, min(int(value or 0), 3))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_symbols(value: object) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(
+        str(symbol).strip() for symbol in value if str(symbol).strip()
+    ))
+
+
+def _require_items(payload: Dict, field: str) -> List[Dict]:
+    items = payload.get(field)
+    if items is None:
+        items = payload.get("data")
+    if not isinstance(items, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field}（或 data）必须是数组",
+        )
+    if len(items) > 2000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"单次最多上报 2000 条 {field}",
+        )
+    if not all(isinstance(item, dict) for item in items):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field} 中的每一项必须是对象",
+        )
+    return items
+
+
+def _normalize_calendar(day: str, items: List[Dict]) -> List[Dict]:
+    result = []
+    for index, item in enumerate(items):
+        name = str(item.get("name") or item.get("title") or "").strip()
+        if not name:
+            raise HTTPException(400, f"events[{index}] 缺少 name")
+        event_time = str(
+            item.get("publish_time") or item.get("event_time")
+            or item.get("time") or ""
+        ).strip()
+        event_id = str(item.get("id") or "").strip() or _stable_id(
+            "calendar", day, event_time, name, item.get("currency")
+        )
+        result.append({
+            **item,
+            "id": event_id,
+            "name": name,
+            "event_time": event_time,
+            "publish_time": event_time,
+            "forecast": item.get("forecast", item.get("consensus", "")),
+            "importance": _normalize_importance(
+                item.get("importance", item.get("star", 0))
+            ),
+            "symbols": _normalize_symbols(item.get("symbols")),
+        })
+    return result
+
+
+def _normalize_key_events(day: str, items: List[Dict]) -> List[Dict]:
+    result = []
+    for index, item in enumerate(items):
+        title = str(
+            item.get("title") or item.get("name") or item.get("content") or ""
+        ).strip()
+        if not title:
+            raise HTTPException(400, f"events[{index}] 缺少 title")
+        event_time = str(
+            item.get("event_time") or item.get("publish_time")
+            or item.get("time") or ""
+        ).strip()
+        event_id = str(item.get("id") or "").strip() or _stable_id(
+            "key", day, event_time, title, item.get("category")
+        )
+        result.append({
+            **item,
+            "id": event_id,
+            "title": title,
+            "event_time": event_time,
+            "importance": _normalize_importance(
+                item.get("importance", item.get("star", 0))
+            ),
+            "symbols": _normalize_symbols(item.get("symbols")),
+        })
+    return result
+
+
+def _normalize_flash_news(items: List[Dict]) -> List[Dict]:
+    result = []
+    for index, item in enumerate(items):
+        content = str(item.get("content") or item.get("title") or "").strip()
+        if not content:
+            raise HTTPException(400, f"items[{index}] 缺少 content")
+        published_at = str(
+            item.get("published_at") or item.get("time")
+            or item.get("create_time") or datetime.now().isoformat()
+        ).strip()
+        news_id = str(item.get("id") or "").strip() or _stable_id(
+            "flash", published_at, content
+        )
+        result.append({
+            **item,
+            "id": news_id,
+            "content": content,
+            "published_at": published_at,
+            "importance": _normalize_importance(
+                item.get("importance", item.get("star", 0))
+            ),
+            "symbols": _normalize_symbols(
+                item.get("symbols") or item.get("related_symbols")
+            ),
+        })
+    return result
 
 
 def create_news_routes():
-    """创建新闻相关路由"""
-    router = APIRouter(prefix="/api/news", tags=["新闻"])
-    protected_router = APIRouter(
-        prefix="/api/news",
-        tags=["新闻"],
-        dependencies=[Depends(require_auth)],
-    )
+    """Create the shared market event service routes."""
+    router = APIRouter(prefix="/news", tags=["市场事件"])
+    repository = MarketEventRepository()
+    hub = get_market_event_hub()
 
-    @protected_router.get("/calendar")
+    @router.post("/calendar/daily")
+    async def replace_calendar_day(
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        payload = await request.json()
+        day = _validate_day(payload.get("date"))
+        source = str(payload.get("source") or "external").strip()
+        events = _normalize_calendar(day, _require_items(payload, "events"))
+        count = repository.replace_calendar_day(day, events, source)
+        return {
+            "status": "ok",
+            "message": f"{day} 财经日历已覆盖",
+            "date": day,
+            "count": count,
+        }
+
+    @router.get("/calendar")
     async def get_calendar(
-        date: Optional[str] = Query(None, description="日期，格式: 2026-03-15，不传返回所有")
-    ):
-        """
-        获取财经日历
+        date_value: Optional[str] = Query(None, alias="date"),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        day = _validate_day(date_value) if date_value else None
+        events = repository.list_calendar(day)
+        return {"status": "ok", "date": day, "count": len(events), "data": events}
 
-        返回指定日期或所有日期的财经事件
-        """
-        from market.market_event_monitor import get_market_event_monitor
-        monitor = get_market_event_monitor()
-
-        calendar = monitor.get_calendar(date)
-
+    @router.post("/key-events/daily")
+    async def replace_key_event_day(
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        payload = await request.json()
+        day = _validate_day(payload.get("date"))
+        source = str(payload.get("source") or "external").strip()
+        events = _normalize_key_events(day, _require_items(payload, "events"))
+        count = repository.replace_key_event_day(day, events, source)
         return {
             "status": "ok",
-            "date": date,
-            "count": len(calendar),
-            "data": calendar
+            "message": f"{day} 关键事件已覆盖",
+            "date": day,
+            "count": count,
         }
 
-    @protected_router.get("/upcoming")
-    async def get_upcoming(
-        hours: int = Query(24, description="未来多少小时内的事件")
-    ):
-        """
-        获取即将发布的重要事件
+    @router.get("/key-events")
+    async def get_key_events(
+        date_value: Optional[str] = Query(None, alias="date"),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        day = _validate_day(date_value) if date_value else None
+        events = repository.list_key_events(day)
+        return {"status": "ok", "date": day, "count": len(events), "data": events}
 
-        默认返回未来24小时内的重要财经事件
-        """
-        from market.market_event_monitor import get_market_event_monitor
-        monitor = get_market_event_monitor()
+    @router.post("/flash")
+    async def upsert_flash_news(
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        payload = await request.json()
+        source = str(payload.get("source") or "external").strip()
+        items = _normalize_flash_news(_require_items(payload, "items"))
+        for item in items:
+            item["source"] = source
+        count = repository.upsert_flash_news(items, source)
+        await hub.broadcast({
+            "type": "market_flash_news_updated",
+            "count": count,
+            "items": items,
+            "updated_at": int(datetime.now().timestamp()),
+        })
+        return {"status": "ok", "message": "市场快讯已写入", "count": count}
 
-        events = monitor.get_upcoming_events(hours)
-
-        return {
-            "status": "ok",
-            "hours": hours,
-            "count": len(events),
-            "data": events
-        }
-
-    @protected_router.get("/flash")
+    @router.get("/flash")
     async def get_flash_news(
-        count: int = Query(20, description="获取数量，默认20")
-    ):
-        """
-        获取最新快讯
+        limit: int = Query(100, ge=1, le=500),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        items = repository.list_flash_news(limit)
+        return {"status": "ok", "count": len(items), "data": items}
 
-        返回最近的有影响的快讯（关键人物讲话、重要事件）
-        """
-        from market.market_event_monitor import get_market_event_monitor
-        monitor = get_market_event_monitor()
-
-        news_list = monitor.get_recent_news(count)
-
+    @router.get("/status")
+    async def get_status(user: AuthUser = Depends(require_auth)) -> Dict:
         return {
             "status": "ok",
-            "count": len(news_list),
-            "data": news_list
-        }
-
-    @protected_router.get("/status")
-    async def get_status():
-        """
-        获取新闻模块状态
-        """
-        from market.market_event_monitor import get_market_event_monitor
-        monitor = get_market_event_monitor()
-
-        status = monitor.get_status()
-
-        return {
-            "status": "ok",
-            "data": status
+            "data": {
+                **repository.get_status(),
+                "websocket_clients": hub.ws_manager.get_client_count(),
+            },
         }
 
     @router.websocket("/ws")
-    async def news_websocket(websocket: WebSocket):
-        """
-        市场事件WebSocket推送
-
-        推送内容类型:
-        - calendar_event_reminder: 财经日历事件发布前提醒
-        - calendar_update: 日历更新
-        - flash_news: 重要快讯
-        """
-        from market.market_event_monitor import get_market_event_monitor
-        monitor = get_market_event_monitor()
-
+    async def market_event_websocket(websocket: WebSocket):
         await websocket.accept()
-        monitor.ws_manager.add_client(websocket)
-
+        authenticated = False
         try:
-            # 发送欢迎消息
+            auth_text = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            auth_message = json.loads(auth_text)
+            if auth_message.get("type") != "auth" or not auth_message.get("token"):
+                await websocket.close(code=1008, reason="请先登录")
+                return
+            user = get_auth_manager().verify_token(auth_message["token"])
+            hub.ws_manager.add_client(websocket)
+            authenticated = True
             await websocket.send_json({
                 "type": "connected",
-                "message": "已连接到市场事件推送服务"
+                "message": "已连接到公共市场事件服务",
+                "user_id": user.user_id,
             })
-
-            # 保持连接，等待客户端消息或断开
             while True:
-                # 接收客户端消息（心跳等）
-                data = await websocket.receive_text()
-
-                # 处理心跳
-                if data == "ping":
+                message = json.loads(await websocket.receive_text())
+                if message.get("type") == "ping":
                     await websocket.send_json({"type": "pong"})
-
+        except asyncio.TimeoutError:
+            await websocket.close(code=1008, reason="登录超时")
+        except (HTTPException, json.JSONDecodeError):
+            await websocket.close(code=1008, reason="登录凭证无效")
         except WebSocketDisconnect:
             pass
-        except Exception as e:
-            print(f"[MarketEventWebSocket] 连接异常: {e}")
         finally:
-            monitor.ws_manager.remove_client(websocket)
+            if authenticated:
+                hub.ws_manager.remove_client(websocket)
 
-    @protected_router.get("/impact/{symbol}")
-    async def get_symbol_impact(symbol: str):
-        """
-        获取特定品种的相关事件
-
-        返回影响该品种的即将发布事件
-        """
-        from market.market_event_monitor import get_market_event_monitor
-        from market.event_config import WATCH_SYMBOLS
-
-        if symbol not in WATCH_SYMBOLS:
-            return {
-                "status": "error",
-                "message": f"不支持的品种: {symbol}",
-                "supported_symbols": WATCH_SYMBOLS
-            }
-
-        monitor = get_market_event_monitor()
-        events = monitor.get_upcoming_events(72)  # 未来3天
-
-        # 过滤相关事件
-        related_events = [
-            e for e in events
-            if symbol in e.get('symbols', [])
-        ]
-
-        return {
-            "status": "ok",
-            "symbol": symbol,
-            "count": len(related_events),
-            "data": related_events
-        }
-
-    @protected_router.post("/calendar/clear")
-    async def clear_calendar():
-        """
-        清空财经日历数据
-
-        清空后需要EA重新推送日历数据（会应用时区转换）
-        """
-        from market.market_event_monitor import get_market_event_monitor
-        monitor = get_market_event_monitor()
-        monitor.clear_calendar()
-
-        return {
-            "status": "ok",
-            "message": "财经日历数据已清空，请让EA重新推送日历数据"
-        }
-
-    @protected_router.delete("/calendar")
-    async def clear_calendar_delete():
-        """
-        清空财经日历数据 (DELETE方法)
-
-        清空后需要EA重新推送日历数据（会应用时区转换）
-        """
-        from market.market_event_monitor import get_market_event_monitor
-        monitor = get_market_event_monitor()
-        monitor.clear_calendar()
-
-        return {
-            "status": "ok",
-            "message": "财经日历数据已清空，请让EA重新推送日历数据"
-        }
-
-    router.include_router(protected_router)
     return router

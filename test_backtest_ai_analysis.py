@@ -77,11 +77,11 @@ class BacktestAIAnalysisTestCase(unittest.TestCase):
         )
         dataset = dataset_service.create_dataset(
             self.user.user_id, account.account_id, "Review data", "GOLD_",
-            1767225600, 1767229200, warmup_days=0,
+            1767225600, 1767232800, warmup_days=0,
         )
         datasets.mark_ready(
             dataset["dataset_id"],
-            received_bars=61,
+            received_bars=121,
             duplicate_count=0,
             gap_count=0,
             invalid_count=0,

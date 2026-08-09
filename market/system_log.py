@@ -29,10 +29,6 @@ class SystemLog:
         "ea_kline_stale": "K线数据过期",
         "ea_trade_request": "EA请求交易指令",
 
-        # MT5财经日历推送
-        "mt5_calendar_update": "MT5财经日历上报",
-        "mt5_event_result": "MT5事件结果上报",
-
         # 转折点相关
         "pivot_detected": "转折点检测完成",
         "pivot_alert": "转折点提醒",
@@ -45,20 +41,6 @@ class SystemLog:
 
         # 持仓相关
         "position_update": "持仓数据更新",
-
-        # 新闻爬虫相关
-        "news_crawler_start": "新闻爬虫启动",
-        "news_crawler_stop": "新闻爬虫停止",
-        "news_calendar_fetch": "财经日历获取",
-        "news_calendar_fetch_error": "财经日历获取失败",
-        "news_calendar_update": "财经日历更新",
-        "news_flash_fetch": "快讯获取",
-        "news_flash_fetch_error": "快讯获取失败",
-        "news_event_scheduled": "事件调度创建",
-        "news_event_reminder": "事件发布前提醒",
-        "news_event_result": "事件结果获取",
-        "news_impact_analysis": "影响分析完成",
-        "news_ws_broadcast": "新闻WebSocket推送",
 
         # 系统事件
         "system_startup": "系统启动",

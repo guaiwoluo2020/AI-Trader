@@ -20,6 +20,7 @@ from ..models.llm_config import (
 )
 from ..store import LLMStore
 from .kline_service import KlineService
+from sqlite_storage import SharedAIRuntimeRepository
 
 
 class LLMRequestError(RuntimeError):
@@ -50,6 +51,7 @@ class LLMService:
         self._strategy_store = None
         self._allowed_strategy_ids = None
         self._source_last_analysis_at = {}
+        self._shared_runtime_repo = SharedAIRuntimeRepository()
 
         # 从环境变量补充配置
         self._load_env_config()
@@ -130,6 +132,20 @@ class LLMService:
                     "min_risk_reward": strategy.min_risk_reward,
                     "analysis_interval_minutes": interval // 60,
                     "kline_count": int(params.get("kline_count", 100)),
+                    "model": str(params.get("model") or ""),
+                    "system_prompt": str(params.get("system_prompt") or ""),
+                    "analysis_prompt_template": str(
+                        params.get("analysis_prompt_template") or ""
+                    ),
+                    "share_runtime_data": bool(
+                        params.get("share_runtime_data", False)
+                    ),
+                    "reference_runtime_ids": list(
+                        params.get("reference_runtime_ids") or []
+                    ),
+                    "signal_params": dict(params),
+                    "symbol": strategy.symbol,
+                    "strategy_lifecycle": strategy.lifecycle_status,
                 })
         return plan
 
@@ -217,6 +233,8 @@ class LLMService:
         self,
         all_klines: Dict[str, Dict],
         analysis_plan: Optional[Dict[str, Dict]] = None,
+        analysis_prompt_template: Optional[str] = None,
+        reference_context: str = "",
     ) -> str:
         """构建分析提示词"""
         strategy_sections = []
@@ -253,12 +271,18 @@ class LLMService:
             market_sections.append("\n".join(market_lines))
 
         config = self.llm_store.get_config()
-        template = getattr(
+        template = analysis_prompt_template or getattr(
             config, "analysis_prompt_template", DEFAULT_ANALYSIS_PROMPT_TEMPLATE
         )
         prompt = template.replace(
             "{{strategy_context}}", "\n\n".join(strategy_sections)
         ).replace("{{market_data}}", "\n\n".join(market_sections))
+        if reference_context:
+            prompt += (
+                "\n\n## 其他用户共享的历史AI运行数据（仅供参考）\n"
+                "这些数据可能来自不同账户或行情源，不得替代当前K线判断：\n"
+                f"{reference_context}"
+            )
         return prompt + (
             "\n\n## 策略归属硬性要求\n"
             "trade_suggestions 中每条建议必须包含 strategy_id 和 signal_source_id，"
@@ -266,17 +290,22 @@ class LLMService:
             "输出建议，不得省略或合并。"
         )
 
-    def prompt_hash(self, prompt: str) -> str:
+    def prompt_hash(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """同时覆盖 system 和 user prompt，供回测缓存与审计使用。"""
         config = self.llm_store.get_config()
         version = getattr(config, "prompt_version", 1)
-        system_prompt = getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)
+        system_prompt = system_prompt or getattr(
+            config, "system_prompt", DEFAULT_SYSTEM_PROMPT
+        )
         payload = f"v{version}\n{system_prompt}\n{prompt}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     # ==================== LLM API 调用 ====================
 
-    def call_llm(self, prompt: str) -> Optional[Dict]:
+    def call_llm(
+        self, prompt: str, model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> Optional[Dict]:
         """调用 LLM API（非流式）"""
         config = self.llm_store.get_config()
         if not config.api_key:
@@ -289,9 +318,9 @@ class LLMService:
             }
 
             data = {
-                "model": config.model,
+                "model": model or config.model,
                 "messages": [
-                    {"role": "system", "content": getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
+                    {"role": "system", "content": system_prompt or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
@@ -317,7 +346,10 @@ class LLMService:
             print(f"[LLMService] 调用异常: {e}")
             return None
 
-    def call_llm_stream(self, prompt: str, on_chunk: callable = None) -> Optional[Dict]:
+    def call_llm_stream(
+        self, prompt: str, on_chunk: callable = None,
+        model: Optional[str] = None, system_prompt: Optional[str] = None,
+    ) -> Optional[Dict]:
         """
         调用 LLM API（流式）
 
@@ -336,9 +368,9 @@ class LLMService:
             }
 
             data = {
-                "model": config.model,
+                "model": model or config.model,
                 "messages": [
-                    {"role": "system", "content": getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
+                    {"role": "system", "content": system_prompt or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
@@ -542,6 +574,140 @@ class LLMService:
             analysis["trade_suggestions"] = normalized
         return response
 
+    def _group_analysis_plans(self, analysis_plan: Dict[str, Dict]) -> List[Dict]:
+        """Group sources only when model, prompts, and references are identical."""
+        config = self.llm_store.get_config()
+        groups: Dict[tuple, Dict] = {}
+        for symbol, symbol_plan in analysis_plan.items():
+            for profile in symbol_plan.get("strategies", []):
+                model = profile.get("model") or getattr(config, "model", "")
+                system_prompt = profile.get("system_prompt") or getattr(
+                    config, "system_prompt", DEFAULT_SYSTEM_PROMPT
+                )
+                template = (
+                    profile.get("analysis_prompt_template")
+                    or getattr(
+                        config,
+                        "analysis_prompt_template",
+                        DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
+                    )
+                )
+                references = tuple(profile.get("reference_runtime_ids") or [])
+                key = (model, system_prompt, template, references)
+                group = groups.setdefault(key, {
+                    "model": model,
+                    "system_prompt": system_prompt,
+                    "analysis_prompt_template": template,
+                    "reference_runtime_ids": list(references),
+                    "plan": {},
+                })
+                target = group["plan"].setdefault(
+                    symbol, {"periods": {}, "strategies": []}
+                )
+                target["strategies"].append(profile)
+                for period, weight in profile.get("periods", {}).items():
+                    current = target["periods"].setdefault(
+                        period, {"weight": 0, "kline_count": 0}
+                    )
+                    current["weight"] = max(current["weight"], int(weight))
+                    current["kline_count"] = max(
+                        current["kline_count"], int(profile.get("kline_count", 100))
+                    )
+        if not groups and analysis_plan:
+            return [{
+                "model": getattr(config, "model", ""),
+                "system_prompt": getattr(
+                    config, "system_prompt", DEFAULT_SYSTEM_PROMPT
+                ),
+                "analysis_prompt_template": getattr(
+                    config,
+                    "analysis_prompt_template",
+                    DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
+                ),
+                "reference_runtime_ids": [],
+                "plan": analysis_plan,
+            }]
+        return list(groups.values())
+
+    def _shared_reference_context(self, share_ids: List[str]) -> str:
+        references = []
+        for share_id in share_ids[:10]:
+            item = self._shared_runtime_repo.get_shared(share_id)
+            if not item:
+                continue
+            references.append({
+                "symbol": item["symbol"],
+                "period": item["period"],
+                "model": item["model"],
+                "signal_params": item["signal_params"],
+                "strategy_name": item["strategy_name"],
+                "strategy_lifecycle": item["strategy_lifecycle"],
+                "result": item["result"],
+                "last_run_at": item["last_run_at"],
+            })
+        return json.dumps(references, ensure_ascii=False)[:30000]
+
+    @staticmethod
+    def _merge_analysis_results(target: Dict, incoming: Dict) -> None:
+        for symbol, analysis in (incoming or {}).items():
+            if not isinstance(analysis, dict):
+                continue
+            if symbol not in target:
+                target[symbol] = analysis
+                continue
+            current = target[symbol]
+            current.setdefault("trend_analysis", {}).update(
+                analysis.get("trend_analysis") or {}
+            )
+            current.setdefault("trade_suggestions", []).extend(
+                analysis.get("trade_suggestions") or []
+            )
+            for key in ("overall_trend", "key_levels", "analyzed_at"):
+                if analysis.get(key) is not None:
+                    current[key] = analysis[key]
+
+    def _publish_runtime_results(self, plan: Dict, response: Dict) -> None:
+        config = self.llm_store.get_config()
+        for symbol, symbol_plan in plan.items():
+            analysis = response.get(symbol)
+            if not isinstance(analysis, dict):
+                continue
+            for profile in symbol_plan.get("strategies", []):
+                source_id = profile.get("signal_source_id", "")
+                if not profile.get("share_runtime_data"):
+                    self._shared_runtime_repo.remove_for_source(
+                        self.llm_store.user_id,
+                        profile.get("strategy_id", ""),
+                        source_id,
+                    )
+                    continue
+                source_result = dict(analysis)
+                source_result["trade_suggestions"] = [
+                    item for item in analysis.get("trade_suggestions", [])
+                    if item.get("signal_source_id") == source_id
+                ]
+                self._shared_runtime_repo.publish(
+                    self.llm_store.user_id,
+                    {
+                        "strategy_id": profile.get("strategy_id", ""),
+                        "strategy_name": profile.get("strategy_name", ""),
+                        "symbol": symbol,
+                        "lifecycle_status": profile.get(
+                            "strategy_lifecycle", "draft"
+                        ),
+                    },
+                    {
+                        "signal_source_id": source_id,
+                        "period": next(iter(profile.get("periods") or {}), ""),
+                        "params": profile.get("signal_params") or {},
+                    },
+                    source_result,
+                    profile.get("model") or config.model,
+                    profile.get("system_prompt") or config.system_prompt,
+                    profile.get("analysis_prompt_template")
+                    or config.analysis_prompt_template,
+                )
+
     # ==================== 入场价检测 ====================
 
     def check_entry_price_nearby(
@@ -681,40 +847,66 @@ class LLMService:
                 "message": "所有品种行情均超过 3 分钟未更新，暂不发起 AI 分析",
             }
 
-        report("analyzing", f"正在分析 {len(active_symbols)} 个品种...")
-
-        # 收集K线数据
-        all_klines = self.collect_klines_for_analysis(
-            active_symbols, analysis_plan
+        groups = self._group_analysis_plans(analysis_plan)
+        report(
+            "analyzing",
+            f"正在分析 {len(active_symbols)} 个品种，共 {len(groups)} 组模型配置...",
         )
-        if not all_klines:
-            report("error", "无K线数据可分析")
-            return {"status": "error", "message": "无K线数据可分析"}
 
-        # 构建提示词
-        prompt = self.build_analysis_prompt(all_klines, analysis_plan)
-
-        # 调用 LLM
         def on_chunk(count, content):
             if count % 50 == 0:
                 report("streaming", f"正在接收分析结果... ({len(content)} 字符)")
 
-        try:
-            response = self.call_llm_stream(prompt, on_chunk)
-        except LLMRequestError as exc:
-            message = str(exc)
-            report("error", message)
-            return {"status": "error", "message": message}
+        response: Dict = {}
+        analyzed_source_ids = set()
+        for group in groups:
+            group_plan = {
+                symbol: item for symbol, item in group["plan"].items()
+                if symbol in active_symbols
+            }
+            if not group_plan:
+                continue
+            all_klines = self.collect_klines_for_analysis(
+                list(group_plan), group_plan
+            )
+            if not all_klines:
+                continue
+            prompt = self.build_analysis_prompt(
+                all_klines,
+                group_plan,
+                analysis_prompt_template=group["analysis_prompt_template"],
+                reference_context=self._shared_reference_context(
+                    group["reference_runtime_ids"]
+                ),
+            )
+            try:
+                group_response = self.call_llm_stream(
+                    prompt,
+                    on_chunk,
+                    model=group["model"],
+                    system_prompt=group["system_prompt"],
+                )
+            except LLMRequestError as exc:
+                message = str(exc)
+                report("error", message)
+                return {"status": "error", "message": message}
+            group_response = self._normalize_analysis_response(
+                group_response or {}, group_plan
+            )
+            self._merge_analysis_results(response, group_response)
+            self._publish_runtime_results(group_plan, group_response)
+            analyzed_source_ids.update(
+                profile.get("signal_source_id")
+                for item in group_plan.values()
+                for profile in item.get("strategies", [])
+            )
 
-        response = self._normalize_analysis_response(response, analysis_plan)
+        if not response:
+            report("error", "无K线数据可分析或模型未返回有效结果")
+            return {"status": "error", "message": "模型未返回有效分析结果"}
 
         # 保存结果
         if response:
-            analyzed_source_ids = {
-                profile.get("signal_source_id")
-                for symbol_plan in analysis_plan.values()
-                for profile in symbol_plan.get("strategies", [])
-            }
             for symbol, analysis in response.items():
                 if isinstance(analysis, dict):
                     previous = self.llm_store.get_analysis_result(symbol)

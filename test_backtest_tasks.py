@@ -64,12 +64,12 @@ class BacktestTemplateTestCase(unittest.TestCase):
             name,
             "GOLD_",
             start,
-            start + 3600,
+            start + 2 * 60 * 60,
             warmup_days=0,
         )
         self.dataset_repository.mark_ready(
             dataset["dataset_id"],
-            received_bars=61,
+            received_bars=121,
             duplicate_count=0,
             gap_count=0,
             invalid_count=0,

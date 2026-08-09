@@ -70,6 +70,7 @@ class KeyLevelSignalGenerator:
 
         # 冷却记录
         self._signal_cooldowns: Dict[str, datetime] = {}
+        self._last_prices: Dict[str, float] = {}
 
         print("[KeyLevelSignalGenerator] 关键点位信号生成器已初始化")
 
@@ -108,6 +109,12 @@ class KeyLevelSignalGenerator:
         """设置冷却"""
         key = f"{strategy_id}_{signal_source_id}_{symbol}_{key_level}"
         self._signal_cooldowns[key] = datetime.now()
+
+    def _price_state_key(
+        self, symbol: str, key_level: float, strategy_id: str = "",
+        signal_source_id: str = "",
+    ) -> str:
+        return f"{strategy_id}_{signal_source_id}_{symbol}_{key_level}"
 
     def generate_signal(
         self, symbol: str, current_price: float, strategy_id: str = "",
@@ -157,9 +164,30 @@ class KeyLevelSignalGenerator:
                 symbol,
                 current_price,
                 levels,
-                threshold=float(params.get("proximity_threshold", self.threshold)),
+                threshold=float(params.get(
+                    "order_distance",
+                    params.get("proximity_threshold", self.threshold),
+                )),
+                previous_price=None,
+                trigger_config=params,
             )
             source_id = config["signal_source_id"]
+            state_key = self._price_state_key(
+                symbol, signal.key_level, strategy.strategy_id, source_id
+            )
+            previous_price = self._last_prices.get(state_key)
+            signal = build_key_level_state_signal(
+                symbol,
+                current_price,
+                levels,
+                threshold=float(params.get(
+                    "order_distance",
+                    params.get("proximity_threshold", self.threshold),
+                )),
+                previous_price=previous_price,
+                trigger_config=params,
+            )
+            self._last_prices[state_key] = current_price
             cooldown = max(0, int(params.get("cooldown_seconds", self.cooldown)))
             if signal.is_entry_trigger and self._check_cooldown(
                 symbol, signal.key_level, strategy.strategy_id, source_id, cooldown

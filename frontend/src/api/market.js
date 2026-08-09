@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { getAuthToken } from '../auth'
 import { applyAuthToRequestConfig, handleAuthError } from './auth-helpers.js'
-import { API_BASE_URL, getMarketWebSocketUrl } from './runtime.js'
+import { API_BASE_URL, getApiWebSocketUrl, getMarketWebSocketUrl } from './runtime.js'
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -22,6 +22,42 @@ api.interceptors.response.use(
 )
 
 export const marketAPI = {
+  async getMarketEventStatus() {
+    const response = await api.get('/news/status')
+    return response.data
+  },
+
+  async getMarketCalendar(date) {
+    const response = await api.get('/news/calendar', { params: { date } })
+    return response.data
+  },
+
+  async getMarketKeyEvents(date) {
+    const response = await api.get('/news/key-events', { params: { date } })
+    return response.data
+  },
+
+  async getMarketFlashNews(limit = 100) {
+    const response = await api.get('/news/flash', { params: { limit } })
+    return response.data
+  },
+
+  createMarketEventWebSocket(onMessage, onClose) {
+    const ws = new WebSocket(getApiWebSocketUrl('/news/ws'))
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'auth', token: getAuthToken() }))
+    }
+    ws.onmessage = (event) => {
+      try {
+        onMessage?.(JSON.parse(event.data))
+      } catch (error) {
+        console.error('市场事件 WebSocket 消息解析失败:', error)
+      }
+    }
+    ws.onclose = () => onClose?.()
+    return ws
+  },
+
   // ==================== 回测任务 ====================
 
   async getBacktestTemplateContext() {
@@ -335,6 +371,21 @@ export const marketAPI = {
     return response.data
   },
 
+  // 获取 AI 信号源可选模型、默认提示词和共享运行数据
+  async getLLMSignalOptions(symbol = null) {
+    const response = await api.get('/llm/signal-options', {
+      params: symbol ? { symbol } : {}
+    })
+    return response.data
+  },
+
+  async getSharedAIRuntimeData(symbol = null) {
+    const response = await api.get('/llm/runtime-shares', {
+      params: symbol ? { symbol } : {}
+    })
+    return response.data
+  },
+
   // 申请开通大模型行情分析
   async requestLLMAccess() {
     const response = await api.post('/llm/access/request')
@@ -468,9 +519,24 @@ export const marketAPI = {
     return response.data
   },
 
+  // 获取平台共享策略库
+  async getSharedStrategies() {
+    const response = await api.get('/strategy/shared')
+    return response.data
+  },
+
   // 创建策略（同一品种可创建多条）
   async createStrategy(data) {
     const response = await api.post('/strategy', data)
+    return response.data
+  },
+
+  // 复制共享策略为当前用户的私有草稿
+  async copySharedStrategy(ownerUserId, strategyId, data = {}) {
+    const response = await api.post(
+      `/strategy/shared/${encodeURIComponent(ownerUserId)}/${encodeURIComponent(strategyId)}/copy`,
+      data
+    )
     return response.data
   },
 

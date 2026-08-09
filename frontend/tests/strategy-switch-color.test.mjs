@@ -10,10 +10,14 @@ const settingsSource = fs.readFileSync(
 test('strategy configuration switches use green when enabled', () => {
   assert.match(
     settingsSource,
-    /v-model="tradeConfig\.enabled"[\s\S]*?label="启用自动生成"[\s\S]*?color="success"/
+    /v-model="selectedStrategy\.is_shared" color="success"/
   )
   assert.match(
     settingsSource,
-    /v-model="strategy\.enabled"[\s\S]*?label="启用策略"[\s\S]*?color="success"/
+    /v-model="selectedStrategy\.enabled" color="success"/
+  )
+  assert.match(
+    settingsSource,
+    /v-model="newSignalSource\.params\.share_runtime_data"[\s\S]*?color="success"/
   )
 })

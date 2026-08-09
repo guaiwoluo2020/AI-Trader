@@ -61,6 +61,10 @@ class LLMStore:
 
     # ==================== 配置管理 ====================
 
+    @property
+    def user_id(self) -> int:
+        return int(self._user_id)
+
     def get_config(self) -> LLMConfig:
         """获取当前用户的有效配置，审批变化无需重启引擎。"""
         with self._lock:

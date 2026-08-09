@@ -122,6 +122,7 @@ class StrategyStore:
                 enabled=False,
                 auto_execute=False,
                 lifecycle_status=StrategyLifecycle.DRAFT,
+                signal_sources=[],
             )
             if data:
                 safe_data = dict(data)

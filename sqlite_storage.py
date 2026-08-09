@@ -11,11 +11,13 @@ import hashlib
 import hmac
 import math
 import os
+import re
 import secrets
 import sqlite3
 import threading
 import time
 import uuid
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -172,6 +174,30 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_llm_access_requests_status
                     ON llm_access_requests(status, requested_at);
+
+                    CREATE TABLE IF NOT EXISTS shared_ai_runtime_data (
+                        share_id TEXT PRIMARY KEY,
+                        owner_user_id INTEGER NOT NULL,
+                        strategy_id TEXT NOT NULL,
+                        signal_source_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        period TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        signal_params_json TEXT NOT NULL DEFAULT '{}',
+                        system_prompt TEXT NOT NULL DEFAULT '',
+                        analysis_prompt_template TEXT NOT NULL DEFAULT '',
+                        strategy_name TEXT NOT NULL DEFAULT '',
+                        strategy_lifecycle TEXT NOT NULL DEFAULT 'draft',
+                        result_json TEXT NOT NULL DEFAULT '{}',
+                        last_run_at INTEGER NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(owner_user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        UNIQUE(owner_user_id, strategy_id, signal_source_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_shared_ai_runtime_lookup
+                    ON shared_ai_runtime_data(symbol, period, updated_at DESC);
 
                     CREATE TABLE IF NOT EXISTS position_management_policies (
                         policy_id TEXT PRIMARY KEY,
@@ -783,6 +809,49 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_paper_runtime_logs_account
                     ON paper_runtime_logs(account_id, created_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS market_calendar_events (
+                        event_date TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        event_time TEXT NOT NULL DEFAULT '',
+                        importance INTEGER NOT NULL DEFAULT 0,
+                        source TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY(event_date, event_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_market_calendar_time
+                    ON market_calendar_events(event_date, event_time);
+
+                    CREATE TABLE IF NOT EXISTS market_key_events (
+                        event_date TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        event_time TEXT NOT NULL DEFAULT '',
+                        importance INTEGER NOT NULL DEFAULT 0,
+                        source TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY(event_date, event_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_market_key_event_time
+                    ON market_key_events(event_date, event_time);
+
+                    CREATE TABLE IF NOT EXISTS market_flash_news (
+                        news_id TEXT PRIMARY KEY,
+                        published_at TEXT NOT NULL DEFAULT '',
+                        importance INTEGER NOT NULL DEFAULT 0,
+                        source TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_market_flash_published
+                    ON market_flash_news(published_at DESC, updated_at DESC);
 
                     """
                 )
@@ -2608,6 +2677,211 @@ class LLMAccessRepository:
         return self.get_status(int(row["user_id"])) if row else None
 
 
+class SharedAIRuntimeRepository:
+    """Stores opt-in AI analysis snapshots that other users may use as context."""
+
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or get_storage()
+
+    def list_shared(
+        self, viewer_user_id: int, symbol: Optional[str] = None,
+    ) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT runtime.*, users.username AS owner_username
+            FROM shared_ai_runtime_data AS runtime
+            JOIN users ON users.id = runtime.owner_user_id
+            ORDER BY runtime.updated_at DESC, runtime.share_id
+            """,
+            (),
+        )
+        items = [self._row_to_dict(row, viewer_user_id) for row in rows]
+        if symbol:
+            for item in items:
+                item["symbol_similarity"] = self.symbol_similarity(
+                    symbol, item["symbol"]
+                )
+            items.sort(key=lambda item: (
+                -item["symbol_similarity"], -item["updated_at"], item["share_id"]
+            ))
+        return items
+
+    @classmethod
+    def symbol_similarity(cls, left: str, right: str) -> float:
+        left_normalized = cls._normalize_symbol(left)
+        right_normalized = cls._normalize_symbol(right)
+        if not left_normalized or not right_normalized:
+            return 0.0
+        if left_normalized == right_normalized:
+            return 1.0
+        if cls._symbol_family(left_normalized) == cls._symbol_family(right_normalized):
+            return 0.98
+        if left_normalized.startswith(right_normalized) or right_normalized.startswith(
+            left_normalized
+        ):
+            return 0.9
+        return round(
+            SequenceMatcher(None, left_normalized, right_normalized).ratio(), 4
+        )
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        return re.sub(r"[^A-Z0-9]", "", str(symbol or "").upper())
+
+    @staticmethod
+    def _symbol_family(symbol: str) -> str:
+        aliases = (
+            (("XAU", "GOLD"), "GOLD"),
+            (("XAG", "SILVER"), "SILVER"),
+            (("BTC", "XBT"), "BTC"),
+            (("ETH",), "ETH"),
+            (("WTI", "USOIL", "XTI"), "WTI"),
+            (("BRENT", "UKOIL", "XBR"), "BRENT"),
+        )
+        for markers, family in aliases:
+            if any(marker in symbol for marker in markers):
+                return family
+        return symbol
+
+    def get_shared(self, share_id: str) -> Optional[Dict]:
+        row = self.storage.fetchone(
+            """
+            SELECT runtime.*, users.username AS owner_username
+            FROM shared_ai_runtime_data AS runtime
+            JOIN users ON users.id = runtime.owner_user_id
+            WHERE runtime.share_id = ?
+            """,
+            (str(share_id),),
+        )
+        return self._row_to_dict(row, None) if row else None
+
+    def publish(
+        self,
+        user_id: int,
+        strategy: Dict,
+        source: Dict,
+        result: Dict,
+        model: str,
+        system_prompt: str,
+        analysis_prompt_template: str,
+    ) -> Dict:
+        strategy_id = str(strategy.get("strategy_id", ""))
+        source_id = str(source.get("signal_source_id", ""))
+        share_id = f"{int(user_id)}:{strategy_id}:{source_id}"
+        now = _now_ts()
+        self.storage.execute(
+            """
+            INSERT INTO shared_ai_runtime_data(
+                share_id, owner_user_id, strategy_id, signal_source_id,
+                symbol, period, model, signal_params_json, system_prompt,
+                analysis_prompt_template, strategy_name, strategy_lifecycle,
+                result_json, last_run_at, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(share_id) DO UPDATE SET
+                symbol = excluded.symbol,
+                period = excluded.period,
+                model = excluded.model,
+                signal_params_json = excluded.signal_params_json,
+                system_prompt = excluded.system_prompt,
+                analysis_prompt_template = excluded.analysis_prompt_template,
+                strategy_name = excluded.strategy_name,
+                strategy_lifecycle = excluded.strategy_lifecycle,
+                result_json = excluded.result_json,
+                last_run_at = excluded.last_run_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                share_id, int(user_id), strategy_id, source_id,
+                str(strategy.get("symbol", "")), str(source.get("period", "")),
+                str(model), json.dumps(source.get("params") or {}, ensure_ascii=False),
+                str(system_prompt), str(analysis_prompt_template),
+                str(strategy.get("strategy_name", "")),
+                str(strategy.get("lifecycle_status", "draft")),
+                json.dumps(result or {}, ensure_ascii=False), now, now, now,
+            ),
+        )
+        return self.get_shared(share_id) or {}
+
+    def remove_for_source(
+        self, user_id: int, strategy_id: str, signal_source_id: str,
+    ) -> None:
+        self.storage.execute(
+            """
+            DELETE FROM shared_ai_runtime_data
+            WHERE owner_user_id = ? AND strategy_id = ? AND signal_source_id = ?
+            """,
+            (int(user_id), str(strategy_id), str(signal_source_id)),
+        )
+
+    def sync_strategy_visibility(self, user_id: int, strategy: Dict) -> None:
+        self.storage.execute(
+            """
+            UPDATE shared_ai_runtime_data
+            SET symbol = ?, strategy_name = ?, strategy_lifecycle = ?, updated_at = ?
+            WHERE owner_user_id = ? AND strategy_id = ?
+            """,
+            (
+                str(strategy.get("symbol", "")),
+                str(strategy.get("strategy_name", "")),
+                str(strategy.get("lifecycle_status", "draft")),
+                _now_ts(), int(user_id), str(strategy.get("strategy_id", "")),
+            ),
+        )
+        shared_source_ids = {
+            str(source.get("signal_source_id", ""))
+            for source in (strategy.get("signal_sources") or [])
+            if source.get("source") == "ai_entry"
+            and (source.get("params") or {}).get("share_runtime_data")
+        }
+        rows = self.storage.fetchall(
+            """
+            SELECT signal_source_id FROM shared_ai_runtime_data
+            WHERE owner_user_id = ? AND strategy_id = ?
+            """,
+            (int(user_id), str(strategy.get("strategy_id", ""))),
+        )
+        for row in rows:
+            if row["signal_source_id"] not in shared_source_ids:
+                self.remove_for_source(
+                    user_id, strategy.get("strategy_id", ""),
+                    row["signal_source_id"],
+                )
+
+    def remove_for_strategy(self, user_id: int, strategy_id: str) -> None:
+        self.storage.execute(
+            """
+            DELETE FROM shared_ai_runtime_data
+            WHERE owner_user_id = ? AND strategy_id = ?
+            """,
+            (int(user_id), str(strategy_id)),
+        )
+
+    @staticmethod
+    def _row_to_dict(row, viewer_user_id: Optional[int]) -> Dict:
+        return {
+            "share_id": row["share_id"],
+            "owner_user_id": int(row["owner_user_id"]),
+            "owner_username": row["owner_username"],
+            "is_owner": (
+                viewer_user_id is not None
+                and int(row["owner_user_id"]) == int(viewer_user_id)
+            ),
+            "strategy_id": row["strategy_id"],
+            "strategy_name": row["strategy_name"],
+            "strategy_lifecycle": row["strategy_lifecycle"],
+            "signal_source_id": row["signal_source_id"],
+            "symbol": row["symbol"],
+            "period": row["period"],
+            "model": row["model"],
+            "signal_params": json.loads(row["signal_params_json"] or "{}"),
+            "system_prompt": row["system_prompt"],
+            "analysis_prompt_template": row["analysis_prompt_template"],
+            "result": json.loads(row["result_json"] or "{}"),
+            "last_run_at": int(row["last_run_at"]),
+            "updated_at": int(row["updated_at"]),
+        }
+
+
 class PositionManagementPolicyRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
@@ -2797,6 +3071,72 @@ class StrategyConfigRepository:
             (user_id, strategy.strategy_id, strategy.symbol, payload, now, now),
         )
         return strategy
+
+    def list_shared_strategies(
+        self, viewer_user_id: int, include_own: bool = False
+    ) -> List[Dict]:
+        from market.models.trading_strategy import TradingStrategy
+
+        rows = self.storage.fetchall(
+            """
+            SELECT strategy.user_id, users.username, strategy.config_json
+            FROM user_strategy_configs AS strategy
+            JOIN users ON users.id = strategy.user_id
+            ORDER BY strategy.updated_at DESC, strategy.strategy_id
+            """,
+            (),
+        )
+        shared = []
+        for row in rows:
+            owner_user_id = int(row["user_id"])
+            if owner_user_id == int(viewer_user_id) and not include_own:
+                continue
+            strategy = TradingStrategy.from_dict(json.loads(row["config_json"]))
+            if strategy.visibility != "shared":
+                continue
+            item = strategy.to_dict()
+            item.update({
+                "owner_user_id": owner_user_id,
+                "owner_username": row["username"],
+            })
+            shared.append(item)
+        return shared
+
+    def copy_shared_strategy(
+        self,
+        target_user_id: int,
+        owner_user_id: int,
+        strategy_id: str,
+        position_management_policy_id: str,
+    ) -> Optional["TradingStrategy"]:
+        from market.models.trading_strategy import StrategyLifecycle, TradingStrategy
+
+        source = self.get_strategy_by_id(int(owner_user_id), strategy_id)
+        if source is None or source.visibility != "shared":
+            return None
+
+        owner = UserRepository(self.storage).get_by_id(int(owner_user_id))
+        now = datetime.now()
+        payload = source.to_dict()
+        payload.update({
+            "strategy_id": "",
+            "strategy_name": f"{source.strategy_name}（副本）",
+            "visibility": "private",
+            "is_shared": False,
+            "enabled": False,
+            "auto_execute": False,
+            "lifecycle_status": StrategyLifecycle.DRAFT,
+            "lifecycle_updated_at": now.isoformat(),
+            "lifecycle_history": [],
+            "position_management_policy_id": position_management_policy_id,
+            "source_strategy_id": source.strategy_id,
+            "source_owner_user_id": int(owner_user_id),
+            "source_owner_username": owner.username if owner else "",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        })
+        copied = TradingStrategy.from_dict(payload)
+        return self.save_strategy(int(target_user_id), copied)
 
     def delete_strategy(self, user_id: int, symbol: str) -> bool:
         """兼容旧调用，删除该品种的全部策略。"""

@@ -6,90 +6,6 @@
       </v-col>
     </v-row>
 
-    <!-- 最新快讯 -->
-    <v-row v-if="latestFlashNews">
-      <v-col cols="12">
-        <v-alert
-          :type="latestFlashNews.importance >= 2 ? 'warning' : 'info'"
-          dense
-          class="mb-2"
-          dismissible
-          @input="latestFlashNews = null"
-        >
-          <div class="d-flex align-center">
-            <v-icon small class="mr-2">mdi-lightning-bolt</v-icon>
-            <v-chip v-if="latestFlashNews.speaker" color="primary" size="x-small" class="mr-2">
-              {{ latestFlashNews.speaker }}
-            </v-chip>
-            <span class="text-body-2">{{ latestFlashNews.content }}</span>
-            <v-spacer></v-spacer>
-            <span class="text-caption grey--text ml-2">{{ formatNewsTime(latestFlashNews.time) }}</span>
-          </div>
-          <!-- 影响分析 -->
-          <div v-if="latestFlashNews.impact && Object.keys(latestFlashNews.impact).length > 0" class="mt-1">
-            <v-chip
-              v-for="(impact, symbol) in latestFlashNews.impact"
-              :key="symbol"
-              :color="getImpactColor(impact.direction)"
-              size="x-small"
-              class="mr-1"
-            >
-              {{ symbol }}: {{ impact.direction }}
-            </v-chip>
-          </div>
-        </v-alert>
-      </v-col>
-    </v-row>
-
-    <!-- 重要财经事件提醒 -->
-    <v-row v-if="topCalendarEvent">
-      <v-col cols="12">
-        <v-alert
-          type="error"
-          dense
-          class="mb-2"
-          dismissible
-          @input="topCalendarEvent = null"
-        >
-          <div class="d-flex align-center">
-            <v-icon small class="mr-2">mdi-calendar-alert</v-icon>
-            <v-chip color="error" size="x-small" class="mr-2">
-              重要性 {{ topCalendarEvent.importance }}
-            </v-chip>
-            <v-chip :color="getCurrencyColor(topCalendarEvent.currency)" size="x-small" class="mr-2">
-              {{ topCalendarEvent.currency }}
-            </v-chip>
-            <span class="text-body-2 font-weight-medium">{{ topCalendarEvent.name }}</span>
-            <v-spacer></v-spacer>
-            <span class="text-caption grey--text ml-2">
-              {{ formatEventTime(topCalendarEvent.publish_time) }}
-            </span>
-          </div>
-          <!-- 预测值和实际值 -->
-          <div class="mt-1 d-flex align-center">
-            <span class="text-caption mr-3" v-if="topCalendarEvent.forecast">
-              预测: <strong>{{ topCalendarEvent.forecast }}</strong>
-            </span>
-            <span class="text-caption mr-3" v-if="topCalendarEvent.previous">
-              前值: <strong>{{ topCalendarEvent.previous }}</strong>
-            </span>
-            <span class="text-caption success--text" v-if="topCalendarEvent.actual">
-              实际: <strong>{{ topCalendarEvent.actual }}</strong>
-            </span>
-          </div>
-          <!-- 结果标签 -->
-          <div v-if="topCalendarEvent.result" class="mt-1">
-            <v-chip
-              :color="getEventResultColor(topCalendarEvent.result)"
-              size="x-small"
-            >
-              {{ getEventResultLabel(topCalendarEvent.result) }}
-            </v-chip>
-          </div>
-        </v-alert>
-      </v-col>
-    </v-row>
-
     <!-- 交易决策提醒 -->
     <v-row v-if="decisionAlerts.length > 0">
       <v-col cols="12">
@@ -560,7 +476,6 @@ export default {
     const ws = ref(null)
     const wsConnected = ref(false)
     let wsReconnectTimer = null
-    let newsReconnectTimer = null
     let statusInterval = null
     let isUnmounted = false
     const { selectedAccountId } = useAccountContext()
@@ -584,12 +499,6 @@ export default {
       return '尚未生成分析结果，点击“立即分析”开始'
     })
 
-    // 最新快讯
-    const latestFlashNews = ref(null)
-    const newsWs = ref(null)
-
-    // 最高等级财经事件
-    const topCalendarEvent = ref(null)
 
     // 计算属性
     const highPivots = computed(() => {
@@ -899,153 +808,6 @@ export default {
       }
     }
 
-    // 获取最新快讯
-    const fetchLatestFlashNews = async () => {
-      try {
-        const response = await fetch('/api/news/flash?count=1')
-        const data = await response.json()
-        if (data.status === 'ok' && data.data && data.data.length > 0) {
-          latestFlashNews.value = data.data[0]
-        }
-      } catch (err) {
-        console.error('获取快讯失败:', err)
-      }
-    }
-
-    // 连接新闻WebSocket
-    const connectNewsWebSocket = () => {
-      if (
-        isUnmounted ||
-        newsWs.value?.readyState === WebSocket.OPEN ||
-        newsWs.value?.readyState === WebSocket.CONNECTING
-      ) {
-        return
-      }
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${protocol}//${window.location.host}/api/news/ws`
-
-      newsWs.value = new WebSocket(wsUrl)
-
-      newsWs.value.onopen = () => {
-        console.log('[Market] 新闻WebSocket已连接')
-      }
-
-      newsWs.value.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          if (data.type === 'flash_news' && data.news) {
-            // 更新最新快讯
-            latestFlashNews.value = data.news
-          } else if (data.type === 'connected') {
-            // 连接成功
-            console.log('[Market] 新闻WebSocket连接确认')
-          }
-        } catch (err) {
-          console.error('[Market] 解析新闻WebSocket消息失败:', err)
-        }
-      }
-
-      newsWs.value.onerror = (err) => {
-        console.error('[Market] 新闻WebSocket错误:', err)
-      }
-
-      newsWs.value.onclose = () => {
-        newsWs.value = null
-        if (!isUnmounted) {
-          console.log('[Market] 新闻WebSocket断开，5秒后重连...')
-          clearTimeout(newsReconnectTimer)
-          newsReconnectTimer = setTimeout(() => {
-            connectNewsWebSocket()
-          }, 5000)
-        }
-      }
-    }
-
-    // 格式化快讯时间
-    const formatNewsTime = (timeStr) => {
-      if (!timeStr) return ''
-      const date = new Date(timeStr)
-      return date.toLocaleString('zh-CN', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      })
-    }
-
-    // 获取影响颜色
-    const getImpactColor = (direction) => {
-      if (direction === '利好') return 'success'
-      if (direction === '利空') return 'error'
-      return 'info'
-    }
-
-    // 获取最高重要性财经事件
-    const fetchTopCalendarEvent = async () => {
-      try {
-        const response = await fetch('/api/news/upcoming?hours=24')
-        const data = await response.json()
-        if (data.status === 'ok' && data.data && data.data.length > 0) {
-          // 按重要性排序，选择最高重要性的事件
-          const sortedEvents = data.data
-            .filter(e => e.name && e.name.length > 2) // 过滤无效名称
-            .sort((a, b) => {
-              // 先按重要性排序（高到低）
-              if (b.importance !== a.importance) return b.importance - a.importance
-              // 同重要性按时间排序（近到远）
-              return new Date(a.publish_time) - new Date(b.publish_time)
-            })
-          if (sortedEvents.length > 0) {
-            topCalendarEvent.value = sortedEvents[0]
-          }
-        }
-      } catch (err) {
-        console.error('获取财经事件失败:', err)
-      }
-    }
-
-    // 格式化事件时间
-    const formatEventTime = (timeStr) => {
-      if (!timeStr) return ''
-      const date = new Date(timeStr)
-      return date.toLocaleString('zh-CN', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      })
-    }
-
-    // 获取货币颜色
-    const getCurrencyColor = (currency) => {
-      const colors = {
-        'USD': 'green',
-        'EUR': 'blue',
-        'GBP': 'purple',
-        'JPY': 'red',
-        'AUD': 'orange',
-        'CAD': 'teal',
-        'CHF': 'indigo',
-        'CNY': 'deep-orange'
-      }
-      return colors[currency] || 'grey'
-    }
-
-    // 获取事件结果颜色
-    const getEventResultColor = (result) => {
-      if (result === 'better') return 'success'
-      if (result === 'worse') return 'error'
-      if (result === 'in_line') return 'info'
-      return 'grey'
-    }
-
-    // 获取事件结果标签
-    const getEventResultLabel = (result) => {
-      if (result === 'better') return '好于预期'
-      if (result === 'worse') return '差于预期'
-      if (result === 'in_line') return '符合预期'
-      return '未知'
-    }
 
     const getTrendChipColor = (trend) => {
       if (!trend) return 'grey'
@@ -1227,11 +989,6 @@ export default {
         loadLLMAnalysis()
         connectWebSocket()
       }
-      // 快讯相关
-      fetchLatestFlashNews()
-      connectNewsWebSocket()
-      // 财经事件
-      fetchTopCalendarEvent()
 
       // 定时刷新
       statusInterval = setInterval(() => {
@@ -1265,11 +1022,8 @@ export default {
       isUnmounted = true
       clearInterval(statusInterval)
       clearTimeout(wsReconnectTimer)
-      clearTimeout(newsReconnectTimer)
       ws.value?.close()
-      newsWs.value?.close()
       ws.value = null
-      newsWs.value = null
     })
 
     return {
@@ -1325,16 +1079,6 @@ export default {
       hasConflict,
       getConclusion,
       getConclusionColor,
-      // 快讯相关
-      latestFlashNews,
-      formatNewsTime,
-      getImpactColor,
-      // 财经事件相关
-      topCalendarEvent,
-      formatEventTime,
-      getCurrencyColor,
-      getEventResultColor,
-      getEventResultLabel
     }
   }
 }
