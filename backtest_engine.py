@@ -33,6 +33,7 @@ from market.services.signal.signal_rules import (
     valid_exits as shared_valid_exits,
 )
 from market.services.signal.key_level_signal import evaluate_key_level_expression
+from market.services.signal.alpha_factor_signal import AlphaRuntimeExecutor
 from market.services.strategy.strategy_service import StrategyService
 from market.store.llm_store import LLMStore
 from sqlite_storage import SQLiteStorage, get_storage
@@ -649,12 +650,16 @@ def aggregate_period(m1_bars: List[Dict], period: str, limit: int) -> List[Dict]
                 "high": bar["high"],
                 "low": bar["low"],
                 "close": bar["close"],
+                "tick_volume": int(bar.get("tick_volume", 0)),
+                "spread": int(bar.get("spread", 0)),
             })
         else:
             current = aggregated[-1]
             current["high"] = max(current["high"], bar["high"])
             current["low"] = min(current["low"], bar["low"])
             current["close"] = bar["close"]
+            current["tick_volume"] += int(bar.get("tick_volume", 0))
+            current["spread"] = int(bar.get("spread", current["spread"]))
     result = aggregated[-limit:]
     return [{key: value for key, value in item.items() if key != "bucket"} for item in result]
 
@@ -806,6 +811,10 @@ def build_analysis_plan(
     allowed = set(signal_source_ids) if signal_source_ids is not None else None
     model = TradingStrategy.from_dict(strategy)
     for source in model.get_signal_sources("ai_entry", enabled_only=True):
+        if (source.get("params") or {}).get(
+            "analysis_mode", "self_analysis"
+        ) == "shared_reference":
+            continue
         source_id = source["signal_source_id"]
         if allowed is not None and source_id not in allowed:
             continue
@@ -859,6 +868,7 @@ class ReplaySignalEngine:
         self._cooldowns: Dict[str, int] = {}
         self._consumed_ai_recommendations = set()
         self._pending_ma_crosses: Dict[str, Dict] = {}
+        self._alpha_executor = AlphaRuntimeExecutor()
 
     def generate(
         self,
@@ -883,6 +893,12 @@ class ReplaySignalEngine:
                 ))
             elif config["source"] == "moving_average":
                 signal = self._moving_average_signal(
+                    config, seen_bars, current_price, simulated_time
+                )
+                if signal:
+                    signals.append(signal)
+            elif config["source"] == "alpha_factor":
+                signal = self._alpha_factor_signal(
                     config, seen_bars, current_price, simulated_time
                 )
                 if signal:
@@ -1058,6 +1074,34 @@ class ReplaySignalEngine:
 
     def _mark_emitted(self, key: str, now: int) -> None:
         self._cooldowns[key] = now
+
+    def _alpha_factor_signal(
+        self, config, seen_bars, current_price: float, simulated_time: int,
+    ) -> Optional[TradingSignal]:
+        period = config["period"]
+        if simulated_time % PERIOD_SECONDS[period] != 0:
+            return None
+        params = config.get("params") or {}
+        definition = params.get("alpha_snapshot") or {}
+        bars = aggregate_period(seen_bars, period, 2000)
+        state = self._alpha_executor.evaluate(bars, definition)
+        state["is_entry_trigger"] = bool(
+            state["is_entry_trigger"]
+            and state["confidence"] >= int(params.get("min_confidence", 60))
+        )
+        cooldown_key = f"alpha_factor:{config['signal_source_id']}"
+        cooldown = max(0, int(params.get("cooldown_seconds", 180)))
+        if state["is_entry_trigger"]:
+            if not self._can_emit(cooldown_key, simulated_time, cooldown):
+                state["is_entry_trigger"] = False
+            else:
+                self._mark_emitted(cooldown_key, simulated_time)
+        signal = self._alpha_executor.build_signal(
+            self.strategy.get("symbol", ""), period, current_price, state,
+            replay_datetime(simulated_time),
+        )
+        signal.signal_source_id = config["signal_source_id"]
+        return signal
 
 
 def replay_datetime(simulated_time: int) -> datetime:
@@ -1363,6 +1407,12 @@ class M1BacktestEngine:
         ai_sources = strategy_model.get_signal_sources(
             "ai_entry", enabled_only=True
         )
+        ai_sources = [
+            source for source in ai_sources
+            if (source.get("params") or {}).get(
+                "analysis_mode", "self_analysis"
+            ) != "shared_reference"
+        ]
         next_ai_analysis_at = {
             source["signal_source_id"]: start + max(
                 1,
@@ -2138,14 +2188,14 @@ def build_result(
         source_counts[source] = source_counts.get(source, 0) + 1
     enabled_sources = [
         source for source in (
-            "key_level", "ai_entry", "moving_average"
+            "key_level", "ai_entry", "moving_average", "alpha_factor"
         )
         if signal_source_enabled(strategy, source)
     ]
     return {
         "engine_version": ENGINE_VERSION,
         "supported_signal_sources": [
-            "key_level", "ai_entry", "moving_average"
+            "key_level", "ai_entry", "moving_average", "alpha_factor"
         ],
         "enabled_signal_sources": enabled_sources,
         "signal_source_trade_counts": source_counts,

@@ -9,7 +9,11 @@ from typing import Dict, Optional, List
 import threading
 
 from ..models import LLMConfig, LLMAnalysisResult
-from sqlite_storage import LLMConfigRepository, bootstrap_runtime_storage
+from sqlite_storage import (
+    LLMConfigRepository,
+    RuntimeStateRepository,
+    bootstrap_runtime_storage,
+)
 
 
 class LLMStore:
@@ -18,7 +22,7 @@ class LLMStore:
     # 入场价提醒冷却时间（秒）
     ENTRY_ALERT_COOLDOWN = 300  # 5分钟
 
-    def __init__(self, user_id: int = None):
+    def __init__(self, user_id: int = None, account_id: int = None):
         # 分析结果: {SYMBOL: LLMAnalysisResult}
         self._analysis_results: Dict[str, LLMAnalysisResult] = {}
         self._lock = threading.RLock()
@@ -30,6 +34,10 @@ class LLMStore:
         if self._user_id is None:
             runtime_user = bootstrap_runtime_storage(self._build_password_credentials)
             self._user_id = runtime_user.user_id
+        self._account_id = int(account_id or 0)
+        self._runtime_repo = RuntimeStateRepository(
+            self._user_id, self._account_id
+        )
 
         # 入场价提醒记录: {(symbol, period, direction, entry_price): datetime}
         self._alerted_entries: Dict[tuple, datetime] = {}
@@ -42,6 +50,7 @@ class LLMStore:
 
         # 加载配置文件
         self._load_config_from_file()
+        self._load_analysis_results()
 
         print("[LLMStore] LLM存储已初始化")
 
@@ -115,11 +124,42 @@ class LLMStore:
 
     # ==================== 分析结果管理 ====================
 
+    def _load_analysis_results(self) -> None:
+        for payload in self._runtime_repo.list_entities("llm_analysis"):
+            try:
+                result = LLMAnalysisResult.from_dict(payload)
+            except (TypeError, ValueError):
+                continue
+            self._analysis_results[result.symbol] = result
+            if result.analyzed_at and (
+                self._last_analysis_time is None
+                or result.analyzed_at > self._last_analysis_time
+            ):
+                self._last_analysis_time = result.analyzed_at
+
+    def set_scope(self, user_id: int, account_id: int) -> None:
+        """切换账户范围并恢复该账户最近的 AI 分析。"""
+        self._user_id = int(user_id)
+        self._account_id = int(account_id or 0)
+        self._runtime_repo.set_scope(self._user_id, self._account_id)
+        with self._lock:
+            self._analysis_results.clear()
+            self._last_analysis_time = None
+            self._load_analysis_results()
+
     def save_analysis(self, result: LLMAnalysisResult):
         """保存分析结果"""
         with self._lock:
             self._analysis_results[result.symbol] = result
             self._last_analysis_time = datetime.now().isoformat()
+            self._runtime_repo.upsert_entity(
+                "llm_analysis",
+                result.symbol,
+                result.to_dict(),
+                symbol=result.symbol,
+                status=result.market_status,
+            )
+            self._runtime_repo.trim_entities("llm_analysis", 50)
 
     def save_analysis_dict(self, symbol: str, analysis: Dict):
         """从字典保存分析结果"""
@@ -144,14 +184,24 @@ class LLMStore:
         """更新市场状态"""
         with self._lock:
             if symbol in self._analysis_results:
-                self._analysis_results[symbol].market_status = market_status
-                self._analysis_results[symbol].data_stale = data_stale
+                result = self._analysis_results[symbol]
+                result.market_status = market_status
+                result.data_stale = data_stale
+                self._runtime_repo.upsert_entity(
+                    "llm_analysis", symbol, result.to_dict(),
+                    symbol=symbol, status=market_status,
+                )
 
     def set_stale_status(self, symbol: str, stale: bool, seconds_ago: int = None):
         """设置数据过期状态"""
         with self._lock:
             if symbol in self._analysis_results:
-                self._analysis_results[symbol].data_stale = stale
+                result = self._analysis_results[symbol]
+                result.data_stale = stale
+                self._runtime_repo.upsert_entity(
+                    "llm_analysis", symbol, result.to_dict(),
+                    symbol=symbol, status=result.market_status,
+                )
 
     def get_analyzed_symbols(self) -> List[str]:
         """获取已分析的品种列表"""

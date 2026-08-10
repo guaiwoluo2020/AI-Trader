@@ -51,6 +51,8 @@ class AuthRoutesTestCase(unittest.TestCase):
         self.assertIn("/health", paths)
         self.assertIn("/auth/login", paths)
         self.assertIn("/auth/register", paths)
+        self.assertIn("/auth/email-code", paths)
+        self.assertIn("/auth/admin/email-config", paths)
         self.assertIn("/auth/me", paths)
         self.assertIn("/auth/change-password", paths)
 
@@ -65,16 +67,21 @@ class AuthRoutesTestCase(unittest.TestCase):
         self.assertEqual(verified.role, "admin")
 
     def test_register_creates_login_ready_user(self):
-        user = self.auth_manager.register(" New_Trader ", "TradePass2026")
+        user = self.auth_manager.register(
+            " New_Trader ", "TradePass2026", "new@example.com"
+        )
 
         self.assertEqual("new_trader", user.username)
+        self.assertEqual("new@example.com", user.email)
         self.assertEqual("user", user.role)
         self.assertIsNotNone(
             self.auth_manager.authenticate("NEW_TRADER", "TradePass2026")
         )
 
     def test_change_password_revokes_old_token_and_preserves_role(self):
-        user = self.auth_manager.register("new_trader", "TradePass2026")
+        user = self.auth_manager.register(
+            "new_trader", "TradePass2026", "new@example.com"
+        )
         old_token = self.auth_manager.create_token(user)
 
         updated = self.auth_manager.change_password(
@@ -95,7 +102,9 @@ class AuthRoutesTestCase(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 401)
 
     def test_change_password_rejects_incorrect_current_password(self):
-        user = self.auth_manager.register("new_trader", "TradePass2026")
+        user = self.auth_manager.register(
+            "new_trader", "TradePass2026", "new@example.com"
+        )
 
         with self.assertRaisesRegex(ValueError, "当前密码不正确"):
             self.auth_manager.change_password(
@@ -105,14 +114,30 @@ class AuthRoutesTestCase(unittest.TestCase):
             )
 
     def test_register_rejects_duplicate_username(self):
-        self.auth_manager.register("new_trader", "TradePass2026")
+        self.auth_manager.register(
+            "new_trader", "TradePass2026", "new@example.com"
+        )
 
         with self.assertRaises(UsernameAlreadyExistsError):
-            self.auth_manager.register("NEW_TRADER", "AnotherPass2026")
+            self.auth_manager.register(
+                "NEW_TRADER", "AnotherPass2026", "another@example.com"
+            )
 
     def test_register_rejects_weak_password(self):
         with self.assertRaisesRegex(ValueError, "同时包含字母和数字"):
-            self.auth_manager.register("new_trader", "passwordonly")
+            self.auth_manager.register(
+                "new_trader", "passwordonly", "new@example.com"
+            )
+
+    def test_register_rejects_duplicate_email(self):
+        self.auth_manager.register(
+            "first_trader", "TradePass2026", "same@example.com"
+        )
+
+        with self.assertRaises(UsernameAlreadyExistsError):
+            self.auth_manager.register(
+                "second_trader", "TradePass2027", "same@example.com"
+            )
 
     def test_trader_routes_require_auth(self):
         with self.assertRaises(HTTPException) as context:

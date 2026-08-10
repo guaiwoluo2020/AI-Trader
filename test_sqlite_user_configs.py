@@ -100,6 +100,22 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不支持的大模型"):
             TradingStrategy(symbol="GOLD#", signal_sources=[invalid])
 
+        shared_source = signal_source_defaults("ai_entry", "M5")
+        shared_source["params"].update({
+            "analysis_mode": "shared_reference",
+            "shared_runtime_id": "2:strategy:source",
+            "reference_runtime_ids": ["context-is-not-used"],
+            "share_runtime_data": True,
+        })
+        shared_strategy = TradingStrategy(
+            symbol="GOLD#", signal_sources=[shared_source]
+        )
+        shared_params = shared_strategy.get_signal_sources("ai_entry")[0]["params"]
+        self.assertEqual(shared_params["analysis_mode"], "shared_reference")
+        self.assertEqual(shared_params["shared_runtime_id"], "2:strategy:source")
+        self.assertEqual(shared_params["reference_runtime_ids"], [])
+        self.assertFalse(shared_params["share_runtime_data"])
+
     def test_shared_ai_runtime_data_is_listed_by_symbol(self):
         source = signal_source_defaults("ai_entry", "M5")
         strategy = TradingStrategy(

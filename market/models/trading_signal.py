@@ -17,6 +17,7 @@ class SignalSource:
     KEY_LEVEL = "key_level"      # 关键点位信号
     AI_ENTRY = "ai_entry"        # AI入场信号
     MOVING_AVERAGE = "moving_average"  # 均线交叉信号
+    ALPHA_FACTOR = "alpha_factor"  # 已验证 Alpha 因子信号
 
 
 class SignalStatus:

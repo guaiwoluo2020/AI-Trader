@@ -252,6 +252,25 @@ class StrategyServiceTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不能重复添加"):
             TradingStrategy(symbol="GOLD_", signal_sources=duplicate)
 
+    def test_multiple_validated_alphas_can_share_a_period(self):
+        sources = []
+        for index in (1, 2):
+            sources.append({
+                "signal_source_id": f"alpha-{index}",
+                "source": "alpha_factor",
+                "period": "M5",
+                "weight": 30,
+                "params": {
+                    "alpha_id": f"library-{index}",
+                    "alpha_snapshot": {
+                        "timeframe": "M5", "factors": [{"name": "ema"}],
+                        "params": {"factor_0_length": 5},
+                    },
+                },
+            })
+        strategy = TradingStrategy(symbol="GOLD_", signal_sources=sources)
+        self.assertEqual(2, len(strategy.signal_sources))
+
     def test_key_level_cannot_mix_with_ai_or_moving_average_on_update(self):
         strategy = TradingStrategy(symbol="GOLD_", signal_sources=[])
 

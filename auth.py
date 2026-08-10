@@ -32,6 +32,7 @@ class AuthUser:
     """认证后的用户"""
     user_id: int
     username: str
+    email: Optional[str] = None
     role: str = "user"
     token_version: int = 1
 
@@ -92,6 +93,7 @@ class AuthManager:
         return AuthUser(
             user_id=record.user_id,
             username=record.username,
+            email=record.email,
             role=record.role,
             token_version=record.token_version,
         )
@@ -108,8 +110,9 @@ class AuthManager:
                     return self._to_auth_user(user)
         return None
 
-    def register(self, username: str, password: str) -> AuthUser:
+    def register(self, username: str, password: str, email: str) -> AuthUser:
         normalized_username = username.strip().lower()
+        normalized_email = email.strip().lower()
         if not re.fullmatch(r"[a-z0-9_-]{3,32}", normalized_username):
             raise ValueError("用户名需为 3-32 位，仅支持字母、数字、下划线和短横线")
         self._validate_password(password)
@@ -117,6 +120,8 @@ class AuthManager:
         with self._lock:
             if self.user_repo.get_by_username(normalized_username):
                 raise UsernameAlreadyExistsError("用户名已被注册")
+            if self.user_repo.get_by_email(normalized_email):
+                raise UsernameAlreadyExistsError("该邮箱已被注册")
 
             salt, password_hash = self._build_password_credentials(password)
             try:
@@ -125,9 +130,10 @@ class AuthManager:
                     password_hash,
                     salt,
                     role="user",
+                    email=normalized_email,
                 )
             except sqlite3.IntegrityError as exc:
-                raise UsernameAlreadyExistsError("用户名已被注册") from exc
+                raise UsernameAlreadyExistsError("用户名或邮箱已被注册") from exc
 
         return self._to_auth_user(record)
 

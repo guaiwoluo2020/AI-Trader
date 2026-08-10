@@ -11,8 +11,8 @@ from datetime import datetime
 import threading
 import asyncio
 import json
+import time
 
-from models import TradeInstruction
 from market.models import KlineData, PivotPoint, LLMConfig, LLMAnalysisResult
 from market.models import TechTrendState, TechResonanceResult, TechTradeSuggestion
 from market.models import PendingOrder, TradingInstruction, TradingSignal, TradingDecision
@@ -25,7 +25,7 @@ from market.services import PendingOrderService, TradingInstructionService
 from market.services import SignalService, StrategyService, RiskManager
 from market.services import (
     KeyLevelSignalGenerator, AIEntrySignalGenerator,
-    MovingAverageSignalGenerator,
+    MovingAverageSignalGenerator, AlphaFactorSignalGenerator,
 )
 from market.services import StatisticsService, PositionService, TradeHistoryService
 from market.trade_config import TradeConfig
@@ -34,6 +34,7 @@ from market.system_log import SystemLog
 from sqlite_storage import (
     PositionManagementPolicyRepository,
     RuntimeStateRepository,
+    SharedAIRuntimeRepository,
     StrategyDeploymentRepository,
     TradingAccountRepository,
 )
@@ -62,7 +63,7 @@ class TradingServer:
         # 存储层
         self.kline_store = KlineStore()
         self.pivot_store = PivotStore()
-        self.llm_store = LLMStore(user_id=user_id)
+        self.llm_store = LLMStore(user_id=user_id, account_id=account_id)
         self.tech_store = TechStore()
 
         # 服务层
@@ -185,7 +186,15 @@ class TradingServer:
         self._main_loop = None
 
         # ==================== 决策历史 ====================
-        self._decision_history: deque = deque(maxlen=50)
+        self._decision_history: deque = deque(maxlen=200)
+        if self._runtime_repository:
+            for item in self._runtime_repository.list_entities(
+                "strategy_decision"
+            ):
+                try:
+                    self._decision_history.append(TradingDecision.from_dict(item))
+                except (TypeError, ValueError):
+                    continue
 
         # 兼容旧代码的别名
         self.market_store = self.kline_store
@@ -208,13 +217,19 @@ class TradingServer:
         self._signal_service.register_generator("key_level", key_level_generator)
 
         # AI入场信号生成器
-        ai_entry_generator = AIEntrySignalGenerator()
+        ai_entry_generator = AIEntrySignalGenerator(SharedAIRuntimeRepository())
         ai_entry_generator.set_llm_analyzer(self.llm_analyzer)
+        self._ai_entry_generator = ai_entry_generator
         self._signal_service.register_generator("ai_entry", ai_entry_generator)
 
         moving_average_generator = MovingAverageSignalGenerator(self.kline_store)
         self._signal_service.register_generator(
             "moving_average", moving_average_generator
+        )
+
+        alpha_factor_generator = AlphaFactorSignalGenerator(self.kline_store)
+        self._signal_service.register_generator(
+            "alpha_factor", alpha_factor_generator
         )
 
     # ==================== WebSocket 管理 ====================
@@ -263,7 +278,19 @@ class TradingServer:
         return self.get_ws_client_count() == 0
 
     def cleanup_pending_orders(self) -> int:
-        return self.pending_order_service.cleanup_expired()
+        before = {
+            order.order_id
+            for order in self.pending_order_service.get_orders()
+        }
+        count = self.pending_order_service.cleanup_expired()
+        if count:
+            after = {
+                order.order_id
+                for order in self.pending_order_service.get_orders()
+            }
+            for order_id in before - after:
+                self.update_decision_status(order_id, "expired")
+        return count
 
     def cleanup_signals(self) -> int:
         return self._signal_service.cleanup_expired()
@@ -401,9 +428,6 @@ class TradingServer:
         for decision in decisions:
             if account is not None and not account.auto_trading_enabled:
                 decision.auto_execute = False
-            # 记录决策历史
-            self._decision_history.append(decision)
-
             # 3. 自动执行决策（如果允许）
             if decision.action != "none" and decision.status != "rejected":
                 order_id = self.strategy_service.execute_decision(decision)
@@ -423,6 +447,8 @@ class TradingServer:
                         "tp": decision.tp
                     }
                     result["pending_orders"].append(pending_order)
+
+            self._record_decision(decision)
 
             # 创建待确认订单后再序列化和广播，确保携带真实 order_id。
             result["decisions"].append(decision.to_dict())
@@ -566,45 +592,6 @@ class TradingServer:
             "process_result": process_result
         }
 
-    # ==================== 交易员接口 ====================
-
-    def add_trade_instruction(self, instructions: List[TradeInstruction]) -> dict:
-        """添加交易指令（交易员手动下单）"""
-        added = 0
-        rejected = 0
-
-        for instruction in instructions:
-            sl = instruction.sl if instruction.sl is not None else 0.0
-            tp = instruction.tp if instruction.tp is not None and instruction.tp > 0 else 0.0
-
-            # 验证止损止盈
-            if sl > 0 and tp > 0:
-                if instruction.action.lower() == 'b':
-                    if not (instruction.price > sl and instruction.price < tp):
-                        print(f"[警告] 忽略无效买入指令: {instruction}")
-                        rejected += 1
-                        continue
-                elif instruction.action.lower() == 's':
-                    if not (instruction.price < sl and instruction.price > tp):
-                        print(f"[警告] 忽略无效卖出指令: {instruction}")
-                        rejected += 1
-                        continue
-
-            self.trading_instruction_service.create_instruction(
-                symbol=instruction.symbol,
-                action=instruction.action,
-                price=instruction.price,
-                mount=instruction.mount,
-                sl=sl,
-                tp=tp,
-                description=instruction.description or "",
-                source="manual"
-            )
-            added += 1
-
-        print(f"[TradingServer] 已添加 {added} 条交易指令, 拒绝 {rejected} 条")
-        return {"added": added, "rejected": rejected}
-
     # ==================== 统计数据 ====================
 
     def save_statistics(self, stat_data: dict) -> None:
@@ -695,22 +682,534 @@ class TradingServer:
                 self.user_id,
                 self.account_id,
             )
+        self.llm_store.set_scope(self.user_id, self.account_id)
         self.system_log.set_scope(self.user_id, self.account_id)
 
     # ==================== 决策历史 ====================
 
-    def get_decision_history(self, symbol: str = None, count: int = 20) -> List[Dict]:
-        """获取决策历史"""
+    def _record_decision(self, decision: TradingDecision) -> None:
+        self._decision_history.append(decision)
+        if self._runtime_repository:
+            self._runtime_repository.upsert_entity(
+                "strategy_decision",
+                decision.decision_id,
+                decision.to_dict(),
+                symbol=decision.symbol,
+                status=decision.status,
+            )
+            self._runtime_repository.trim_entities("strategy_decision", 200)
+
+    def update_decision_status(self, order_id: str, status: str) -> bool:
+        """按关联订单同步决策状态，并持久化审计结果。"""
+        for decision in reversed(self._decision_history):
+            if decision.order_id != order_id:
+                continue
+            decision.status = status
+            if status == "confirmed":
+                decision.auto_executed = decision.auto_executed or decision.auto_execute
+            if self._runtime_repository:
+                self._runtime_repository.upsert_entity(
+                    "strategy_decision",
+                    decision.decision_id,
+                    decision.to_dict(),
+                    symbol=decision.symbol,
+                    status=decision.status,
+                )
+            return True
+        return False
+
+    def get_decision_history(
+        self,
+        symbol: str = None,
+        count: int = 20,
+        strategy_id: str = None,
+        status: str = None,
+        date_from: str = None,
+        date_to: str = None,
+    ) -> List[Dict]:
+        """获取当前账户的持久化决策历史，最新记录优先。"""
         decisions = list(self._decision_history)
         if symbol:
             decisions = [d for d in decisions if d.symbol == symbol]
-        return [d.to_dict() for d in decisions[-count:]]
+        if strategy_id:
+            decisions = [d for d in decisions if d.strategy_id == strategy_id]
+        if status:
+            decisions = [d for d in decisions if d.status == status]
+        if date_from:
+            start = datetime.fromisoformat(date_from)
+            decisions = [d for d in decisions if d.created_at and d.created_at >= start]
+        if date_to:
+            end = datetime.fromisoformat(date_to)
+            decisions = [d for d in decisions if d.created_at and d.created_at <= end]
+        return [d.to_dict() for d in reversed(decisions[-max(1, min(count, 200)):])]
+
+    def get_dashboard_overview(self, account) -> Dict:
+        """Build one account-scoped operational snapshot for the dashboard."""
+        now = int(time.time())
+        connected = bool(
+            account.account_type == "mt5" and account.last_seen_at
+            and now - account.last_seen_at <= 120
+        )
+        risk = self._risk_manager.get_status()
+        positions = self.position_service.get_position_objects()
+        position_items = sorted(
+            (item.to_dict() for item in positions),
+            key=lambda item: abs(float(item.get("profit", 0) or 0)),
+            reverse=True,
+        )
+        today = datetime.now().date()
+        today_deals = [
+            deal for deal in self.trade_history_store.get()
+            if deal.time and deal.time.date() == today
+        ]
+        today_closed = [deal for deal in today_deals if deal.is_exit]
+        today_net_profit = sum(
+            deal.profit + deal.swap + deal.commission for deal in today_deals
+        )
+        pending_orders = self.pending_order_service.get_orders_dict()
+        instructions = self.get_all_pending_trades()
+        pending_instruction_count = sum(
+            len(items) for items in instructions.values() if isinstance(items, list)
+        )
+
+        deployed_ids = set(self._active_strategy_ids("live"))
+        decisions = self.get_decision_history(count=100)
+        latest_decisions = {}
+        for decision in decisions:
+            latest_decisions.setdefault(decision.get("strategy_id", ""), decision)
+        active_signals = self._signal_service.get_active_signals()
+        latest_signals = {}
+        for signal in sorted(
+            active_signals, key=lambda item: item.created_at or datetime.min,
+            reverse=True,
+        ):
+            latest_signals.setdefault(signal.strategy_id, signal)
+        strategies = []
+        for strategy in self._strategy_store.get_all_strategies():
+            if strategy.strategy_id not in deployed_ids:
+                continue
+            decision = latest_decisions.get(strategy.strategy_id)
+            signal = latest_signals.get(strategy.strategy_id)
+            direction = (
+                (decision or {}).get("action")
+                or (signal.action if signal else "none")
+            )
+            confidence = (
+                (decision or {}).get("confidence_score")
+                or (signal.confidence if signal else 0)
+            )
+            strategies.append({
+                "strategy_id": strategy.strategy_id,
+                "strategy_name": strategy.strategy_name,
+                "symbol": strategy.symbol,
+                "lifecycle_status": strategy.lifecycle_status,
+                "enabled": strategy.enabled,
+                "auto_execute": strategy.auto_execute,
+                "direction": direction,
+                "confidence": round(float(confidence or 0), 2),
+                "latest_decision": decision,
+                "latest_signal_at": (
+                    signal.created_at.isoformat()
+                    if signal and signal.created_at else None
+                ),
+            })
+
+        market_health = []
+        for symbol in sorted(self.kline_service.get_symbols()):
+            status = self.kline_service.check_m1_updated_within(symbol, 180)
+            periods = [
+                period for period in ("M1", "M5", "M15", "H1", "H4")
+                if self.kline_service.is_initialized(symbol, period)
+                or self.kline_service.get_klines(symbol, period, 1)
+            ]
+            latest = status.get("latest_time")
+            market_health.append({
+                "symbol": symbol,
+                "status": status.get("market_status", "closed"),
+                "is_stale": bool(status.get("is_stale", True)),
+                "seconds_ago": status.get("seconds_ago"),
+                "latest_time": latest.isoformat() if latest else None,
+                "periods": periods,
+            })
+
+        ai_cards = [
+            card for card in self.get_ai_market_cards()
+            if card.get("strategy_id") in deployed_ids
+            and card.get("status") != "strategy_inactive"
+        ]
+        ai_priority = {
+            "decision_created": 0, "signal_formed": 1,
+            "ready_to_signal": 2, "waiting_price": 3,
+            "observing": 4, "waiting_analysis": 5, "expired": 6,
+        }
+        ai_cards.sort(key=lambda card: (
+            ai_priority.get(card.get("status"), 9),
+            -float(card.get("confidence", 0) or 0),
+        ))
+
+        attention = []
+        if not connected:
+            attention.append({
+                "type": "mt5_offline", "severity": "error",
+                "title": "MT5 终端未连接",
+                "detail": "当前账户超过 2 分钟未收到 EA 心跳",
+                "path": "/accounts",
+            })
+        if not account.trading_enabled:
+            attention.append({
+                "type": "trading_paused", "severity": "warning",
+                "title": "账户交易已暂停",
+                "detail": "策略仍可观察，但不会产生新的交易执行",
+                "path": "/accounts",
+            })
+        if risk.get("circuit_breaker"):
+            attention.append({
+                "type": "circuit_breaker", "severity": "error",
+                "title": "账户风控已熔断",
+                "detail": risk.get("circuit_breaker_reason") or "请检查当日亏损与订单限制",
+                "path": "/accounts",
+            })
+        if pending_orders:
+            attention.append({
+                "type": "pending_orders", "severity": "warning",
+                "title": f"有 {len(pending_orders)} 条策略决策待确认",
+                "detail": "请确认交易参数或放弃本次机会",
+                "path": "/market",
+            })
+        if pending_instruction_count:
+            attention.append({
+                "type": "pending_instructions", "severity": "info",
+                "title": f"有 {pending_instruction_count} 条指令等待 MT5 领取",
+                "detail": "可前往交易指令查看执行链路",
+                "path": "/trades",
+            })
+        stale_symbols = [item["symbol"] for item in market_health if item["is_stale"]]
+        if stale_symbols:
+            attention.append({
+                "type": "market_stale", "severity": "warning",
+                "title": "部分行情数据未及时更新",
+                "detail": "、".join(stale_symbols[:4]),
+                "path": "/accounts",
+            })
+        expired_ai = sum(card.get("status") == "expired" for card in ai_cards)
+        if expired_ai:
+            attention.append({
+                "type": "ai_expired", "severity": "warning",
+                "title": f"有 {expired_ai} 条 AI 分析已过期",
+                "detail": "自主分析或共享数据正在等待更新",
+                "path": "/ai-market",
+            })
+
+        balance = float(account.balance or risk.get("account_balance", 0) or 0)
+        equity = float(account.equity or risk.get("account_equity", 0) or 0)
+        free_margin = float(account.free_margin or risk.get("free_margin", 0) or 0)
+        margin = float(account.margin or 0)
+        return {
+            "status": "ok",
+            "generated_at": datetime.now().isoformat(),
+            "account": {
+                "account_id": account.account_id,
+                "account_name": account.account_name,
+                "account_type": account.account_type,
+                "environment": account.environment,
+                "currency": account.currency,
+                "mt5_login": account.mt5_login,
+                "mt5_server": account.mt5_server,
+                "ea_version": account.ea_version,
+                "connected": connected,
+                "last_seen_at": account.last_seen_at,
+                "trading_enabled": account.trading_enabled,
+                "auto_trading_enabled": account.auto_trading_enabled,
+            },
+            "financial": {
+                "balance": balance,
+                "equity": equity,
+                "free_margin": free_margin,
+                "margin": margin,
+                "margin_level": round(equity / margin * 100, 2) if margin > 0 else 0,
+                "floating_profit": round(sum(item.profit for item in positions), 2),
+                "today_net_profit": round(today_net_profit, 2),
+                "today_trade_count": len(today_closed),
+            },
+            "risk": risk,
+            "positions": {
+                "count": len(position_items),
+                "buy_count": sum(item["direction"] == "buy" for item in position_items),
+                "sell_count": sum(item["direction"] == "sell" for item in position_items),
+                "items": position_items[:5],
+            },
+            "pending": {
+                "confirmation_count": len(pending_orders),
+                "instruction_count": pending_instruction_count,
+            },
+            "attention": attention,
+            "strategies": strategies,
+            "ai_opportunities": ai_cards[:3],
+            "market_health": market_health,
+        }
 
     # ==================== LLM 分析接口（内部封装） ====================
 
     def get_llm_analysis(self, symbol: str = None) -> Dict:
         """获取大模型分析结果"""
         return self.llm_analyzer.get_analysis(symbol)
+
+    @staticmethod
+    def _ai_direction(value: str) -> str:
+        text = str(value or "").lower()
+        if text in {"up", "buy", "bullish"} or any(
+            marker in text for marker in ("上涨", "上升", "看涨")
+        ):
+            return "up"
+        if text in {"down", "sell", "bearish"} or any(
+            marker in text for marker in ("下跌", "下降", "看跌")
+        ):
+            return "down"
+        return "sideways"
+
+    def _latest_market_price(self, symbol: str) -> float:
+        klines = self.kline_service.get_klines(symbol, "M1", 1)
+        if not klines:
+            return 0.0
+        try:
+            return float(klines[-1].get("close", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+
+    def _shared_ai_market_card(
+        self, strategy, source: Dict, current_price: float,
+        active_signals: List[TradingSignal],
+    ) -> Dict:
+        params = source.get("params") or {}
+        source_id = source.get("signal_source_id", "")
+        state = self._ai_entry_generator.get_shared_reference_state(
+            strategy.symbol, current_price, strategy, source
+        )
+        shared = state.get("shared") or {}
+        suggestion = state.get("suggestion") or {}
+        signal = next((
+            item for item in active_signals
+            if item.strategy_id == strategy.strategy_id
+            and item.signal_source_id == source_id
+        ), None)
+        decision = next((
+            candidate for candidate in reversed(self._decision_history)
+            if any(
+                item.get("signal_source_id") == source_id
+                for item in candidate.signals
+            )
+        ), None)
+        confidence = int(state.get("confidence", 0) or 0)
+        minimum = int(params.get("min_confidence", 70) or 0)
+        entry_price = float(suggestion.get("entry_price", 0) or 0)
+        threshold = float(params.get("entry_threshold", 0.0001) or 0)
+        distance_ratio = (
+            abs(current_price - entry_price) / current_price
+            if current_price > 0 and entry_price > 0 else None
+        )
+        if not strategy.enabled or not source.get("enabled", True):
+            status, reason = "strategy_inactive", "策略或信号源尚未启用"
+        elif not shared:
+            status, reason = "expired", state["reason"]
+        elif state.get("stale"):
+            status, reason = "expired", state["reason"]
+        elif decision is not None:
+            status, reason = "decision_created", "共享分析已参与聚合并生成交易决策"
+        elif signal is not None and signal.is_entry_trigger:
+            status, reason = "signal_formed", "共享分析满足当前策略的置信度与价格条件"
+        elif confidence < minimum:
+            status, reason = "observing", f"共享置信度 {confidence}% 低于策略要求 {minimum}%"
+        elif state.get("direction") == "sideways":
+            status, reason = "observing", "共享分析判断为震荡"
+        elif not suggestion:
+            status, reason = "observing", "共享分析已有方向，但没有有效入场建议"
+        elif distance_ratio is None or distance_ratio > threshold:
+            status, reason = "waiting_price", "当前账户价格尚未进入共享建议的入场区间"
+        else:
+            status, reason = "ready_to_signal", "当前账户价格已进入共享建议触发区"
+        result = shared.get("result") or {}
+        return {
+            "card_id": f"{strategy.strategy_id}:{source_id}",
+            "analysis_mode": "shared_reference",
+            "derived_from_shared": True,
+            "strategy_id": strategy.strategy_id,
+            "strategy_name": strategy.strategy_name,
+            "strategy_lifecycle": strategy.lifecycle_status,
+            "strategy_enabled": strategy.enabled,
+            "signal_source_id": source_id,
+            "source_enabled": source.get("enabled", True),
+            "symbol": strategy.symbol,
+            "period": source.get("period", ""),
+            "model": shared.get("model", ""),
+            "source_owner_username": shared.get("owner_username", ""),
+            "source_symbol": shared.get("symbol", ""),
+            "shared_runtime_id": shared.get("share_id", params.get("shared_runtime_id", "")),
+            "direction": state.get("direction", "sideways"),
+            "confidence": confidence,
+            "min_confidence": minimum,
+            "status": status,
+            "status_reason": reason,
+            "current_price": current_price,
+            "entry_price": entry_price,
+            "stop_loss": float(suggestion.get("stop_loss", 0) or 0),
+            "take_profit": float(suggestion.get("take_profit", 0) or 0),
+            "entry_threshold": threshold,
+            "distance_ratio": distance_ratio,
+            "trend": (result.get("trend_analysis") or {}).get(shared.get("period", "")) or {},
+            "overall_trend": result.get("overall_trend"),
+            "key_levels": result.get("key_levels"),
+            "suggestion": suggestion or None,
+            "analyzed_at": result.get("analyzed_at") or shared.get("last_run_at"),
+            "market_status": result.get("market_status", "unknown"),
+            "data_stale": bool(state.get("stale")),
+            "signal": signal.to_dict() if signal else None,
+            "decision": decision.to_dict() if decision else None,
+        }
+
+    def get_ai_market_cards(self, symbol: str = None) -> List[Dict]:
+        """按策略 AI 信号源解释最新分析及其信号转化状态。"""
+        analyses = self.get_llm_analysis() or {}
+        active_signals = self._signal_service.get_active_signals()
+        cards = []
+        for strategy in self._strategy_store.get_all_strategies():
+            if symbol and strategy.symbol != symbol:
+                continue
+            for source in strategy.get_signal_sources("ai_entry"):
+                params = source.get("params") or {}
+                current_price = self._latest_market_price(strategy.symbol)
+                if params.get("analysis_mode", "self_analysis") == "shared_reference":
+                    cards.append(self._shared_ai_market_card(
+                        strategy, source, current_price, active_signals
+                    ))
+                    continue
+                period = source.get("period", "")
+                source_id = source.get("signal_source_id", "")
+                analysis = analyses.get(strategy.symbol) or {}
+                trend = (analysis.get("trend_analysis") or {}).get(period) or {}
+                suggestions = [
+                    item for item in (analysis.get("trade_suggestions") or [])
+                    if item.get("signal_source_id") == source_id
+                    or (
+                        not item.get("signal_source_id")
+                        and item.get("strategy_id") == strategy.strategy_id
+                        and item.get("period") == period
+                    )
+                ]
+                suggestion = max(
+                    suggestions,
+                    key=lambda item: int(item.get("confidence", 0) or 0),
+                    default=None,
+                )
+                signal = next((
+                    item for item in active_signals
+                    if item.strategy_id == strategy.strategy_id
+                    and item.signal_source_id == source_id
+                ), None)
+                analyzed_at = analysis.get("analyzed_at")
+                decision = None
+                for candidate in reversed(self._decision_history):
+                    if analyzed_at and candidate.created_at:
+                        try:
+                            if candidate.created_at < datetime.fromisoformat(analyzed_at):
+                                continue
+                        except (TypeError, ValueError):
+                            pass
+                    if any(
+                        item.get("signal_source_id") == source_id
+                        for item in candidate.signals
+                    ):
+                        decision = candidate
+                        break
+
+                direction = self._ai_direction(
+                    (suggestion or {}).get("direction") or trend.get("trend")
+                )
+                confidence = int(
+                    (suggestion or {}).get("confidence")
+                    or trend.get("confidence")
+                    or 0
+                )
+                min_confidence = int(params.get("min_confidence", 70) or 0)
+                entry_price = float((suggestion or {}).get("entry_price", 0) or 0)
+                threshold = float(params.get("entry_threshold", 0.0001) or 0)
+                distance_ratio = (
+                    abs(current_price - entry_price) / entry_price
+                    if current_price > 0 and entry_price > 0 else None
+                )
+
+                if not strategy.enabled or not source.get("enabled", True):
+                    status, status_reason = "strategy_inactive", "策略或信号源尚未启用"
+                elif not analysis:
+                    status, status_reason = "waiting_analysis", "等待首次 AI 分析"
+                elif analysis.get("data_stale") or analysis.get("market_status") in {"stale", "closed"}:
+                    status, status_reason = "expired", "行情未更新，当前分析仅供参考"
+                elif decision is not None:
+                    status, status_reason = "decision_created", "已参与策略聚合并生成交易决策"
+                elif signal is not None and signal.is_entry_trigger:
+                    status, status_reason = "signal_formed", "置信度与入场价格条件均已满足"
+                elif confidence < min_confidence:
+                    status, status_reason = (
+                        "observing",
+                        f"置信度 {confidence}% 低于策略要求 {min_confidence}%",
+                    )
+                elif direction == "sideways":
+                    status, status_reason = "observing", "AI 判断为震荡，暂不形成方向信号"
+                elif suggestion is None:
+                    status, status_reason = "observing", "已有方向判断，但模型尚未给出有效入场建议"
+                elif distance_ratio is None:
+                    status, status_reason = "waiting_price", "等待实时价格后检查入场距离"
+                elif distance_ratio > threshold:
+                    status, status_reason = (
+                        "waiting_price",
+                        f"当前价格距建议入场价 {distance_ratio * 100:.3f}%",
+                    )
+                else:
+                    status, status_reason = "ready_to_signal", "价格已进入触发区，等待策略处理"
+
+                cards.append({
+                    "card_id": f"{strategy.strategy_id}:{source_id}",
+                    "analysis_mode": "self_analysis",
+                    "derived_from_shared": False,
+                    "strategy_id": strategy.strategy_id,
+                    "strategy_name": strategy.strategy_name,
+                    "strategy_lifecycle": strategy.lifecycle_status,
+                    "strategy_enabled": strategy.enabled,
+                    "signal_source_id": source_id,
+                    "source_enabled": source.get("enabled", True),
+                    "symbol": strategy.symbol,
+                    "period": period,
+                    "model": params.get("model", ""),
+                    "direction": direction,
+                    "confidence": confidence,
+                    "min_confidence": min_confidence,
+                    "status": status,
+                    "status_reason": status_reason,
+                    "current_price": current_price,
+                    "entry_price": entry_price,
+                    "stop_loss": float((suggestion or {}).get("stop_loss", 0) or 0),
+                    "take_profit": float((suggestion or {}).get("take_profit", 0) or 0),
+                    "entry_threshold": threshold,
+                    "distance_ratio": distance_ratio,
+                    "trend": trend,
+                    "overall_trend": analysis.get("overall_trend"),
+                    "key_levels": analysis.get("key_levels"),
+                    "suggestion": suggestion,
+                    "analyzed_at": analyzed_at,
+                    "market_status": analysis.get("market_status", "unknown"),
+                    "data_stale": bool(analysis.get("data_stale", False)),
+                    "analysis_interval_minutes": int(
+                        params.get("analysis_interval_minutes", 5) or 5
+                    ),
+                    "kline_count": int(params.get("kline_count", 100) or 100),
+                    "share_runtime_data": bool(params.get("share_runtime_data", False)),
+                    "system_prompt": params.get("system_prompt", ""),
+                    "analysis_prompt_template": params.get(
+                        "analysis_prompt_template", ""
+                    ),
+                    "signal": signal.to_dict() if signal else None,
+                    "decision": decision.to_dict() if decision else None,
+                })
+        return cards
 
     def get_llm_status(self) -> Dict:
         """获取大模型分析器状态"""

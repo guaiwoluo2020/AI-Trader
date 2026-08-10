@@ -7,6 +7,7 @@ AI入场信号生成器
 
 from typing import Optional, List, Dict
 from datetime import datetime
+import time
 
 from ...models import SignalSource, TradingSignal
 from .signal_rules import (
@@ -17,9 +18,10 @@ from .signal_rules import (
 class AIEntrySignalGenerator:
     """AI入场信号生成器"""
 
-    def __init__(self):
+    def __init__(self, shared_runtime_repo=None):
         # LLM分析器引用
         self._llm_analyzer = None
+        self._shared_runtime_repo = shared_runtime_repo
 
         # 阈值（价格距离AI入场价的百分比）
         self.threshold = 0.0001  # 万分之一
@@ -158,6 +160,11 @@ class AIEntrySignalGenerator:
         for config in strategy.get_signal_sources("ai_entry", enabled_only=True):
             params = config.get("params") or {}
             source_id = config["signal_source_id"]
+            if params.get("analysis_mode", "self_analysis") == "shared_reference":
+                signals.append(self._shared_reference_signal(
+                    symbol, current_price, strategy, config
+                ))
+                continue
             triggers = [
                 signal for signal in self.generate_signals(
                     symbol, current_price, strategy.strategy_id, source_id,
@@ -202,6 +209,124 @@ class AIEntrySignalGenerator:
             trigger.signal_source_id = source_id
             signals.append(trigger)
         return signals
+
+    def get_shared_reference_state(
+        self, symbol: str, current_price: float, strategy, config: Dict,
+    ) -> Dict:
+        """Resolve a shared snapshot using the current user's thresholds and price."""
+        params = config.get("params") or {}
+        share_id = str(params.get("shared_runtime_id") or "")
+        shared = (
+            self._shared_runtime_repo.get_shared(share_id)
+            if self._shared_runtime_repo and share_id else None
+        )
+        empty = {
+            "ready": False, "direction": "sideways", "confidence": 0,
+            "reason": "共享AI运行数据已取消共享或不存在", "shared": shared,
+            "suggestion": None, "trigger": None, "stale": False,
+        }
+        if not shared:
+            return empty
+
+        result = shared.get("result") or {}
+        source_period = str(shared.get("period") or config.get("period") or "")
+        source_id = str(shared.get("signal_source_id") or "")
+        suggestions = [
+            item for item in (result.get("trade_suggestions") or [])
+            if not item.get("signal_source_id")
+            or item.get("signal_source_id") == source_id
+        ]
+        suggestion = max(
+            suggestions,
+            key=lambda item: int(item.get("confidence", 0) or 0),
+            default=None,
+        )
+        trend = extract_ai_trend_state(result, source_period)
+        direction = (
+            "up" if (suggestion or {}).get("direction") == "buy"
+            else "down" if (suggestion or {}).get("direction") == "sell"
+            else trend["direction"]
+        )
+        confidence = int(
+            (suggestion or {}).get("confidence") or trend["confidence"] or 0
+        )
+        original_interval = int(
+            (shared.get("signal_params") or {}).get(
+                "analysis_interval_minutes", 5
+            ) or 5
+        )
+        stale_after = max(15 * 60, original_interval * 3 * 60)
+        stale = bool(result.get("data_stale")) or (
+            int(time.time()) - int(shared.get("last_run_at") or 0) > stale_after
+        )
+        min_confidence = int(params.get("min_confidence", strategy.min_confidence))
+        ready = bool((trend["ready"] or suggestion) and not stale)
+        reason = (
+            "共享AI运行数据已过期，等待共享者更新"
+            if stale else str(
+                (suggestion or {}).get("reason") or trend["reason"]
+            )
+        )
+        trigger = None
+        if ready and suggestion and confidence >= min_confidence:
+            local_suggestion = dict(suggestion)
+            local_suggestion["period"] = config.get("period", source_period)
+            trigger = build_ai_entry_signal(
+                symbol, current_price, local_suggestion,
+                threshold=float(params.get("entry_threshold", self.threshold)),
+                require_suggested_exits=False,
+            )
+            if trigger:
+                trigger.trigger_reason = (
+                    f"引用 {shared.get('owner_username', '')} 的共享AI分析: "
+                    f"{trigger.trigger_reason}"
+                )
+        return {
+            "ready": ready, "direction": direction, "confidence": confidence,
+            "reason": reason, "shared": shared, "suggestion": suggestion,
+            "trigger": trigger, "stale": stale,
+        }
+
+    def _shared_reference_signal(
+        self, symbol: str, current_price: float, strategy, config: Dict,
+    ) -> TradingSignal:
+        state = self.get_shared_reference_state(
+            symbol, current_price, strategy, config
+        )
+        trigger = state["trigger"]
+        shared = state.get("shared") or {}
+        recommendation_key = (
+            str(shared.get("share_id") or ""),
+            int(shared.get("last_run_at") or 0),
+            strategy.strategy_id,
+            config["signal_source_id"],
+        )
+        if trigger is not None and recommendation_key in self._consumed_recommendations:
+            trigger = None
+        elif trigger is not None:
+            self._remember_consumed(recommendation_key)
+        if trigger is None:
+            trigger = TradingSignal(
+                symbol=symbol,
+                action=direction_action(state["direction"]),
+                market_direction=state["direction"],
+                state_ready=state["ready"],
+                is_entry_trigger=False,
+                confidence=state["confidence"],
+                source=SignalSource.AI_ENTRY,
+                source_period=config["period"],
+                trigger_price=current_price,
+                trigger_reason=state["reason"],
+                suggested_entry=current_price,
+            )
+        else:
+            trigger.market_direction = state["direction"]
+            trigger.action = direction_action(state["direction"])
+            trigger.state_ready = state["ready"]
+            trigger.confidence = state["confidence"]
+            trigger.is_entry_trigger = state["direction"] in {"up", "down"}
+        trigger.signal_source_id = config["signal_source_id"]
+        return trigger
 
     def _trend_state(self, symbol: str, period: str) -> Dict:
         if not self._llm_analyzer or not hasattr(self._llm_analyzer, "get_analysis"):

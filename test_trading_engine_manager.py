@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from auth import AuthManager, AuthUser, reset_auth_manager
 from fastapi import HTTPException
@@ -18,7 +18,6 @@ from market.models import (
     TradingInstruction as StoredTradingInstruction,
     TradingStrategy,
 )
-from models import TradeInstruction
 from sqlite_storage import (
     RuntimeStateRepository,
     TradingAccountRepository,
@@ -260,16 +259,15 @@ class TradingEngineManagerTestCase(unittest.TestCase):
                 "profit": 1.0,
             }],
         )
-        engine1.add_trade_instruction([
-            TradeInstruction(
-                symbol="GOLD#",
-                action="b",
-                mount=0.01,
-                price=3300.0,
-                sl=3290.0,
-                tp=3320.0,
-            )
-        ])
+        engine1.trading_instruction_service.create_instruction(
+            symbol="GOLD#",
+            action="b",
+            mount=0.01,
+            price=3300.0,
+            sl=3290.0,
+            tp=3320.0,
+            source="test",
+        )
         engine1.system_log.add_log(
             "ea_statistics",
             message="account one",
@@ -292,6 +290,50 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             engine1.system_log.get_logs()[0]["account_id"],
             account1.account_id,
         )
+
+    def test_dashboard_overview_is_scoped_to_selected_account(self):
+        salt, password_hash = self.auth_manager._build_password_credentials("user2")
+        user2 = UserRepository().create_user("user2", password_hash, salt)
+        account_repo = TradingAccountRepository()
+        account1, _ = account_repo.create_or_rotate_default(self.admin.user_id)
+        account2, _ = account_repo.create_or_rotate_default(user2.user_id)
+        account_repo.update_financial_snapshot(
+            account1.account_id,
+            balance=10000,
+            equity=10008,
+            free_margin=9900,
+            margin=108,
+        )
+        manager = TradingEngineManager()
+        engine1 = manager.get_engine(self.admin.user_id, account1.account_id)
+        engine2 = manager.get_engine(user2.user_id, account2.account_id)
+        engine1.position_service.update_positions("GOLD#", [{
+            "ticket": 3001,
+            "symbol": "GOLD#",
+            "volume": 0.01,
+            "priceOpen": 3300.0,
+            "type": "BUY",
+            "profit": 8.0,
+        }])
+        engine2.position_service.update_positions("BTCUSD", [{
+            "ticket": 3002,
+            "symbol": "BTCUSD",
+            "volume": 0.01,
+            "priceOpen": 90000.0,
+            "type": "SELL",
+            "profit": -5.0,
+        }])
+
+        overview = engine1.get_dashboard_overview(
+            account_repo.get_by_id(self.admin.user_id, account1.account_id)
+        )
+
+        self.assertEqual(overview["account"]["account_id"], account1.account_id)
+        self.assertEqual(overview["financial"]["equity"], 10008)
+        self.assertEqual(overview["positions"]["count"], 1)
+        self.assertEqual(overview["positions"]["items"][0]["symbol"], "GOLD#")
+        self.assertNotIn("BTCUSD", str(overview))
+        manager.close_all()
 
     def test_close_all_stops_and_removes_engines(self):
         manager = TradingEngineManager(
@@ -377,16 +419,15 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             "time": datetime.now().isoformat(),
             "comment": "mt5TerminalEA",
         }])
-        engine.add_trade_instruction([
-            TradeInstruction(
-                symbol="GOLD#",
-                action="b",
-                mount=0.01,
-                price=3300.0,
-                sl=3290.0,
-                tp=3320.0,
-            )
-        ])
+        engine.trading_instruction_service.create_instruction(
+            symbol="GOLD#",
+            action="b",
+            mount=0.01,
+            price=3300.0,
+            sl=3290.0,
+            tp=3320.0,
+            source="test",
+        )
         sent = engine.trading_instruction_service.fetch_instructions_for_ea(
             "GOLD#",
             3300.0,
@@ -427,6 +468,64 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         ).list_entities("trading_instruction")
         self.assertEqual(rows[0]["status"], "sent")
         restarted.close()
+
+    def test_strategy_decisions_persist_and_support_audit_filters(self):
+        account, _ = TradingAccountRepository().create_or_rotate_default(
+            self.admin.user_id
+        )
+        manager = TradingEngineManager()
+        engine = manager.get_engine(self.admin.user_id, account.account_id)
+        now = datetime.now()
+        confirmed = TradingDecision(
+            decision_id="decision-confirmed",
+            order_id="order-confirmed",
+            symbol="GOLD#",
+            strategy_id="strategy-gold",
+            strategy_name="Gold strategy",
+            action="buy",
+            status="pending",
+            created_at=now - timedelta(minutes=2),
+        )
+        rejected = TradingDecision(
+            decision_id="decision-rejected",
+            symbol="BTCUSD",
+            strategy_id="strategy-btc",
+            strategy_name="BTC strategy",
+            action="sell",
+            status="rejected",
+            created_at=now - timedelta(minutes=1),
+        )
+        engine._record_decision(confirmed)
+        engine._record_decision(rejected)
+        self.assertTrue(
+            engine.update_decision_status("order-confirmed", "confirmed")
+        )
+
+        manager.close_all()
+        restarted_manager = TradingEngineManager()
+        restarted = restarted_manager.get_engine(
+            self.admin.user_id, account.account_id
+        )
+
+        self.assertEqual(
+            [item["decision_id"] for item in restarted.get_decision_history()],
+            ["decision-rejected", "decision-confirmed"],
+        )
+        self.assertEqual(
+            restarted.get_decision_history(status="confirmed")[0]["status"],
+            "confirmed",
+        )
+        self.assertEqual(
+            restarted.get_decision_history(strategy_id="strategy-btc")[0]["symbol"],
+            "BTCUSD",
+        )
+        self.assertEqual(
+            restarted.get_decision_history(
+                date_from=(now - timedelta(seconds=90)).isoformat()
+            )[0]["decision_id"],
+            "decision-rejected",
+        )
+        restarted_manager.close_all()
 
     def test_strategy_decision_broadcast_contains_real_pending_order_id(self):
         account, _ = TradingAccountRepository().create_or_rotate_default(
@@ -642,6 +741,64 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         self.assertFalse(hasattr(engine.pending_order_service, "_thread"))
         self.assertFalse(hasattr(engine._signal_service, "_thread"))
         manager.close_all()
+
+    def test_ai_analysis_survives_restart_and_explains_non_signal_state(self):
+        account, _ = TradingAccountRepository().create_or_rotate_default(
+            self.admin.user_id
+        )
+        manager = TradingEngineManager()
+        engine = manager.get_engine(self.admin.user_id, account.account_id)
+        strategy = TradingStrategy(
+            symbol="GOLD#",
+            strategy_id="ai-market-strategy",
+            strategy_name="AI 行情测试",
+            enabled=True,
+            lifecycle_status="production",
+            signal_sources=[{
+                "signal_source_id": "ai-market-m5",
+                "source": "ai_entry",
+                "period": "M5",
+                "enabled": True,
+                "weight": 30,
+                "params": {
+                    "analysis_interval_minutes": 5,
+                    "kline_count": 100,
+                    "min_confidence": 70,
+                    "entry_threshold": 0.001,
+                },
+            }],
+        )
+        engine._strategy_store.set_strategy(strategy)
+        engine.llm_store.save_analysis_dict("GOLD#", {
+            "trend_analysis": {
+                "M5": {
+                    "trend": "震荡上升",
+                    "confidence": 55,
+                    "reason": "上涨结构尚未确认",
+                },
+            },
+            "overall_trend": {
+                "direction": "上涨",
+                "summary": "偏多观察",
+            },
+            "trade_suggestions": [],
+        })
+
+        card = engine.get_ai_market_cards()[0]
+        self.assertEqual(card["direction"], "up")
+        self.assertEqual(card["status"], "observing")
+        self.assertIn("低于策略要求", card["status_reason"])
+        analyzed_at = card["analyzed_at"]
+        manager.close_all()
+
+        restarted_manager = TradingEngineManager()
+        restarted = restarted_manager.get_engine(
+            self.admin.user_id, account.account_id
+        )
+        restored = restarted.get_ai_market_cards()[0]
+        self.assertEqual(restored["analyzed_at"], analyzed_at)
+        self.assertEqual(restored["status"], "observing")
+        restarted_manager.close_all()
 
     def test_shared_scheduler_deduplicates_same_account_task(self):
         started = threading.Event()

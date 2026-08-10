@@ -48,6 +48,20 @@ class LLMAnalysisResult:
             market_status="active"
         )
 
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'LLMAnalysisResult':
+        """从持久化快照恢复分析结果。"""
+        return cls(
+            symbol=str(data.get("symbol", "")),
+            trend_analysis=data.get("trend_analysis") or {},
+            overall_trend=data.get("overall_trend"),
+            key_levels=data.get("key_levels"),
+            trade_suggestions=data.get("trade_suggestions") or [],
+            analyzed_at=data.get("analyzed_at"),
+            data_stale=bool(data.get("data_stale", False)),
+            market_status=str(data.get("market_status", "active")),
+        )
+
     def get_trade_suggestion(self, period: str) -> Optional[Dict]:
         """获取指定周期的交易建议"""
         for ts in self.trade_suggestions:

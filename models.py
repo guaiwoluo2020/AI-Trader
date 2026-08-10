@@ -41,7 +41,37 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     """注册请求"""
     username: str
+    email: str
     password: str
+    verification_code: str
+
+
+class SendEmailCodeRequest(BaseModel):
+    """发送注册邮箱验证码。"""
+    email: str
+
+
+class SystemEmailConfigRequest(BaseModel):
+    """管理员邮件服务配置。"""
+    smtp_host: str
+    smtp_port: int
+    use_ssl: bool = True
+    sender_email: str
+    sender_name: str = "AI Trader"
+    password: Optional[str] = None
+    enabled: bool = True
+
+
+class TestSystemEmailRequest(BaseModel):
+    """管理员测试邮件请求。"""
+    target_email: Optional[str] = None
+
+
+class UserQuotaOverrideRequest(BaseModel):
+    """管理员为指定用户覆盖默认业务资源配额。"""
+    max_datasets: Optional[int] = None
+    max_strategies: Optional[int] = None
+    max_signal_sources: Optional[int] = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -54,6 +84,7 @@ class AuthUserInfo(BaseModel):
     """当前登录用户信息"""
     user_id: int
     username: str
+    email: Optional[str] = None
     role: str
 
 

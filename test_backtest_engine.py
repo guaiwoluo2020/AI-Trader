@@ -3,6 +3,7 @@
 
 import csv
 import gzip
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -351,6 +352,56 @@ class M1BacktestEngineTests(unittest.TestCase):
         self.assertEqual(generator.generate_signals("GOLD_", 3000.05), [])
         match["analyzed_at"] = "2026-08-02T10:05:00"
         self.assertEqual(len(generator.generate_signals("GOLD_", 3000.05)), 1)
+
+    def test_shared_ai_runtime_becomes_current_strategy_signal_source(self):
+        shared = {
+            "share_id": "2:source-strategy:source-ai",
+            "owner_username": "shared-user",
+            "signal_source_id": "source-ai",
+            "symbol": "XAUUSD",
+            "period": "M5",
+            "last_run_at": int(time.time()),
+            "signal_params": {"analysis_interval_minutes": 5},
+            "result": {
+                "trend_analysis": {
+                    "M5": {"trend": "up", "confidence": 88, "reason": "上升"}
+                },
+                "trade_suggestions": [{
+                    "signal_source_id": "source-ai",
+                    "period": "M5", "direction": "buy", "confidence": 88,
+                    "entry_price": 3000.0, "stop_loss": 0,
+                    "take_profit": 0, "reason": "共享机会",
+                }],
+            },
+        }
+
+        class SharedRepository:
+            @staticmethod
+            def get_shared(share_id):
+                return shared if share_id == shared["share_id"] else None
+
+        strategy = SimpleNamespace(
+            strategy_id="consumer-strategy", min_confidence=50,
+            get_signal_sources=lambda *_args, **_kwargs: [{
+                "signal_source_id": "consumer-ai", "source": "ai_entry",
+                "period": "M5", "enabled": True,
+                "params": {
+                    "analysis_mode": "shared_reference",
+                    "shared_runtime_id": shared["share_id"],
+                    "min_confidence": 80, "entry_threshold": 0.001,
+                },
+            }],
+        )
+        generator = AIEntrySignalGenerator(SharedRepository())
+
+        first = generator.generate_signals_for_strategy("GOLD_", 3000.0, strategy)
+        repeated = generator.generate_signals_for_strategy("GOLD_", 3000.0, strategy)
+
+        self.assertEqual(first[0].action, "buy")
+        self.assertTrue(first[0].is_entry_trigger)
+        self.assertEqual(first[0].signal_source_id, "consumer-ai")
+        self.assertIn("shared-user", first[0].trigger_reason)
+        self.assertFalse(repeated[0].is_entry_trigger)
 
     def test_pivot_requires_right_hand_confirmation_bars(self):
         bars = []

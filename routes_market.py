@@ -33,6 +33,8 @@ from sqlite_storage import (
 from trading_engine_manager import TradingEngineManager
 from strategy_admission import StrategyAdmissionService
 from web_account_context import resolve_web_engine
+from user_quotas import UserQuotaService
+from alpha_research import AlphaLibraryRepository
 
 
 def create_market_routes(
@@ -50,7 +52,31 @@ def create_market_routes(
     llm_config_repo = LLMConfigRepository()
     llm_access_repo = LLMAccessRepository()
     shared_ai_runtime_repo = SharedAIRuntimeRepository()
+    quota_service = UserQuotaService()
     admission_service = StrategyAdmissionService(engine_manager.paper_trading)
+    alpha_library = AlphaLibraryRepository()
+
+    def bind_alpha_signal_snapshots(user: AuthUser, data: Dict) -> None:
+        """Resolve validated Alpha definitions server-side and pin their version."""
+        for source in data.get("signal_sources") or []:
+            if source.get("source") != "alpha_factor":
+                continue
+            params = source.setdefault("params", {})
+            alpha_id = str(params.get("alpha_id") or "").strip()
+            alpha = alpha_library.get_visible(user.user_id, alpha_id)
+            if alpha is None or alpha.get("status") != "validated":
+                raise ValueError("选择的 Alpha 不存在、未通过验证或已停用")
+            definition = alpha.get("definition") or {}
+            period = str(definition.get("timeframe") or "").upper()
+            if not period:
+                raise ValueError("Alpha 缺少可执行周期")
+            source["period"] = period
+            params.update({
+                "alpha_id": alpha["alpha_id"],
+                "alpha_version": int(alpha.get("version") or 1),
+                "alpha_name": alpha.get("name") or "Validated Alpha",
+                "alpha_snapshot": definition,
+            })
 
     def validate_ai_signal_configuration(user: AuthUser, data: Dict) -> None:
         ai_sources = [
@@ -60,10 +86,27 @@ def create_market_routes(
         if not ai_sources:
             return
         access = llm_access_repo.get_status(user.user_id, user.role)
-        if not access["access_granted"]:
-            raise ValueError("AI入场信号仅对已开通大模型分析的付费用户开放")
+        effective_config = llm_config_repo.get_effective_config(user.user_id)
+        access = {
+            **access,
+            "service_configured": effective_config.enabled,
+            "feature_enabled": (
+                access["access_granted"] and effective_config.enabled
+            ),
+        }
         for source in ai_sources:
             params = source.get("params") or {}
+            mode = params.get("analysis_mode", "self_analysis")
+            if mode == "shared_reference":
+                share_id = str(params.get("shared_runtime_id") or "").strip()
+                shared = shared_ai_runtime_repo.get_shared(share_id)
+                if shared is None or shared["owner_user_id"] == user.user_id:
+                    raise ValueError("选择的共享AI运行数据不存在或已取消共享")
+                if str(source.get("period", "")).upper() != shared["period"]:
+                    raise ValueError("共享引用信号的周期必须与共享数据周期一致")
+                continue
+            if not access["access_granted"]:
+                raise ValueError("自主AI分析仅对已开通大模型分析的付费用户开放")
             for share_id in params.get("reference_runtime_ids") or []:
                 shared = shared_ai_runtime_repo.get_shared(str(share_id))
                 if shared is None:
@@ -509,6 +552,7 @@ def create_market_routes(
         order = pending_order_service.confirm_order(order_id, update_data)
         if not order:
             return {"status": "error", "message": "订单不存在"}
+        engine.update_decision_status(order_id, "confirmed")
 
         system_log = engine.system_log
         action_text = '买入' if order.action == 'b' else '卖出'
@@ -552,6 +596,7 @@ def create_market_routes(
         order = pending_order_service.reject_order(order_id)
         if not order:
             return {"status": "error", "message": "订单不存在"}
+        engine.update_decision_status(order_id, "rejected")
 
         system_log = engine.system_log
         system_log.add_log(
@@ -672,7 +717,8 @@ def create_market_routes(
         return {
             "status": "ok",
             "count": len(strategies),
-            "strategies": [s.to_dict() for s in strategies]
+            "strategies": [s.to_dict() for s in strategies],
+            "quota": quota_service.get_summary(user.user_id, user.role),
         }
 
     @protected_router.post("/strategy")
@@ -686,14 +732,20 @@ def create_market_routes(
             symbol = str(data.get("symbol", "")).strip()
             if not symbol:
                 return {"status": "error", "message": "请选择交易品种"}
+            bind_alpha_signal_snapshots(user, data)
             validate_ai_signal_configuration(user, data)
             policy_id = str(data.get("position_management_policy_id", "")).strip()
             if not policy_id or not position_policy_repo.get(user.user_id, policy_id):
                 return {"status": "error", "message": "请选择有效的持仓管理方案"}
             engine = engine_manager.get_engine_for_user(user.user_id)
-            strategy = engine.strategy_service.strategy_store.create_strategy(
-                symbol, data
-            )
+            with quota_service.guarded():
+                quota_service.assert_can_create(user.user_id, user.role, "strategies")
+                quota_service.assert_strategy_sources(
+                    user.user_id, user.role, "", data.get("signal_sources") or [],
+                )
+                strategy = engine.strategy_service.strategy_store.create_strategy(
+                    symbol, data
+                )
             shared_ai_runtime_repo.sync_strategy_visibility(
                 user.user_id, strategy.to_dict()
             )
@@ -709,12 +761,27 @@ def create_market_routes(
     @protected_router.get("/strategy/decisions")
     async def get_decisions(
         symbol: Optional[str] = None,
-        count: int = 20,
+        strategy_id: Optional[str] = None,
+        status: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        count: int = Query(50, ge=1, le=200),
+        account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        """获取决策历史"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
-        decisions = engine.get_decision_history(symbol, count)
+        """获取当前账户的策略决策审计记录。"""
+        _, engine = resolve_web_engine(engine_manager, user, account_id)
+        try:
+            decisions = engine.get_decision_history(
+                symbol=symbol,
+                count=count,
+                strategy_id=strategy_id,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="时间筛选格式无效") from exc
         return {
             "status": "ok",
             "count": len(decisions),
@@ -761,9 +828,17 @@ def create_market_routes(
                 }
             policy_id = policy.policy_id
 
-        strategy = strategy_repo.copy_shared_strategy(
-            user.user_id, owner_user_id, strategy_id, policy_id
-        )
+        source = strategy_repo.get_strategy_by_id(owner_user_id, strategy_id)
+        if source is None or source.visibility != "shared":
+            return {"status": "error", "message": "共享策略不存在或未开放复制"}
+        with quota_service.guarded():
+            quota_service.assert_can_create(user.user_id, user.role, "strategies")
+            quota_service.assert_strategy_sources(
+                user.user_id, user.role, "", source.signal_sources or [],
+            )
+            strategy = strategy_repo.copy_shared_strategy(
+                user.user_id, owner_user_id, strategy_id, policy_id
+            )
         if strategy is None:
             return {"status": "error", "message": "共享策略不存在或未开放复制"}
 
@@ -806,12 +881,24 @@ def create_market_routes(
             if strategy is None:
                 return {"status": "error", "message": "策略配置不存在"}
             if "signal_sources" in data:
+                bind_alpha_signal_snapshots(user, data)
                 validate_ai_signal_configuration(user, data)
-            strategy = engine.strategy_service.update_strategy(
-                strategy.symbol,
-                data,
-                strategy.strategy_id,
-            )
+                with quota_service.guarded():
+                    quota_service.assert_strategy_sources(
+                        user.user_id, user.role, strategy.strategy_id,
+                        data.get("signal_sources") or [],
+                    )
+                    strategy = engine.strategy_service.update_strategy(
+                        strategy.symbol,
+                        data,
+                        strategy.strategy_id,
+                    )
+            else:
+                strategy = engine.strategy_service.update_strategy(
+                    strategy.symbol,
+                    data,
+                    strategy.strategy_id,
+                )
             shared_ai_runtime_repo.sync_strategy_visibility(
                 user.user_id, strategy.to_dict()
             )
@@ -1068,6 +1155,87 @@ def create_market_routes(
     ) -> Dict:
         items = shared_ai_runtime_repo.list_shared(user.user_id, symbol)
         return {"status": "ok", "count": len(items), "items": items}
+
+    @protected_router.get("/llm/market-view")
+    async def get_ai_market_view(
+        account_id: Optional[int] = Query(None),
+        symbol: Optional[str] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """聚合当前账户 AI 分析状态和平台共享分析。"""
+        account, engine = resolve_web_engine(engine_manager, user, account_id)
+        access = llm_access_repo.get_status(user.user_id, user.role)
+        effective_config = llm_config_repo.get_effective_config(user.user_id)
+        access = {
+            **access,
+            "service_configured": effective_config.enabled,
+            "feature_enabled": (
+                access["access_granted"] and effective_config.enabled
+            ),
+        }
+        own_cards = engine.get_ai_market_cards(symbol)
+        shared_cards = []
+        for item in shared_ai_runtime_repo.list_shared(user.user_id, symbol):
+            if item["is_owner"]:
+                continue
+            result = item.get("result") or {}
+            trend = (result.get("trend_analysis") or {}).get(item["period"]) or {}
+            suggestion = max(
+                result.get("trade_suggestions") or [],
+                key=lambda value: int(value.get("confidence", 0) or 0),
+                default=None,
+            )
+            direction = engine._ai_direction(
+                (suggestion or {}).get("direction") or trend.get("trend")
+            )
+            confidence = int(
+                (suggestion or {}).get("confidence")
+                or trend.get("confidence")
+                or 0
+            )
+            shared_cards.append({
+                **item,
+                "card_id": item["share_id"],
+                "direction": direction,
+                "confidence": confidence,
+                "status": "shared_reference",
+                "status_reason": "由平台用户主动共享，仅作为行情分析参考",
+                "trend": trend,
+                "overall_trend": result.get("overall_trend"),
+                "key_levels": result.get("key_levels"),
+                "suggestion": suggestion,
+                "analyzed_at": result.get("analyzed_at") or item["last_run_at"],
+                "entry_price": float((suggestion or {}).get("entry_price", 0) or 0),
+                "stop_loss": float((suggestion or {}).get("stop_loss", 0) or 0),
+                "take_profit": float((suggestion or {}).get("take_profit", 0) or 0),
+            })
+        return {
+            "status": "ok",
+            "account": {
+                "account_id": account.account_id if account else 0,
+                "account_name": account.account_name if account else "",
+            },
+            "access": access,
+            "own": own_cards,
+            "shared": shared_cards,
+            "summary": {
+                "own_count": len(own_cards),
+                "actionable_count": sum(
+                    card["status"] in {
+                        "ready_to_signal", "signal_formed", "decision_created"
+                    }
+                    for card in own_cards
+                ),
+                "shared_count": len(shared_cards),
+                "last_analysis_time": max(
+                    (
+                        str(card.get("analyzed_at") or "")
+                        for card in own_cards
+                    ),
+                    default="",
+                ),
+            },
+        }
 
     @protected_router.post("/llm/access/request")
     async def request_llm_access(user: AuthUser = Depends(require_auth)) -> Dict:

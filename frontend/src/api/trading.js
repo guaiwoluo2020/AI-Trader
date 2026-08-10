@@ -31,6 +31,11 @@ api.interceptors.response.use(
 )
 
 export const authAPI = {
+  async sendRegistrationCode(email) {
+    const response = await api.post('/auth/email-code', { email })
+    return response.data
+  },
+
   async login(credentials) {
     const response = await api.post('/auth/login', credentials)
     setAuthSession({
@@ -67,12 +72,53 @@ export const authAPI = {
     return response.data
   },
 
+  async getEmailConfig() {
+    const response = await api.get('/auth/admin/email-config')
+    return response.data
+  },
+
+  async saveEmailConfig(config) {
+    const response = await api.put('/auth/admin/email-config', config)
+    return response.data
+  },
+
+  async testEmailConfig(targetEmail = null) {
+    const response = await api.post('/auth/admin/email-config/test', {
+      target_email: targetEmail || null,
+    })
+    return response.data
+  },
+
+  async getMyQuota() {
+    const response = await api.get('/auth/quota')
+    return response.data
+  },
+
+  async getUserQuotas() {
+    const response = await api.get('/auth/admin/user-quotas')
+    return response.data
+  },
+
+  async saveUserQuota(userId, quota) {
+    const response = await api.put(
+      `/auth/admin/users/${encodeURIComponent(userId)}/quota`, quota
+    )
+    return response.data
+  },
+
   logout() {
     clearAuthSession()
   },
 }
 
 export const tradingAPI = {
+  async getDashboardOverview(accountId = null) {
+    const response = await api.get('/dashboard/overview', {
+      params: accountId ? { account_id: accountId } : {},
+    })
+    return response.data
+  },
+
   // 健康检查
   async health() {
     const response = await api.get('/health')
@@ -82,14 +128,6 @@ export const tradingAPI = {
   // 获取服务状态
   async getStatus(accountId = null) {
     const response = await api.get('/status', { params: accountId ? { account_id: accountId } : {} })
-    return response.data
-  },
-
-  // 发送交易指令
-  async sendTradeInstructions(instructions, accountId = null) {
-    const response = await api.post('/send_trade_instructions', instructions, {
-      params: accountId ? { account_id: accountId } : {},
-    })
     return response.data
   },
 

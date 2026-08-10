@@ -13,7 +13,7 @@
           <ol>
             <li>
               <span>01</span>
-              创建独立交易账户
+              验证常用邮箱
             </li>
             <li>
               <span>02</span>
@@ -36,7 +36,7 @@
           <div class="mobile-brand">AI TRADER</div>
           <span class="form-kicker">NEW ACCOUNT</span>
           <h2>注册新账号</h2>
-          <p class="form-intro">只需设置用户名和密码，下一步即可连接 MT5。</p>
+          <p class="form-intro">验证邮箱并设置账号，下一步即可连接 MT5。</p>
 
           <v-alert
             v-if="errorMessage"
@@ -50,6 +50,46 @@
           </v-alert>
 
           <v-form @submit.prevent="handleRegister">
+            <label class="field-label" for="register-email">邮箱</label>
+            <v-text-field
+              id="register-email"
+              v-model="email"
+              placeholder="用于接收 6 位注册验证码"
+              prepend-inner-icon="mdi-email-outline"
+              variant="outlined"
+              autocomplete="email"
+              :disabled="loading"
+              :error-messages="emailError"
+              class="mb-2"
+              @blur="emailTouched = true"
+            />
+
+            <label class="field-label" for="register-code">邮箱验证码</label>
+            <div class="verification-row">
+              <v-text-field
+                id="register-code"
+                v-model="verificationCode"
+                placeholder="6 位数字"
+                prepend-inner-icon="mdi-shield-key-outline"
+                variant="outlined"
+                inputmode="numeric"
+                maxlength="6"
+                :disabled="loading"
+                :error-messages="codeError"
+                @blur="codeTouched = true"
+              />
+              <v-btn
+                color="primary"
+                variant="tonal"
+                height="56"
+                :loading="codeSending"
+                :disabled="!emailValid || resendCountdown > 0 || loading"
+                @click="sendVerificationCode"
+              >
+                {{ resendCountdown > 0 ? `${resendCountdown}s 后重发` : '发送验证码' }}
+              </v-btn>
+            </div>
+
             <label class="field-label" for="register-username">用户名</label>
             <v-text-field
               id="register-username"
@@ -115,7 +155,7 @@
               :loading="loading"
               class="register-button"
             >
-              创建账号并连接 MT5
+              验证并创建账号
             </v-btn>
           </v-form>
 
@@ -130,22 +170,32 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { authAPI } from '../api/trading'
 
 const router = useRouter()
+const email = ref('')
+const verificationCode = ref('')
 const username = ref('')
 const password = ref('')
 const confirmPassword = ref('')
+const emailTouched = ref(false)
+const codeTouched = ref(false)
 const usernameTouched = ref(false)
 const passwordTouched = ref(false)
 const confirmTouched = ref(false)
 const showPassword = ref(false)
 const showConfirmPassword = ref(false)
 const loading = ref(false)
+const codeSending = ref(false)
+const resendCountdown = ref(0)
 const errorMessage = ref('')
+let countdownTimer = null
 
+const normalizedEmail = computed(() => email.value.trim().toLowerCase())
+const emailValid = computed(() => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail.value))
+const codeValid = computed(() => /^\d{6}$/.test(verificationCode.value))
 const normalizedUsername = computed(() => username.value.trim().toLowerCase())
 const usernameValid = computed(() => /^[a-z0-9_-]{3,32}$/.test(normalizedUsername.value))
 const passwordValid = computed(
@@ -156,6 +206,12 @@ const passwordValid = computed(
     /\d/.test(password.value),
 )
 
+const emailError = computed(() =>
+  emailTouched.value && !emailValid.value ? '请输入有效的常用邮箱地址' : '',
+)
+const codeError = computed(() =>
+  codeTouched.value && !codeValid.value ? '请输入邮件中的 6 位验证码' : '',
+)
 const usernameError = computed(() =>
   usernameTouched.value && !usernameValid.value
     ? '请输入 3-32 位用户名，仅支持字母、数字、下划线和短横线'
@@ -184,12 +240,16 @@ const strengthLabel = computed(() => {
 })
 
 async function handleRegister() {
+  emailTouched.value = true
+  codeTouched.value = true
   usernameTouched.value = true
   passwordTouched.value = true
   confirmTouched.value = true
   errorMessage.value = ''
 
   if (
+    !emailValid.value ||
+    !codeValid.value ||
     !usernameValid.value ||
     !passwordValid.value ||
     confirmPassword.value !== password.value
@@ -200,6 +260,8 @@ async function handleRegister() {
   loading.value = true
   try {
     const registerResult = await authAPI.register({
+      email: normalizedEmail.value,
+      verification_code: verificationCode.value,
       username: normalizedUsername.value,
       password: password.value,
     })
@@ -210,6 +272,28 @@ async function handleRegister() {
     loading.value = false
   }
 }
+
+async function sendVerificationCode() {
+  emailTouched.value = true
+  errorMessage.value = ''
+  if (!emailValid.value) return
+  codeSending.value = true
+  try {
+    const result = await authAPI.sendRegistrationCode(normalizedEmail.value)
+    resendCountdown.value = Number(result.resend_in || 60)
+    clearInterval(countdownTimer)
+    countdownTimer = setInterval(() => {
+      resendCountdown.value = Math.max(0, resendCountdown.value - 1)
+      if (!resendCountdown.value) clearInterval(countdownTimer)
+    }, 1000)
+  } catch (error) {
+    errorMessage.value = error.response?.data?.detail || '验证码发送失败，请稍后重试'
+  } finally {
+    codeSending.value = false
+  }
+}
+
+onUnmounted(() => clearInterval(countdownTimer))
 </script>
 
 <style scoped>
@@ -340,6 +424,14 @@ async function handleRegister() {
   font-weight: 700;
 }
 
+.verification-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
 .strength-row {
   display: grid;
   grid-template-columns: repeat(3, 1fr) auto;
@@ -406,6 +498,13 @@ async function handleRegister() {
   .mobile-brand {
     display: block;
     margin-bottom: 38px;
+  }
+}
+
+@media (max-width: 480px) {
+  .verification-row {
+    grid-template-columns: 1fr;
+    margin-bottom: 12px;
   }
 }
 </style>

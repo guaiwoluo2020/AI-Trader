@@ -56,6 +56,7 @@ def get_runtime_username() -> str:
 class UserRecord:
     user_id: int
     username: str
+    email: Optional[str]
     password_hash: str
     salt: str
     role: str
@@ -133,6 +134,7 @@ class SQLiteStorage:
                     CREATE TABLE IF NOT EXISTS users (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         username TEXT NOT NULL UNIQUE,
+                        email TEXT UNIQUE,
                         password_hash TEXT NOT NULL,
                         salt TEXT NOT NULL,
                         created_at INTEGER NOT NULL,
@@ -174,6 +176,53 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_llm_access_requests_status
                     ON llm_access_requests(status, requested_at);
+
+                    CREATE TABLE IF NOT EXISTS user_quota_overrides (
+                        user_id INTEGER PRIMARY KEY,
+                        max_datasets INTEGER,
+                        max_strategies INTEGER,
+                        max_signal_sources INTEGER,
+                        updated_by INTEGER,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY(updated_by) REFERENCES users(id) ON DELETE SET NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS system_email_config (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        smtp_host TEXT NOT NULL DEFAULT 'smtp.qiye.aliyun.com',
+                        smtp_port INTEGER NOT NULL DEFAULT 465,
+                        use_ssl INTEGER NOT NULL DEFAULT 1,
+                        sender_email TEXT NOT NULL DEFAULT '',
+                        sender_name TEXT NOT NULL DEFAULT 'AI Trader',
+                        encrypted_password TEXT NOT NULL DEFAULT '',
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        updated_by INTEGER,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(updated_by) REFERENCES users(id) ON DELETE SET NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS email_verification_codes (
+                        email TEXT PRIMARY KEY,
+                        code_hash TEXT NOT NULL,
+                        code_salt TEXT NOT NULL,
+                        expires_at INTEGER NOT NULL,
+                        sent_at INTEGER NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_email_verification_expiry
+                    ON email_verification_codes(expires_at);
+
+                    CREATE TABLE IF NOT EXISTS email_verification_send_events (
+                        requester_hash TEXT NOT NULL,
+                        sent_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_email_send_events_requester
+                    ON email_verification_send_events(requester_hash, sent_at);
 
                     CREATE TABLE IF NOT EXISTS shared_ai_runtime_data (
                         share_id TEXT PRIMARY KEY,
@@ -652,6 +701,111 @@ class SQLiteStorage:
                         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                     );
 
+                    CREATE TABLE IF NOT EXISTS alpha_research_runs (
+                        run_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        dataset_id TEXT,
+                        research_name TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        progress REAL NOT NULL DEFAULT 0,
+                        cancel_requested INTEGER NOT NULL DEFAULT 0,
+                        config_json TEXT NOT NULL,
+                        best_params_json TEXT NOT NULL DEFAULT '{}',
+                        result_json TEXT NOT NULL DEFAULT '{}',
+                        error_message TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        started_at INTEGER,
+                        completed_at INTEGER,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY(dataset_id) REFERENCES backtest_datasets(dataset_id) ON DELETE SET NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_alpha_research_runs_owner
+                    ON alpha_research_runs(user_id, created_at DESC);
+
+                    CREATE INDEX IF NOT EXISTS idx_alpha_research_runs_queue
+                    ON alpha_research_runs(status, created_at);
+
+                    CREATE TABLE IF NOT EXISTS alpha_research_trials (
+                        run_id TEXT NOT NULL,
+                        trial_number INTEGER NOT NULL,
+                        iteration_number INTEGER NOT NULL DEFAULT 1,
+                        status TEXT NOT NULL,
+                        score REAL,
+                        params_json TEXT NOT NULL DEFAULT '{}',
+                        metrics_json TEXT NOT NULL DEFAULT '{}',
+                        duration_ms INTEGER NOT NULL DEFAULT 0,
+                        error_message TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        PRIMARY KEY(run_id, trial_number),
+                        FOREIGN KEY(run_id) REFERENCES alpha_research_runs(run_id) ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS alpha_research_iterations (
+                        run_id TEXT NOT NULL,
+                        iteration_number INTEGER NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'running',
+                        candidate_json TEXT NOT NULL DEFAULT '{}',
+                        expression_text TEXT NOT NULL DEFAULT '',
+                        best_params_json TEXT NOT NULL DEFAULT '{}',
+                        metrics_json TEXT NOT NULL DEFAULT '{}',
+                        feedback_prompt TEXT NOT NULL DEFAULT '',
+                        feedback_response_json TEXT NOT NULL DEFAULT '{}',
+                        llm_model TEXT NOT NULL DEFAULT '',
+                        error_message TEXT NOT NULL DEFAULT '',
+                        started_at INTEGER NOT NULL,
+                        completed_at INTEGER,
+                        PRIMARY KEY(run_id, iteration_number),
+                        FOREIGN KEY(run_id) REFERENCES alpha_research_runs(run_id) ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS alpha_library (
+                        alpha_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        source_run_id TEXT NOT NULL UNIQUE,
+                        name TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        status TEXT NOT NULL DEFAULT 'validated',
+                        visibility TEXT NOT NULL DEFAULT 'private',
+                        timeframe TEXT NOT NULL,
+                        definition_json TEXT NOT NULL,
+                        metrics_json TEXT NOT NULL DEFAULT '{}',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY(source_run_id) REFERENCES alpha_research_runs(run_id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_alpha_library_visible
+                    ON alpha_library(status, visibility, updated_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS alpha_research_signals (
+                        run_id TEXT NOT NULL,
+                        bar_time INTEGER NOT NULL,
+                        direction INTEGER NOT NULL,
+                        alpha_value REAL NOT NULL,
+                        close_price REAL NOT NULL,
+                        PRIMARY KEY(run_id, bar_time),
+                        FOREIGN KEY(run_id) REFERENCES alpha_research_runs(run_id) ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS alpha_research_trades (
+                        trade_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        direction TEXT NOT NULL,
+                        entry_time INTEGER NOT NULL,
+                        entry_price REAL NOT NULL,
+                        exit_time INTEGER NOT NULL,
+                        exit_price REAL NOT NULL,
+                        exit_reason TEXT NOT NULL,
+                        gross_return REAL NOT NULL,
+                        holding_bars INTEGER NOT NULL,
+                        FOREIGN KEY(run_id) REFERENCES alpha_research_runs(run_id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_alpha_research_trades_run
+                    ON alpha_research_trades(run_id, entry_time);
+
                     CREATE TABLE IF NOT EXISTS paper_account_settings (
                         account_id INTEGER PRIMARY KEY,
                         leverage REAL NOT NULL DEFAULT 100,
@@ -1049,6 +1203,12 @@ class SQLiteStorage:
                     "visibility",
                     "TEXT NOT NULL DEFAULT 'shared'",
                 )
+                self._ensure_column(
+                    conn,
+                    "alpha_research_trials",
+                    "iteration_number",
+                    "INTEGER NOT NULL DEFAULT 1",
+                )
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_backtest_datasets_visibility
@@ -1091,6 +1251,11 @@ class SQLiteStorage:
                     "users",
                     "token_version",
                     "INTEGER NOT NULL DEFAULT 1",
+                )
+                self._ensure_column(conn, "users", "email", "TEXT")
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email "
+                    "ON users(email) WHERE email IS NOT NULL"
                 )
                 self._migrate_ea_activation_codes(conn)
                 self._migrate_strategy_configs(conn)
@@ -1425,7 +1590,7 @@ class UserRepository:
     def get_by_username(self, username: str) -> Optional[UserRecord]:
         row = self.storage.fetchone(
             """
-            SELECT id, username, password_hash, salt, role, token_version,
+            SELECT id, username, email, password_hash, salt, role, token_version,
                    created_at, updated_at
             FROM users
             WHERE username = ?
@@ -1437,12 +1602,24 @@ class UserRepository:
     def get_by_id(self, user_id: int) -> Optional[UserRecord]:
         row = self.storage.fetchone(
             """
-            SELECT id, username, password_hash, salt, role, token_version,
+            SELECT id, username, email, password_hash, salt, role, token_version,
                    created_at, updated_at
             FROM users
             WHERE id = ?
             """,
             (user_id,),
+        )
+        return self._row_to_user(row)
+
+    def get_by_email(self, email: str) -> Optional[UserRecord]:
+        row = self.storage.fetchone(
+            """
+            SELECT id, username, email, password_hash, salt, role, token_version,
+                   created_at, updated_at
+            FROM users
+            WHERE email = ?
+            """,
+            (email,),
         )
         return self._row_to_user(row)
 
@@ -1452,17 +1629,18 @@ class UserRepository:
         password_hash: str,
         salt: str,
         role: str = "user",
+        email: Optional[str] = None,
     ) -> UserRecord:
         now = _now_ts()
         self.storage.execute(
             """
             INSERT INTO users(
-                username, password_hash, salt, role, token_version,
+                username, email, password_hash, salt, role, token_version,
                 created_at, updated_at
             )
-            VALUES(?, ?, ?, ?, 1, ?, ?)
+            VALUES(?, ?, ?, ?, ?, 1, ?, ?)
             """,
-            (username, password_hash, salt, role, now, now),
+            (username, email, password_hash, salt, role, now, now),
         )
         user = self.get_by_username(username)
         if user is None:
@@ -1495,6 +1673,17 @@ class UserRepository:
         row = self.storage.fetchone("SELECT COUNT(*) AS total FROM users")
         return int(row["total"]) if row else 0
 
+    def list_users(self) -> List[UserRecord]:
+        rows = self.storage.fetchall(
+            """
+            SELECT id, username, email, password_hash, salt, role, token_version,
+                   created_at, updated_at
+            FROM users
+            ORDER BY created_at, id
+            """
+        )
+        return [user for row in rows if (user := self._row_to_user(row)) is not None]
+
     def ensure_runtime_user(self, password_hash_builder) -> UserRecord:
         username = get_runtime_username()
         user = self.get_by_username(username)
@@ -1517,6 +1706,7 @@ class UserRepository:
         return UserRecord(
             user_id=int(row["id"]),
             username=row["username"],
+            email=row["email"],
             password_hash=row["password_hash"],
             salt=row["salt"],
             role=row["role"],
@@ -3278,6 +3468,22 @@ class RuntimeStateRepository:
             sql += " AND symbol = ?"
             params += (symbol,)
         self.storage.execute(sql, params)
+
+    def trim_entities(self, entity_type: str, max_count: int) -> None:
+        """只保留账户范围内指定类型最近更新的记录。"""
+        self.storage.execute(
+            """
+            DELETE FROM runtime_entities
+            WHERE rowid IN (
+                SELECT rowid
+                FROM runtime_entities
+                WHERE user_id = ? AND account_id = ? AND entity_type = ?
+                ORDER BY created_at DESC, updated_at DESC, entity_id DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (self.user_id, self.account_id, entity_type, max(0, int(max_count))),
+        )
 
     def migrate_scope(self, account_id: int) -> None:
         target_account_id = int(account_id)

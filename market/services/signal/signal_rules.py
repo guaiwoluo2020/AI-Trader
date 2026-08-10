@@ -352,6 +352,7 @@ def build_ai_entry_signal(
     suggestion: Dict,
     signal_time: Optional[datetime] = None,
     threshold: float = 0.0001,
+    require_suggested_exits: bool = True,
 ) -> Optional[TradingSignal]:
     period = str(suggestion.get("period", "")).upper()
     direction = str(suggestion.get("direction", "")).lower()
@@ -361,13 +362,19 @@ def build_ai_entry_signal(
     if (
         current_price <= 0 or direction not in {"buy", "sell"} or entry <= 0
         or abs(current_price - entry) / current_price > threshold
-        or not valid_exits(direction, current_price, sl, tp)
     ):
         return None
-    risk = abs(current_price - sl)
-    reward = abs(tp - current_price)
-    if risk <= 0 or reward / risk < 1 or risk > current_price * 0.02:
+    exits_valid = valid_exits(direction, current_price, sl, tp)
+    risk = abs(current_price - sl) if exits_valid else 0
+    reward = abs(tp - current_price) if exits_valid else 0
+    exits_usable = bool(
+        exits_valid and risk > 0 and reward / risk >= 1
+        and risk <= current_price * 0.02
+    )
+    if require_suggested_exits and not exits_usable:
         return None
+    if not exits_usable:
+        sl = tp = risk = reward = 0
     try:
         confidence = max(0, min(100, int(suggestion.get("confidence", 75))))
     except (TypeError, ValueError):
@@ -384,7 +391,7 @@ def build_ai_entry_signal(
         suggested_entry=current_price,
         suggested_sl=sl,
         suggested_tp=tp,
-        risk_reward_ratio=round(reward / risk, 2),
+        risk_reward_ratio=round(reward / risk, 2) if risk else 0,
         ai_analysis_period=period,
         created_at=signal_time,
     )

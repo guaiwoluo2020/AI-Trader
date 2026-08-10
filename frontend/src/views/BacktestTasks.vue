@@ -908,7 +908,7 @@ function exitReasonLabel(reason) {
 function sourceLabel(source) {
   return {
     pivot: '转折点', key_level: '关键点位', ai_entry: 'AI 入场',
-    moving_average: '均线交叉',
+    moving_average: '均线交叉', alpha_factor: '已验证 Alpha',
   }[source] || source
 }
 function currentPnL(ledger) {

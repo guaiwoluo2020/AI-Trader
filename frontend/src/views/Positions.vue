@@ -1,309 +1,87 @@
 <template>
-  <v-container fluid>
-    <v-row>
-      <v-col cols="12">
-        <h1 class="mb-4">仓位管理</h1>
-      </v-col>
+  <v-container fluid class="positions-page">
+    <section class="positions-hero mb-5">
+      <div>
+        <div class="section-kicker">LIVE POSITION CONTROL</div>
+        <h1>仓位管理</h1>
+        <p>{{ selectedAccount?.account_name || '当前账户' }} · 监控实时敞口、浮动盈亏与历史成交</p>
+      </div>
+      <v-chip :color="selectedAccount?.active ? 'success' : 'warning'" variant="flat">
+        <v-icon start>mdi-lan-connect</v-icon>{{ selectedAccount?.active ? 'MT5 已连接' : 'MT5 未连接' }}
+      </v-chip>
+    </section>
+
+    <v-row class="mb-2">
+      <v-col cols="6" md="3"><v-card class="metric-card" color="primary" variant="tonal"><v-card-text><span>当前持仓</span><strong>{{ summary.total_count }}</strong></v-card-text></v-card></v-col>
+      <v-col cols="6" md="3"><v-card class="metric-card" :color="summary.total_profit >= 0 ? 'success' : 'error'" variant="tonal"><v-card-text><span>浮动盈亏</span><strong>{{ signedMoney(summary.total_profit) }}</strong></v-card-text></v-card></v-col>
+      <v-col cols="6" md="3"><v-card class="metric-card" color="success" variant="tonal"><v-card-text><span>买入仓位</span><strong>{{ summary.buy_count }}</strong></v-card-text></v-card></v-col>
+      <v-col cols="6" md="3"><v-card class="metric-card" color="error" variant="tonal"><v-card-text><span>卖出仓位</span><strong>{{ summary.sell_count }}</strong></v-card-text></v-card></v-col>
     </v-row>
 
-    <!-- 标签页 -->
-    <v-card>
-      <v-tabs v-model="activeTab" background-color="primary" dark>
-        <v-tab>
-          <v-icon class="mr-2">mdi-chart-box</v-icon>
-          当前持仓
-        </v-tab>
-        <v-tab>
-          <v-icon class="mr-2">mdi-history</v-icon>
-          历史交易
-        </v-tab>
+    <v-card class="content-card" elevation="0">
+      <v-tabs v-model="activeTab" color="primary" class="page-tabs">
+        <v-tab value="positions"><v-icon start>mdi-chart-box-outline</v-icon>当前持仓</v-tab>
+        <v-tab value="history"><v-icon start>mdi-history</v-icon>历史交易</v-tab>
       </v-tabs>
 
-      <!-- 当前持仓 -->
-      <v-tab-item>
-        <!-- 汇总卡片 -->
-        <v-row class="pa-4">
-          <v-col cols="12" md="3">
-            <v-card outlined>
-              <v-card-text class="text-center">
-                <div class="text-h4">{{ summary.total_count }}</div>
-                <div class="text-caption grey--text">总持仓数</div>
-              </v-card-text>
-            </v-card>
-          </v-col>
-          <v-col cols="12" md="3">
-            <v-card outlined>
-              <v-card-text class="text-center">
-                <div class="text-h4" :class="summary.total_profit >= 0 ? 'success--text' : 'error--text'">
-                  {{ summary.total_profit >= 0 ? '+' : '' }}{{ summary.total_profit.toFixed(2) }}
-                </div>
-                <div class="text-caption grey--text">总盈亏</div>
-              </v-card-text>
-            </v-card>
-          </v-col>
-          <v-col cols="12" md="3">
-            <v-card outlined>
-              <v-card-text class="text-center">
-                <div class="text-h4 success--text">{{ summary.buy_count }}</div>
-                <div class="text-caption grey--text">买单数量</div>
-              </v-card-text>
-            </v-card>
-          </v-col>
-          <v-col cols="12" md="3">
-            <v-card outlined>
-              <v-card-text class="text-center">
-                <div class="text-h4 error--text">{{ summary.sell_count }}</div>
-                <div class="text-caption grey--text">卖单数量</div>
-              </v-card-text>
-            </v-card>
-          </v-col>
-        </v-row>
-
-        <!-- 持仓列表 -->
-        <v-card-text>
-          <v-btn color="primary" small class="mb-3" @click="loadPositions" :loading="loading">
-            <v-icon start small>mdi-refresh</v-icon>
-            刷新
-          </v-btn>
-
-          <v-table v-if="positions.length > 0">
-            <template v-slot:default>
-              <thead>
-                <tr>
-                  <th>订单号</th>
-                  <th>品种</th>
-                  <th>方向</th>
-                  <th>手数</th>
-                  <th>开仓价</th>
-                  <th>当前盈亏</th>
-                  <th>止损距离</th>
-                  <th>止盈距离</th>
-                  <th>更新时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="pos in positions" :key="pos.ticket">
-                  <td>{{ pos.ticket }}</td>
-                  <td><strong>{{ pos.symbol }}</strong></td>
-                  <td>
-                    <v-chip size="x-small" :color="pos.type === 'BUY' ? 'success' : 'error'">
-                      {{ pos.type === 'BUY' ? '买入' : '卖出' }}
-                    </v-chip>
-                  </td>
-                  <td>{{ pos.volume }}</td>
-                  <td>{{ pos.price_open }}</td>
-                  <td :class="pos.profit >= 0 ? 'success--text' : 'error--text'">
-                    {{ pos.profit >= 0 ? '+' : '' }}{{ pos.profit.toFixed(2) }}
-                  </td>
-                  <td>{{ pos.distance_sl || '-' }}</td>
-                  <td>{{ pos.distance_tp || '-' }}</td>
-                  <td>{{ formatTime(pos.updated_at) }}</td>
-                  <td>
-                    <v-btn size="x-small" color="error" outlined @click="closePosition(pos)">
-                      平仓
-                    </v-btn>
-                  </td>
-                </tr>
-              </tbody>
-            </template>
-          </v-table>
-          <div v-else class="text-center grey--text py-8">
-            <v-icon large>mdi-folder-open-outline</v-icon>
-            <div class="mt-2">暂无持仓</div>
+      <v-window v-model="activeTab">
+        <v-window-item value="positions">
+          <div class="section-toolbar">
+            <div><strong>实时持仓明细</strong><div class="text-caption text-medium-emphasis">每 5 秒自动同步一次 MT5 仓位</div></div>
+            <v-btn color="primary" variant="tonal" prepend-icon="mdi-refresh" :loading="loading" @click="loadPositions">刷新</v-btn>
           </div>
-        </v-card-text>
-      </v-tab-item>
-
-      <!-- 历史交易 -->
-      <v-tab-item>
-        <v-card-text>
-          <v-btn color="primary" small class="mb-3" @click="loadTradeHistory" :loading="historyLoading">
-            <v-icon start small>mdi-refresh</v-icon>
-            刷新
-          </v-btn>
-
-          <!-- 统计卡片 -->
-          <v-row class="mb-4">
-            <v-col cols="12" md="2">
-              <v-card outlined>
-                <v-card-text class="text-center">
-                  <div class="text-h5">{{ historyStats.total_count || 0 }}</div>
-                  <div class="text-caption grey--text">总成交数</div>
-                </v-card-text>
-              </v-card>
-            </v-col>
-            <v-col cols="12" md="2">
-              <v-card outlined>
-                <v-card-text class="text-center">
-                  <div class="text-h5" :class="(historyStats.net_profit || 0) >= 0 ? 'success--text' : 'error--text'">
-                    {{ (historyStats.net_profit || 0) >= 0 ? '+' : '' }}{{ (historyStats.net_profit || 0).toFixed(2) }}
-                  </div>
-                  <div class="text-caption grey--text">净盈亏</div>
-                </v-card-text>
-              </v-card>
-            </v-col>
-            <v-col cols="6" md="1">
-              <v-card outlined>
-                <v-card-text class="text-center">
-                  <div class="text-h6">{{ historyStats.manual_count || 0 }}</div>
-                  <div class="text-caption grey--text">手动</div>
-                </v-card-text>
-              </v-card>
-            </v-col>
-            <v-col cols="6" md="1">
-              <v-card outlined>
-                <v-card-text class="text-center">
-                  <div class="text-h6 primary--text">{{ historyStats.auto_count || 0 }}</div>
-                  <div class="text-caption grey--text">自动</div>
-                </v-card-text>
-              </v-card>
-            </v-col>
-            <v-col cols="6" md="1">
-              <v-card outlined>
-                <v-card-text class="text-center">
-                  <div class="text-h6 warning--text">{{ historyStats.sl_tp_count || 0 }}</div>
-                  <div class="text-caption grey--text">止损/止盈</div>
-                </v-card-text>
-              </v-card>
-            </v-col>
-            <v-col cols="6" md="1">
-              <v-card outlined>
-                <v-card-text class="text-center">
-                  <div class="text-h6 error--text">{{ historyStats.so_count || 0 }}</div>
-                  <div class="text-caption grey--text">强制平仓</div>
-                </v-card-text>
-              </v-card>
-            </v-col>
-            <v-col cols="6" md="2">
-              <v-card outlined>
-                <v-card-text class="text-center">
-                  <div class="text-h6">{{ (historyStats.total_commission || 0).toFixed(2) }}</div>
-                  <div class="text-caption grey--text">手续费</div>
-                </v-card-text>
-              </v-card>
-            </v-col>
-            <v-col cols="6" md="2">
-              <v-card outlined>
-                <v-card-text class="text-center">
-                  <div class="text-h6">{{ (historyStats.total_swap || 0).toFixed(2) }}</div>
-                  <div class="text-caption grey--text">库存费</div>
-                </v-card-text>
-              </v-card>
-            </v-col>
-          </v-row>
-
-          <!-- 品种分布 -->
-          <v-row class="mb-4" v-if="historyStats.symbols && Object.keys(historyStats.symbols).length > 0">
-            <v-col cols="12">
-              <div class="text-subtitle-1 font-weight-bold mb-2">品种分布</div>
-              <v-chip
-                v-for="(data, symbol) in historyStats.symbols"
-                :key="symbol"
-                class="mr-2 mb-2"
-                :color="data.profit >= 0 ? 'success' : 'error'"
-                outlined
-              >
-                {{ symbol }}: {{ data.count }}单, 盈亏 {{ data.profit >= 0 ? '+' : '' }}{{ data.profit.toFixed(2) }}
-              </v-chip>
-            </v-col>
-          </v-row>
-
-          <!-- 自动单分类 -->
-          <v-row class="mb-4" v-if="historyStats.auto_categories && Object.keys(historyStats.auto_categories).length > 0">
-            <v-col cols="12">
-              <div class="text-subtitle-1 font-weight-bold mb-2">自动单分类</div>
-              <v-data-table
-                :headers="categoryHeaders"
-                :items="categoryItems"
-                dense
-                hide-default-footer
-                class="elevation-1"
-              >
-                <template v-slot:item.profit="{ item }">
-                  <span :class="item.profit >= 0 ? 'success--text' : 'error--text'">
-                    {{ item.profit >= 0 ? '+' : '' }}{{ item.profit.toFixed(2) }}
-                  </span>
-                </template>
-                <template v-slot:item.percentage="{ item }">
-                  <v-progress-linear
-                    :value="item.percentage"
-                    color="primary"
-                    height="20"
-                  >
-                    <template v-slot:default>
-                      {{ item.percentage }}%
-                    </template>
-                  </v-progress-linear>
-                </template>
-              </v-data-table>
-            </v-col>
-          </v-row>
-
-          <!-- 成交列表 -->
-          <div class="text-subtitle-1 font-weight-bold mb-2">成交记录</div>
-          <v-table v-if="tradeDeals.length > 0" fixed-header height="400">
-            <template v-slot:default>
-              <thead>
-                <tr>
-                  <th>订单号</th>
-                  <th>品种</th>
-                  <th>方向</th>
-                  <th>类型</th>
-                  <th>手数</th>
-                  <th>价格</th>
-                  <th>盈亏</th>
-                  <th>手续费</th>
-                  <th>时间</th>
-                  <th>备注</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="deal in tradeDeals" :key="deal.ticket">
-                  <td>{{ deal.ticket }}</td>
-                  <td><strong>{{ deal.symbol }}</strong></td>
-                  <td>
-                    <v-chip size="x-small" :color="deal.type === 0 ? 'success' : 'error'">
-                      {{ deal.type_text }}
-                    </v-chip>
-                  </td>
-                  <td>
-                    <v-chip size="x-small" outlined :color="deal.entry === 1 ? 'warning' : 'info'">
-                      {{ deal.entry_text }}
-                    </v-chip>
-                  </td>
-                  <td>{{ deal.volume }}</td>
-                  <td>{{ deal.price }}</td>
-                  <td :class="deal.profit >= 0 ? 'success--text' : 'error--text'">
-                    {{ deal.profit >= 0 ? '+' : '' }}{{ deal.profit.toFixed(2) }}
-                  </td>
-                  <td>{{ deal.commission.toFixed(2) }}</td>
-                  <td>{{ deal.time }}</td>
-                  <td>
-                    <v-chip v-if="deal.order_source === '自动'" size="x-small" color="primary">
-                      {{ deal.comment }}
-                    </v-chip>
-                    <v-chip v-else-if="deal.order_source === '止损触发'" size="x-small" color="error" outlined>
-                      {{ deal.comment }}
-                    </v-chip>
-                    <v-chip v-else-if="deal.order_source === '止盈触发'" size="x-small" color="success" outlined>
-                      {{ deal.comment }}
-                    </v-chip>
-                    <v-chip v-else-if="deal.order_source === '强制平仓'" size="x-small" color="error" dark>
-                      {{ deal.comment }}
-                    </v-chip>
-                    <span v-else class="grey--text">{{ deal.order_source }}</span>
-                  </td>
-                </tr>
-              </tbody>
-            </template>
+          <v-table v-if="positions.length" class="data-table">
+            <thead><tr><th>订单号</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>当前盈亏</th><th>止损距离</th><th>止盈距离</th><th>更新时间</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr v-for="pos in positions" :key="pos.ticket">
+                <td class="text-medium-emphasis">#{{ pos.ticket }}</td><td><strong>{{ pos.symbol }}</strong></td>
+                <td><v-chip size="small" :color="pos.type === 'BUY' ? 'success' : 'error'" variant="tonal">{{ pos.type === 'BUY' ? '买入' : '卖出' }}</v-chip></td>
+                <td>{{ pos.volume }}</td><td>{{ formatPrice(pos.price_open) }}</td>
+                <td><strong :class="Number(pos.profit) >= 0 ? 'text-success' : 'text-error'">{{ signedMoney(pos.profit) }}</strong></td>
+                <td>{{ pos.distance_sl || '-' }}</td><td>{{ pos.distance_tp || '-' }}</td><td>{{ formatTime(pos.updated_at) }}</td>
+                <td><v-btn size="small" color="error" variant="tonal" @click="closePosition(pos)">平仓</v-btn></td>
+              </tr>
+            </tbody>
           </v-table>
-          <div v-else class="text-center grey--text py-8">
-            <v-icon large>mdi-history</v-icon>
-            <div class="mt-2">暂无历史交易数据</div>
+          <div v-else class="empty-state"><v-icon size="52">mdi-chart-box-outline</v-icon><h3>当前没有持仓</h3><p>新仓位上报后会自动显示在这里。</p></div>
+        </v-window-item>
+
+        <v-window-item value="history">
+          <div class="section-toolbar">
+            <div><strong>账户成交档案</strong><div class="text-caption text-medium-emphasis">复盘成交来源、费用与最终盈亏</div></div>
+            <v-btn color="primary" variant="tonal" prepend-icon="mdi-refresh" :loading="historyLoading" @click="loadTradeHistory">刷新</v-btn>
           </div>
-        </v-card-text>
-      </v-tab-item>
+          <v-row class="px-4 pb-2">
+            <v-col cols="6" md="3"><div class="history-stat"><span>总成交</span><strong>{{ historyStats.total_count || 0 }}</strong></div></v-col>
+            <v-col cols="6" md="3"><div class="history-stat"><span>净盈亏</span><strong :class="Number(historyStats.net_profit || 0) >= 0 ? 'text-success' : 'text-error'">{{ signedMoney(historyStats.net_profit) }}</strong></div></v-col>
+            <v-col cols="6" md="3"><div class="history-stat"><span>自动 / 手动</span><strong>{{ historyStats.auto_count || 0 }} / {{ historyStats.manual_count || 0 }}</strong></div></v-col>
+            <v-col cols="6" md="3"><div class="history-stat"><span>手续费 / 库存费</span><strong>{{ formatMoney(historyStats.total_commission) }} / {{ formatMoney(historyStats.total_swap) }}</strong></div></v-col>
+          </v-row>
+
+          <div v-if="historyStats.symbols && Object.keys(historyStats.symbols).length" class="distribution-panel mx-4 mb-4">
+            <span class="distribution-title">品种分布</span>
+            <v-chip v-for="(data, symbol) in historyStats.symbols" :key="symbol" :color="data.profit >= 0 ? 'success' : 'error'" variant="tonal">{{ symbol }} · {{ data.count }} 单 · {{ signedMoney(data.profit) }}</v-chip>
+          </div>
+
+          <v-data-table v-if="historyStats.auto_categories && Object.keys(historyStats.auto_categories).length" :headers="categoryHeaders" :items="categoryItems" density="compact" hide-default-footer class="mx-4 mb-4 category-table">
+            <template #item.profit="{ item }"><span :class="item.profit >= 0 ? 'text-success' : 'text-error'">{{ signedMoney(item.profit) }}</span></template>
+            <template #item.percentage="{ item }"><v-progress-linear :model-value="item.percentage" color="primary" height="18" rounded><strong>{{ item.percentage }}%</strong></v-progress-linear></template>
+          </v-data-table>
+
+          <v-table v-if="tradeDeals.length" class="data-table" fixed-header height="420">
+            <thead><tr><th>订单号</th><th>品种</th><th>方向</th><th>类型</th><th>手数</th><th>价格</th><th>盈亏</th><th>手续费</th><th>时间</th><th>来源</th></tr></thead>
+            <tbody><tr v-for="deal in tradeDeals" :key="deal.ticket">
+              <td class="text-medium-emphasis">#{{ deal.ticket }}</td><td><strong>{{ deal.symbol }}</strong></td>
+              <td><v-chip size="small" :color="deal.type === 0 ? 'success' : 'error'" variant="tonal">{{ deal.type_text }}</v-chip></td>
+              <td>{{ deal.entry_text }}</td><td>{{ deal.volume }}</td><td>{{ formatPrice(deal.price) }}</td>
+              <td><strong :class="Number(deal.profit) >= 0 ? 'text-success' : 'text-error'">{{ signedMoney(deal.profit) }}</strong></td>
+              <td>{{ formatMoney(deal.commission) }}</td><td>{{ deal.time }}</td>
+              <td><v-chip size="small" variant="outlined" :color="sourceColor(deal.order_source)">{{ deal.comment || deal.order_source || '-' }}</v-chip></td>
+            </tr></tbody>
+          </v-table>
+          <div v-else class="empty-state"><v-icon size="52">mdi-history</v-icon><h3>暂无历史交易</h3><p>MT5 上报成交记录后会显示在这里。</p></div>
+        </v-window-item>
+      </v-window>
     </v-card>
 
     <!-- 平仓确认对话框 -->
@@ -341,7 +119,7 @@ import { useAccountContext } from '@/composables/useAccountContext'
 export default {
   name: 'Positions',
   setup() {
-    const activeTab = ref(0)
+    const activeTab = ref('positions')
     const positions = ref([])
     const summary = ref({
       total_count: 0,
@@ -363,13 +141,13 @@ export default {
     const historyLoading = ref(false)
 
     let refreshInterval = null
-    const { selectedAccountId } = useAccountContext()
+    const { selectedAccountId, selectedAccount } = useAccountContext()
 
     const categoryHeaders = [
-      { text: '分类', value: 'category', width: 150 },
-      { text: '数量', value: 'count', width: 80 },
-      { text: '占比', value: 'percentage', width: 150 },
-      { text: '盈亏', value: 'profit', width: 100 }
+      { title: '自动单分类', key: 'category', width: 180 },
+      { title: '数量', key: 'count', width: 100 },
+      { title: '占比', key: 'percentage', width: 220 },
+      { title: '盈亏', key: 'profit', width: 120 }
     ]
 
     const categoryItems = computed(() => {
@@ -463,6 +241,22 @@ export default {
       })
     }
 
+    const formatMoney = (value) => Number(value || 0).toFixed(2)
+    const signedMoney = (value) => {
+      const number = Number(value || 0)
+      return `${number >= 0 ? '+' : ''}${number.toFixed(2)}`
+    }
+    const formatPrice = (value) => Number(value || 0).toLocaleString('zh-CN', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 5
+    })
+    const sourceColor = (source) => ({
+      '自动': 'primary',
+      '止损触发': 'error',
+      '止盈触发': 'success',
+      '强制平仓': 'error'
+    })[source] || 'grey'
+
     onMounted(() => {
       if (selectedAccountId.value) {
         loadPositions()
@@ -490,6 +284,7 @@ export default {
 
     return {
       activeTab,
+      selectedAccount,
       positions,
       summary,
       loading,
@@ -508,8 +303,36 @@ export default {
       loadTradeHistory,
       closePosition,
       confirmClosePosition,
-      formatTime
+      formatTime,
+      formatMoney,
+      signedMoney,
+      formatPrice,
+      sourceColor
     }
   }
 }
 </script>
+
+<style scoped>
+.positions-page { max-width:1600px; padding:28px; }
+.positions-hero { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:26px 30px; color:#f4fbf8; border-radius:22px; background:radial-gradient(circle at 86% 18%,rgba(247,186,67,.28),transparent 28%),linear-gradient(125deg,#123c35 0%,#176b56 58%,#0d8f70 100%); box-shadow:0 18px 40px rgba(20,82,68,.18); }
+.positions-hero h1 { margin:2px 0 6px; font-size:clamp(1.8rem,3vw,2.7rem); line-height:1.05; }
+.positions-hero p { margin:0; color:rgba(244,251,248,.76); }
+.section-kicker { color:#f4c96b; font-size:.72rem; font-weight:800; letter-spacing:.16em; }
+.metric-card .v-card-text { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.metric-card strong { font-size:clamp(1.35rem,2vw,1.9rem); }
+.content-card { border:1px solid #dce7e0; border-radius:18px; overflow:hidden; background:linear-gradient(155deg,#fff,#f8fbf9); }
+.page-tabs { padding:8px 14px 0; border-bottom:1px solid #e2ebe5; }
+.section-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:20px 24px; }
+.data-table :deep(th) { color:#536b62; font-size:.75rem; font-weight:800; letter-spacing:.03em; background:#f2f7f4!important; }
+.history-stat { display:flex; flex-direction:column; gap:4px; min-height:86px; padding:16px; border-radius:14px; background:#eef5f1; }
+.history-stat span { color:#718078; font-size:.75rem; }
+.history-stat strong { font-size:1.25rem; }
+.distribution-panel { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:16px; border-radius:14px; background:#fbf6e9; }
+.distribution-title { margin-right:6px; color:#6e5d28; font-weight:800; }
+.category-table { border:1px solid #e2ebe5; border-radius:14px; overflow:hidden; }
+.empty-state { padding:64px 20px; text-align:center; color:#718078; }
+.empty-state h3 { margin:12px 0 4px; color:#385148; }
+.empty-state p { margin:0; }
+@media (max-width:700px) { .positions-page{padding:16px}.positions-hero{align-items:stretch;flex-direction:column;padding:22px}.positions-hero .v-chip{align-self:flex-start}.section-toolbar{align-items:flex-start;flex-direction:column}.section-toolbar .v-btn{width:100%} }
+</style>

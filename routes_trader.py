@@ -4,13 +4,12 @@
 交易员相关的接口路由
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Optional, List, Dict
+from fastapi import APIRouter, Depends, Query
+from typing import Optional, Dict
 from auth import AuthUser, require_auth
-from models import TradeInstruction
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
-from sqlite_storage import TradeExecutionRepository
+from sqlite_storage import TradeExecutionRepository, TradingAccountRepository
 
 
 def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -18,68 +17,16 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
     创建交易员相关路由
     """
     router = APIRouter()
-    
-    @router.post("/send_trade_instructions")
-    async def send_trade_instructions(
-        instructions: List[TradeInstruction],
+    account_repository = TradingAccountRepository()
+
+    @router.get("/dashboard/overview")
+    async def get_dashboard_overview(
         account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        """
-        交易员发送交易指令
-        
-        参数 (JSON):
-        ```json
-        [
-            {
-                "symbol": "EURUSD",
-                "action": "b",
-                "mount": 0.1,
-                "price": 1.0850,
-                "sl": 1.0800,
-                "tp": 1.0900
-            },
-            {
-                "symbol": "GBPUSD",
-                "action": "s",
-                "mount": 0.2,
-                "price": 1.2700,
-                "sl": null,
-                "tp": null
-            }
-        ]
-        ```
-        
-        说明:
-        - action: 'b'(买入) 或 's'(卖出)
-        - mount: 交易手数
-        - price: 交易指令的目标价格（用于 Python 端过滤）
-        - sl: 止损价格（可选，默认 0.0）
-        - tp: 获利价格（可选，默认 0.005）
-        
-        返回:
-        ```json
-        {
-            "status": "ok",
-            "message": "已添加 2 条交易指令"
-        }
-        ```
-        """
         account, server = resolve_web_engine(engine_manager, user, account_id)
-        if account.status != "active" or not account.trading_enabled:
-            raise HTTPException(status_code=409, detail="当前账户交易已暂停")
-        if any(item.mount > account.max_single_volume for item in instructions):
-            raise HTTPException(status_code=400, detail="交易手数超过账户单笔限制")
-        result = server.add_trade_instruction(instructions)
-        added = result.get("added", 0)
-        rejected = result.get("rejected", 0)
-        msg = f"已添加 {added} 条交易指令"
-        if rejected > 0:
-            msg += f"，{rejected} 条因价格不合法被拒绝"
-        return {
-            "status": "ok",
-            "message": msg
-        }
+        account = account_repository.get_by_id(user.user_id, account.account_id)
+        return server.get_dashboard_overview(account)
     
     @router.get("/query_pending_trades")
     async def query_pending_trades(

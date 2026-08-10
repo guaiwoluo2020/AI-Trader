@@ -4,8 +4,8 @@ import Dashboard from '../views/Dashboard.vue'
 import Login from '../views/Login.vue'
 import Register from '../views/Register.vue'
 import TradeOrders from '../views/TradeOrders.vue'
-import Statistics from '../views/Statistics.vue'
 import Market from '../views/Market.vue'
+import AIMarket from '../views/AIMarket.vue'
 import Settings from '../views/Settings.vue'
 import StrategySettings from '../views/StrategySettings.vue'
 import SystemLog from '../views/SystemLog.vue'
@@ -16,6 +16,7 @@ import BacktestDatasets from '../views/BacktestDatasets.vue'
 import BacktestTasks from '../views/BacktestTasks.vue'
 import Accounts from '../views/Accounts.vue'
 import PositionManagement from '../views/PositionManagement.vue'
+import AlphaResearch from '../views/AlphaResearch.vue'
 
 const routes = [
   {
@@ -55,9 +56,9 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
-    path: '/statistics',
-    name: 'Statistics',
-    component: Statistics,
+    path: '/ai-market',
+    name: 'AIMarket',
+    component: AIMarket,
     meta: { requiresAuth: true }
   },
   {
@@ -100,6 +101,12 @@ const routes = [
     path: '/backtests',
     name: 'BacktestTasks',
     component: BacktestTasks,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/alpha-research',
+    name: 'AlphaResearch',
+    component: AlphaResearch,
     meta: { requiresAuth: true }
   },
   {

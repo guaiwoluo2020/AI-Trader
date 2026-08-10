@@ -425,7 +425,9 @@ class BacktestDatasetRepository:
                        (SELECT COUNT(*) FROM backtest_template_datasets td
                         WHERE td.dataset_id = d.dataset_id) AS template_count,
                        (SELECT COUNT(*) FROM backtest_tasks bt
-                        WHERE bt.dataset_id = d.dataset_id) AS task_count
+                        WHERE bt.dataset_id = d.dataset_id) AS task_count,
+                       (SELECT COUNT(*) FROM alpha_research_runs ar
+                        WHERE ar.dataset_id = d.dataset_id) AS alpha_count
                 FROM backtest_datasets d
                 WHERE d.user_id = ? AND d.dataset_id = ?
                 """,
@@ -435,9 +437,11 @@ class BacktestDatasetRepository:
                 return False
             template_count = int(row["template_count"])
             task_count = int(row["task_count"])
-            if template_count or task_count:
+            alpha_count = int(row["alpha_count"])
+            if template_count or task_count or alpha_count:
                 raise DatasetReferencedError(
-                    f"数据集已被 {template_count} 个模板和 {task_count} 个回测任务引用，不能删除"
+                    f"数据集已被 {template_count} 个模板、{task_count} 个回测任务（策略）和 "
+                    f"{alpha_count} 个 Alpha 研究任务引用，不能删除"
                 )
             conn.execute(
                 "DELETE FROM backtest_datasets WHERE user_id = ? AND dataset_id = ?",

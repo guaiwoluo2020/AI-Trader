@@ -1,17 +1,44 @@
 <template>
-  <v-container fluid>
-    <v-row>
-      <v-col cols="12">
-        <h1 class="mb-4">交易指令管理</h1>
+  <v-container fluid class="operations-page">
+    <section class="operations-hero mb-5">
+      <div>
+        <div class="section-kicker">EA EXECUTION PIPELINE</div>
+        <h1>交易指令</h1>
+        <p>{{ selectedAccount?.account_name || '当前账户' }} · 跟踪策略指令从等待领取到 MT5 执行回报</p>
+      </div>
+      <v-chip :color="selectedAccount?.active ? 'success' : 'warning'" variant="flat">
+        <v-icon start>mdi-lan-connect</v-icon>
+        {{ selectedAccount?.active ? 'MT5 已连接' : 'MT5 未连接' }}
+      </v-chip>
+    </section>
+
+    <v-row class="mb-2">
+      <v-col cols="12" sm="4">
+        <v-card class="metric-card" variant="tonal" color="warning">
+          <v-card-text><span>待执行指令</span><strong>{{ pendingTrades.length }}</strong></v-card-text>
+        </v-card>
+      </v-col>
+      <v-col cols="12" sm="4">
+        <v-card class="metric-card" variant="tonal" color="success">
+          <v-card-text><span>成功回报</span><strong>{{ successfulExecutions }}</strong></v-card-text>
+        </v-card>
+      </v-col>
+      <v-col cols="12" sm="4">
+        <v-card class="metric-card" variant="tonal" color="error">
+          <v-card-text><span>失败回报</span><strong>{{ failedExecutions }}</strong></v-card-text>
+        </v-card>
       </v-col>
     </v-row>
 
+    <v-alert v-if="error" type="error" closable class="mb-4" @click:close="error = ''">{{ error }}</v-alert>
+    <v-alert v-if="success" type="success" closable class="mb-4" @click:close="success = ''">{{ success }}</v-alert>
+
     <v-row>
       <v-col cols="12">
-        <v-card>
+        <v-card class="content-card" elevation="0">
           <v-card-title class="d-flex align-center justify-space-between">
-            EA 执行结果
-            <v-btn size="small" variant="text" :loading="loadingExecutions" @click="loadExecutions">
+            <div class="d-flex align-center"><v-icon class="mr-2" color="success">mdi-check-decagram-outline</v-icon>EA 执行回报</div>
+            <v-btn size="small" variant="tonal" prepend-icon="mdi-refresh" :loading="loadingExecutions" @click="loadExecutions">
               刷新
             </v-btn>
           </v-card-title>
@@ -51,86 +78,17 @@
       </v-col>
     </v-row>
 
-    <!-- 发送交易指令表单 -->
     <v-row>
-      <v-col cols="12" md="6">
-        <v-card>
-          <v-card-title>发送交易指令</v-card-title>
-          <v-card-text>
-            <v-form ref="form" v-model="formValid">
-              <v-select
-                v-model="tradeForm.symbol"
-                :items="symbols"
-                label="交易品种"
-                required
-                :rules="[v => !!v || '请选择交易品种']"
-              ></v-select>
-
-              <v-select
-                v-model="tradeForm.direction"
-                :items="directions"
-                label="买卖方向"
-                required
-                :rules="[v => !!v || '请选择买卖方向']"
-              ></v-select>
-
-              <v-text-field
-                v-model.number="tradeForm.volume"
-                label="手数"
-                type="number"
-                step="0.01"
-                required
-                :rules="[v => v > 0 || '手数必须大于0']"
-              ></v-text-field>
-
-              <v-text-field
-                v-model.number="tradeForm.price"
-                label="执行价格"
-                type="number"
-                step="0.00001"
-                required
-                :rules="[v => v > 0 || '执行价格必须大于0']"
-              ></v-text-field>
-
-              <v-text-field
-                v-model.number="tradeForm.sl"
-                label="止损价格"
-                type="number"
-                step="0.00001"
-                :rules="[v => !v || v > 0 || '止损价格必须大于0']"
-              ></v-text-field>
-
-              <v-text-field
-                v-model.number="tradeForm.tp"
-                label="止盈价格"
-                type="number"
-                step="0.00001"
-                :rules="[v => !v || v > 0 || '止盈价格必须大于0']"
-              ></v-text-field>
-
-              <v-btn
-                color="primary"
-                :disabled="!formValid"
-                :loading="sending"
-                @click="sendTrade"
-                block
-                class="mt-4"
-              >
-                发送交易指令
-              </v-btn>
-            </v-form>
-          </v-card-text>
-        </v-card>
-      </v-col>
-
-      <!-- 待执行指令列表 -->
-      <v-col cols="12" md="6">
-        <v-card>
+      <v-col cols="12">
+        <v-card class="content-card queue-card" elevation="0">
           <v-card-title class="d-flex align-center justify-space-between">
-            待执行指令
+            <div class="d-flex align-center"><v-icon class="mr-2" color="warning">mdi-tray-arrow-down</v-icon>待执行指令</div>
             <v-btn
               color="error"
               size="small"
+              variant="tonal"
+              prepend-icon="mdi-delete-sweep-outline"
+              :disabled="!pendingTrades.length"
               :loading="clearing"
               @click="clearAllTrades"
             >
@@ -163,38 +121,17 @@
       </v-col>
     </v-row>
 
-    <!-- 错误信息 -->
-    <v-row v-if="error">
-      <v-col cols="12">
-        <v-alert type="error" dismissible>
-          {{ error }}
-        </v-alert>
-      </v-col>
-    </v-row>
-
-    <!-- 成功信息 -->
-    <v-row v-if="success">
-      <v-col cols="12">
-        <v-alert type="success" dismissible>
-          {{ success }}
-        </v-alert>
-      </v-col>
-    </v-row>
   </v-container>
 </template>
 
 <script>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { tradingAPI } from '@/api/trading'
-import { marketAPI } from '@/api/market'
 import { useAccountContext } from '@/composables/useAccountContext'
 
 export default {
   name: 'TradeOrders',
   setup() {
-    const form = ref(null)
-    const formValid = ref(false)
-    const sending = ref(false)
     const loadingTrades = ref(false)
     const clearing = ref(false)
     const error = ref('')
@@ -202,22 +139,9 @@ export default {
     const loadingExecutions = ref(false)
     const executionReports = ref([])
     let refreshTimer = null
-    const { selectedAccountId } = useAccountContext()
-
-    const tradeForm = ref({
-      symbol: '',
-      direction: '',
-      volume: 0.01,
-      price: 0,
-      sl: 0,
-      tp: 0,
-    })
-
-    const symbols = ref([])
-    const directions = [
-      { title: '买入', value: 'BUY' },
-      { title: '卖出', value: 'SELL' },
-    ]
+    const { selectedAccountId, selectedAccount } = useAccountContext()
+    const successfulExecutions = computed(() => executionReports.value.filter(item => item.success).length)
+    const failedExecutions = computed(() => executionReports.value.filter(item => !item.success).length)
 
     const tradeHeaders = [
       { title: '品种', key: 'symbol', width: '20%' },
@@ -262,46 +186,6 @@ export default {
         console.error('Load trades error:', err)
       } finally {
         loadingTrades.value = false
-      }
-    }
-
-    const sendTrade = async () => {
-      try {
-        sending.value = true
-        error.value = ''
-        success.value = ''
-
-        // 价格验证
-        if (tradeForm.value.sl > 0 && tradeForm.value.tp > 0) {
-          if (tradeForm.value.direction === 'BUY' && !(tradeForm.value.sl < tradeForm.value.price && tradeForm.value.price < tradeForm.value.tp)) {
-            error.value = '买入指令必须满足: 止损 < 执行价格 < 止盈'
-            return
-          }
-          if (tradeForm.value.direction === 'SELL' && !(tradeForm.value.tp < tradeForm.value.price && tradeForm.value.price < tradeForm.value.sl)) {
-            error.value = '卖出指令必须满足: 止盈 < 执行价格 < 止损'
-            return
-          }
-        }
-
-        // 转换数据格式
-        const instruction = {
-          symbol: tradeForm.value.symbol,
-          action: tradeForm.value.direction === 'BUY' ? 'b' : 's',
-          mount: tradeForm.value.volume,
-          price: tradeForm.value.price,
-          sl: tradeForm.value.sl || 0,
-          tp: tradeForm.value.tp || 0
-        }
-
-        await tradingAPI.sendTradeInstructions([instruction], selectedAccountId.value)
-        success.value = '交易指令发送成功！'
-        form.value.reset()
-        await loadPendingTrades()
-      } catch (err) {
-        error.value = `发送指令失败: ${err.message}`
-        console.error('Send trade error:', err)
-      } finally {
-        sending.value = false
       }
     }
 
@@ -359,18 +243,8 @@ export default {
       }
     }
 
-    const loadSymbols = async () => {
-      try {
-        const data = await marketAPI.getSymbols(selectedAccountId.value)
-        symbols.value = data.symbols || []
-      } catch (err) {
-        console.error('加载品种列表失败:', err)
-      }
-    }
-
     onMounted(() => {
       if (selectedAccountId.value) {
-        loadSymbols()
         loadPendingTrades()
         loadExecutions()
       }
@@ -382,12 +256,9 @@ export default {
     })
 
     watch(selectedAccountId, (value) => {
-      symbols.value = []
       pendingTrades.value = []
       executionReports.value = []
-      tradeForm.value.symbol = ''
       if (value) {
-        loadSymbols()
         loadPendingTrades()
         loadExecutions()
       }
@@ -396,24 +267,20 @@ export default {
     onUnmounted(() => clearInterval(refreshTimer))
 
     return {
-      form,
-      formValid,
-      sending,
       loadingTrades,
       clearing,
       error,
       success,
-      tradeForm,
-      symbols,
-      directions,
       tradeHeaders,
       executionHeaders,
       pendingTrades,
       executionReports,
+      selectedAccount,
+      successfulExecutions,
+      failedExecutions,
       loadingExecutions,
       loadPendingTrades,
       loadExecutions,
-      sendTrade,
       clearAllTrades,
       formatTime,
       formatExecutionTime,
@@ -423,3 +290,16 @@ export default {
   },
 }
 </script>
+
+<style scoped>
+.operations-page { max-width: 1600px; padding: 28px; }
+.operations-hero { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:26px 30px; color:#f4fbf8; border-radius:22px; background:radial-gradient(circle at 86% 18%,rgba(247,186,67,.28),transparent 28%),linear-gradient(125deg,#123c35 0%,#176b56 58%,#0d8f70 100%); box-shadow:0 18px 40px rgba(20,82,68,.18); }
+.operations-hero h1 { margin:2px 0 6px; font-size:clamp(1.8rem,3vw,2.7rem); line-height:1.05; }
+.operations-hero p { margin:0; color:rgba(244,251,248,.76); }
+.section-kicker { color:#f4c96b; font-size:.72rem; font-weight:800; letter-spacing:.16em; }
+.metric-card .v-card-text { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.metric-card strong { font-size:1.9rem; }
+.content-card { border:1px solid #dce7e0; border-radius:18px; overflow:hidden; background:linear-gradient(155deg,#fff,#f8fbf9); }
+.queue-card { border-color:rgba(183,137,24,.24); }
+@media (max-width:700px) { .operations-page{padding:16px}.operations-hero{align-items:stretch;flex-direction:column;padding:22px}.operations-hero .v-chip{align-self:flex-start} }
+</style>

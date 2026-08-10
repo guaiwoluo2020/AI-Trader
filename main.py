@@ -27,6 +27,8 @@ from routes_news import create_news_routes
 from routes_backtest_data import create_backtest_data_routes
 from routes_backtest_tasks import create_backtest_task_routes
 from routes_accounts import create_account_routes
+from routes_alpha_research import create_alpha_research_routes
+from alpha_research import AlphaResearchWorker
 from backtest_engine import BacktestWorker
 from trading_engine_manager import TradingEngineManager
 
@@ -38,6 +40,7 @@ def create_app():
     get_auth_manager()
     engine_manager = TradingEngineManager()
     backtest_worker = BacktestWorker()
+    alpha_research_worker = AlphaResearchWorker()
 
     # 创建 FastAPI 应用
     app = FastAPI(
@@ -90,6 +93,7 @@ def create_app():
     app.include_router(create_backtest_data_routes(engine_manager))
     app.include_router(create_backtest_task_routes())
     app.include_router(create_account_routes(engine_manager))
+    app.include_router(create_alpha_research_routes())
 
     # 启动时设置事件循环
     @app.on_event("startup")
@@ -107,13 +111,17 @@ def create_app():
 
         app.state.backtest_worker = backtest_worker
         backtest_worker.start()
+        app.state.alpha_research_worker = alpha_research_worker
+        alpha_research_worker.start()
 
         print("[Startup] 事件循环已设置")
         print("[Startup] 回测任务 Worker 已启动")
+        print("[Startup] Alpha 研究 Worker 已启动")
 
     @app.on_event("shutdown")
     async def shutdown_event():
         backtest_worker.stop()
+        alpha_research_worker.stop()
         engine_manager.close_all()
 
         from market.system_log import get_system_log

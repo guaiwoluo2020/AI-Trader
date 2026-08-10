@@ -184,6 +184,56 @@ export const marketAPI = {
     return response.data
   },
 
+  // ==================== Alpha research ====================
+
+  async getAlphaResearchContext() {
+    const response = await api.get('/alpha-research/context')
+    return response.data
+  },
+
+  async getAlphaResearchRuns() {
+    const response = await api.get('/alpha-research/runs')
+    return response.data
+  },
+
+  async generateAlphaCandidates(data) {
+    const response = await api.post('/alpha-research/candidates', data, { timeout: 130000 })
+    return response.data
+  },
+
+  async createAlphaResearchRun(data) {
+    const response = await api.post('/alpha-research/runs', data)
+    return response.data
+  },
+
+  async getAlphaResearchRun(runId) {
+    const response = await api.get(`/alpha-research/runs/${encodeURIComponent(runId)}`)
+    return response.data
+  },
+
+  async cancelAlphaResearchRun(runId) {
+    const response = await api.post(`/alpha-research/runs/${encodeURIComponent(runId)}/cancel`)
+    return response.data
+  },
+
+  async publishAlphaResearchRun(runId, visibility = 'private') {
+    const response = await api.post(
+      `/alpha-research/runs/${encodeURIComponent(runId)}/publish`,
+      { visibility }
+    )
+    return response.data
+  },
+
+  async getAlphaLibrary() {
+    const response = await api.get('/alpha-library')
+    return response.data
+  },
+
+  async retireAlpha(alphaId) {
+    const response = await api.post(`/alpha-library/${encodeURIComponent(alphaId)}/retire`)
+    return response.data
+  },
+
   // 获取所有symbol列表
   async getSymbols(accountId = null) {
     const response = await api.get('/market/symbols', {
@@ -386,6 +436,14 @@ export const marketAPI = {
     return response.data
   },
 
+  async getAIMarketView(accountId = null, symbol = null) {
+    const params = {}
+    if (accountId) params.account_id = accountId
+    if (symbol) params.symbol = symbol
+    const response = await api.get('/llm/market-view', { params })
+    return response.data
+  },
+
   // 申请开通大模型行情分析
   async requestLLMAccess() {
     const response = await api.post('/llm/access/request')
@@ -573,9 +631,14 @@ export const marketAPI = {
   },
 
   // 获取决策历史
-  async getDecisions(symbol = null, count = 20) {
-    const params = { count }
-    if (symbol) params.symbol = symbol
+  async getDecisions(filters = {}, accountId = null) {
+    const params = { count: filters.count || 50 }
+    if (filters.symbol) params.symbol = filters.symbol
+    if (filters.strategy_id) params.strategy_id = filters.strategy_id
+    if (filters.status) params.status = filters.status
+    if (filters.date_from) params.date_from = filters.date_from
+    if (filters.date_to) params.date_to = filters.date_to
+    if (accountId) params.account_id = accountId
     const response = await api.get('/strategy/decisions', { params })
     return response.data
   },

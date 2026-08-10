@@ -48,8 +48,8 @@
 
     <section class="metric-grid">
       <article class="metric-card">
-        <span>数据集总数</span>
-        <strong>{{ datasets.length }}</strong>
+        <span>我的数据集</span>
+        <strong>{{ quota.usage.datasets }} / {{ quota.limits.datasets ?? '∞' }}</strong>
       </article>
       <article class="metric-card ready">
         <span>已经可用</span>
@@ -308,6 +308,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { marketAPI } from '../api/market'
 
 const datasets = ref([])
+const quota = reactive({ usage: { datasets: 0 }, limits: { datasets: 10 } })
 const context = reactive({ account: null, accounts: [], symbols: [], required_ea_version: '2.04' })
 const loading = ref(false)
 const creating = ref(false)
@@ -446,6 +447,7 @@ async function loadAll() {
       form.accountId = context.accounts[0].account_id
     }
     datasets.value = datasetData.datasets || []
+    Object.assign(quota, datasetData.quota || quota)
     if (!form.symbol && context.symbols.length) form.symbol = context.symbols[0]
   } catch (error) {
     messageType.value = 'error'

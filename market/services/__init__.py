@@ -16,6 +16,7 @@ from .trading_instruction_service import TradingInstructionService
 from .signal import (
     SignalService, KeyLevelSignalGenerator,
     AIEntrySignalGenerator, MovingAverageSignalGenerator,
+    AlphaFactorSignalGenerator, AlphaRuntimeExecutor,
 )
 
 # 策略服务
@@ -32,6 +33,7 @@ __all__ = [
     'PendingOrderService', 'TradingInstructionService',
     'SignalService', 'KeyLevelSignalGenerator',
     'AIEntrySignalGenerator', 'MovingAverageSignalGenerator',
+    'AlphaFactorSignalGenerator', 'AlphaRuntimeExecutor',
     'StrategyService', 'RiskManager',
     'StatisticsService', 'PositionService', 'TradeHistoryService', 'PositionManager',
     'calculate_ma', 'calculate_adx', 'calculate_rsi', 'calculate_macd', 'calculate_bollinger_bands'

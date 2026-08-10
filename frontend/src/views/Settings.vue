@@ -1,8 +1,48 @@
 <template>
   <v-container fluid>
-    <v-row v-if="!isStrategyPage">
+    <v-row v-if="!isStrategyPage" class="settings-workspace">
       <v-col cols="12">
-        <h1 class="mb-4">{{ pageTitle }}</h1>
+        <section class="settings-hero" :class="{ 'settings-hero--admin': isAdmin }">
+          <div>
+            <div class="strategy-eyebrow">{{ isAdmin ? 'ADMIN CONTROL CENTER' : 'PERSONAL CONTROL ROOM' }}</div>
+            <h2>{{ isAdmin ? '平台运营与安全配置' : '管理你的交易工作空间' }}</h2>
+            <p>{{ isAdmin ? '集中维护用户额度、注册邮件和大模型服务，让平台运行状态清晰可控。' : '查看资源额度、保护账户安全，并管理大模型行情分析权限。' }}</p>
+            <div class="settings-hero__identity">
+              <v-avatar size="30" color="white" variant="tonal"><v-icon size="18">mdi-account-circle-outline</v-icon></v-avatar>
+              <span>{{ currentUser.username }}</span>
+              <v-chip size="x-small" :color="isAdmin ? 'warning' : 'success'" variant="flat">{{ roleLabel }}</v-chip>
+            </div>
+          </div>
+          <v-btn v-if="isAdmin" variant="outlined" color="white" prepend-icon="mdi-refresh" :loading="quotaSaving === 'loading'" @click="loadAdminWorkspace">刷新运营数据</v-btn>
+          <v-btn v-else to="/strategy-settings" variant="outlined" color="white" prepend-icon="mdi-chart-timeline-variant-shimmer">前往策略管理</v-btn>
+        </section>
+
+        <section class="settings-metrics">
+          <article>
+            <span>{{ isAdmin ? '受管用户' : '历史数据集' }}</span>
+            <strong>{{ isAdmin ? quotaUsers.length : `${myQuota.usage.datasets} / ${myQuota.limits.datasets ?? '∞'}` }}</strong>
+            <small>{{ isAdmin ? '可在白名单中单独扩容' : '创建的数据集占用额度' }}</small>
+            <v-icon>mdi-database-outline</v-icon>
+          </article>
+          <article>
+            <span>{{ isAdmin ? '待审批 AI 申请' : '策略额度' }}</span>
+            <strong>{{ isAdmin ? llmAccessRequests.length : `${myQuota.usage.strategies} / ${myQuota.limits.strategies ?? '∞'}` }}</strong>
+            <small>{{ isAdmin ? '等待管理员处理' : '私有及复制后的策略均计入' }}</small>
+            <v-icon>mdi-chart-timeline-variant</v-icon>
+          </article>
+          <article>
+            <span>{{ isAdmin ? '邮件服务' : '信号源额度' }}</span>
+            <strong>{{ isAdmin ? (emailConfig.enabled && emailConfig.password_set ? '在线' : '待配置') : `${myQuota.usage.signal_sources} / ${myQuota.limits.signal_sources ?? '∞'}` }}</strong>
+            <small>{{ isAdmin ? '负责新用户注册验证码' : '所有策略下已保存的信号源' }}</small>
+            <v-icon>mdi-access-point</v-icon>
+          </article>
+          <article>
+            <span>{{ isAdmin ? '平台 AI 服务' : 'AI 行情分析' }}</span>
+            <strong>{{ isAdmin ? (llmConfig.enabled ? '启用' : '停用') : llmAccessLabel }}</strong>
+            <small>{{ isAdmin ? '全局大模型服务状态' : llmAccessDescription }}</small>
+            <v-icon>mdi-brain</v-icon>
+          </article>
+        </section>
       </v-col>
     </v-row>
 
@@ -29,10 +69,10 @@
           <v-window v-model="strategyWorkspaceTab">
             <v-window-item value="mine">
               <div class="strategy-metrics">
-                <article><span>全部策略</span><strong>{{ strategies.length }}</strong><v-icon>mdi-layers-triple-outline</v-icon></article>
+                <article><span>全部策略</span><strong>{{ strategies.length }} / {{ strategyQuota.limits.strategies ?? '∞' }}</strong><v-icon>mdi-layers-triple-outline</v-icon></article>
                 <article><span>实盘可用</span><strong>{{ strategyMetrics.production }}</strong><v-icon>mdi-rocket-launch-outline</v-icon></article>
                 <article><span>正在启用</span><strong>{{ strategyMetrics.enabled }}</strong><v-icon>mdi-pulse</v-icon></article>
-                <article><span>平台共享</span><strong>{{ strategyMetrics.shared }}</strong><v-icon>mdi-share-variant-outline</v-icon></article>
+                <article><span>信号源用量</span><strong>{{ strategyQuota.usage.signal_sources }} / {{ strategyQuota.limits.signal_sources ?? '∞' }}</strong><v-icon>mdi-access-point</v-icon></article>
               </div>
 
               <v-card class="strategy-list-shell" elevation="0">
@@ -122,7 +162,7 @@
                     <div class="signal-source-summary"><v-chip size="x-small" variant="outlined">权重 {{ source.weight }}</v-chip><span class="text-caption text-medium-emphasis">{{ signalSourceSummary(source) }}</span></div>
                   </article>
                 </div>
-                <div v-else class="strategy-empty compact"><v-icon size="44">mdi-access-point-plus</v-icon><h3>还没有信号源</h3><p>添加关键点位、AI 入场或均线交叉信号。</p></div>
+                <div v-else class="strategy-empty compact"><v-icon size="44">mdi-access-point-plus</v-icon><h3>还没有信号源</h3><p>添加关键点位、AI 入场、均线交叉或已验证 Alpha。</p></div>
               </v-window-item>
 
               <v-window-item value="risk">
@@ -146,10 +186,10 @@
     <!-- 账户与安全 -->
     <v-row v-if="!isStrategyPage">
       <v-col cols="12">
-        <v-card>
-          <v-card-title>
-            <v-icon class="mr-2">mdi-account-lock</v-icon>
-            账户与安全
+        <v-card class="user-settings-card" elevation="0">
+          <v-card-title class="settings-card-title">
+            <div><v-icon>mdi-account-lock-outline</v-icon><span>账户与安全</span></div>
+            <small>个人资料与登录保护</small>
           </v-card-title>
           <v-card-text>
             <v-row>
@@ -234,13 +274,96 @@
       </v-col>
     </v-row>
 
+    <!-- 管理员邮件服务配置 -->
+    <v-row v-if="!isStrategyPage && isAdmin">
+      <v-col cols="12">
+        <v-card class="user-settings-card admin-service-card" elevation="0">
+          <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
+            <div><v-icon class="mr-2">mdi-email-lock-outline</v-icon>注册邮件服务</div>
+            <v-chip :color="emailConfig.enabled && emailConfig.password_set ? 'success' : 'warning'" variant="tonal" size="small">
+              {{ emailConfig.enabled && emailConfig.password_set ? '已启用' : emailConfig.password_set ? '已停用' : '待配置' }}
+            </v-chip>
+          </v-card-title>
+          <v-card-text>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-5">
+              用于发送新用户注册验证码。SMTP 密码加密存储且不会回显；留空表示保留现有密码。
+            </v-alert>
+            <v-row>
+              <v-col cols="12" md="4"><v-text-field v-model="emailConfig.smtp_host" label="SMTP 服务器" variant="outlined" density="compact" /></v-col>
+              <v-col cols="12" sm="6" md="2"><v-text-field v-model.number="emailConfig.smtp_port" label="端口" type="number" variant="outlined" density="compact" /></v-col>
+              <v-col cols="12" sm="6" md="2"><v-switch v-model="emailConfig.use_ssl" color="success" label="SSL 加密" hide-details /></v-col>
+              <v-col cols="12" md="4"><v-text-field v-model="emailConfig.sender_name" label="发件人名称" variant="outlined" density="compact" /></v-col>
+              <v-col cols="12" md="6"><v-text-field v-model="emailConfig.sender_email" label="发件邮箱" prepend-inner-icon="mdi-email-outline" variant="outlined" density="compact" /></v-col>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="emailConfig.password"
+                  label="SMTP 密码"
+                  :placeholder="emailConfig.password_set ? '已加密保存，输入新密码可覆盖' : '请输入 SMTP 密码或客户端安全密码'"
+                  :type="showEmailPassword ? 'text' : 'password'"
+                  :append-inner-icon="showEmailPassword ? 'mdi-eye-off' : 'mdi-eye'"
+                  prepend-inner-icon="mdi-key-outline"
+                  variant="outlined"
+                  density="compact"
+                  @click:append-inner="showEmailPassword = !showEmailPassword"
+                />
+              </v-col>
+            </v-row>
+            <div class="d-flex align-center flex-wrap ga-3">
+              <v-switch v-model="emailConfig.enabled" color="success" label="允许发送注册验证码" hide-details />
+              <v-spacer />
+              <v-btn variant="tonal" color="primary" :loading="emailTesting" :disabled="!emailConfig.password_set && !emailConfig.password" @click="testEmailConfig">
+                <v-icon start>mdi-email-fast-outline</v-icon>发送测试邮件
+              </v-btn>
+              <v-btn color="primary" :loading="emailSaving" @click="saveEmailConfig">
+                <v-icon start>mdi-content-save-lock-outline</v-icon>保存邮件配置
+              </v-btn>
+            </div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+
+    <!-- 管理员用户配额白名单 -->
+    <v-row v-if="!isStrategyPage && isAdmin">
+      <v-col cols="12">
+        <v-card class="user-settings-card admin-service-card" elevation="0">
+          <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
+            <div><v-icon class="mr-2">mdi-account-star-outline</v-icon>用户配额白名单</div>
+            <v-chip color="success" variant="tonal" size="small">默认：数据集 10 · 策略 5 · 信号源 10</v-chip>
+          </v-card-title>
+          <v-card-text>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-4">
+              留空即使用普通用户默认配额；填写数值后仅覆盖该用户对应项目。管理员不受配额限制。
+            </v-alert>
+            <v-table density="comfortable" class="quota-table">
+              <thead><tr><th>用户</th><th>当前用量</th><th>数据集上限</th><th>策略上限</th><th>信号源上限</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="item in quotaUsers" :key="item.user_id">
+                  <td><strong>{{ item.username }}</strong><small>{{ item.email || '未绑定邮箱' }}</small></td>
+                  <td>
+                    <v-chip size="x-small" variant="tonal">数据集 {{ item.usage.datasets }}/{{ item.limits.datasets ?? '∞' }}</v-chip>
+                    <v-chip size="x-small" variant="tonal" class="ml-1">策略 {{ item.usage.strategies }}/{{ item.limits.strategies ?? '∞' }}</v-chip>
+                    <v-chip size="x-small" variant="tonal" class="ml-1">信号 {{ item.usage.signal_sources }}/{{ item.limits.signal_sources ?? '∞' }}</v-chip>
+                  </td>
+                  <td><v-text-field v-model="item.quotaDraft.max_datasets" :disabled="item.role === 'admin'" placeholder="默认 10" type="number" min="0" max="1000" density="compact" hide-details /></td>
+                  <td><v-text-field v-model="item.quotaDraft.max_strategies" :disabled="item.role === 'admin'" placeholder="默认 5" type="number" min="0" max="1000" density="compact" hide-details /></td>
+                  <td><v-text-field v-model="item.quotaDraft.max_signal_sources" :disabled="item.role === 'admin'" placeholder="默认 10" type="number" min="0" max="1000" density="compact" hide-details /></td>
+                  <td><v-btn size="small" color="primary" :disabled="item.role === 'admin'" :loading="quotaSaving === item.user_id" @click="saveUserQuota(item)">保存</v-btn></td>
+                </tr>
+              </tbody>
+            </v-table>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+
     <!-- 大模型功能与管理员配置 -->
     <v-row v-if="!isStrategyPage">
       <v-col cols="12">
-        <v-card>
-          <v-card-title>
-            <v-icon class="mr-2">mdi-brain</v-icon>
-            {{ isAdmin ? '大模型配置' : '大模型行情分析' }}
+        <v-card class="user-settings-card" :class="{ 'admin-service-card': isAdmin }" elevation="0">
+          <v-card-title class="settings-card-title">
+            <div><v-icon>mdi-brain</v-icon><span>{{ isAdmin ? '大模型配置与审批' : '大模型行情分析' }}</span></div>
+            <small>{{ isAdmin ? '全局服务与用户开通申请' : '开通后可使用自主 AI 分析' }}</small>
           </v-card-title>
           <v-card-text>
             <v-form v-if="isAdmin" ref="llmForm">
@@ -457,7 +580,7 @@
         <v-card-title>{{ signalSourceEditMode === 'edit' ? '编辑信号源' : '添加信号源' }}</v-card-title>
         <v-card-text>
           <v-alert type="info" variant="tonal" density="compact" class="mb-4">
-            关键点位信号与 AI 入场、均线交叉互斥：策略中一旦存在关键点位，就不能再添加其他信号；存在其他信号时，也不能添加关键点位。
+            关键点位信号与 AI 入场、均线交叉、已验证 Alpha 互斥：策略中一旦存在关键点位，就不能再添加其他信号；存在其他信号时，也不能添加关键点位。
           </v-alert>
           <div class="signal-source-type-grid mb-3">
             <button
@@ -480,11 +603,12 @@
             </button>
           </div>
           <v-row dense>
-            <v-col v-if="newSignalSource.source !== 'key_level'" cols="12" sm="6">
+            <v-col v-if="!['key_level', 'alpha_factor'].includes(newSignalSource.source)" cols="12" sm="6">
               <v-select
                 v-model="newSignalSource.period"
                 :items="availablePeriodsForNewSource"
                 label="分析周期"
+                :disabled="newSignalSource.source === 'ai_entry' && newSignalSource.params.analysis_mode === 'shared_reference'"
                 :no-data-text="'该信号源的所有周期都已添加'"
               ></v-select>
             </v-col>
@@ -545,18 +669,51 @@
             </v-row>
           </template>
 
+          <template v-else-if="newSignalSource.source === 'alpha_factor'">
+            <v-row dense class="mt-3">
+              <v-col cols="12">
+                <v-select
+                  v-model="newSignalSource.params.alpha_id"
+                  :items="alphaLibraryOptions"
+                  label="已验证 Alpha"
+                  no-data-text="暂无通过准入检查的 Alpha，请先在 Alpha 研究中发布"
+                  @update:model-value="onAlphaSelected"
+                ></v-select>
+              </v-col>
+              <v-col cols="12" sm="6"><v-text-field :model-value="newSignalSource.params.alpha_name || '--'" label="Alpha 版本" readonly></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field :model-value="newSignalSource.period" label="执行周期" readonly></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.cooldown_seconds" label="信号冷却（秒）" type="number" min="0"></v-text-field></v-col>
+              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">策略会固定当前 Alpha 版本快照，回测和实盘使用同一个执行器；因子库后续更新不会悄悄改变本策略。</v-alert></v-col>
+            </v-row>
+          </template>
+
           <template v-else>
+            <v-btn-toggle
+              v-model="newSignalSource.params.analysis_mode"
+              mandatory
+              color="success"
+              variant="outlined"
+              divided
+              class="mt-3"
+            >
+              <v-btn value="self_analysis">自主 AI 分析</v-btn>
+              <v-btn value="shared_reference">引用共享 AI 数据</v-btn>
+            </v-btn-toggle>
             <v-alert
-              v-if="!aiSignalOptions.accessGranted"
+              v-if="newSignalSource.params.analysis_mode === 'self_analysis' && !aiSignalOptions.accessGranted"
               type="warning"
               variant="tonal"
               density="compact"
               class="mt-3"
             >
-              AI 入场信号仅对已开通大模型分析的付费用户开放，请先在用户配置中申请开通。
+              自主 AI 分析仅对已开通大模型分析的付费用户开放；你也可以切换为“引用共享 AI 数据”，无需开通即可参与策略决策。
+            </v-alert>
+            <v-alert v-else-if="newSignalSource.params.analysis_mode === 'shared_reference'" type="info" variant="tonal" density="compact" class="mt-3">
+              系统不会为此信号源调用大模型，将使用共享者的最新分析方向和置信度，并以你当前账户的实时价格判断是否进入建议入场区间。
             </v-alert>
             <v-row dense class="mt-3">
-              <v-col cols="12" sm="6">
+              <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12" sm="6">
                 <v-select
                   v-model="newSignalSource.params.model"
                   :items="aiSignalOptions.models"
@@ -564,13 +721,13 @@
                   :loading="aiSignalOptionsLoading"
                 ></v-select>
               </v-col>
-              <v-col cols="12" sm="6">
+              <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12" sm="6">
                 <v-select v-model.number="newSignalSource.params.analysis_interval_minutes" :items="aiIntervalOptionsFor(newSignalSource)" label="调用间隔" suffix="分钟" :hint="`${newSignalSource.period} 周期不能低于 ${periodMinutes(newSignalSource.period)} 分钟`" persistent-hint></v-select>
               </v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.kline_count" label="分析K线数量" type="number" min="10" max="500"></v-text-field></v-col>
+              <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.kline_count" label="分析K线数量" type="number" min="10" max="500"></v-text-field></v-col>
               <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
               <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.entry_threshold" label="入场价接近阈值" type="number" step="0.0001" min="0"></v-text-field></v-col>
-              <v-col cols="12">
+              <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12">
                 <v-textarea
                   v-model="newSignalSource.params.system_prompt"
                   label="系统提示词"
@@ -580,7 +737,7 @@
                   persistent-hint
                 ></v-textarea>
               </v-col>
-              <v-col cols="12">
+              <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12">
                 <v-textarea
                   v-model="newSignalSource.params.analysis_prompt_template"
                   label="分析提示词模板"
@@ -590,7 +747,7 @@
                   persistent-hint
                 ></v-textarea>
               </v-col>
-              <v-col cols="12">
+              <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12">
                 <v-switch
                   v-model="newSignalSource.params.share_runtime_data"
                   color="success"
@@ -600,7 +757,7 @@
                   persistent-hint
                 ></v-switch>
               </v-col>
-              <v-col cols="12">
+              <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12">
                 <v-select
                   v-model="newSignalSource.params.reference_runtime_ids"
                   :items="sharedAIRuntimeOptions"
@@ -611,6 +768,18 @@
                   clearable
                   :loading="aiSignalOptionsLoading"
                   no-data-text="当前品种暂无共享 AI 运行数据"
+                ></v-select>
+              </v-col>
+              <v-col v-else cols="12">
+                <v-select
+                  v-model="newSignalSource.params.shared_runtime_id"
+                  :items="sharedAIRuntimeOptions"
+                  label="选择共享 AI 运行数据"
+                  chips
+                  clearable
+                  :loading="aiSignalOptionsLoading"
+                  no-data-text="平台暂无可引用的共享 AI 运行数据"
+                  @update:model-value="onSharedRuntimeSelected"
                 ></v-select>
               </v-col>
               <v-col v-if="selectedSharedAIRuntimeData.length" cols="12">
@@ -729,6 +898,29 @@ export default {
     const llmRequestsLoading = ref(false)
     const llmReviewingId = ref(null)
 
+    // 注册邮件服务配置
+    const emailConfig = ref({
+      smtp_host: 'smtp.qiye.aliyun.com',
+      smtp_port: 465,
+      use_ssl: true,
+      sender_email: '',
+      sender_name: 'AI Trader',
+      password: '',
+      password_set: false,
+      enabled: false
+    })
+    const showEmailPassword = ref(false)
+    const emailSaving = ref(false)
+    const emailTesting = ref(false)
+
+    // 管理员用户配额白名单
+    const quotaUsers = ref([])
+    const quotaSaving = ref(null)
+    const myQuota = ref({
+      usage: { datasets: 0, strategies: 0, signal_sources: 0 },
+      limits: { datasets: 10, strategies: 5, signal_sources: 10 }
+    })
+
     // 账户与安全
     const currentUser = computed(() => authState.user || {
       username: '未登录',
@@ -809,6 +1001,107 @@ export default {
         showError.value = true
       } finally {
         passwordSaving.value = false
+      }
+    }
+
+    const loadEmailConfig = async () => {
+      if (!isAdmin.value) return
+      try {
+        const data = await authAPI.getEmailConfig()
+        emailConfig.value = { ...emailConfig.value, ...(data.config || {}), password: '' }
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '加载邮件服务配置失败'
+        showError.value = true
+      }
+    }
+
+    const saveEmailConfig = async () => {
+      emailSaving.value = true
+      try {
+        const data = await authAPI.saveEmailConfig(emailConfig.value)
+        emailConfig.value = { ...emailConfig.value, ...(data.config || {}), password: '' }
+        successMessage.value = data.message || '邮件服务配置已保存'
+        showSuccess.value = true
+        return true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '保存邮件服务配置失败'
+        showError.value = true
+        return false
+      } finally {
+        emailSaving.value = false
+      }
+    }
+
+    const testEmailConfig = async () => {
+      emailTesting.value = true
+      try {
+        if (!await saveEmailConfig()) return
+        const data = await authAPI.testEmailConfig(emailConfig.value.sender_email)
+        successMessage.value = data.message || '测试邮件已发送'
+        showSuccess.value = true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '测试邮件发送失败'
+        showError.value = true
+      } finally {
+        emailTesting.value = false
+      }
+    }
+
+    const loadUserQuotas = async () => {
+      if (!isAdmin.value) return
+      try {
+        const data = await authAPI.getUserQuotas()
+        quotaUsers.value = (data.users || []).map(item => ({
+          ...item,
+          quotaDraft: {
+            max_datasets: item.overrides.datasets ?? '',
+            max_strategies: item.overrides.strategies ?? '',
+            max_signal_sources: item.overrides.signal_sources ?? ''
+          }
+        }))
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '加载用户配额失败'
+        showError.value = true
+      }
+    }
+
+    const loadMyQuota = async () => {
+      try {
+        const data = await authAPI.getMyQuota()
+        myQuota.value = data.quota || myQuota.value
+      } catch (err) {
+        console.error('加载个人资源额度失败:', err)
+      }
+    }
+
+    const loadAdminWorkspace = async () => {
+      quotaSaving.value = 'loading'
+      try {
+        await Promise.all([
+          loadUserQuotas(), loadEmailConfig(), loadLLMConfig(), loadLLMAccessRequests()
+        ])
+        successMessage.value = '管理员运营数据已刷新'
+        showSuccess.value = true
+      } finally {
+        quotaSaving.value = null
+      }
+    }
+
+    const saveUserQuota = async (item) => {
+      quotaSaving.value = item.user_id
+      try {
+        const payload = Object.fromEntries(Object.entries(item.quotaDraft).map(([key, value]) => [
+          key, value === '' || value === null ? null : Number(value)
+        ]))
+        await authAPI.saveUserQuota(item.user_id, payload)
+        successMessage.value = `已更新 ${item.username} 的配额白名单`
+        showSuccess.value = true
+        await loadUserQuotas()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '保存用户配额失败'
+        showError.value = true
+      } finally {
+        quotaSaving.value = null
       }
     }
 
@@ -1067,6 +1360,7 @@ export default {
 
     // 策略数据
     const strategies = ref([])
+    const strategyQuota = ref({ usage: { signal_sources: 0 }, limits: { strategies: 5, signal_sources: 10 } })
     const strategiesLoading = ref(false)
     const strategySaving = ref(null)
     const strategyLifecycleSaving = ref(null)
@@ -1095,6 +1389,7 @@ export default {
     const signalSourceEditMode = ref('add')
     const editingSignalSourceId = ref('')
     const aiSignalOptionsLoading = ref(false)
+    const alphaLibrary = ref([])
     const aiSignalOptions = reactive({
       accessGranted: false,
       models: ['deepseek-v4-pro', 'deepseek-v4-flash', 'glm-5.2', 'qwen3.7-max', 'qwen3.8-max'],
@@ -1109,7 +1404,8 @@ export default {
     const signalSourceMeta = {
       key_level: { label: '关键点位信号', color: 'success', icon: 'mdi-map-marker-path' },
       ai_entry: { label: 'AI 入场信号', color: 'info', icon: 'mdi-brain' },
-      moving_average: { label: '均线交叉信号', color: 'orange-darken-2', icon: 'mdi-chart-bell-curve' }
+      moving_average: { label: '均线交叉信号', color: 'orange-darken-2', icon: 'mdi-chart-bell-curve' },
+      alpha_factor: { label: '已验证 Alpha', color: 'teal-darken-1', icon: 'mdi-atom-variant' }
     }
     const strategySignalSources = (strategy) => {
       const sources = Array.isArray(strategy?.signal_sources)
@@ -1124,26 +1420,24 @@ export default {
       color: signalSourceMeta[source.source]?.color || 'grey',
       label: source.source === 'key_level'
         ? '关键点位'
+        : source.source === 'ai_entry' && source.params?.analysis_mode === 'shared_reference'
+          ? `共享 AI ${source.period}`
         : `${signalSourceMeta[source.source]?.label.replace('信号', '').trim() || source.source} ${source.period}`
     }))
     const signalSourceTypeOptions = computed(() => Object.entries(signalSourceMeta).map(([value, item]) => ({
       title: item.label,
       value,
       disabled: (
-        (value === 'ai_entry' && !aiSignalOptions.accessGranted) ||
         (Boolean(signalSourceTarget.value) && !availablePeriodsForSource(
           value, editingSignalSourceId.value
         ).length)
       )
     })))
     const signalSourceDisabledReason = (sourceType) => {
-      if (sourceType === 'ai_entry' && !aiSignalOptions.accessGranted) {
-        return '需开通大模型分析'
-      }
       const sources = strategySignalSources(signalSourceTarget.value)
         .filter(item => item.signal_source_id !== editingSignalSourceId.value)
       if (sourceType === 'key_level' && sources.some(item => item.source !== 'key_level')) {
-        return '已有 AI/均线'
+        return '已有其他信号'
       }
       if (sourceType !== 'key_level' && sources.some(item => item.source === 'key_level')) {
         return '已有关键点位'
@@ -1169,6 +1463,18 @@ export default {
       value: item.share_id,
       title: `${item.symbol} · 匹配度 ${formatSimilarity(item.symbol_similarity)} · ${item.period} · ${item.model} · ${item.strategy_name} · ${lifecycleLabel(item.strategy_lifecycle)}`
     })))
+    const alphaLibraryOptions = computed(() => {
+      const occupied = new Set(strategySignalSources(signalSourceTarget.value)
+        .filter(item => item.source === 'alpha_factor')
+        .filter(item => item.signal_source_id !== editingSignalSourceId.value)
+        .map(item => item.params?.alpha_id))
+      return alphaLibrary.value
+      .filter(item => item.status === 'validated' && !occupied.has(item.alpha_id))
+      .map(item => ({
+        value: item.alpha_id,
+        title: `${item.name} · v${item.version} · ${item.timeframe} · ${item.is_owner ? '我的' : `共享自 ${item.owner_username}`}`
+      }))
+    })
     const formatSimilarity = (value) => `${Math.round(Number(value || 0) * 100)}%`
     function lifecycleLabel (status) {
       return ({
@@ -1181,13 +1487,23 @@ export default {
     )
     const formatSharedRuntimeResult = (result = {}) => JSON.stringify(result, null, 2)
     const selectedSharedAIRuntimeData = computed(() => {
-      const selected = new Set(newSignalSource.params?.reference_runtime_ids || [])
+      const params = newSignalSource.params || {}
+      const selected = new Set(params.analysis_mode === 'shared_reference'
+        ? [params.shared_runtime_id].filter(Boolean)
+        : (params.reference_runtime_ids || []))
       return aiSignalOptions.sharedRuntimeData.filter(item => selected.has(item.share_id))
     })
-    const canSaveSignalSource = computed(() => Boolean(
-      newSignalSource.period &&
-      (newSignalSource.source !== 'ai_entry' || aiSignalOptions.accessGranted)
-    ))
+    const canSaveSignalSource = computed(() => {
+      if (!newSignalSource.period) return false
+      if (newSignalSource.source === 'alpha_factor') {
+        return Boolean(newSignalSource.params?.alpha_id)
+      }
+      if (newSignalSource.source !== 'ai_entry') return true
+      const params = newSignalSource.params || {}
+      return params.analysis_mode === 'shared_reference'
+        ? Boolean(params.shared_runtime_id)
+        : aiSignalOptions.accessGranted
+    })
 
     const loadAISignalOptions = async (symbol) => {
       aiSignalOptionsLoading.value = true
@@ -1203,6 +1519,15 @@ export default {
         aiSignalOptions.sharedRuntimeData = []
       } finally {
         aiSignalOptionsLoading.value = false
+      }
+    }
+
+    const loadAlphaLibrary = async () => {
+      try {
+        const data = await marketAPI.getAlphaLibrary()
+        alphaLibrary.value = data.items || []
+      } catch (error) {
+        alphaLibrary.value = []
       }
     }
 
@@ -1236,15 +1561,22 @@ export default {
                 fast_period: 5, slow_period: 20, ma_type: 'sma',
                 min_confidence: 70,
                 cooldown_seconds: 180
-              }
-            : {
+            }
+            : source === 'alpha_factor'
+              ? {
+                  alpha_id: '', alpha_version: 1, alpha_name: '',
+                  alpha_snapshot: {}, min_confidence: 60, cooldown_seconds: 180
+                }
+              : {
+              analysis_mode: 'self_analysis',
               analysis_interval_minutes: Math.max(5, periodMinutes(period)), kline_count: 100,
               min_confidence: 70, entry_threshold: 0.0001,
               model: aiSignalOptions.models[0] || 'deepseek-v4-pro',
               system_prompt: aiSignalOptions.defaultSystemPrompt,
               analysis_prompt_template: aiSignalOptions.defaultAnalysisPromptTemplate,
               share_runtime_data: false,
-              reference_runtime_ids: []
+              reference_runtime_ids: [],
+              shared_runtime_id: ''
             }
     })
     const cloneSignalSource = (source) => JSON.parse(JSON.stringify(source))
@@ -1258,11 +1590,13 @@ export default {
         newSignalSource.params.levels_text ??= (newSignalSource.params.levels || []).join(', ')
       }
       if (newSignalSource.source === 'ai_entry') {
+        newSignalSource.params.analysis_mode ||= 'self_analysis'
         newSignalSource.params.model ||= aiSignalOptions.models[0] || 'deepseek-v4-pro'
         newSignalSource.params.system_prompt ||= aiSignalOptions.defaultSystemPrompt
         newSignalSource.params.analysis_prompt_template ||= aiSignalOptions.defaultAnalysisPromptTemplate
         newSignalSource.params.share_runtime_data ??= false
         newSignalSource.params.reference_runtime_ids ||= []
+        newSignalSource.params.shared_runtime_id ||= ''
       }
       normalizeAIInterval(newSignalSource)
     }
@@ -1422,6 +1756,15 @@ export default {
       if (source.source === 'moving_average') {
         return `${params.ma_type || 'sma'} 快线 ${params.fast_period} / 慢线 ${params.slow_period}，最低置信度 ${params.min_confidence ?? 0}%`
       }
+      if (source.source === 'alpha_factor') {
+        return `${params.alpha_name || '已验证 Alpha'} · ${source.period}，最低置信度 ${params.min_confidence ?? 0}%`
+      }
+      if (params.analysis_mode === 'shared_reference') {
+        const shared = aiSignalOptions.sharedRuntimeData.find(
+          item => item.share_id === params.shared_runtime_id
+        )
+        return `引用 ${shared?.owner_username || '平台用户'} 的 ${shared?.symbol || '共享'} 分析，最低置信度 ${params.min_confidence ?? 0}%`
+      }
       return `${params.model || '平台默认模型'} · 每 ${params.analysis_interval_minutes ?? 0} 分钟分析 ${params.kline_count ?? 0} 根K线，最低置信度 ${params.min_confidence ?? 0}%${params.share_runtime_data ? ' · 已共享运行数据' : ''}`
     }
     const normalizeStrategyVisibility = (strategy) => {
@@ -1500,6 +1843,7 @@ export default {
         if (!newStrategyPolicyId.value) newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
         if (data.status === 'ok') {
           strategies.value = data.strategies || []
+          strategyQuota.value = data.quota || strategyQuota.value
           strategies.value.forEach(strategy => {
             normalizeStrategyVisibility(strategy)
             ensureSignalSources(strategy)
@@ -1699,6 +2043,11 @@ export default {
       if (hasKeyLevel) {
         return []
       }
+      if (sourceType === 'alpha_factor') {
+        return alphaLibraryOptions.value.length
+          ? signalPeriods
+          : []
+      }
       const occupied = new Set(
         sources
           .filter(item => item.source === sourceType)
@@ -1732,9 +2081,36 @@ export default {
       setDialogSignalSource(sourceDefaults(sourceType, period || 'M1'))
     }
 
+    const onSharedRuntimeSelected = (shareId) => {
+      if (!shareId) return
+      const selected = aiSignalOptions.sharedRuntimeData.find(
+        item => item.share_id === shareId
+      )
+      if (!selected) return
+      const available = availablePeriodsForSource(
+        'ai_entry', editingSignalSourceId.value
+      )
+      if (!available.includes(selected.period)) {
+        newSignalSource.params.shared_runtime_id = ''
+        errorMessage.value = `当前策略已经添加过 AI ${selected.period} 周期，不能重复引用`
+        showError.value = true
+        return
+      }
+      newSignalSource.period = selected.period
+    }
+
+    const onAlphaSelected = (alphaId) => {
+      const alpha = alphaLibrary.value.find(item => item.alpha_id === alphaId)
+      if (!alpha) return
+      newSignalSource.period = alpha.timeframe
+      newSignalSource.params.alpha_name = `${alpha.name} v${alpha.version}`
+      newSignalSource.params.alpha_version = alpha.version
+      newSignalSource.params.alpha_snapshot = alpha.definition
+    }
+
     const openSignalSourceDialog = async (strategy, source = null) => {
       signalSourceTarget.value = strategy
-      await loadAISignalOptions(strategy.symbol)
+      await Promise.all([loadAISignalOptions(strategy.symbol), loadAlphaLibrary()])
       if (source) {
         signalSourceEditMode.value = 'edit'
         editingSignalSourceId.value = source.signal_source_id
@@ -1756,7 +2132,10 @@ export default {
 
     const saveSignalSourceFromDialog = () => {
       if (!signalSourceTarget.value || !canSaveSignalSource.value) return
-      if (newSignalSource.source === 'ai_entry') {
+      if (
+        newSignalSource.source === 'ai_entry' &&
+        newSignalSource.params.analysis_mode === 'self_analysis'
+      ) {
         const template = String(newSignalSource.params.analysis_prompt_template || '')
         if (!template.includes('{{strategy_context}}') || !template.includes('{{market_data}}')) {
           errorMessage.value = 'AI分析提示词必须包含 {{strategy_context}} 和 {{market_data}}'
@@ -1860,10 +2239,10 @@ export default {
       }
       await loadCurrentUser()
       if (isAdmin.value) {
-        loadLLMConfig()
-        loadLLMAccessRequests()
+        loadAdminWorkspace()
       } else {
         loadLLMAccess()
+        loadMyQuota()
       }
     })
 
@@ -1892,6 +2271,17 @@ export default {
       passwordMismatch,
       canChangePassword,
       changePassword,
+      emailConfig,
+      showEmailPassword,
+      emailSaving,
+      emailTesting,
+      saveEmailConfig,
+      testEmailConfig,
+      quotaUsers,
+      quotaSaving,
+      saveUserQuota,
+      myQuota,
+      loadAdminWorkspace,
       saveTradeConfig,
       addSymbolConfig,
       removeSymbolConfig,
@@ -1918,6 +2308,7 @@ export default {
       formatStrategyTime,
       // 策略配置
       strategies,
+      strategyQuota,
       strategiesLoading,
       strategySaving,
       strategyLifecycleSaving,
@@ -1981,6 +2372,7 @@ export default {
       aiSignalOptions,
       aiSignalOptionsLoading,
       sharedAIRuntimeOptions,
+      alphaLibraryOptions,
       selectedSharedAIRuntimeData,
       canSaveSignalSource,
       lifecycleLabel,
@@ -1992,6 +2384,8 @@ export default {
       availablePeriodsForNewSource,
       selectFirstAvailablePeriod,
       onNewSignalSourceTypeChange,
+      onSharedRuntimeSelected,
+      onAlphaSelected,
       openSignalSourceDialog,
       saveSignalSourceFromDialog,
       removeSignalSource
@@ -2001,6 +2395,14 @@ export default {
 </script>
 
 <style scoped>
+.settings-workspace { --settings-ink: #18342b; --settings-muted: #6c7f77; --settings-line: #dfe9e4; --settings-green: #176b4d; }
+.settings-hero { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 28px; min-height: 192px; padding: 36px 38px; overflow: hidden; border-radius: 24px; color: #f7fff9; background: linear-gradient(120deg, #123b31 0%, #176b4d 60%, #d9a441 165%); box-shadow: 0 18px 45px rgba(26, 76, 59, .18); }
+.settings-hero--admin { background: linear-gradient(120deg, #172f3d 0%, #236a68 57%, #d6a33e 165%); }
+.settings-hero::after { position: absolute; right: -54px; bottom: -112px; width: 310px; height: 310px; border: 56px solid rgba(255,255,255,.08); border-radius: 50%; content: ''; }
+.settings-hero>div { z-index: 1; }.settings-hero h2 { max-width: 720px; margin: 4px 0 8px; font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(1.65rem, 3vw, 2.35rem); line-height: 1.15; }.settings-hero p { max-width: 690px; margin: 0; color: rgba(247,255,249,.76); }
+.settings-hero__identity { display: flex; align-items: center; gap: 9px; margin-top: 17px; color: rgba(255,255,255,.9); font-size: .8rem; font-weight: 700; }.settings-hero .v-btn { z-index: 1; font-weight: 700; }
+.settings-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 22px 0 10px; }.settings-metrics article { position: relative; min-height: 123px; padding: 19px 21px; overflow: hidden; border: 1px solid var(--settings-line); border-radius: 17px; background: linear-gradient(145deg, #fff, #f7fbf9); }.settings-metrics span,.settings-metrics small { display: block; color: var(--settings-muted); }.settings-metrics span { font-size: .78rem; }.settings-metrics strong { display: block; margin-top: 4px; color: var(--settings-ink); font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(1.25rem, 2.1vw, 1.8rem); line-height: 1.08; }.settings-metrics small { max-width: 85%; margin-top: 7px; font-size: .67rem; line-height: 1.35; }.settings-metrics .v-icon { position: absolute; right: 17px; bottom: 16px; color: #b9d4c8; }
+.user-settings-card { overflow: hidden; border: 1px solid var(--settings-line); border-radius: 19px !important; background: #fff; }.user-settings-card :deep(.v-card-text) { padding: 22px 24px 26px; }.settings-card-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 18px 24px !important; border-bottom: 1px solid var(--settings-line); color: var(--settings-ink); }.settings-card-title>div { display: flex; align-items: center; gap: 10px; font-size: 1rem; font-weight: 700; }.settings-card-title>div .v-icon { color: var(--settings-green); }.settings-card-title>small { color: var(--settings-muted); font-size: .72rem; font-weight: 400; }.admin-service-card { border-color: #c8ddd4; background: linear-gradient(145deg, #fff 0%, #f7fcfa 100%); }.account-summary { padding: 8px; border: 1px solid #e2ece7; border-radius: 13px; background: #f9fcfa; }.quota-table :deep(th) { color: var(--settings-muted); font-size: .72rem; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }.quota-table :deep(td) { padding-top: 12px; padding-bottom: 12px; }.quota-table small { display: block; margin-top: 3px; color: var(--settings-muted); font-size: .7rem; }
 .admission-panel { padding: 16px; border: 1px solid #dbe7e1; border-radius: 14px; background: linear-gradient(135deg, #f5f9f6, #fffaf0); }
 .admission-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .admission-title strong,.admission-title span { display: block; }.admission-title span { margin-top: 2px; color: #7a8982; font-size: .72rem; }
@@ -2082,6 +2484,6 @@ export default {
 .shared-ai-runtime-list p { margin: 5px 0 0; color: #61756c; font-size: .76rem; }
 .shared-ai-runtime-list summary { margin-top: 9px; color: #176b4d; font-size: .76rem; font-weight: 700; cursor: pointer; }
 .shared-prompt-preview { max-height: 130px; margin-top: 8px; padding: 9px; overflow: auto; border-radius: 8px; background: rgba(255,255,255,.82); color: #53675e; font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .7rem; white-space: pre-wrap; }
-@media (max-width: 960px) { .strategy-metrics { grid-template-columns: 1fr 1fr; }.strategy-toolbar { grid-template-columns: 1fr 1fr; }.strategy-toolbar>*:first-child { grid-column: 1 / -1; } }
-@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero { padding: 26px 22px; }.strategy-primary-action { width: 100%; }.strategy-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article { min-height: 92px; padding: 15px; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 960px) { .strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; }.strategy-toolbar { grid-template-columns: 1fr 1fr; }.strategy-toolbar>*:first-child { grid-column: 1 / -1; } }
+@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.settings-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero,.settings-hero { padding: 26px 22px; }.strategy-primary-action,.settings-hero .v-btn { width: 100%; }.strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article,.settings-metrics article { min-height: 104px; padding: 15px; }.settings-metrics strong { font-size: 1.28rem; }.settings-card-title { align-items: flex-start; flex-direction: column; }.user-settings-card :deep(.v-card-text) { padding: 18px 16px 22px; }.quota-table { min-width: 860px; }.quota-table :deep(.v-table__wrapper) { overflow-x: auto; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
 </style>

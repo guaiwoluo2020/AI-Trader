@@ -4,18 +4,21 @@
 认证相关路由
 """
 
+import asyncio
 import os
+import smtplib
 import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 
 from auth import (
     AuthUser,
     UsernameAlreadyExistsError,
     get_auth_manager,
+    require_admin,
     require_auth,
 )
 from models import (
@@ -25,9 +28,19 @@ from models import (
     LoginRequest,
     LoginResponse,
     RegisterRequest,
+    SendEmailCodeRequest,
+    SystemEmailConfigRequest,
+    TestSystemEmailRequest,
+    UserQuotaOverrideRequest,
 )
-from sqlite_storage import EAActivationRepository, TradingAccountRepository
+from email_verification import (
+    EmailVerificationError,
+    EmailVerificationService,
+    SystemEmailConfigRepository,
+)
+from sqlite_storage import EAActivationRepository, TradingAccountRepository, UserRepository
 from trading_engine_manager import TradingEngineManager
+from user_quotas import UserQuotaService
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -40,6 +53,32 @@ def create_auth_routes(
 ) -> APIRouter:
     """创建认证路由"""
     router = APIRouter(prefix="/auth", tags=["认证"])
+    email_service = EmailVerificationService()
+    email_config_repository = SystemEmailConfigRepository()
+    quota_service = UserQuotaService()
+    user_repository = UserRepository()
+
+    @router.post("/email-code")
+    async def send_registration_email_code(
+        payload: SendEmailCodeRequest,
+        request: Request,
+    ):
+        try:
+            requester = request.client.host if request.client else "unknown"
+            result = await asyncio.to_thread(
+                email_service.send_code, payload.email, requester
+            )
+            return {"status": "ok", "message": "验证码已发送，请检查邮箱", **result}
+        except EmailVerificationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        except (RuntimeError, OSError, smtplib.SMTPException) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"验证码发送失败: {exc}",
+            ) from exc
 
     @router.post("/login", response_model=LoginResponse)
     async def login(payload: LoginRequest) -> LoginResponse:
@@ -71,7 +110,11 @@ def create_auth_routes(
     async def register(payload: RegisterRequest) -> LoginResponse:
         auth_manager = get_auth_manager()
         try:
-            user = auth_manager.register(payload.username, payload.password)
+            email = email_service.assert_valid_code(
+                payload.email, payload.verification_code
+            )
+            user = auth_manager.register(payload.username, payload.password, email)
+            email_service.consume(email)
         except UsernameAlreadyExistsError as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -90,6 +133,91 @@ def create_auth_routes(
             user=_user_info(user),
             next_path="/mt5-setup",
         )
+
+    @router.get("/admin/email-config")
+    async def get_system_email_config(
+        user: AuthUser = Depends(require_admin),
+    ):
+        return {"status": "ok", "config": email_config_repository.get()}
+
+    @router.put("/admin/email-config")
+    async def save_system_email_config(
+        payload: SystemEmailConfigRequest,
+        user: AuthUser = Depends(require_admin),
+    ):
+        try:
+            config = email_config_repository.save(payload.model_dump(), user.user_id)
+            return {"status": "ok", "message": "邮件服务配置已加密保存", "config": config}
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+    @router.post("/admin/email-config/test")
+    async def test_system_email_config(
+        payload: TestSystemEmailRequest,
+        user: AuthUser = Depends(require_admin),
+    ):
+        try:
+            result = await asyncio.to_thread(email_service.send_test, payload.target_email)
+            return {"status": "ok", "message": "测试邮件已发送", **result}
+        except (EmailVerificationError, RuntimeError, OSError, smtplib.SMTPException) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"测试邮件发送失败: {exc}",
+            ) from exc
+
+    @router.get("/quota")
+    async def get_my_quota(user: AuthUser = Depends(require_auth)):
+        return {
+            "status": "ok",
+            "quota": quota_service.get_summary(user.user_id, user.role),
+        }
+
+    @router.get("/admin/user-quotas")
+    async def list_user_quotas(user: AuthUser = Depends(require_admin)):
+        users = []
+        for record in user_repository.list_users():
+            summary = quota_service.get_summary(record.user_id, record.role)
+            users.append({
+                "user_id": record.user_id,
+                "username": record.username,
+                "email": record.email,
+                "role": record.role,
+                **summary,
+            })
+        return {"status": "ok", "users": users}
+
+    @router.put("/admin/users/{user_id}/quota")
+    async def save_user_quota(
+        user_id: int,
+        payload: UserQuotaOverrideRequest,
+        user: AuthUser = Depends(require_admin),
+    ):
+        target = user_repository.get_by_id(user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        try:
+            overrides = quota_service.repository.save_overrides(
+                user_id,
+                {
+                    "datasets": payload.max_datasets,
+                    "strategies": payload.max_strategies,
+                    "signal_sources": payload.max_signal_sources,
+                },
+                user.user_id,
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "status": "ok",
+            "message": "用户配额白名单已保存",
+            "quota": {
+                **quota_service.get_summary(target.user_id, target.role),
+                "overrides": overrides,
+            },
+        }
 
     @router.get("/me")
     async def me(user: AuthUser = Depends(require_auth)):
@@ -252,6 +380,7 @@ def _user_info(user: AuthUser) -> AuthUserInfo:
     return AuthUserInfo(
         user_id=user.user_id,
         username=user.username,
+        email=user.email,
         role=user.role,
     )
 

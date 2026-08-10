@@ -127,6 +127,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
         }
     elif source == "ai_entry":
         params = {
+            "analysis_mode": "self_analysis",
             "analysis_interval_minutes": max(5, SIGNAL_PERIOD_MINUTES[period]),
             "kline_count": 100,
             "min_confidence": 70,
@@ -136,6 +137,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "analysis_prompt_template": "",
             "share_runtime_data": False,
             "reference_runtime_ids": [],
+            "shared_runtime_id": "",
         }
     elif source == "moving_average":
         params = {
@@ -143,6 +145,15 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "slow_period": 20,
             "ma_type": "sma",
             "min_confidence": 70,
+            "cooldown_seconds": 180,
+        }
+    elif source == "alpha_factor":
+        params = {
+            "alpha_id": "",
+            "alpha_version": 1,
+            "alpha_name": "",
+            "alpha_snapshot": {},
+            "min_confidence": 60,
             "cooldown_seconds": 180,
         }
     return {
@@ -201,8 +212,11 @@ def normalize_signal_sources(
         }
         if "key_level" in sources and (
             "ai_entry" in sources or "moving_average" in sources
+            or "alpha_factor" in sources
         ):
-            raise ValueError("关键点位信号源不能和AI/均线信号源同时存在")
+            raise ValueError(
+                "关键点位信号源不能和AI/均线信号源同时存在，也不能和Alpha信号源同时存在"
+            )
     normalized = []
     occupied = set()
     source_ids = set()
@@ -212,13 +226,19 @@ def normalize_signal_sources(
         period = str(raw.get("period", "")).upper()
         if source == "pivot":
             raise ValueError("转折点已改为系统基础数据，不再支持作为策略信号源")
-        if source not in {"key_level", "ai_entry", "moving_average"}:
+        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor"}:
             raise ValueError(f"不支持的信号源类型: {source}")
         if source == "key_level":
             period = "M1"
         if period not in SIGNAL_PERIODS:
             raise ValueError(f"不支持的信号周期: {period}")
-        occupied_key = source if source == "key_level" else (source, period)
+        raw_params = raw.get("params") or {}
+        occupied_key = (
+            source if source == "key_level"
+            else (source, period, str(raw_params.get("alpha_id", "")))
+            if source == "alpha_factor"
+            else (source, period)
+        )
         if occupied_key in occupied:
             if source == "key_level":
                 raise ValueError("关键点位信号源不能重复添加")
@@ -272,6 +292,13 @@ def normalize_signal_sources(
                 0, min(86400, int(params["cooldown_seconds"]))
             )
         elif source == "ai_entry":
+            params["analysis_mode"] = str(
+                params.get("analysis_mode") or "self_analysis"
+            ).strip()
+            if params["analysis_mode"] not in {
+                "self_analysis", "shared_reference"
+            }:
+                raise ValueError("AI入场信号运行方式无效")
             params["analysis_interval_minutes"] = max(
                 SIGNAL_PERIOD_MINUTES[period],
                 min(1440, int(params["analysis_interval_minutes"])),
@@ -309,7 +336,15 @@ def normalize_signal_sources(
             params["reference_runtime_ids"] = list(dict.fromkeys(
                 str(value).strip() for value in references if str(value).strip()
             ))[:10]
-        else:
+            params["shared_runtime_id"] = str(
+                params.get("shared_runtime_id") or ""
+            ).strip()
+            if params["analysis_mode"] == "shared_reference":
+                if not params["shared_runtime_id"]:
+                    raise ValueError("共享引用模式必须选择一条共享AI运行数据")
+                params["share_runtime_data"] = False
+                params["reference_runtime_ids"] = []
+        elif source == "moving_average":
             params["fast_period"] = max(1, min(500, int(params["fast_period"])))
             params["slow_period"] = max(2, min(1000, int(params["slow_period"])))
             if params["fast_period"] >= params["slow_period"]:
@@ -328,6 +363,20 @@ def normalize_signal_sources(
                 params.pop(obsolete, None)
             params["cooldown_seconds"] = max(
                 0, min(86400, int(params["cooldown_seconds"]))
+            )
+        else:
+            params["alpha_id"] = str(params.get("alpha_id") or "").strip()
+            if not params["alpha_id"]:
+                raise ValueError("请选择已验证 Alpha")
+            params["alpha_version"] = max(1, int(params.get("alpha_version", 1)))
+            params["alpha_name"] = str(params.get("alpha_name") or "").strip()[:100]
+            if not isinstance(params.get("alpha_snapshot"), dict) or not params["alpha_snapshot"]:
+                raise ValueError("Alpha 信号源缺少可执行版本快照")
+            params["min_confidence"] = max(
+                0, min(100, int(params.get("min_confidence", 60)))
+            )
+            params["cooldown_seconds"] = max(
+                0, min(86400, int(params.get("cooldown_seconds", 180)))
             )
         normalized.append(item)
     return normalized

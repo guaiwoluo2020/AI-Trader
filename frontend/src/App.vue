@@ -83,11 +83,11 @@ export default {
         title: '交易管理',
         icon: 'mdi-swap-horizontal-bold',
         items: [
-          { title: '交易账户', path: '/accounts', icon: 'mdi-wallet-bifold-outline' },
+          { title: '交易账户', path: '/accounts', icon: 'mdi-bank-outline' },
+          { title: 'AI 行情', path: '/ai-market', icon: 'mdi-brain' },
+          { title: '策略执行', path: '/market', icon: 'mdi-play-circle-outline' },
           { title: '交易指令', path: '/trades', icon: 'mdi-format-list-bulleted' },
-          { title: '信号推荐', path: '/market', icon: 'mdi-lightning-bolt' },
           { title: '仓位管理', path: '/positions', icon: 'mdi-chart-box' },
-          { title: '统计数据', path: '/statistics', icon: 'mdi-chart-line' },
         ],
       },
       {
@@ -98,6 +98,7 @@ export default {
           { title: '策略配置', path: '/strategy-settings', icon: 'mdi-tune-variant' },
           { title: '持仓管理', path: '/position-management', icon: 'mdi-shield-edit-outline' },
           { title: '回测数据集', path: '/backtest-datasets', icon: 'mdi-database-clock-outline' },
+          { title: 'Alpha 研究', path: '/alpha-research', icon: 'mdi-atom-variant' },
           { title: '回测任务', path: '/backtests', icon: 'mdi-flask-round-bottom-outline' },
         ],
       },
@@ -122,7 +123,7 @@ export default {
     ]
     const showShell = computed(() => !route.meta.public)
     const currentUsername = computed(() => authState.user?.username || '未登录')
-    const accountRoutes = new Set(['Dashboard', 'TradeOrders', 'Statistics', 'Market', 'Positions'])
+    const accountRoutes = new Set(['Dashboard', 'TradeOrders', 'AIMarket', 'Market', 'Positions'])
     const showAccountSelector = computed(() => accountRoutes.has(route.name))
     const { loadAccountContext } = useAccountContext()
 

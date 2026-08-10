@@ -97,6 +97,8 @@ class LLMService:
                 "ai_entry", enabled_only=True
             ):
                 params = source.get("params") or {}
+                if params.get("analysis_mode", "self_analysis") == "shared_reference":
+                    continue
                 source_id = source["signal_source_id"]
                 interval = max(
                     1, int(params.get("analysis_interval_minutes", 5))

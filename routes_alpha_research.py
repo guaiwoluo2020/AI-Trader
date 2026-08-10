@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Authenticated Alpha research API."""
+
+from typing import Dict
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from alpha_research import AlphaResearchService
+from auth import AuthUser, require_auth
+
+
+def create_alpha_research_routes() -> APIRouter:
+    router = APIRouter()
+    service = AlphaResearchService()
+
+    @router.get("/alpha-research/context")
+    async def get_context(user: AuthUser = Depends(require_auth)) -> Dict:
+        return {"status": "ok", **service.context(user.user_id)}
+
+    @router.get("/alpha-research/runs")
+    async def list_runs(user: AuthUser = Depends(require_auth)) -> Dict:
+        runs = service.repository.list_for_user(user.user_id)
+        return {"status": "ok", "count": len(runs), "runs": runs}
+
+    @router.post("/alpha-research/candidates")
+    async def generate_candidates(
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        try:
+            candidates = service.candidates.generate(user.user_id, await request.json())
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {
+            "status": "ok",
+            "message": f"已生成 {len(candidates)} 个 Alpha 候选",
+            "candidates": candidates,
+        }
+
+    @router.post("/alpha-research/runs")
+    async def create_run(
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        try:
+            run = service.create(user.user_id, await request.json())
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "status": "ok",
+            "message": "Alpha 研究任务已提交，将按 LLM 结构迭代与 Optuna 参数搜索执行",
+            "run": run,
+        }
+
+    @router.get("/alpha-research/runs/{run_id}")
+    async def get_run(
+        run_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        run = service.repository.get(user.user_id, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Alpha 研究任务不存在")
+        if run["status"] == "completed":
+            run["admission"] = service.library.admission_report(run["result"])
+        return {"status": "ok", "run": run}
+
+    @router.post("/alpha-research/runs/{run_id}/publish")
+    async def publish_run(
+        run_id: str,
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        run = service.repository.get(user.user_id, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Alpha 研究任务不存在")
+        try:
+            payload = await request.json()
+            alpha = service.library.publish_run(
+                user.user_id, run, str(payload.get("visibility", "private"))
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "message": "Alpha 已进入因子库", "alpha": alpha}
+
+    @router.get("/alpha-library")
+    async def list_alpha_library(
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        items = service.library.list_visible(user.user_id)
+        return {"status": "ok", "count": len(items), "items": items}
+
+    @router.post("/alpha-library/{alpha_id}/retire")
+    async def retire_alpha(
+        alpha_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        if not service.library.retire(user.user_id, alpha_id):
+            raise HTTPException(status_code=404, detail="Alpha 不存在或无权停用")
+        return {"status": "ok", "message": "Alpha 已停用"}
+
+    @router.post("/alpha-research/runs/{run_id}/cancel")
+    async def cancel_run(
+        run_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        if not service.repository.request_cancel(user.user_id, run_id):
+            raise HTTPException(status_code=400, detail="任务不存在或当前状态不能终止")
+        return {"status": "ok", "message": "已提交终止请求"}
+
+    return router

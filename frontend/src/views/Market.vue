@@ -1,10 +1,114 @@
 <template>
   <v-container fluid>
-    <v-row>
-      <v-col cols="12">
-        <h1 class="mb-4">信号推荐</h1>
+    <section class="execution-hero mb-5">
+      <div>
+        <div class="section-kicker">LIVE STRATEGY OPERATIONS</div>
+        <h1>策略执行中心</h1>
+        <p>
+          {{ selectedAccount?.account_name || '当前账户' }} · 实时跟踪策略决策、人工确认与自动执行
+        </p>
+      </div>
+      <v-chip :color="wsConnected ? 'success' : 'error'" variant="flat">
+        <v-icon start>mdi-lan-connect</v-icon>
+        {{ wsConnected ? '实时通道已连接' : '实时通道断开' }}
+      </v-chip>
+    </section>
+
+    <v-row class="mb-2">
+      <v-col cols="12" sm="4">
+        <v-card class="metric-card" variant="tonal" color="primary">
+          <v-card-text><span>运行策略</span><strong>{{ activeDeployments.length }}</strong></v-card-text>
+        </v-card>
+      </v-col>
+      <v-col cols="12" sm="4">
+        <v-card class="metric-card" variant="tonal" color="warning">
+          <v-card-text><span>待处理决策</span><strong>{{ pendingOrders.length }}</strong></v-card-text>
+        </v-card>
+      </v-col>
+      <v-col cols="12" sm="4">
+        <v-card class="metric-card" variant="tonal" color="info">
+          <v-card-text><span>已记录决策</span><strong>{{ decisionAlerts.length }}</strong></v-card-text>
+        </v-card>
       </v-col>
     </v-row>
+
+    <v-card class="mb-4">
+      <v-card-title class="d-flex align-center">
+        <v-icon class="mr-2">mdi-play-circle-outline</v-icon>
+        当前运行策略
+      </v-card-title>
+      <v-card-text>
+        <div v-if="activeDeployments.length" class="d-flex flex-wrap ga-2">
+          <v-chip
+            v-for="deployment in activeDeployments"
+            :key="deployment.deployment_id"
+            color="success"
+            variant="tonal"
+          >
+            {{ deployment.strategy_name || deployment.strategy_id }} · {{ deployment.symbol }}
+          </v-chip>
+        </div>
+        <v-alert v-else type="info" variant="tonal" density="compact">
+          当前账户尚未绑定运行中的实盘策略
+        </v-alert>
+      </v-card-text>
+    </v-card>
+
+    <v-card class="mb-4 pending-card">
+      <v-card-title class="d-flex align-center">
+        <v-icon class="mr-2" color="warning">mdi-inbox-arrow-down-outline</v-icon>
+        待处理决策
+        <v-chip size="small" color="warning" class="ml-2">{{ pendingOrders.length }}</v-chip>
+      </v-card-title>
+      <v-card-text>
+        <v-alert v-if="!pendingOrders.length" type="success" variant="tonal" density="compact">
+          当前没有需要人工处理的策略决策
+        </v-alert>
+        <v-row v-else>
+          <v-col v-for="order in pendingOrders" :key="order.order_id" cols="12">
+            <div class="pending-order-row">
+              <div class="pending-order-main">
+                <div class="d-flex flex-wrap align-center ga-2 mb-2">
+                  <strong>{{ order.symbol }}</strong>
+                  <v-chip size="small" :color="order.action === 'b' ? 'success' : 'error'">
+                    {{ order.action === 'b' ? '买入' : '卖出' }}
+                  </v-chip>
+                  <v-chip size="small" variant="outlined">
+                    {{ order.strategy_name || order.strategy_id || '策略决策' }}
+                  </v-chip>
+                </div>
+                <div class="text-caption text-medium-emphasis">{{ order.reason }}</div>
+              </div>
+              <div class="pending-order-fields">
+                <v-text-field v-model.number="order.mount" label="手数" type="number" step="0.01" min="0.01" density="compact" hide-details variant="outlined" />
+                <v-text-field v-model.number="order.sl" label="止损" type="number" density="compact" hide-details variant="outlined" />
+                <v-text-field v-model.number="order.tp" label="止盈" type="number" density="compact" hide-details variant="outlined" />
+              </div>
+              <div class="pending-order-actions">
+                <v-btn color="success" :loading="confirmingOrderId === order.order_id" @click="confirmPendingOrder(order)">确认执行</v-btn>
+                <v-btn variant="outlined" color="error" :loading="rejectingOrderId === order.order_id" @click="rejectPendingOrder(order.order_id)">放弃</v-btn>
+              </div>
+            </div>
+          </v-col>
+        </v-row>
+      </v-card-text>
+    </v-card>
+
+    <v-card class="mb-4">
+      <v-card-title class="d-flex align-center flex-wrap ga-2">
+        <v-icon class="mr-1">mdi-history</v-icon>
+        最新策略决策
+        <v-spacer />
+        <v-select v-model="decisionFilters.strategy_id" :items="strategyFilterOptions" label="策略" clearable density="compact" hide-details variant="outlined" class="decision-filter" />
+        <v-select v-model="decisionFilters.status" :items="decisionStatusOptions" label="状态" clearable density="compact" hide-details variant="outlined" class="decision-filter" />
+        <v-text-field v-model="decisionFilters.date_from" label="开始时间" type="datetime-local" density="compact" hide-details variant="outlined" class="decision-time-filter" />
+        <v-text-field v-model="decisionFilters.date_to" label="结束时间" type="datetime-local" density="compact" hide-details variant="outlined" class="decision-time-filter" />
+        <v-btn color="primary" variant="tonal" :loading="loadingDecisions" @click="loadDecisions">查询</v-btn>
+      </v-card-title>
+      <v-card-text v-if="!decisionAlerts.length" class="text-center text-medium-emphasis py-8">
+        暂无符合条件的策略决策
+      </v-card-text>
+    </v-card>
 
     <!-- 交易决策提醒 -->
     <v-row v-if="decisionAlerts.length > 0">
@@ -13,9 +117,7 @@
           v-for="(alert, index) in decisionAlerts"
           :key="alert.decision_id || index"
           :type="alert.rejected ? 'warning' : alert.action === 'buy' ? 'success' : 'error'"
-          dismissible
           class="mb-2"
-          @input="removeDecisionAlert(index)"
         >
           <div class="d-flex flex-wrap align-center">
             <v-icon small class="mr-1">mdi-chart-line</v-icon>
@@ -94,343 +196,13 @@
             </div>
           </div>
 
-          <!-- 待确认订单操作 -->
-          <div v-if="alert.pending_order && !alert.pending_order.confirmed" class="mt-3 pa-2 grey lighten-4 rounded">
-            <div class="text-subtitle-2 font-weight-bold mb-2">
-              <v-icon small color="primary" class="mr-1">mdi-file-document-edit</v-icon>
-              待确认订单
-            </div>
-
-            <v-row dense class="mb-2">
-              <v-col cols="3">
-                <v-text-field
-                  v-model.number="alert.pending_order.mount"
-                  label="手数"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  dense
-                  hide-details
-                  outlined
-                ></v-text-field>
-              </v-col>
-              <v-col cols="3">
-                <v-text-field
-                  v-model.number="alert.pending_order.sl"
-                  label="止损"
-                  type="number"
-                  step="0.01"
-                  dense
-                  hide-details
-                  outlined
-                ></v-text-field>
-              </v-col>
-              <v-col cols="3">
-                <v-text-field
-                  v-model.number="alert.pending_order.tp"
-                  label="止盈"
-                  type="number"
-                  step="0.01"
-                  dense
-                  hide-details
-                  outlined
-                ></v-text-field>
-              </v-col>
-              <v-col cols="3" class="d-flex align-center">
-                <v-btn
-                  color="success"
-                  small
-                  class="mr-1"
-                  :loading="confirmingOrderId === alert.pending_order.order_id"
-                  @click="confirmDecisionOrder(alert.pending_order, index)"
-                >
-                  <v-icon start small>mdi-check</v-icon>
-                  确认
-                </v-btn>
-                <v-btn
-                  color="error"
-                  small
-                  outlined
-                  :loading="rejectingOrderId === alert.pending_order.order_id"
-                  @click="rejectDecisionOrder(alert.pending_order.order_id, index)"
-                >
-                  放弃
-                </v-btn>
-              </v-col>
-            </v-row>
-
-            <div class="text-caption grey--text mb-1">
-              {{ alert.reason }}
-            </div>
-            <div class="text-caption grey--text">
-              <v-icon small>mdi-clock-outline</v-icon>
-              {{ formatTime(alert.timestamp) }}
-            </div>
-          </div>
-
-          <!-- 已确认状态 -->
-          <div v-if="alert.pending_order?.confirmed" class="mt-2">
-            <v-chip small color="success">
-              <v-icon start small>mdi-check-circle</v-icon>
-              {{ alert.pending_order.auto_executed ? '已自动下单，等待 MT5 执行' : '已确认，等待执行' }}
+          <div class="mt-2 d-flex align-center ga-2">
+            <v-chip size="small" :color="getDecisionStatusColor(alert.status)" variant="tonal">
+              {{ getDecisionStatusLabel(alert.status, alert.auto_executed) }}
             </v-chip>
+            <span class="text-caption text-medium-emphasis">{{ formatTime(alert.timestamp) }}</span>
           </div>
         </v-alert>
-      </v-col>
-    </v-row>
-
-    <!-- WebSocket 状态 -->
-    <v-row>
-      <v-col cols="12">
-        <v-chip
-          :color="wsConnected ? 'success' : 'error'"
-          small
-          class="mr-2"
-        >
-          <v-icon start small>mdi-lan-connect</v-icon>
-          {{ wsConnected ? 'WebSocket 已连接' : 'WebSocket 断开' }}
-        </v-chip>
-      </v-col>
-    </v-row>
-
-    <!-- 大模型趋势分析 -->
-    <v-row>
-      <v-col cols="12">
-        <v-card>
-          <v-card-title>
-            <v-icon class="mr-2">mdi-robot</v-icon>
-            AI趋势分析
-            <v-spacer></v-spacer>
-            <!-- 分析状态指示器 -->
-            <v-chip v-if="llmAnalyzing" small color="primary" class="mr-2">
-              <v-progress-circular indeterminate size="12" width="2" class="mr-1"></v-progress-circular>
-              {{ llmAnalysisStatus || '分析中...' }}
-            </v-chip>
-            <v-chip v-else-if="llmStatus.enabled" small color="success" class="mr-2">已启用</v-chip>
-            <v-chip v-else small color="grey">
-              {{ llmStatus.access_status === 'pending' ? '开通审批中' : '未开通' }}
-            </v-chip>
-            <v-btn
-              color="primary"
-              size="small"
-              variant="outlined"
-              :disabled="!llmFeatureAvailable || llmAnalyzing"
-              :loading="llmTriggering"
-              @click="triggerLLMAnalysis"
-            >
-              <v-icon start size="small">mdi-play</v-icon>
-              立即分析
-            </v-btn>
-          </v-card-title>
-          <v-card-text>
-            <!-- 分析时间 -->
-            <div v-if="llmStatus.last_analysis_time" class="text-caption grey--text mb-3">
-              上次分析: {{ llmStatus.last_analysis_time }}
-            </div>
-
-            <!-- 无数据提示 -->
-            <div v-if="!llmAnalysis || Object.keys(llmAnalysis).length === 0" class="text-center py-6">
-              <v-icon size="48" color="grey lighten-1">mdi-robot-outline</v-icon>
-              <p class="mt-3 grey--text">
-                <template v-if="llmAnalyzing">
-                  {{ llmAnalysisStatus || '正在分析...' }}
-                </template>
-                <template v-else>
-                  {{ llmEmptyMessage }}
-                </template>
-              </p>
-              <!-- 分析进度条 -->
-              <v-progress-linear v-if="llmAnalyzing" indeterminate color="primary" class="mt-2"></v-progress-linear>
-            </div>
-
-            <!-- 分析结果 -->
-            <div v-else>
-              <v-expansion-panels>
-                <v-expansion-panel v-for="(data, symbol) in llmAnalysis" :key="symbol">
-                  <v-expansion-panel-title>
-                    <div class="d-flex align-center">
-                      <strong class="mr-3">{{ symbol }}</strong>
-                      <v-chip
-                        v-if="data.overall_trend"
-                        :color="getTrendChipColor(data.overall_trend.direction)"
-                        small
-                      >
-                        {{ data.overall_trend.direction }}
-                      </v-chip>
-                      <!-- 休市状态 -->
-                      <v-chip
-                        v-if="data.market_status === 'closed'"
-                        color="grey"
-                        small
-                        class="ml-2"
-                      >
-                        <v-icon start size="x-small">mdi-pause-circle</v-icon>
-                        休市中
-                      </v-chip>
-                      <!-- 数据未更新 -->
-                      <v-chip
-                        v-else-if="data.data_stale"
-                        color="warning"
-                        small
-                        class="ml-2"
-                      >
-                        <v-icon start size="x-small">mdi-alert</v-icon>
-                        数据未更新
-                      </v-chip>
-                    </div>
-                  </v-expansion-panel-title>
-                  <v-expansion-panel-text>
-                    <!-- 休市提示 -->
-                    <v-alert
-                      v-if="data.market_status === 'closed'"
-                      type="info"
-                      dense
-                      class="mb-3"
-                    >
-                      <div class="d-flex align-center">
-                        <v-icon small class="mr-2">mdi-pause-circle</v-icon>
-                        <span>
-                          休市中，暂无行情数据。下次开市时将自动更新分析。
-                        </span>
-                      </div>
-                    </v-alert>
-                    <!-- 数据过期提示 -->
-                    <v-alert
-                      v-else-if="data.data_stale"
-                      type="warning"
-                      dense
-                      class="mb-3"
-                    >
-                      <div class="d-flex align-center">
-                        <v-icon small class="mr-2">mdi-clock-alert</v-icon>
-                        <span>
-                          行情数据已 {{ data.stale_seconds || '?' }} 秒未更新，当前显示上次分析结果。
-                          <span class="text-caption">({{ data.analyzed_at }})</span>
-                        </span>
-                      </div>
-                    </v-alert>
-
-                    <!-- 各周期趋势（休市时可能没有分析结果）-->
-                    <div v-if="data.trend_analysis" class="mb-4">
-                      <div class="text-subtitle-2 mb-2">各周期趋势</div>
-                      <v-table density="compact">
-                        <template v-slot:default>
-                          <thead>
-                            <tr>
-                              <th>周期</th>
-                              <th>AI趋势</th>
-                              <th>置信度</th>
-                              <th>AI说明</th>
-                              <th>技术趋势</th>
-                              <th>技术说明</th>
-                              <th>结论</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            <tr v-for="(trend, period) in data.trend_analysis" :key="period">
-                              <td><strong>{{ period }}</strong></td>
-                              <td>
-                                <v-chip :color="getTrendChipColor(trend.trend)" size="x-small">
-                                  {{ trend.trend }}
-                                </v-chip>
-                              </td>
-                              <td>
-                                <span class="text-caption">{{ trend.confidence }}%</span>
-                              </td>
-                              <td class="text-caption grey--text" style="max-width: 180px;">
-                                {{ trend.reason }}
-                              </td>
-                              <td>
-                                <v-chip
-                                  v-if="getTechTrend(symbol, period)"
-                                  :color="getTrendColor(getTechTrend(symbol, period).trend)"
-                                  size="x-small"
-                                >
-                                  {{ getTrendLabel(getTechTrend(symbol, period).trend) }}
-                                </v-chip>
-                                <span v-else class="grey--text text-caption">-</span>
-                              </td>
-                              <td class="text-caption grey--text" style="max-width: 180px;">
-                                <div v-if="getTechTrend(symbol, period)" :title="getTechTrend(symbol, period).reason">
-                                  {{ getTechTrend(symbol, period).reason }}
-                                </div>
-                                <span v-else>-</span>
-                              </td>
-                              <td>
-                                <v-chip
-                                  :color="getConclusionColor(symbol, period, trend)"
-                                  size="x-small"
-                                >
-                                  {{ getConclusion(symbol, period, trend) }}
-                                </v-chip>
-                              </td>
-                            </tr>
-                          </tbody>
-                        </template>
-                      </v-table>
-                    </div>
-
-                    <!-- 关键价位 -->
-                    <div v-if="data.key_levels" class="mb-4">
-                      <div class="text-subtitle-2 mb-2">关键价位</div>
-                      <v-row>
-                        <v-col cols="6">
-                          <div class="text-caption grey--text">压力位</div>
-                          <div v-for="(level, i) in data.key_levels.resistance" :key="'r'+i">
-                            <v-chip color="error" size="x-small" class="mr-1">{{ level }}</v-chip>
-                          </div>
-                        </v-col>
-                        <v-col cols="6">
-                          <div class="text-caption grey--text">支撑位</div>
-                          <div v-for="(level, i) in data.key_levels.support" :key="'s'+i">
-                            <v-chip color="success" size="x-small" class="mr-1">{{ level }}</v-chip>
-                          </div>
-                        </v-col>
-                      </v-row>
-                    </div>
-
-                    <!-- 交易建议 -->
-                    <div v-if="data.trade_suggestions && data.trade_suggestions.length > 0">
-                      <div class="text-subtitle-2 mb-2">交易建议</div>
-                      <v-table density="compact">
-                        <template v-slot:default>
-                          <thead>
-                            <tr>
-                              <th>周期</th>
-                              <th>方向</th>
-                              <th>入场价</th>
-                              <th>止损</th>
-                              <th>止盈</th>
-                              <th>理由</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            <tr v-for="(suggestion, i) in data.trade_suggestions" :key="i">
-                              <td>{{ suggestion.period }}</td>
-                              <td>
-                                <v-chip :color="suggestion.direction === 'buy' ? 'success' : 'error'" size="x-small">
-                                  {{ suggestion.direction === 'buy' ? '买入' : '卖出' }}
-                                </v-chip>
-                              </td>
-                              <td>{{ suggestion.entry_price }}</td>
-                              <td>{{ suggestion.stop_loss }}</td>
-                              <td>{{ suggestion.take_profit }}</td>
-                              <td class="text-caption">{{ suggestion.reason }}</td>
-                            </tr>
-                          </tbody>
-                        </template>
-                      </v-table>
-                    </div>
-
-                    <div class="text-caption grey--text mt-2">
-                      分析时间: {{ data.analyzed_at }}
-                    </div>
-                  </v-expansion-panel-text>
-                </v-expansion-panel>
-              </v-expansion-panels>
-            </div>
-          </v-card-text>
-        </v-card>
       </v-col>
     </v-row>
 
@@ -442,7 +214,7 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { marketAPI } from '@/api/market'
 import { useAccountContext } from '@/composables/useAccountContext'
 import {
@@ -454,19 +226,25 @@ export default {
   name: 'Market',
   setup() {
     // 数据
-    const allPivots = ref([])
-    const marketStatus = ref({})
-    const thresholds = ref({})
     const decisionAlerts = ref([])  // 统一的决策提醒列表
     const expandedSignals = ref(new Set())  // 展开信号的状态
-    const loading = ref(false)
     const showError = ref(false)
     const errorMessage = ref('')
 
-    // 趋势分析相关
-    const trendData = ref({})
-    const loadingTrend = ref(false)
     const pendingOrders = ref([])
+    const loadingDecisions = ref(false)
+    const decisionFilters = reactive({
+      strategy_id: null,
+      status: null,
+      date_from: '',
+      date_to: '',
+    })
+    const decisionStatusOptions = [
+      { title: '待确认', value: 'pending' },
+      { title: '已确认', value: 'confirmed' },
+      { title: '风控/人工拒绝', value: 'rejected' },
+      { title: '已过期', value: 'expired' },
+    ]
 
     // 订单确认/放弃状态
     const confirmingOrderId = ref(null)
@@ -478,62 +256,15 @@ export default {
     let wsReconnectTimer = null
     let statusInterval = null
     let isUnmounted = false
-    const { selectedAccountId } = useAccountContext()
+    const { selectedAccountId, selectedAccount } = useAccountContext()
 
-    // 大模型分析
-    const llmStatus = ref({ enabled: false })
-    const llmAnalysis = ref({})
-    const llmAnalyzing = ref(false)
-    const llmAnalysisStatus = ref('')
-    const llmTriggering = ref(false)
-    const llmAccessGranted = computed(() =>
-      llmStatus.value.access_status === 'approved' || Boolean(llmStatus.value.enabled)
-    )
-    const llmFeatureAvailable = computed(() =>
-      llmAccessGranted.value && Boolean(llmStatus.value.enabled)
-    )
-    const llmEmptyMessage = computed(() => {
-      if (!llmAccessGranted.value) return '请前往用户配置申请开通大模型行情分析'
-      if (!llmStatus.value.enabled) return '大模型服务暂未配置，请联系管理员'
-      if (llmStatus.value.analysis_message) return llmStatus.value.analysis_message
-      return '尚未生成分析结果，点击“立即分析”开始'
-    })
-
-
-    // 计算属性
-    const highPivots = computed(() => {
-      return allPivots.value
-        .filter(p => p.direction === 'high')
-        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-        .slice(0, 20)
-    })
-
-    const lowPivots = computed(() => {
-      return allPivots.value
-        .filter(p => p.direction === 'low')
-        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-        .slice(0, 20)
-    })
-
-    // 方法
-    const loadStatus = async () => {
-      try {
-        const status = await marketAPI.getStatus(selectedAccountId.value)
-        marketStatus.value = status
-      } catch (err) {
-        console.error('加载状态失败:', err)
-      }
-    }
-
-    const loadThresholds = async () => {
-      try {
-        const data = await marketAPI.getThresholds()
-        thresholds.value = data.thresholds || {}
-      } catch (err) {
-        console.error('加载阈值失败:', err)
-      }
-    }
-
+    const activeDeployments = computed(() => (
+      selectedAccount.value?.deployments || []
+    ).filter(item => item.execution_mode === 'live' && item.status === 'active'))
+    const strategyFilterOptions = computed(() => activeDeployments.value.map(item => ({
+      title: `${item.strategy_name || item.strategy_id} · ${item.symbol}`,
+      value: item.strategy_id,
+    })))
     const connectWebSocket = () => {
       if (
         isUnmounted ||
@@ -560,9 +291,10 @@ export default {
             }
             const alert = normalizeTradingDecision(decision)
             decisionAlerts.value.unshift(alert)
-            if (decisionAlerts.value.length > 10) {
+            if (decisionAlerts.value.length > 50) {
               decisionAlerts.value.pop()
             }
+            loadPendingOrders()
           } else if (data.type === 'pending_order') {
             // 订单状态更新（确认后）
             console.log('收到订单更新:', data)
@@ -572,36 +304,12 @@ export default {
               a => a.pending_order?.order_id === order.order_id
             )
             if (alertIndex >= 0) {
-              decisionAlerts.value[alertIndex].pending_order = {
-                ...decisionAlerts.value[alertIndex].pending_order,
-                ...order,
-                confirmed: true
-              }
+              decisionAlerts.value[alertIndex].status = 'confirmed'
             }
+            loadPendingOrders()
+            loadDecisions()
           } else if (data.type === 'connected') {
             wsConnected.value = true
-          } else if (data.type === 'llm_analysis_status') {
-            // 大模型分析状态更新（流式）
-            console.log('收到分析状态更新:', data)
-            if (data.status === 'analyzing' || data.status === 'streaming') {
-              llmAnalyzing.value = true
-              llmAnalysisStatus.value = data.message
-            } else if (data.status === 'stale') {
-              // 数据过期，停止加载状态
-              llmAnalyzing.value = false
-              llmAnalysisStatus.value = data.message
-            } else if (data.status === 'error') {
-              llmAnalyzing.value = false
-              llmAnalysisStatus.value = data.message
-            }
-          } else if (data.type === 'llm_analysis_update') {
-            // 大模型分析更新，刷新分析结果
-            console.log('收到大模型分析更新通知:', data)
-            llmAnalyzing.value = false
-            llmAnalysisStatus.value = ''
-            loadLLMAnalysis()
-            loadLLMStatus()
-            loadTrend()
           }
         },
         // onError
@@ -629,125 +337,6 @@ export default {
       ws.value = socket
     }
 
-    const getThresholdLabel = (period) => {
-      const threshold = thresholds.value[period]
-      if (threshold) {
-        return `±${threshold.percent}`
-      }
-      return period
-    }
-
-    const getPivotPeriodColor = (period) => {
-      const colors = {
-        'H4': 'red',
-        'H1': 'orange',
-        'M15': 'yellow darken-2',
-        'M5': 'green',
-        'M1': 'blue'
-      }
-      return colors[period] || 'grey'
-    }
-
-    const getTechTrend = (symbol, period) => {
-      const normalized = symbol.replace('#', '').toUpperCase()
-      const symbolVariants = [normalized, normalized + '#', symbol]
-      for (const s of symbolVariants) {
-        // 后端返回的数据结构是 resonance.periods
-        if (trendData.value[s]?.resonance?.periods?.[period]) {
-          return trendData.value[s].resonance.periods[period]
-        }
-      }
-      return null
-    }
-
-    // 判断AI趋势和技术趋势是否冲突
-    const hasConflict = (symbol, period, aiTrend) => {
-      const techTrend = getTechTrend(symbol, period)
-      if (!techTrend) return false
-
-      const aiDir = getTrendDirection(aiTrend.trend)
-      const techDir = techTrend.trend
-
-      // 如果一个看涨一个看跌，则是冲突
-      if ((aiDir === 'up' && techDir === 'down') || (aiDir === 'down' && techDir === 'up')) {
-        return true
-      }
-      return false
-    }
-
-    // 获取趋势方向
-    const getTrendDirection = (trend) => {
-      if (!trend) return 'unknown'
-      const t = trend.toLowerCase()
-      if (t.includes('上涨') || t.includes('上升') || t === 'up') return 'up'
-      if (t.includes('下跌') || t.includes('下降') || t === 'down') return 'down'
-      return 'sideways'
-    }
-
-    // 获取结论
-    const getConclusion = (symbol, period, aiTrend) => {
-      const techTrend = getTechTrend(symbol, period)
-      const aiDir = getTrendDirection(aiTrend.trend)
-      const techDir = techTrend?.trend || 'unknown'
-
-      if (hasConflict(symbol, period, aiTrend)) {
-        return '谨慎观望'
-      }
-
-      if (aiDir === techDir) {
-        if (aiDir === 'up') return '看涨'
-        if (aiDir === 'down') return '看跌'
-        return '震荡'
-      }
-
-      // AI有判断但技术分析无明确趋势
-      if (techDir === 'sideways' || techDir === 'unknown') {
-        return aiDir === 'up' ? '偏多' : aiDir === 'down' ? '偏空' : '震荡'
-      }
-
-      return '待观察'
-    }
-
-    // 获取结论颜色
-    const getConclusionColor = (symbol, period, aiTrend) => {
-      if (hasConflict(symbol, period, aiTrend)) {
-        return 'warning'
-      }
-      const conclusion = getConclusion(symbol, period, aiTrend)
-      if (conclusion === '看涨') return 'success'
-      if (conclusion === '看跌') return 'error'
-      if (conclusion === '偏多') return 'success lighten-2'
-      if (conclusion === '偏空') return 'error lighten-2'
-      return 'grey'
-    }
-
-    // 趋势分析相关方法
-    const loadTrend = async () => {
-      // 加载所有已分析品种的趋势数据
-      const symbols = Object.keys(llmAnalysis.value)
-      if (symbols.length === 0) return
-
-      loadingTrend.value = true
-      try {
-        // 并行加载所有品种的趋势
-        const promises = symbols.map(symbol => marketAPI.getTrend(symbol, selectedAccountId.value))
-        const results = await Promise.all(promises)
-
-        // 合并结果
-        results.forEach((data, index) => {
-          if (data) {
-            const symbol = symbols[index]
-            trendData.value[symbol] = data
-            console.log(`[Market] 加载 ${symbol} 技术趋势:`, data.resonance?.signal)
-          }
-        })
-      } catch (err) {
-        console.error('加载趋势分析失败:', err)
-      } finally {
-        loadingTrend.value = false
-      }
-    }
-
     const loadPendingOrders = async () => {
       try {
         const data = await marketAPI.getPendingOrders(null, selectedAccountId.value)
@@ -757,106 +346,23 @@ export default {
       }
     }
 
-    // 大模型分析相关
-    const loadLLMStatus = async () => {
+    const loadDecisions = async () => {
+      if (!selectedAccountId.value) return
+      loadingDecisions.value = true
       try {
-        const data = await marketAPI.getLLMStatus(selectedAccountId.value)
-        if (data.status === 'ok') {
-          llmStatus.value = data.data
-          const status = data.data.analysis_status
-          llmAnalyzing.value = ['queued', 'analyzing', 'streaming'].includes(status)
-          llmAnalysisStatus.value = data.data.analysis_message || ''
-        }
+        const data = await marketAPI.getDecisions({
+          ...decisionFilters,
+          count: 50,
+        }, selectedAccountId.value)
+        decisionAlerts.value = (data.decisions || []).map(normalizeTradingDecision)
       } catch (err) {
-        console.error('获取大模型状态失败:', err)
-      }
-    }
-
-    const loadLLMAnalysis = async () => {
-      if (!llmAccessGranted.value) {
-        llmAnalysis.value = {}
-        return
-      }
-      try {
-        const data = await marketAPI.getLLMAnalysis(null, selectedAccountId.value)
-        if (data.status === 'ok') {
-          llmAnalysis.value = data.data || {}
-        }
-      } catch (err) {
-        console.error('获取大模型分析失败:', err)
-      }
-    }
-
-    const triggerLLMAnalysis = async () => {
-      llmTriggering.value = true
-      try {
-        const data = await marketAPI.triggerLLMAnalysis(selectedAccountId.value)
-        if (data.status === 'accepted' || data.status === 'busy') {
-          llmAnalyzing.value = true
-          llmAnalysisStatus.value = data.message
-          await loadLLMStatus()
-          return
-        }
-        errorMessage.value = data.message || '提交 AI 分析任务失败'
-        showError.value = true
-        await loadLLMStatus()
-      } catch (err) {
-        errorMessage.value = err.response?.data?.detail || `提交 AI 分析任务失败: ${err.message}`
-        showError.value = true
+        console.error('加载策略决策历史失败:', err)
       } finally {
-        llmTriggering.value = false
+        loadingDecisions.value = false
       }
     }
 
-
-    const getTrendChipColor = (trend) => {
-      if (!trend) return 'grey'
-      const trendLower = trend.toLowerCase()
-      if (trendLower.includes('上涨') || trendLower === 'up' || trendLower === 'buy') {
-        return 'success'
-      }
-      if (trendLower.includes('下跌') || trendLower === 'down' || trendLower === 'sell') {
-        return 'error'
-      }
-      return 'warning'
-    }
-
-    const confirmOrder = async (orderId) => {
-      try {
-        const data = await marketAPI.confirmOrder(orderId, selectedAccountId.value)
-        if (data.status === 'ok') {
-          await loadPendingOrders()
-        } else {
-          errorMessage.value = data.message || '确认订单失败'
-          showError.value = true
-        }
-      } catch (err) {
-        errorMessage.value = `确认订单失败: ${err.message}`
-        showError.value = true
-      }
-    }
-
-    const rejectOrder = async (orderId) => {
-      try {
-        const data = await marketAPI.rejectOrder(orderId, selectedAccountId.value)
-        if (data.status === 'ok') {
-          await loadPendingOrders()
-        } else {
-          errorMessage.value = data.message || '拒绝订单失败'
-          showError.value = true
-        }
-      } catch (err) {
-        errorMessage.value = `拒绝订单失败: ${err.message}`
-        showError.value = true
-      }
-    }
-
-    // 决策提醒操作
-    const removeDecisionAlert = (index) => {
-      decisionAlerts.value.splice(index, 1)
-    }
-
-    const confirmDecisionOrder = async (order, alertIndex) => {
+    const confirmPendingOrder = async (order) => {
       confirmingOrderId.value = order.order_id
       try {
         const data = await marketAPI.confirmOrderWithUpdate(order.order_id, {
@@ -865,8 +371,7 @@ export default {
           tp: order.tp
         }, selectedAccountId.value)
         if (data.status === 'ok') {
-          decisionAlerts.value.splice(alertIndex, 1)
-          await loadPendingOrders()
+          await Promise.all([loadPendingOrders(), loadDecisions()])
         } else {
           errorMessage.value = data.message || '确认订单失败'
           showError.value = true
@@ -879,13 +384,12 @@ export default {
       }
     }
 
-    const rejectDecisionOrder = async (orderId, alertIndex) => {
+    const rejectPendingOrder = async (orderId) => {
       rejectingOrderId.value = orderId
       try {
         const data = await marketAPI.rejectOrder(orderId, selectedAccountId.value)
         if (data.status === 'ok') {
-          decisionAlerts.value.splice(alertIndex, 1)
-          await loadPendingOrders()
+          await Promise.all([loadPendingOrders(), loadDecisions()])
         } else {
           errorMessage.value = data.message || '放弃订单失败'
           showError.value = true
@@ -896,6 +400,22 @@ export default {
       } finally {
         rejectingOrderId.value = null
       }
+    }
+
+    const getDecisionStatusColor = (status) => ({
+      pending: 'warning',
+      confirmed: 'success',
+      rejected: 'error',
+      expired: 'grey',
+    }[status] || 'info')
+
+    const getDecisionStatusLabel = (status, autoExecuted = false) => {
+      if (status === 'confirmed') return autoExecuted ? '已自动执行' : '已确认执行'
+      return {
+        pending: '等待确认',
+        rejected: '已拒绝',
+        expired: '已过期',
+      }[status] || status || '未知状态'
     }
 
     // 辅助方法
@@ -923,7 +443,8 @@ export default {
         'pivot': 'Pivot',
         'key_level': 'KeyLevel',
         'ai_entry': 'AI',
-        'moving_average': '均线'
+        'moving_average': '均线',
+        'alpha_factor': 'Alpha'
       }
       const sourceName = sourceNames[source] || source
 
@@ -966,37 +487,19 @@ export default {
       return date.toLocaleString('zh-CN')
     }
 
-    const getTrendColor = (trend) => {
-      if (trend === 'up') return 'success'
-      if (trend === 'down') return 'error'
-      return 'warning'
-    }
-
-    const getTrendLabel = (trend) => {
-      if (trend === 'up') return '上升'
-      if (trend === 'down') return '下降'
-      if (trend === 'sideways') return '震荡'
-      return '未知'
-    }
-
     // 生命周期
     onMounted(async () => {
-      loadThresholds()
       if (selectedAccountId.value) {
-        loadStatus()
         loadPendingOrders()
-        await loadLLMStatus()
-        loadLLMAnalysis()
+        loadDecisions()
         connectWebSocket()
       }
 
       // 定时刷新
       statusInterval = setInterval(() => {
         if (!selectedAccountId.value) return
-        loadStatus()
         loadPendingOrders()
-        loadLLMStatus().then(loadLLMAnalysis)
-        loadTrend()
+        loadDecisions()
       }, 10000)
 
     })
@@ -1008,13 +511,8 @@ export default {
       wsConnected.value = false
       decisionAlerts.value = []
       pendingOrders.value = []
-      trendData.value = {}
-      llmAnalysis.value = {}
-      llmStatus.value = { enabled: false }
       if (!value || isUnmounted) return
-      await Promise.all([loadStatus(), loadPendingOrders(), loadLLMStatus()])
-      await loadLLMAnalysis()
-      loadTrend()
+      await Promise.all([loadPendingOrders(), loadDecisions()])
       connectWebSocket()
     })
 
@@ -1027,33 +525,25 @@ export default {
     })
 
     return {
-      allPivots,
-      highPivots,
-      lowPivots,
-      marketStatus,
-      thresholds,
       decisionAlerts,
-      loading,
       showError,
       errorMessage,
       wsConnected,
-      getThresholdLabel,
-      getPivotPeriodColor,
-      // 趋势分析相关
-      trendData,
-      loadingTrend,
       pendingOrders,
-      loadTrend,
-      confirmOrder,
-      rejectOrder,
-      getTrendColor,
-      getTrendLabel,
+      selectedAccount,
+      activeDeployments,
+      strategyFilterOptions,
+      decisionFilters,
+      decisionStatusOptions,
+      loadingDecisions,
+      loadDecisions,
       // 决策订单操作
       confirmingOrderId,
       rejectingOrderId,
-      removeDecisionAlert,
-      confirmDecisionOrder,
-      rejectDecisionOrder,
+      confirmPendingOrder,
+      rejectPendingOrder,
+      getDecisionStatusColor,
+      getDecisionStatusLabel,
       getSignalSourceColor,
       formatTime,
       formatTradePrice,
@@ -1062,29 +552,85 @@ export default {
       getVisibleSignals,
       toggleSignalExpand,
       isSignalExpanded,
-      // 大模型分析
-      llmStatus,
-      llmAnalysis,
-      llmAnalyzing,
-      llmAnalysisStatus,
-      llmTriggering,
-      llmFeatureAvailable,
-      llmEmptyMessage,
-      loadLLMStatus,
-      loadLLMAnalysis,
-      triggerLLMAnalysis,
-      getTrendChipColor,
-      // 技术分析与AI分析整合
-      getTechTrend,
-      hasConflict,
-      getConclusion,
-      getConclusionColor,
     }
   }
 }
 </script>
 
 <style scoped>
+.execution-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 26px 30px;
+  color: #f4fbf8;
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 86% 18%, rgba(247, 186, 67, 0.28), transparent 28%),
+    linear-gradient(125deg, #123c35 0%, #176b56 58%, #0d8f70 100%);
+  box-shadow: 0 18px 40px rgba(20, 82, 68, 0.18);
+}
+
+.execution-hero h1 {
+  margin: 2px 0 6px;
+  font-size: clamp(1.8rem, 3vw, 2.7rem);
+  line-height: 1.05;
+}
+
+.execution-hero p {
+  margin: 0;
+  color: rgba(244, 251, 248, 0.76);
+}
+
+.section-kicker {
+  color: #f4c96b;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.metric-card .v-card-text {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.metric-card strong {
+  font-size: 1.9rem;
+}
+
+.pending-order-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(360px, 1.2fr) auto;
+  gap: 18px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid rgba(117, 91, 15, 0.18);
+  border-radius: 14px;
+  background: linear-gradient(100deg, rgba(255, 248, 225, 0.8), rgba(255, 255, 255, 0.9));
+}
+
+.pending-order-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(90px, 1fr));
+  gap: 10px;
+}
+
+.pending-order-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.decision-filter {
+  max-width: 190px;
+}
+
+.decision-time-filter {
+  max-width: 215px;
+}
+
 .v-card {
   margin-bottom: 16px;
 }
@@ -1102,5 +648,28 @@ export default {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+@media (max-width: 960px) {
+  .execution-hero,
+  .pending-order-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pending-order-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .pending-order-actions .v-btn {
+    flex: 1;
+  }
+
+  .decision-filter,
+  .decision-time-filter {
+    max-width: none;
+    width: 100%;
+  }
 }
 </style>

@@ -22,8 +22,6 @@ while read line; do
         echo "🔴 [EA请求交易指令] $line"
     elif echo "$line" | grep -q "POST /send_statistics"; then
         echo "🟢 [EA发送统计数据] $line"
-    elif echo "$line" | grep -q "send_trade_instructions"; then
-        echo "🔵 [交易员下发指令] $line"
     else
         echo "$line"
     fi

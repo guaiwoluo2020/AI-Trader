@@ -15,6 +15,7 @@ from backtest_data import (
 from ea_auth import EAIdentity, require_ea_auth
 from sqlite_storage import StrategyConfigRepository, TradingAccountRepository
 from trading_engine_manager import TradingEngineManager
+from user_quotas import UserQuotaService
 
 
 def create_backtest_data_routes(
@@ -25,6 +26,7 @@ def create_backtest_data_routes(
     service = BacktestDatasetService(repository)
     account_repository = TradingAccountRepository()
     strategy_repository = StrategyConfigRepository()
+    quota_service = UserQuotaService()
 
     @router.get("/backtest/datasets")
     async def list_datasets(
@@ -35,6 +37,7 @@ def create_backtest_data_routes(
             "status": "ok",
             "count": len(datasets),
             "datasets": datasets,
+            "quota": quota_service.get_summary(user.user_id, user.role),
         }
 
     @router.get("/backtest/datasets/context")
@@ -100,16 +103,18 @@ def create_backtest_data_routes(
                 or account.status != "active" or account.activated_at is None
             ):
                 raise ValueError("请先下载并连接 MT5 EA")
-            dataset = service.create_dataset(
-                user_id=user.user_id,
-                account_id=account.account_id,
-                dataset_name=payload.get("dataset_name", ""),
-                symbol=payload.get("symbol", ""),
-                requested_start=int(payload.get("requested_start", 0)),
-                requested_end=int(payload.get("requested_end", 0)),
-                warmup_days=int(payload.get("warmup_days", 30)),
-                visibility=str(payload.get("visibility", "shared")),
-            )
+            with quota_service.guarded():
+                quota_service.assert_can_create(user.user_id, user.role, "datasets")
+                dataset = service.create_dataset(
+                    user_id=user.user_id,
+                    account_id=account.account_id,
+                    dataset_name=payload.get("dataset_name", ""),
+                    symbol=payload.get("symbol", ""),
+                    requested_start=int(payload.get("requested_start", 0)),
+                    requested_end=int(payload.get("requested_end", 0)),
+                    warmup_days=int(payload.get("warmup_days", 30)),
+                    visibility=str(payload.get("visibility", "shared")),
+                )
             return {
                 "status": "ok",
                 "message": "历史数据集已创建，等待 MT5 EA 领取任务",

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import test from 'node:test'
 import {
   countPendingTrades,
   normalizeActiveSymbols,
@@ -42,4 +44,22 @@ assert.deepEqual(
   ]
 )
 
-console.log('dashboard-view-data test passed')
+test('dashboard uses the account-scoped operational overview', () => {
+  const dashboard = fs.readFileSync(
+    new URL('../src/views/Dashboard.vue', import.meta.url),
+    'utf8',
+  )
+  const tradingApi = fs.readFileSync(
+    new URL('../src/api/trading.js', import.meta.url),
+    'utf8',
+  )
+
+  assert.match(tradingApi, /getDashboardOverview.*dashboard\/overview/s)
+  assert.match(dashboard, /getDashboardOverview\(selectedAccountId\.value\)/)
+  assert.match(dashboard, /账户与风控/)
+  assert.match(dashboard, /策略运行概览/)
+  assert.match(dashboard, /最新 AI 机会/)
+  assert.match(dashboard, /行情健康度/)
+  assert.doesNotMatch(dashboard, /统计记录/)
+  assert.doesNotMatch(dashboard, /getStatistics\(/)
+})
