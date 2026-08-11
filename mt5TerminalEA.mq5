@@ -104,6 +104,37 @@ string URLEncode(string str)
   }
 
 //+------------------------------------------------------------------+
+//| JSON字符串转义函数                                                |
+//+------------------------------------------------------------------+
+string EscapeJsonString(string str)
+  {
+   string result = "";
+   for(int i = 0; i < StringLen(str); i++)
+     {
+      ushort ch = StringGetCharacter(str, i);
+      if(ch == '"')
+         result += "\\\"";
+      else if(ch == '\\')
+         result += "\\\\";
+      else if(ch == 8)
+         result += "\\b";
+      else if(ch == 12)
+         result += "\\f";
+      else if(ch == 10)
+         result += "\\n";
+      else if(ch == 13)
+         result += "\\r";
+      else if(ch == 9)
+         result += "\\t";
+      else if(ch < 32)
+         result += StringFormat("\\u%04X", (int)ch);
+      else
+         result += ShortToString(ch);
+     }
+   return result;
+  }
+
+//+------------------------------------------------------------------+
 //| 构建带账户绑定凭证的请求头                                       |
 //+------------------------------------------------------------------+
 string BuildAuthenticatedHeaders()
@@ -1191,8 +1222,8 @@ bool PushAllKlineData(bool isFull)
    if(!PushKlineData(PERIOD_M5, isFull ? 288 : 1))
       success = false;
 
-   // M1: 1小时约60根
-   if(!PushKlineData(PERIOD_M1, isFull ? 60 : 1))
+   // M1: 5小时约300根，满足AI分析默认200根上下文
+   if(!PushKlineData(PERIOD_M1, isFull ? 300 : 1))
       success = false;
 
    if(success && isFull)
