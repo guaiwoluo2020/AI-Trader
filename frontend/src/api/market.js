@@ -432,6 +432,18 @@ export const marketAPI = {
     return response.data
   },
 
+  async saveLLMProvider(payload) {
+    const response = await api.put('/admin/llm/providers', payload)
+    return response.data
+  },
+
+  async activateLLMProvider(providerId) {
+    const response = await api.post(
+      `/admin/llm/providers/${encodeURIComponent(providerId)}/activate`
+    )
+    return response.data
+  },
+
   async saveLLMScene(sceneCode, payload) {
     const response = await api.put(
       `/admin/llm/scenes/${encodeURIComponent(sceneCode)}`, payload

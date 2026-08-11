@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -20,11 +21,6 @@ from backtest_engine import HistoricalBarReader, PERIOD_SECONDS
 from sqlite_storage import SQLiteStorage, get_storage
 
 
-EXIT_REVERSE = "reverse_signal"
-EXIT_FIXED = "fixed_horizon"
-EXIT_NEUTRAL = "neutral_signal"
-EXIT_MODES = {EXIT_REVERSE, EXIT_FIXED, EXIT_NEUTRAL}
-DEFAULT_EXIT_MODE = EXIT_REVERSE
 ALPHA_PERIOD_SECONDS = dict(PERIOD_SECONDS)
 
 
@@ -57,6 +53,28 @@ class FactorCatalog:
         "obv": "能量潮", "mfi": "资金流量指标", "cmf": "蔡金资金流量",
         "vwap": "成交量加权均价", "zscore": "标准分数", "entropy": "信息熵",
         "supertrend": "超级趋势", "aroon": "阿隆指标", "psar": "抛物线转向",
+    }
+    NATIVE_FACTORS = {
+        "previous_day_same_slot_return": {
+            "display_name": "昨日同期收益率",
+            "description": "上一个交易日同一时段 K 线的涨跌幅",
+        },
+        "previous_day_same_slot_range": {
+            "display_name": "昨日同期振幅",
+            "description": "上一个交易日同一时段 K 线的高低振幅",
+        },
+        "price_vs_previous_day_same_slot": {
+            "display_name": "相对昨日同期价格偏离",
+            "description": "当前收盘价相对昨日同期收盘价的偏离",
+        },
+        "same_slot_mean_return": {
+            "display_name": "多日同期平均收益",
+            "description": "过去 N 个交易日同一时段的平均涨跌幅",
+        },
+        "same_slot_win_rate": {
+            "display_name": "多日同期上涨比例",
+            "description": "过去 N 个交易日同一时段上涨的比例",
+        },
     }
 
     @staticmethod
@@ -97,9 +115,27 @@ class FactorCatalog:
                     "supports_length": "length" in signature.parameters,
                     "parameters": list(signature.parameters),
                 })
+        factors.extend({
+            "name": name,
+            "label": name.upper(),
+            "display_name": item["display_name"],
+            "category": "time_session",
+            "category_label": "时段效应",
+            "research_theme": "时段",
+            "description": item["description"],
+            "inputs": ["time", "open", "high", "low", "close", "volume"],
+            "supports_length": name in {"same_slot_mean_return", "same_slot_win_rate"},
+            "parameters": ["length"] if name in {"same_slot_mean_return", "same_slot_win_rate"} else [],
+            "is_native": True,
+        } for name, item in self.NATIVE_FACTORS.items())
         return sorted(factors, key=lambda item: (item["category"], item["name"]))
 
-    def calculate(self, frame: pd.DataFrame, name: str, length: int) -> pd.Series:
+    def calculate(
+        self, frame: pd.DataFrame, name: str, length: int,
+        time_zone: str = "Asia/Shanghai",
+    ) -> pd.Series:
+        if name in self.NATIVE_FACTORS:
+            return self._calculate_time_session_factor(frame, name, length, time_zone)
         ta = self._library()
         function = getattr(ta, name, None)
         if not callable(function) or not any(
@@ -151,6 +187,44 @@ class FactorCatalog:
             pd.to_numeric, errors="coerce"
         ).replace([np.inf, -np.inf], np.nan)
 
+    @staticmethod
+    def _calculate_time_session_factor(
+        frame: pd.DataFrame, name: str, length: int, time_zone: str,
+    ) -> pd.Series:
+        """Build causal same-time-of-day features from the uploaded bar timestamps."""
+        try:
+            zone = ZoneInfo(time_zone)
+        except Exception as exc:
+            raise ValueError("研究时区无效") from exc
+        local_time = pd.to_datetime(frame["time"], unit="s", utc=True).dt.tz_convert(zone)
+        working = pd.DataFrame(index=frame.index)
+        working["date"] = local_time.dt.date
+        working["slot"] = local_time.dt.hour * 60 + local_time.dt.minute
+        working["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        working["bar_return"] = working["close"].div(
+            pd.to_numeric(frame["open"], errors="coerce")
+        ).sub(1)
+        working["bar_range"] = pd.to_numeric(frame["high"], errors="coerce").sub(
+            pd.to_numeric(frame["low"], errors="coerce")
+        ).div(working["close"])
+
+        prior_close = working.groupby("slot", sort=False)["close"].shift(1)
+        if name == "previous_day_same_slot_return":
+            values = working.groupby("slot", sort=False)["bar_return"].shift(1)
+        elif name == "previous_day_same_slot_range":
+            values = working.groupby("slot", sort=False)["bar_range"].shift(1)
+        elif name == "price_vs_previous_day_same_slot":
+            values = working["close"].div(prior_close).sub(1)
+        elif name == "same_slot_mean_return":
+            values = working.groupby("slot", sort=False)["bar_return"].transform(
+                lambda series: series.shift(1).rolling(max(2, int(length)), min_periods=2).mean()
+            )
+        else:
+            values = working.groupby("slot", sort=False)["bar_return"].transform(
+                lambda series: series.shift(1).gt(0).rolling(max(2, int(length)), min_periods=2).mean()
+            )
+        return pd.Series(values, index=frame.index).replace([np.inf, -np.inf], np.nan)
+
 
 class AlphaResearchRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
@@ -200,7 +274,6 @@ class AlphaResearchRepository:
         data["trials"] = self.list_trials(run_id, limit=20)
         data["iterations"] = self.list_iterations(run_id)
         data["signals"] = self.list_signals(run_id, limit=500)
-        data["trades"] = self.list_trades(run_id, limit=500)
         return data
 
     def claim_next(self) -> Optional[Dict]:
@@ -294,7 +367,7 @@ class AlphaResearchRepository:
 
     def complete(
         self, run_id: str, best_params: Dict, result: Dict,
-        signals: List[Dict], trades: List[Dict],
+        signals: List[Dict],
     ) -> None:
         now = int(time.time())
         with self.storage._lock, self.storage._connect() as conn:
@@ -320,23 +393,6 @@ class AlphaResearchRepository:
                 [
                     (run_id, item["time"], item["direction"], item["alpha"], item["close"])
                     for item in signals
-                ],
-            )
-            conn.execute("DELETE FROM alpha_research_trades WHERE run_id = ?", (run_id,))
-            conn.executemany(
-                """
-                INSERT INTO alpha_research_trades(
-                    trade_id, run_id, direction, entry_time, entry_price, exit_time,
-                    exit_price, exit_reason, gross_return, holding_bars
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        item["trade_id"], run_id, item["direction"], item["entry_time"],
-                        item["entry_price"], item["exit_time"], item["exit_price"],
-                        item["exit_reason"], item["gross_return"], item["holding_bars"],
-                    )
-                    for item in trades
                 ],
             )
             conn.commit()
@@ -397,14 +453,6 @@ class AlphaResearchRepository:
         rows = self.storage.fetchall(
             "SELECT bar_time AS time, direction, alpha_value AS alpha, close_price AS close "
             "FROM alpha_research_signals WHERE run_id = ? ORDER BY bar_time DESC LIMIT ?",
-            (run_id, limit),
-        )
-        return [dict(row) for row in reversed(rows)]
-
-    def list_trades(self, run_id: str, limit: int = 500) -> List[Dict]:
-        rows = self.storage.fetchall(
-            "SELECT * FROM alpha_research_trades WHERE run_id = ? "
-            "ORDER BY entry_time DESC LIMIT ?",
             (run_id, limit),
         )
         return [dict(row) for row in reversed(rows)]
@@ -590,7 +638,6 @@ class BacktestResult:
     score: float
     metrics: Dict
     signals: List[Dict]
-    trades: List[Dict]
 
 
 class AlphaBacktestEngine:
@@ -634,7 +681,10 @@ class AlphaBacktestEngine:
             weight = float(params.get(
                 f"factor_{index}_weight", factor.get("weight_min", 1)
             ))
-            raw = self.catalog.calculate(frame, factor["name"], length)
+            raw = self.catalog.calculate(
+                frame, factor["name"], length,
+                config.get("time_zone", "Asia/Shanghai"),
+            )
             components.append({
                 "index": index,
                 "name": factor["name"],
@@ -659,7 +709,7 @@ class AlphaBacktestEngine:
 
     def run(
         self, frame: pd.DataFrame, config: Dict, params: Dict,
-        evaluation_start: int = 0, include_trades: bool = True,
+        evaluation_start: int = 0,
         alpha_override: Optional[pd.Series] = None,
     ) -> BacktestResult:
         alpha = (
@@ -700,14 +750,6 @@ class AlphaBacktestEngine:
                 for item, values in future_returns.items()
             },
         )
-        if include_trades:
-            trade_frame = frame.iloc[evaluation_slice].reset_index(drop=True)
-            trade_signals = signals.iloc[evaluation_slice].reset_index(drop=True)
-            trades = self._simulate_trades(trade_frame, trade_signals, config)
-        else:
-            trades = []
-        trade_returns = np.array([item["gross_return"] for item in trades], dtype=float)
-        metrics.update(self._trade_metrics(trade_returns, trades, len(trade_frame) if include_trades else 0))
         metrics["score"] = self._score(metrics)
         signal_rows = [
             {
@@ -719,7 +761,8 @@ class AlphaBacktestEngine:
             for index in frame.index[evaluation_start:]
             if signals.at[index] and pd.notna(alpha.at[index])
         ]
-        return BacktestResult(metrics["score"], metrics, signal_rows, trades)
+        # Alpha research measures factor predictiveness. Trade simulation belongs to strategy backtesting.
+        return BacktestResult(metrics["score"], metrics, signal_rows)
 
     @staticmethod
     def _apply_cooldown(signals: pd.Series, cooldown: int) -> pd.Series:
@@ -906,7 +949,10 @@ class AlphaBacktestEngine:
         normalized_series = []
         for index, factor in enumerate(config["factors"]):
             length = int(params[f"factor_{index}_length"])
-            raw = self.catalog.calculate(frame, factor["name"], length)
+            raw = self.catalog.calculate(
+                frame, factor["name"], length,
+                config.get("time_zone", "Asia/Shanghai"),
+            )
             normalized = self._preprocess_factor(raw, length)
             normalized_series.append((factor["name"], normalized))
             primary_return = frame["close"].shift(
@@ -951,6 +997,45 @@ class AlphaBacktestEngine:
             )
         return diagnostics
 
+    def time_slot_report(self, frame: pd.DataFrame, config: Dict, params: Dict) -> Dict:
+        """Summarize how the selected Alpha behaves at recurring local times."""
+        if not any(item["name"] in FactorCatalog.NATIVE_FACTORS for item in config["factors"]):
+            return {}
+        time_zone = config.get("time_zone", "Asia/Shanghai")
+        try:
+            local_time = pd.to_datetime(frame["time"], unit="s", utc=True).dt.tz_convert(
+                ZoneInfo(time_zone)
+            )
+        except Exception:
+            return {}
+        horizon = int(config["prediction_horizon"])
+        alpha = self.calculate_alpha(frame, config, params)
+        future_return = frame["close"].shift(-horizon).div(frame["close"]).sub(1)
+        slots = local_time.dt.strftime("%H:%M")
+        rows = []
+        for slot, indices in slots.groupby(slots, sort=True).groups.items():
+            values = alpha.loc[indices]
+            future = future_return.loc[indices]
+            valid = values.notna() & future.notna()
+            if int(valid.sum()) < 5:
+                continue
+            rank_ic = values[valid].rank().corr(future[valid].rank())
+            rows.append({
+                "slot": slot,
+                "sample_count": int(valid.sum()),
+                "average_future_return": round(float(future[valid].mean()), 8),
+                "up_probability": round(float((future[valid] > 0).mean()), 6),
+                "rank_ic": round(float(rank_ic) if pd.notna(rank_ic) else 0.0, 6),
+                "average_alpha": round(float(values[valid].mean()), 6),
+            })
+        rows.sort(key=lambda item: (abs(item["rank_ic"]), item["sample_count"]), reverse=True)
+        return {
+            "time_zone": time_zone,
+            "lookback_days": int(config.get("same_slot_lookback_days", 5)),
+            "slot_count": len(rows),
+            "items": rows[:24],
+        }
+
     @staticmethod
     def _decay_metrics(
         alpha: pd.Series, signals: pd.Series,
@@ -977,186 +1062,6 @@ class AlphaBacktestEngine:
                 "sample_count": int(valid.sum()),
             })
         return decay
-
-    @staticmethod
-    def _simulate_trades(frame: pd.DataFrame, signals: pd.Series, config: Dict) -> List[Dict]:
-        mode = config.get("exit_mode", DEFAULT_EXIT_MODE)
-        if mode not in EXIT_MODES:
-            raise ValueError("退出模式无效")
-        fixed_bars = int(config.get("fixed_horizon_bars", config["prediction_horizon"]))
-        max_holding_bars = int(config.get("max_holding_bars", 0))
-        stop_loss = float(config.get("stop_loss_percent", 0)) / 100
-        take_profit = float(config.get("take_profit_percent", 0)) / 100
-        trailing_stop = float(config.get("trailing_stop_percent", 0)) / 100
-        trades = []
-        position = None
-
-        def close_position(exit_index: int, reason: str, price: Optional[float] = None):
-            nonlocal position
-            if position is None:
-                return
-            exit_price = float(price if price is not None else frame.at[exit_index, "open"])
-            direction_value = 1 if position["direction"] == "buy" else -1
-            gross_return = direction_value * (exit_price / position["entry_price"] - 1)
-            trades.append({
-                "trade_id": uuid.uuid4().hex[:16],
-                "direction": position["direction"],
-                "entry_time": int(frame.at[position["entry_index"], "time"]),
-                "entry_price": position["entry_price"],
-                "exit_time": int(frame.at[exit_index, "time"]),
-                "exit_price": exit_price,
-                "exit_reason": reason,
-                "gross_return": round(float(gross_return), 8),
-                "holding_bars": exit_index - position["entry_index"],
-            })
-            position = None
-
-        def protective_exit(bar_index: int, open_only: bool = False) -> bool:
-            """Evaluate price protection conservatively from completed OHLC bars."""
-            if position is None:
-                return False
-            bar_open = float(frame.at[bar_index, "open"])
-            high = float(frame.at[bar_index, "high"])
-            low = float(frame.at[bar_index, "low"])
-            is_long = position["direction"] == "buy"
-            entry = position["entry_price"]
-            stop_price = entry * (1 - stop_loss) if is_long else entry * (1 + stop_loss)
-            profit_price = entry * (1 + take_profit) if is_long else entry * (1 - take_profit)
-            trail_price = (
-                position["best_price"] * (1 - trailing_stop)
-                if is_long else position["best_price"] * (1 + trailing_stop)
-            )
-
-            # Stop rules win ambiguous bars where both stop and target are touched.
-            stop_hit = (
-                (is_long and bar_open <= stop_price) or (not is_long and bar_open >= stop_price)
-                if open_only else
-                (is_long and low <= stop_price) or (not is_long and high >= stop_price)
-            )
-            if stop_loss and stop_hit:
-                fill = bar_open if open_only else stop_price
-                close_position(bar_index, "stop_loss", fill)
-                return True
-            trail_hit = (
-                (is_long and bar_open <= trail_price) or (not is_long and bar_open >= trail_price)
-                if open_only else
-                (is_long and low <= trail_price) or (not is_long and high >= trail_price)
-            )
-            if trailing_stop and trail_hit:
-                fill = bar_open if open_only else trail_price
-                close_position(bar_index, "trailing_stop", fill)
-                return True
-            profit_hit = (
-                (is_long and bar_open >= profit_price) or (not is_long and bar_open <= profit_price)
-                if open_only else
-                (is_long and high >= profit_price) or (not is_long and low <= profit_price)
-            )
-            if take_profit and profit_hit:
-                fill = bar_open if open_only else profit_price
-                close_position(bar_index, "take_profit", fill)
-                return True
-            if not open_only:
-                position["best_price"] = (
-                    max(position["best_price"], high)
-                    if is_long else min(position["best_price"], low)
-                )
-            return False
-
-        for signal_index in range(len(frame) - 1):
-            execution_index = signal_index + 1
-            direction = int(signals.iloc[signal_index])
-            protected_at_open = bool(
-                position and protective_exit(execution_index, open_only=True)
-            )
-            if protected_at_open:
-                pass
-            elif position and max_holding_bars and (
-                execution_index - position["entry_index"] >= max_holding_bars
-            ):
-                close_position(execution_index, "max_holding")
-            elif position and mode == EXIT_FIXED:
-                if execution_index - position["entry_index"] >= fixed_bars:
-                    close_position(execution_index, EXIT_FIXED)
-            elif position and mode == EXIT_NEUTRAL and direction == 0:
-                close_position(execution_index, EXIT_NEUTRAL)
-            elif position and direction and (
-                (position["direction"] == "buy" and direction < 0)
-                or (position["direction"] == "sell" and direction > 0)
-            ):
-                close_position(execution_index, EXIT_REVERSE)
-
-            if position is None and direction and not protected_at_open:
-                position = {
-                    "direction": "buy" if direction > 0 else "sell",
-                    "entry_index": execution_index,
-                    "entry_price": float(frame.at[execution_index, "open"]),
-                    "best_price": float(frame.at[execution_index, "open"]),
-                }
-            if position:
-                protective_exit(execution_index)
-
-        if position:
-            exit_index = len(frame) - 1
-            exit_price = float(frame.at[exit_index, "close"])
-            direction_value = 1 if position["direction"] == "buy" else -1
-            gross_return = direction_value * (exit_price / position["entry_price"] - 1)
-            trades.append({
-                "trade_id": uuid.uuid4().hex[:16],
-                "direction": position["direction"],
-                "entry_time": int(frame.at[position["entry_index"], "time"]),
-                "entry_price": position["entry_price"],
-                "exit_time": int(frame.at[exit_index, "time"]),
-                "exit_price": exit_price,
-                "exit_reason": "end_of_data",
-                "gross_return": round(float(gross_return), 8),
-                "holding_bars": exit_index - position["entry_index"],
-            })
-        return trades
-
-    @staticmethod
-    def _trade_metrics(
-        returns: np.ndarray, trades: List[Dict], bar_count: int = 0,
-    ) -> Dict:
-        if not len(returns):
-            return {
-                "trade_count": 0, "gross_return": 0.0, "trade_win_rate": 0.0,
-                "max_drawdown": 0.0, "average_holding_bars": 0.0,
-                "sharpe": 0.0, "sortino": 0.0, "profit_factor": 0.0,
-                "strategy_turnover": 0.0,
-                "risk_ratio_basis": "per_trade_unannualized_gross_return",
-            }
-        equity = np.cumprod(1 + returns)
-        peaks = np.maximum.accumulate(equity)
-        drawdowns = equity / peaks - 1
-        mean_return = float(returns.mean())
-        return_std = float(returns.std(ddof=1)) if len(returns) > 1 else 0.0
-        downside = np.minimum(returns, 0)
-        downside_deviation = float(np.sqrt(np.mean(np.square(downside))))
-        gross_profit = float(returns[returns > 0].sum())
-        gross_loss = float(abs(returns[returns < 0].sum()))
-        return {
-            "trade_count": len(trades),
-            "gross_return": round(float(equity[-1] - 1), 8),
-            "trade_win_rate": round(float((returns > 0).mean()), 6),
-            "max_drawdown": round(float(abs(drawdowns.min())), 8),
-            "average_holding_bars": round(float(np.mean([t["holding_bars"] for t in trades])), 2),
-            "sharpe": round(
-                mean_return / return_std
-                if return_std > 1e-12 else 0.0, 6
-            ),
-            "sortino": round(
-                mean_return / downside_deviation
-                if downside_deviation > 1e-12 else 0.0, 6
-            ),
-            "profit_factor": (
-                round(gross_profit / gross_loss, 6)
-                if gross_loss > 1e-12 else None
-            ),
-            "strategy_turnover": round(
-                len(trades) * 2 / max(1, int(bar_count)), 6
-            ),
-            "risk_ratio_basis": "per_trade_unannualized_gross_return",
-        }
 
     @staticmethod
     def _score(metrics: Dict) -> float:
@@ -1395,7 +1300,7 @@ class AlphaOptimizationEngine:
                 next_index += 1
             result = self.backtest.run(
                 frame, reduced_config, reduced_params,
-                evaluation_start=evaluation_start, include_trades=False,
+                evaluation_start=evaluation_start,
             )
             score_delta = baseline.score - result.score
             rank_ic_delta = (
@@ -1511,12 +1416,12 @@ class AlphaOptimizationEngine:
                     ) / max(weight_total, 1e-9)
                     train_result = self.backtest.run(
                         optimization_frame.iloc[:train_end].reset_index(drop=True),
-                        current_config, params, include_trades=False,
+                        current_config, params,
                         alpha_override=trial_alpha.iloc[:train_end],
                     )
                     validation_result = self.backtest.run(
                         optimization_frame, current_config, params,
-                        evaluation_start=train_end, include_trades=False,
+                        evaluation_start=train_end,
                         alpha_override=trial_alpha,
                     )
                     gap = train_result.score - validation_result.score
@@ -1638,11 +1543,11 @@ class AlphaOptimizationEngine:
             ]
             detailed_train = self.backtest.run(
                 optimization_frame.iloc[:train_end].reset_index(drop=True),
-                current_config, best_params, include_trades=True,
+                current_config, best_params,
             )
             detailed_validation = self.backtest.run(
                 optimization_frame, current_config, best_params,
-                evaluation_start=train_end, include_trades=True,
+                evaluation_start=train_end,
             )
             best_metrics["train"] = detailed_train.metrics
             best_metrics["validation"] = detailed_validation.metrics
@@ -1729,11 +1634,11 @@ class AlphaOptimizationEngine:
         final_result = self.backtest.run(frame, selected_config, best_params)
         train_result = self.backtest.run(
             frame.iloc[:train_end].reset_index(drop=True), selected_config,
-            best_params, include_trades=False,
+            best_params,
         )
         validation_result = self.backtest.run(
             frame.iloc[:validation_end].reset_index(drop=True), selected_config,
-            best_params, evaluation_start=train_end, include_trades=False,
+            best_params, evaluation_start=train_end,
         )
         ablation = self.ablation_experiment(
             frame.iloc[:validation_end].reset_index(drop=True), train_end,
@@ -1742,7 +1647,7 @@ class AlphaOptimizationEngine:
         # Hidden test is evaluated exactly once after optimization and ablation.
         test_result = self.backtest.run(
             frame, selected_config, best_params,
-            evaluation_start=validation_end, include_trades=False,
+            evaluation_start=validation_end,
         )
         factor_diagnostics = self.backtest.factor_diagnostics(
             frame, selected_config, best_params
@@ -1762,7 +1667,7 @@ class AlphaOptimizationEngine:
                 evaluation = self.backtest.run(
                     frame.iloc[:validation_end].reset_index(drop=True),
                     selected_config, perturbed,
-                    evaluation_start=train_end, include_trades=False,
+                    evaluation_start=train_end,
                 )
                 parameter_robustness.append({
                     "parameter": key,
@@ -1780,7 +1685,6 @@ class AlphaOptimizationEngine:
             segment = self.backtest.run(
                 frame.iloc[:segment_end].reset_index(drop=True), selected_config,
                 best_params, evaluation_start=segment_start,
-                include_trades=False,
             )
             subperiod_robustness.append({
                 "segment": segment_number,
@@ -1845,6 +1749,9 @@ class AlphaOptimizationEngine:
                 "ablation_duration_ms": ablation["duration_ms"],
             },
             "factor_diagnostics": factor_diagnostics,
+            "time_slot_report": self.backtest.time_slot_report(
+                frame, selected_config, best_params
+            ),
             "parameter_robustness": parameter_robustness,
             "subperiod_robustness": subperiod_robustness,
             "library_correlations": library_correlations,
@@ -1870,11 +1777,10 @@ class AlphaOptimizationEngine:
                 "validation_bars": validation_end - train_end,
                 "hidden_test_bars": len(frame) - validation_end,
             },
-            "gross_only": True,
-            "exit_mode": selected_config["exit_mode"],
+            "research_type": "factor_validity",
         }
         self.progress_callback(98)
-        return result, best_params, final_result.signals, final_result.trades
+        return result, best_params, final_result.signals
 
     @staticmethod
     def _suggest_params(trial, config: Dict) -> Dict:
@@ -1910,14 +1816,22 @@ class AlphaOptimizationEngine:
     @staticmethod
     def _config_for_candidate(base_config: Dict, candidate: Dict) -> Dict:
         config = dict(base_config)
-        config["factors"] = [
-            {
+        factors = []
+        for factor in candidate["factors"]:
+            normalized = {
                 key: factor[key] for key in (
                     "name", "length_min", "length_max", "weight_min", "weight_max"
                 )
             }
-            for factor in candidate["factors"]
-        ]
+            if normalized["name"] in FactorCatalog.NATIVE_FACTORS:
+                if normalized["name"] in {"same_slot_mean_return", "same_slot_win_rate"}:
+                    normalized["length_min"] = normalized["length_max"] = int(
+                        base_config.get("same_slot_lookback_days", 5)
+                    )
+                else:
+                    normalized["length_min"] = normalized["length_max"] = 2
+            factors.append(normalized)
+        config["factors"] = factors
         config["candidate_meta"] = {
             key: candidate.get(key, "")
             for key in ("name", "theme", "hypothesis", "buy_logic", "sell_logic")
@@ -1943,11 +1857,24 @@ class AlphaCandidateService:
 
     SYSTEM_PROMPT = (
         "你是量化研究助手。只输出合法 JSON，不输出 Markdown。"
-        "候选必须使用提供的 pandas-ta 因子，解释研究假设，不承诺盈利。"
+        "候选必须使用提供的技术分析或平台原生时段因子，解释研究假设，不承诺盈利。"
     )
 
     def __init__(self, catalog: Optional[FactorCatalog] = None):
         self.catalog = catalog or FactorCatalog()
+
+    @staticmethod
+    def _render_template(template: str, variables: Dict[str, object]) -> str:
+        rendered = template
+        for key, value in variables.items():
+            rendered = rendered.replace(f"{{{{{key}}}}}", str(value))
+        return rendered.strip()
+
+    def _scene_prompts(self, service, user_id: int, scene_code: str) -> Dict:
+        governance = getattr(service, "_llm_governance", None)
+        if governance is None:
+            return {}
+        return governance.scene_options(user_id, scene_code)
 
     def generate(self, user_id: int, payload: Dict) -> List[Dict]:
         description = str(payload.get("research_description", "")).strip()
@@ -1963,41 +1890,28 @@ class AlphaCandidateService:
         catalog_text = "\n".join(
             f"- {theme}: {', '.join(names)}" for theme, names in by_theme.items()
         )
-        prompt = f"""
-研究目标：{description}
-分析周期：{timeframe}
-预测未来：{horizon} 根 K 线
-请生成 {candidate_count} 个结构有差异的 Alpha 候选。
-
-可用因子：
-{catalog_text}
-
-返回结构：
-{{
-  "candidates": [
-    {{
-      "name": "候选名称",
-      "theme": "趋势/动量/波动/统计/量价/形态/周期/收益",
-      "hypothesis": "可检验的研究假设",
-      "buy_logic": "买入方向含义",
-      "sell_logic": "卖出方向含义",
-      "factors": [
-        {{"name": "ema", "length_min": 5, "length_max": 30,
-          "weight_min": 0.2, "weight_max": 1.5}}
-      ]
-    }}
-  ]
-}}
-每个候选使用 1-5 个因子；周期范围 2-500；权重范围 -3 到 3；
-候选之间不能只是参数不同，必须体现不同研究假设。
-""".strip()
         from market.services.llm_service import LLMService
         from market.store.llm_store import LLMStore
 
-        from llm_governance import ALPHA_CANDIDATE_GENERATION
+        from llm_governance import (
+            ALPHA_CANDIDATE_GENERATION,
+            ALPHA_CANDIDATE_PROMPT_TEMPLATE,
+        )
         service = LLMService(LLMStore(user_id=user_id, account_id=0), None)
+        scene = self._scene_prompts(service, user_id, ALPHA_CANDIDATE_GENERATION)
+        prompt = self._render_template(
+            scene.get("user_prompt_template") or ALPHA_CANDIDATE_PROMPT_TEMPLATE,
+            {
+                "research_description": description,
+                "timeframe": timeframe,
+                "prediction_horizon": horizon,
+                "candidate_count": candidate_count,
+                "factor_catalog": catalog_text,
+            },
+        )
         response = service.call_llm(
-            prompt, system_prompt=self.SYSTEM_PROMPT,
+            prompt,
+            system_prompt=scene.get("system_prompt") or self.SYSTEM_PROMPT,
             scene_code=ALPHA_CANDIDATE_GENERATION,
             object_type="alpha_research", object_id="candidate_generation",
         )
@@ -2028,51 +1942,30 @@ class AlphaCandidateService:
             f"- {theme}: {', '.join(names)}" for theme, names in by_theme.items()
         )
         safe_history = [self._prompt_iteration(item) for item in iteration_history]
-        prompt = f"""
-研究目标：{research_description}
-分析周期：{timeframe}
-预测未来：{prediction_horizon} 根 K 线
-
-当前候选：
-{json.dumps(current_candidate, ensure_ascii=False, separators=(',', ':'))}
-
-已完成研究轮次（仅训练集与验证集，未包含隐藏测试）：
-{json.dumps(safe_history, ensure_ascii=False, separators=(',', ':'))}
-
-可用因子：
-{catalog_text}
-
-请按研究漏斗诊断：因子级重点检查 IC、Rank IC、滚动 IC、IC_IR、
-Rank IC_IR 与多周期 Decay；策略级检查 Sharpe、Sortino、Profit Factor、
-毛收益、最大回撤、策略换手率与交易样本数；同时检查训练/验证过拟合差距。
-独立评估用于判断单因子是否具有预测信息；残差 Rank IC 用于判断该因子
-在剔除其他因子解释部分后是否仍提供增量信息。优先替换独立评估失败、
-残差信息弱或与其他因子高度重复的因子。
-输出一个下一轮候选。优先做有理由的结构调整，可保留、增加、删除或替换因子；
-不要只复制失败结构并微调参数。参数精调将由 Optuna 完成。
-
-只返回：
-{{
-  "candidate": {{
-    "name": "候选名称",
-    "theme": "研究分类",
-    "hypothesis": "修订后的可检验假设",
-    "buy_logic": "买入方向含义",
-    "sell_logic": "卖出方向含义",
-    "factors": [
-      {{"name": "ema", "length_min": 5, "length_max": 30,
-        "weight_min": 0.2, "weight_max": 1.5}}
-    ]
-  }},
-  "diagnosis": "为何这样调整",
-  "changes": ["结构变化摘要"]
-}}
-每个候选使用 1-5 个因子；周期范围 2-500；权重范围 -3 到 3。
-""".strip()
         service = self._llm_service(user_id)
-        from llm_governance import ALPHA_ITERATIVE_REFINEMENT
+        from llm_governance import (
+            ALPHA_ITERATIVE_REFINEMENT,
+            ALPHA_REFINEMENT_PROMPT_TEMPLATE,
+        )
+        scene = self._scene_prompts(service, user_id, ALPHA_ITERATIVE_REFINEMENT)
+        prompt = self._render_template(
+            scene.get("user_prompt_template") or ALPHA_REFINEMENT_PROMPT_TEMPLATE,
+            {
+                "research_description": research_description,
+                "timeframe": timeframe,
+                "prediction_horizon": prediction_horizon,
+                "current_candidate": json.dumps(
+                    current_candidate, ensure_ascii=False, separators=(',', ':')
+                ),
+                "iteration_history": json.dumps(
+                    safe_history, ensure_ascii=False, separators=(',', ':')
+                ),
+                "factor_catalog": catalog_text,
+            },
+        )
         response = service.call_llm(
-            prompt, system_prompt=self.SYSTEM_PROMPT,
+            prompt,
+            system_prompt=scene.get("system_prompt") or self.SYSTEM_PROMPT,
             scene_code=ALPHA_ITERATIVE_REFINEMENT,
             object_type="alpha_research", object_id="iterative_refinement",
         )
@@ -2080,9 +1973,6 @@ Rank IC_IR 与多周期 Decay；策略级检查 Sharpe、Sortino、Profit Factor
         candidate = self._normalize_candidate(raw_candidate, catalog_by_name)
         if candidate is None:
             raise RuntimeError("大模型未返回可执行的 Alpha 改进候选")
-        scene = service._llm_governance.scene_options(
-            user_id, ALPHA_ITERATIVE_REFINEMENT
-        )
         return {
             "candidate": candidate,
             "prompt": prompt,
@@ -2185,17 +2075,6 @@ class AlphaResearchService:
                 if item["status"] == "ready"
             ],
             "factors": FactorCatalog().list(),
-            "exit_modes": [
-                {"value": EXIT_REVERSE, "label": "反向信号退出", "default": True},
-                {"value": EXIT_FIXED, "label": "固定持有周期退出", "default": False},
-                {"value": EXIT_NEUTRAL, "label": "回到观望退出", "default": False},
-            ],
-            "protective_exit_rules": [
-                {"value": "stop_loss", "label": "固定止损", "unit": "%"},
-                {"value": "take_profit", "label": "固定止盈", "unit": "%"},
-                {"value": "trailing_stop", "label": "移动止损", "unit": "%"},
-                {"value": "max_holding", "label": "最大持有周期", "unit": "K线"},
-            ],
             "alpha_library": self.library.list_visible(user_id),
         }
 
@@ -2208,15 +2087,23 @@ class AlphaResearchService:
         dataset = self.datasets.get_visible(user_id, dataset_id)
         if dataset is None or dataset["status"] != "ready":
             raise ValueError("请选择已就绪且有权使用的历史数据集")
+        time_zone = str(payload.get("time_zone", "Asia/Shanghai"))
+        try:
+            ZoneInfo(time_zone)
+        except Exception as exc:
+            raise ValueError("研究时区无效") from exc
+        same_slot_lookback_days = int(payload.get("same_slot_lookback_days", 5))
+        if same_slot_lookback_days not in {3, 5, 10, 20}:
+            raise ValueError("同期观察交易日仅支持 3、5、10 或 20 天")
         factors = payload.get("factors") or []
         if not 1 <= len(factors) <= 5:
             raise ValueError("每个研究任务请选择 1-5 个因子")
-        catalog_names = {item["name"] for item in FactorCatalog().list()}
+        catalog_by_name = {item["name"]: item for item in FactorCatalog().list()}
         normalized_factors = []
         for factor in factors:
             name = str(factor.get("name", "")).strip().lower()
-            if name not in catalog_names:
-                raise ValueError(f"不支持的 pandas-ta 因子: {name}")
+            if name not in catalog_by_name:
+                raise ValueError(f"不支持的因子: {name}")
             length_min = int(factor.get("length_min", 7))
             length_max = int(factor.get("length_max", 30))
             weight_min = float(factor.get("weight_min", 0.2))
@@ -2225,13 +2112,16 @@ class AlphaResearchService:
                 raise ValueError(f"因子 {name} 的周期范围无效")
             if not -3 <= weight_min <= weight_max <= 3 or weight_min == weight_max == 0:
                 raise ValueError(f"因子 {name} 的权重范围无效")
+            meta = catalog_by_name[name]
+            if meta.get("is_native"):
+                if meta.get("supports_length"):
+                    length_min = length_max = same_slot_lookback_days
+                else:
+                    length_min = length_max = 2
             normalized_factors.append({
                 "name": name, "length_min": length_min, "length_max": length_max,
                 "weight_min": weight_min, "weight_max": weight_max,
             })
-        exit_mode = str(payload.get("exit_mode", DEFAULT_EXIT_MODE))
-        if exit_mode not in EXIT_MODES:
-            raise ValueError("退出模式无效")
         trial_count = int(payload.get("trial_count", 50))
         if not 5 <= trial_count <= 500:
             raise ValueError("Optuna 试验次数必须在 5-500 之间")
@@ -2268,16 +2158,12 @@ class AlphaResearchService:
             "candidate_meta": candidate_meta,
             "dataset_id": dataset_id,
             "timeframe": timeframe,
+            "time_zone": time_zone,
+            "same_slot_lookback_days": same_slot_lookback_days,
             "factors": normalized_factors,
             "prediction_horizon": max(1, min(500, int(payload.get("prediction_horizon", 15)))),
-            "exit_mode": exit_mode,
-            "fixed_horizon_bars": max(1, min(500, int(payload.get("fixed_horizon_bars", 15)))),
             "confirmation_bars": max(1, min(10, int(payload.get("confirmation_bars", 1)))),
             "cooldown_bars": max(0, min(500, int(payload.get("cooldown_bars", 0)))),
-            "max_holding_bars": max(0, min(5000, int(payload.get("max_holding_bars", 0)))),
-            "stop_loss_percent": self._optional_percent(payload.get("stop_loss_percent", 0), "固定止损"),
-            "take_profit_percent": self._optional_percent(payload.get("take_profit_percent", 0), "固定止盈"),
-            "trailing_stop_percent": self._optional_percent(payload.get("trailing_stop_percent", 0), "移动止损"),
             "buy_threshold_min": buy_min,
             "buy_threshold_max": buy_max,
             "sell_threshold_min": sell_min,
@@ -2285,14 +2171,6 @@ class AlphaResearchService:
             "trial_count": trial_count,
             "random_seed": int(payload.get("random_seed", 42)),
         }
-
-    @staticmethod
-    def _optional_percent(value, label: str) -> float:
-        number = float(value or 0)
-        if not 0 <= number <= 50:
-            raise ValueError(f"{label}比例必须在 0-50% 之间")
-        return number
-
 
 class AlphaResearchWorker:
     def __init__(self, storage: Optional[SQLiteStorage] = None, poll_seconds: float = 1.0):
@@ -2325,8 +2203,8 @@ class AlphaResearchWorker:
                 progress_callback=lambda value: self.repository.update_progress(run_id, value),
                 cancel_callback=lambda: self.repository.is_cancel_requested(run_id),
             )
-            result, params, signals, trades = optimizer.run(task)
-            self.repository.complete(run_id, params, result, signals, trades)
+            result, params, signals = optimizer.run(task)
+            self.repository.complete(run_id, params, result, signals)
         except AlphaResearchCanceled as exc:
             self.repository.fail(run_id, str(exc), canceled=True)
         except Exception as exc:

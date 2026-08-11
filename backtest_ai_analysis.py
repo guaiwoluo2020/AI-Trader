@@ -107,8 +107,17 @@ class BacktestAIAnalysisService:
         try:
             self._set_status(user_id, task_id, "running")
             snapshot = self._build_snapshot(user_id, task_id)
-            prompt = self.build_prompt(snapshot)
-            prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            scene = {}
+            governance = getattr(llm_service, "_llm_governance", None)
+            if governance is not None:
+                scene = governance.scene_options(user_id, BACKTEST_REPORT_ANALYSIS)
+            prompt = self.build_prompt(
+                snapshot, scene.get("user_prompt_template") or ""
+            )
+            system_prompt = scene.get("system_prompt") or None
+            prompt_hash = hashlib.sha256(
+                f"{system_prompt or ''}\n{prompt}".encode("utf-8")
+            ).hexdigest()
             self.storage.execute(
                 """
                 UPDATE backtest_ai_analyses SET prompt_hash = ?, updated_at = ?
@@ -118,6 +127,7 @@ class BacktestAIAnalysisService:
             )
             result = llm_service.call_llm_stream(
                 prompt,
+                system_prompt=system_prompt,
                 scene_code=BACKTEST_REPORT_ANALYSIS,
                 object_type="backtest_task",
                 object_id=task_id,
@@ -209,30 +219,12 @@ class BacktestAIAnalysisService:
         }
 
     @classmethod
-    def build_prompt(cls, snapshot: Dict) -> str:
+    def build_prompt(cls, snapshot: Dict, template: str = "") -> str:
+        from llm_governance import BACKTEST_REPORT_PROMPT_TEMPLATE
         payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
-        return f"""你是一名严谨的量化策略研究员。请分析下面的回测数据，找出策略表现、风险和参数设置中的问题，并提出可以通过下一轮回测验证的优化建议。
-
-约束：
-1. 只依据提供的数据，不虚构行情、成交或统计指标。
-2. 区分统计证据与推测；样本不足时明确说明，不能承诺收益。
-3. strategy_snapshot.signal_sources 只包含本次回测实际启用的信号源；只能针对其中列出的信号源和参数提出建议，不得补充或假设其他信号源。
-4. 已取消任务的数据可能不完整，必须在结论中说明终止进度带来的偏差。
-5. 不要建议直接上线实盘；每项参数修改都应给出独立回测验证方法。
-6. 必须输出纯 JSON，不要包含 Markdown。
-
-输出结构：
-{{
-  "executive_summary": "总体结论",
-  "data_quality": {{"level": "high|medium|low", "notes": ["说明"]}},
-  "diagnosis": [{{"area": "收益|风险|交易|信号源|数据", "severity": "high|medium|low", "finding": "发现", "evidence": "数据证据"}}],
-  "optimization_suggestions": [{{"priority": 1, "target": "参数路径或优化对象", "current_value": "当前值", "suggested_value": "建议值或范围", "reason": "原因", "expected_impact": "预期方向", "validation_plan": "下一轮如何验证"}}],
-  "risk_warnings": ["风险提示"],
-  "next_backtest_plan": {{"changes": ["一次只改少量变量"], "datasets": ["建议的数据范围"], "acceptance_criteria": ["验收指标"]}}
-}}
-
-回测数据：
-{payload}"""
+        return (template or BACKTEST_REPORT_PROMPT_TEMPLATE).replace(
+            "{{backtest_snapshot}}", payload
+        )
 
     @staticmethod
     def _strategy_for_analysis(snapshot: Dict) -> Dict:

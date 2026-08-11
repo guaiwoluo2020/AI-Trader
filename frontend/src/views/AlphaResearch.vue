@@ -4,11 +4,11 @@
       <div>
         <span class="eyebrow">ALPHA DISCOVERY LAB</span>
         <h1>Alpha 研究</h1>
-        <p>用 pandas-ta 因子组合和 Optuna 参数搜索，快速验证买卖信号的预测能力。</p>
+        <p>用 pandas-ta 因子组合和 Optuna 参数搜索，验证因子的预测力、稳定性与独立贡献。</p>
       </div>
       <div class="hero-badge">
         <v-icon size="34">mdi-atom-variant</v-icon>
-        <div><strong>毛收益研究</strong><span>暂不计手续费、点差与滑点</span></div>
+        <div><strong>因子有效性研究</strong><span>交易规则请进入策略回测工作台验证</span></div>
       </div>
     </section>
 
@@ -28,6 +28,15 @@
             <v-btn value="ai" prepend-icon="mdi-creation-outline">AI 生成候选</v-btn>
             <v-btn value="advanced" prepend-icon="mdi-tune-vertical">高级自定义</v-btn>
           </v-btn-toggle>
+          <v-select
+            v-model="selectedTemplateId"
+            :items="researchTemplateOptions"
+            label="研究目标模板（可选）"
+            prepend-inner-icon="mdi-text-box-search-outline"
+            variant="outlined"
+            class="mb-2"
+            @update:model-value="applyResearchTemplate"
+          />
           <div class="field-grid">
             <v-text-field v-model="form.researchName" label="研究名称" variant="outlined" />
             <v-select
@@ -38,6 +47,7 @@
               no-data-text="暂无已就绪数据集"
             />
             <v-select v-model="form.timeframe" :items="timeframes" label="分析周期" variant="outlined" />
+            <v-select v-model="form.timeZone" :items="timeZoneOptions" label="研究时区" variant="outlined" />
             <v-text-field
               v-model.number="form.predictionHorizon"
               type="number"
@@ -46,6 +56,7 @@
               label="预测未来 K 线数"
               variant="outlined"
             />
+            <v-select v-model.number="form.sameSlotLookbackDays" :items="sameSlotLookbackOptions" label="同期观察交易日" variant="outlined" />
           </div>
 
           <div v-if="researchMode === 'ai'" class="ai-research-panel">
@@ -55,15 +66,15 @@
             </div>
             <v-textarea
               v-model="form.researchDescription"
-              label="例如：寻找 GOLD 在 M5 周期趋势启动后，未来 15 根 K 线仍能延续的买卖信号"
+              label="例如：寻找 GOLD 在 M5 周期趋势启动后，未来 15 根 K 线仍能延续的正负方向信号"
               variant="outlined"
               rows="3"
               counter="500"
               maxlength="500"
             />
             <div class="generate-row">
-              <span>AI 会从趋势、动量、波动、量价、统计等类别中提出结构不同的候选。</span>
-              <v-btn color="primary" prepend-icon="mdi-auto-fix" :loading="generatingCandidates" :disabled="form.researchDescription.trim().length < 10" @click="generateCandidates">生成 Alpha 候选</v-btn>
+              <span>AI 会从趋势、动量、波动、量价、统计和时段效应中提出结构不同的候选。</span>
+              <v-btn color="primary" prepend-icon="mdi-auto-fix" :loading="generatingCandidates" :disabled="generatingCandidates" @click="generateCandidates">生成 Alpha 候选</v-btn>
             </div>
             <v-select
               v-model.number="form.llmIterationCount"
@@ -91,7 +102,7 @@
                     {{ factor.display_name }}<small>{{ factor.category_label }}</small>
                   </span>
                 </div>
-                <div class="candidate-logic"><b>买</b>{{ candidate.buy_logic }}<b>卖</b>{{ candidate.sell_logic }}</div>
+                <div class="candidate-logic"><b>多</b>{{ candidate.buy_logic }}<b>空</b>{{ candidate.sell_logic }}</div>
               </button>
             </div>
           </div>
@@ -114,35 +125,15 @@
             </div>
           </div>
 
-          <div class="subheading compact"><div><h3>信号与交易规则</h3><p>选择一个主退出规则，并按需叠加保护规则；最先触发的规则负责退出。</p></div></div>
+          <div class="subheading compact"><div><h3>信号定义</h3><p>这些参数只用于识别正负方向信号、覆盖率和稳定性，不会生成订单或持仓。</p></div></div>
           <div class="field-grid">
-            <v-select v-model="form.exitMode" :items="exitModeOptions" label="主退出规则" variant="outlined" />
-            <v-text-field
-              v-if="form.exitMode === 'fixed_horizon'"
-              v-model.number="form.fixedHorizonBars"
-              type="number"
-              min="1"
-              max="500"
-              label="固定持有 K 线数"
-              variant="outlined"
-            />
             <v-text-field v-model.number="form.confirmationBars" type="number" min="1" max="10" label="信号确认根数" variant="outlined" />
             <v-text-field v-model.number="form.cooldownBars" type="number" min="0" max="500" label="信号冷却 K 线数" variant="outlined" />
           </div>
 
-          <div class="protection-panel">
-            <div class="protection-title"><v-icon>mdi-shield-half-full</v-icon><div><h4>可选保护规则</h4><p>填写 0 表示不启用；Alpha 研究仍只统计毛收益。</p></div></div>
-            <div class="protection-grid">
-              <v-text-field v-model.number="form.stopLossPercent" type="number" min="0" max="50" step="0.1" suffix="%" label="固定止损" variant="outlined" />
-              <v-text-field v-model.number="form.takeProfitPercent" type="number" min="0" max="50" step="0.1" suffix="%" label="固定止盈" variant="outlined" />
-              <v-text-field v-model.number="form.trailingStopPercent" type="number" min="0" max="50" step="0.1" suffix="%" label="移动止损" variant="outlined" />
-              <v-text-field v-model.number="form.maxHoldingBars" type="number" min="0" max="5000" suffix="根" label="最大持有 K 线" variant="outlined" />
-            </div>
-          </div>
-
           <div class="threshold-grid">
-            <div><label>买入阈值搜索范围</label><div><v-text-field v-model.number="form.buyThresholdMin" type="number" step="0.1" variant="outlined" density="compact" /><span>至</span><v-text-field v-model.number="form.buyThresholdMax" type="number" step="0.1" variant="outlined" density="compact" /></div></div>
-            <div><label>卖出阈值搜索范围</label><div><v-text-field v-model.number="form.sellThresholdMin" type="number" step="0.1" variant="outlined" density="compact" /><span>至</span><v-text-field v-model.number="form.sellThresholdMax" type="number" step="0.1" variant="outlined" density="compact" /></div></div>
+            <div><label>正向信号阈值搜索范围</label><div><v-text-field v-model.number="form.buyThresholdMin" type="number" step="0.1" variant="outlined" density="compact" /><span>至</span><v-text-field v-model.number="form.buyThresholdMax" type="number" step="0.1" variant="outlined" density="compact" /></div></div>
+            <div><label>负向信号阈值搜索范围</label><div><v-text-field v-model.number="form.sellThresholdMin" type="number" step="0.1" variant="outlined" density="compact" /><span>至</span><v-text-field v-model.number="form.sellThresholdMax" type="number" step="0.1" variant="outlined" density="compact" /></div></div>
           </div>
 
           <div class="run-strip">
@@ -169,11 +160,11 @@
         </v-card>
         <v-card class="guide-card" elevation="0">
           <v-icon>mdi-lightbulb-on-outline</v-icon>
-          <h3>如何选择退出模式</h3>
-          <p><b>反向信号退出</b>适合持续趋势观点，是默认模式。</p>
-          <p><b>固定持有周期</b>适合验证明确预测窗口。</p>
-          <p><b>回到观望退出</b>适合阈值区间型信号。</p>
-          <p><b>保护规则</b>与主规则并行，止损、止盈、移动止损或最大持有先触发先退出。</p>
+          <h3>如何阅读研究结果</h3>
+          <p><b>预测窗口</b>定义因子要预测未来多少根 K 线的收益。</p>
+          <p><b>IC 与 IC_IR</b>衡量预测方向与收益之间的相关性及稳定性。</p>
+          <p><b>分组与衰减</b>检查因子强弱是否单调，以及预测力能持续多久。</p>
+          <p><b>下一步</b>通过准入的 Alpha 可作为信号源，再进入策略回测验证交易规则。</p>
         </v-card>
       </aside>
     </div>
@@ -192,7 +183,7 @@
             <div class="run-icon"><v-icon>mdi-function-variant</v-icon></div>
             <div>
               <div class="run-title"><h3>{{ run.research_name }}</h3><v-chip :color="statusMeta(run.status).color" size="small" variant="tonal">{{ statusMeta(run.status).label }}</v-chip></div>
-              <p>{{ run.dataset_name || '数据集已删除' }} · {{ run.symbol || '--' }} · {{ run.config.timeframe }} · {{ exitLabel(run.config.exit_mode) }} · {{ run.config.llm_iteration_count || 1 }} 轮</p>
+              <p>{{ run.dataset_name || '数据集已删除' }} · {{ run.symbol || '--' }} · {{ run.config.timeframe }} · 预测未来 {{ run.config.prediction_horizon }} 根 · {{ run.config.llm_iteration_count || 1 }} 轮</p>
               <div class="factor-tags"><span v-for="factor in run.config.factors" :key="factor.name">{{ factor.name.toUpperCase() }}</span></div>
             </div>
           </div>
@@ -251,21 +242,22 @@
             <div><span>正 Rank IC 比例</span><strong>{{ percentMetric('positive_rank_ic_ratio') }}</strong></div>
             <div><span>五分组单调性</span><strong>{{ percentMetric('quintile_analysis', 'monotonicity') }}</strong></div>
           </div>
-          <h3 class="report-level"><span>Level 3</span> 策略表现</h3>
-          <div class="report-metrics">
-            <div><span>Sharpe（逐笔）</span><strong>{{ metric('sharpe') }}</strong></div>
-            <div><span>Sortino（逐笔）</span><strong>{{ metric('sortino') }}</strong></div>
-            <div><span>Profit Factor</span><strong>{{ metric('profit_factor') }}</strong></div>
-            <div><span>累计毛收益</span><strong>{{ percentMetric('gross_return') }}</strong></div>
-            <div><span>最大回撤</span><strong>{{ percentMetric('max_drawdown') }}</strong></div>
-            <div><span>策略换手率</span><strong>{{ percentMetric('strategy_turnover') }}</strong></div>
-          </div>
-          <v-alert type="info" variant="tonal" class="my-4">本报告为因子研究毛收益，不包含手续费、点差、滑点和资金管理；Sharpe 与 Sortino 当前按逐笔毛收益计算且未年化。</v-alert>
+          <v-alert type="info" variant="tonal" class="my-4">本报告仅评价因子的预测力，不代表可直接交易。请将通过准入的 Alpha 加入策略后，在策略回测工作台验证入场、退出、风控、成本与资金曲线。</v-alert>
           <template v-if="detailRun.result.factor_diagnostics?.length">
             <h3 class="table-title">因子诊断与正交性</h3>
             <v-table density="compact" class="decay-table">
               <thead><tr><th>因子</th><th>覆盖率</th><th>自相关(1)</th><th>Rank IC</th><th>正 IC 比例</th><th>最大相关</th></tr></thead>
               <tbody><tr v-for="item in detailRun.result.factor_diagnostics" :key="item.name"><td>{{ item.name }}</td><td>{{ asPercent(item.coverage) }}</td><td>{{ scoreValue(autocorrelationAt(item, 1)) }}</td><td>{{ scoreValue(item.rank_ic) }}</td><td>{{ asPercent(item.positive_rank_ic_ratio) }}</td><td>{{ scoreValue(item.max_peer_correlation) }}</td></tr></tbody>
+            </v-table>
+          </template>
+          <template v-if="detailRun.result.time_slot_report?.items?.length">
+            <h3 class="table-title">时段规律报告</h3>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-2">
+              按 {{ detailRun.result.time_slot_report.time_zone }} 统计，使用过去 {{ detailRun.result.time_slot_report.lookback_days }} 个交易日同期特征；按 |Rank IC| 展示最有区分度的时段。
+            </v-alert>
+            <v-table density="compact" class="decay-table">
+              <thead><tr><th>时段</th><th>样本数</th><th>平均未来收益</th><th>未来上涨比例</th><th>Rank IC</th><th>平均 Alpha</th></tr></thead>
+              <tbody><tr v-for="item in detailRun.result.time_slot_report.items" :key="item.slot"><td>{{ item.slot }}</td><td>{{ item.sample_count }}</td><td :class="item.average_future_return >= 0 ? 'positive' : 'negative'">{{ signedPercent(item.average_future_return) }}</td><td>{{ asPercent(item.up_probability) }}</td><td>{{ scoreValue(item.rank_ic) }}</td><td>{{ scoreValue(item.average_alpha) }}</td></tr></tbody>
             </v-table>
           </template>
           <template v-if="detailRun.result.independent_evaluation?.factors?.length">
@@ -327,7 +319,7 @@
                     <span>训练分数 <b>{{ scoreValue(iteration.metrics.train?.score) }}</b></span>
                     <span>验证分数 <b>{{ scoreValue(iteration.metrics.validation?.score) }}</b></span>
                     <span>验证 IC_IR <b>{{ scoreValue(iteration.metrics.validation?.ic_ir) }}</b></span>
-                    <span>验证 Sharpe <b>{{ scoreValue(iteration.metrics.validation?.sharpe) }}</b></span>
+                    <span>验证 Rank IC <b>{{ scoreValue(iteration.metrics.validation?.rank_ic) }}</b></span>
                     <span>优化目标 <b>{{ scoreValue(iteration.metrics.objective_score) }}</b></span>
                     <span>残差调整后 <b>{{ scoreValue(iteration.metrics.adjusted_objective_score) }}</b></span>
                     <span>平均残差 IC <b>{{ scoreValue(iteration.metrics.residual_evaluation?.mean_incremental_rank_ic) }}</b></span>
@@ -347,11 +339,6 @@
           </template>
           <h3 class="table-title">最佳参数</h3>
           <div class="param-grid"><div v-for="(value, key) in detailRun.best_params" :key="key"><span>{{ key }}</span><b>{{ formatParam(value) }}</b></div></div>
-          <h3 class="table-title">最佳候选交易流水</h3>
-          <v-table density="compact">
-            <thead><tr><th>方向</th><th>入场时间</th><th>入场价</th><th>退出时间</th><th>退出价</th><th>原因</th><th>毛收益</th></tr></thead>
-            <tbody><tr v-for="trade in detailRun.trades || []" :key="trade.trade_id"><td :class="trade.direction">{{ trade.direction === 'buy' ? '买入' : '卖出' }}</td><td>{{ formatTime(trade.entry_time) }}</td><td>{{ price(trade.entry_price) }}</td><td>{{ formatTime(trade.exit_time) }}</td><td>{{ price(trade.exit_price) }}</td><td>{{ exitLabel(trade.exit_reason) }}</td><td :class="trade.gross_return >= 0 ? 'positive' : 'negative'">{{ signedPercent(trade.gross_return) }}</td></tr></tbody>
-          </v-table>
         </v-card-text>
       </v-card>
     </v-dialog>
@@ -390,7 +377,6 @@ const message = ref('')
 const messageType = ref('success')
 const datasets = ref([])
 const factors = ref([])
-const exitModes = ref([])
 const runs = ref([])
 const detailDialog = ref(false)
 const detailRun = ref(null)
@@ -403,25 +389,38 @@ const factorSearch = ref('')
 const researchMode = ref('ai')
 const candidates = ref([])
 const selectedCandidateId = ref('')
+const selectedTemplateId = ref('')
 let factorKey = 0
 let refreshTimer = null
 
 const newFactor = (name = '') => ({ key: ++factorKey, name, lengthMin: 7, lengthMax: 30, weightMin: 0.2, weightMax: 1 })
 const form = reactive({
-  researchName: '', datasetId: null, timeframe: 'M5', predictionHorizon: 15,
+  researchName: '', datasetId: null, timeframe: 'M5', timeZone: 'Asia/Shanghai', predictionHorizon: 15,
+  sameSlotLookbackDays: 5,
   researchDescription: '',
-  factors: [newFactor('ema')], exitMode: 'reverse_signal', fixedHorizonBars: 15,
+  factors: [newFactor('ema')],
   confirmationBars: 1, cooldownBars: 0, buyThresholdMin: 0.3,
   buyThresholdMax: 2, sellThresholdMin: -2, sellThresholdMax: -0.3, trialCount: 50,
   llmIterationCount: 3,
-  stopLossPercent: 0, takeProfitPercent: 0, trailingStopPercent: 0, maxHoldingBars: 0,
 })
 
 const timeframes = ['M1', 'M5', 'M15', 'H1', 'H4']
+const timeZoneOptions = [{ title: '中国标准时间（Asia/Shanghai）', value: 'Asia/Shanghai' }, { title: 'UTC', value: 'UTC' }]
+const sameSlotLookbackOptions = [3, 5, 10, 20].map(value => ({ title: `过去 ${value} 个交易日`, value }))
 const llmIterationOptions = [1, 2, 3, 4, 5].map(value => ({ title: `${value} 轮`, value }))
+const researchTemplates = [
+  { id: 'trend', title: '趋势延续', description: horizon => `研究当前趋势启动特征对未来 ${horizon} 根 K 线方向与收益的预测能力，寻找能区分趋势延续、趋势衰竭和震荡的趋势、动量与波动率因子组合。` },
+  { id: 'mean-reversion', title: '均值回归', description: horizon => `研究价格偏离均线、布林带或 RSI 极端值后，未来 ${horizon} 根 K 线是否向均值回归，寻找能够区分有效反转、延续突破和震荡的因子组合。` },
+  { id: 'key-level', title: '关键位置反应', description: horizon => `研究接近前一交易日高低点、日内高低点、均线或波动通道边界时，未来 ${horizon} 根 K 线的方向，重点识别突破延续、假突破回落和关键位置震荡。` },
+  { id: 'breakout', title: '突破质量', description: horizon => `研究突破近期高低点或价格通道后，未来 ${horizon} 根 K 线是否延续，寻找能区分有效突破、假突破和突破后回踩的波动率、动量与量价因子。` },
+  { id: 'volatility', title: '波动率状态', description: horizon => `研究波动率由收缩转为扩张，或由扩张转为收缩时，未来 ${horizon} 根 K 线的收益方向与波动变化。` },
+  { id: 'momentum', title: '动量加速与衰竭', description: horizon => `研究动量增强、减弱或发生背离时，未来 ${horizon} 根 K 线的方向，识别趋势加速、动量衰竭和潜在反转。` },
+  { id: 'volume-price', title: '量价确认', description: horizon => `研究价格变动与 tick 成交量同步或背离时，未来 ${horizon} 根 K 线的收益倾向，寻找能识别真实趋势与缺乏量能确认走势的因子组合。` },
+  { id: 'time-session', title: '时段与昨日同期效应', description: horizon => `研究 ${form.timeZone} 每日同一时段及上一个交易日同一时段的价格、波动与成交量特征，对未来 ${horizon} 根 K 线收益方向的预测能力。寻找在趋势、波动率和价格位置条件下仍稳定有效的时段因子组合。` },
+]
+const researchTemplateOptions = researchTemplates.map(item => ({ title: item.title, value: item.id }))
 const datasetOptions = computed(() => datasets.value.map(item => ({ title: `${item.dataset_name} · ${item.symbol} · ${item.received_bars.toLocaleString()} 根`, value: item.dataset_id })))
 const factorOptions = computed(() => factors.value.map(item => ({ title: `${item.display_name} (${item.label}) · ${item.category_label}`, value: item.name })))
-const exitModeOptions = computed(() => exitModes.value.map(item => ({ title: item.label, value: item.value })))
 const activeCount = computed(() => runs.value.filter(item => ['queued', 'running'].includes(item.status)).length)
 const selectedCandidate = computed(() => candidates.value.find(item => item.candidate_id === selectedCandidateId.value) || null)
 const activeFactors = computed(() => researchMode.value === 'ai' ? (selectedCandidate.value?.factors || []) : form.factors)
@@ -439,6 +438,15 @@ const filteredFactorGroups = computed(() => {
 
 function addFactor() { if (form.factors.length < 5) form.factors.push(newFactor()) }
 function removeFactor(index) { if (form.factors.length > 1) form.factors.splice(index, 1) }
+function applyResearchTemplate(templateId) {
+  const template = researchTemplates.find(item => item.id === templateId)
+  if (!template) return
+  form.researchDescription = template.description(form.predictionHorizon)
+  if (!form.researchName) form.researchName = template.title
+  researchMode.value = 'ai'
+  candidates.value = []
+  selectedCandidateId.value = ''
+}
 function normalizedFactor(item) {
   return {
     name: item.name,
@@ -459,14 +467,12 @@ function payload() {
       hypothesis: selectedCandidate.value.hypothesis,
       buy_logic: selectedCandidate.value.buy_logic, sell_logic: selectedCandidate.value.sell_logic,
     } : null,
-    dataset_id: form.datasetId, timeframe: form.timeframe,
-    prediction_horizon: form.predictionHorizon, exit_mode: form.exitMode,
-    fixed_horizon_bars: form.fixedHorizonBars, confirmation_bars: form.confirmationBars,
+    dataset_id: form.datasetId, timeframe: form.timeframe, time_zone: form.timeZone,
+    same_slot_lookback_days: form.sameSlotLookbackDays,
+    prediction_horizon: form.predictionHorizon, confirmation_bars: form.confirmationBars,
     cooldown_bars: form.cooldownBars, buy_threshold_min: form.buyThresholdMin,
     buy_threshold_max: form.buyThresholdMax, sell_threshold_min: form.sellThresholdMin,
     sell_threshold_max: form.sellThresholdMax, trial_count: form.trialCount,
-    stop_loss_percent: form.stopLossPercent, take_profit_percent: form.takeProfitPercent,
-    trailing_stop_percent: form.trailingStopPercent, max_holding_bars: form.maxHoldingBars,
     factors: activeFactors.value.map(normalizedFactor),
   }
 }
@@ -474,13 +480,18 @@ async function loadAll() {
   loading.value = true
   try {
     const [context, runData] = await Promise.all([marketAPI.getAlphaResearchContext(), marketAPI.getAlphaResearchRuns()])
-    datasets.value = context.datasets || []; factors.value = context.factors || []; exitModes.value = context.exit_modes || []; alphaLibrary.value = context.alpha_library || []
+    datasets.value = context.datasets || []; factors.value = context.factors || []; alphaLibrary.value = context.alpha_library || []
     runs.value = runData.runs || []
     if (!form.datasetId && datasets.value.length) form.datasetId = datasets.value[0].dataset_id
   } catch (error) { showError(error, '加载 Alpha 研究数据失败') }
   finally { loading.value = false }
 }
 async function generateCandidates() {
+  if (form.researchDescription.trim().length < 10) {
+    messageType.value = 'warning'
+    message.value = '请先输入不少于 10 个字的研究目标，再生成 Alpha 候选'
+    return
+  }
   generatingCandidates.value = true
   try {
     const data = await marketAPI.generateAlphaCandidates({
@@ -491,7 +502,8 @@ async function generateCandidates() {
     })
     candidates.value = data.candidates || []
     selectedCandidateId.value = candidates.value[0]?.candidate_id || ''
-    messageType.value = 'success'; message.value = data.message
+    messageType.value = candidates.value.length ? 'success' : 'warning'
+    message.value = data.message || (candidates.value.length ? 'Alpha 候选已生成' : '暂未生成 Alpha 候选，请调整研究目标后重试')
   } catch (error) { showError(error, '生成 Alpha 候选失败') }
   finally { generatingCandidates.value = false }
 }
@@ -525,7 +537,6 @@ async function publishRun() {
 }
 function showError(error, fallback) { messageType.value = 'error'; message.value = error.response?.data?.detail || fallback }
 function statusMeta(status) { return ({ queued: { label: '等待中', color: 'warning' }, running: { label: '搜索中', color: 'info' }, completed: { label: '已完成', color: 'success' }, failed: { label: '失败', color: 'error' }, canceled: { label: '已终止', color: 'grey' } })[status] || { label: status, color: 'grey' } }
-function exitLabel(mode) { return ({ reverse_signal: '反向信号退出', fixed_horizon: '固定周期退出', neutral_signal: '回到观望退出', stop_loss: '固定止损', take_profit: '固定止盈', trailing_stop: '移动止损', max_holding: '最大持有周期', end_of_data: '数据结束' })[mode] || mode }
 function metric(key) { const value = detailRun.value?.result?.metrics?.[key]; return value == null ? '--' : Number(value).toFixed(4) }
 function percentMetric(key, child = null) { let value = detailRun.value?.result?.metrics?.[key]; if (child) value = value?.[child]; return value == null ? '--' : `${(Number(value) * 100).toFixed(2)}%` }
 function asPercent(value) { return value == null ? '--' : `${(Number(value) * 100).toFixed(2)}%` }
@@ -534,8 +545,6 @@ function durationText(value) { const milliseconds = Number(value || 0); return m
 function ablationMeta(value) { return ({ baseline: { label: '基准', color: 'info' }, essential: { label: '关键因子', color: 'success' }, useful: { label: '有效贡献', color: 'teal' }, redundant: { label: '可能冗余', color: 'warning' }, sole_factor: { label: '唯一因子', color: 'info' } })[value] || { label: value || '--', color: 'grey' } }
 function signedPercent(value) { const number = Number(value || 0) * 100; return `${number >= 0 ? '+' : ''}${number.toFixed(2)}%` }
 function formatParam(value) { return typeof value === 'number' ? Number(value).toFixed(4).replace(/\.0+$/, '') : value }
-function formatTime(value) { return value ? new Date(value * 1000).toLocaleString('zh-CN') : '--' }
-function price(value) { return Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 5 }) }
 function scoreValue(value) { return value == null ? '--' : Number(value).toFixed(4) }
 
 watch(

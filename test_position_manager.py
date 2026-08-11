@@ -107,6 +107,37 @@ class PositionManagerTests(unittest.TestCase):
         }, {"price": 108})
         self.assertEqual(no_change.action, "none")
 
+    def test_no_fixed_take_profit_can_use_trailing_stop(self):
+        manager = PositionManager()
+        plan = manager.create_plan(
+            policy({
+                "initial_stop_rules": [
+                    {"type": "fixed_percent", "value": 0.02},
+                ],
+                "initial_take_profit_rules": [
+                    {"type": "none"},
+                ],
+                "management_rules": [
+                    {"type": "trailing_stop", "activation_r": 1.5,
+                     "distance_r": 0.5},
+                ],
+                "min_risk_reward": 0,
+            }),
+            "buy", 100,
+        )
+        self.assertEqual(plan.stop_loss, 98)
+        self.assertEqual(plan.take_profit, 0)
+        self.assertEqual(plan.take_profit_rule["type"], "none")
+
+        action = manager.evaluate(plan.policy_snapshot["config"], {
+            "direction": "buy", "entry_price": 100,
+            "stop_loss": plan.stop_loss,
+            "initial_risk": plan.initial_risk,
+            "favorable_price": 104,
+        }, {"price": 103.5})
+        self.assertEqual(action.action, "modify_sl")
+        self.assertEqual(action.stop_loss, 103)
+
     def test_reverse_signal_and_time_limit_close_position(self):
         manager = PositionManager()
         position = {

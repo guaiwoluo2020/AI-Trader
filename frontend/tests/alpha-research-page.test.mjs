@@ -8,12 +8,13 @@ const navigation = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf
 const settings = readFileSync(new URL('../src/views/Settings.vue', import.meta.url), 'utf8')
 const api = readFileSync(new URL('../src/api/market.js', import.meta.url), 'utf8')
 
-test('Alpha research exposes all three exit modes with reverse signal as default', () => {
-  assert.match(view, /exitMode: 'reverse_signal'/)
-  assert.match(view, /form\.exitMode === 'fixed_horizon'/)
-  assert.match(view, /reverse_signal: '反向信号退出'/)
-  assert.match(view, /fixed_horizon: '固定周期退出'/)
-  assert.match(view, /neutral_signal: '回到观望退出'/)
+test('Alpha research stays focused on factor validity rather than trading exits', () => {
+  assert.match(view, /因子有效性研究/)
+  assert.match(view, /信号定义/)
+  assert.match(view, /不会生成订单或持仓/)
+  assert.doesNotMatch(view, /主退出规则/)
+  assert.doesNotMatch(view, /固定止盈/)
+  assert.doesNotMatch(view, /最佳候选交易流水/)
 })
 
 test('Alpha research is available from the authenticated research navigation', () => {
@@ -28,13 +29,17 @@ test('AI research is the default and manual factors are an advanced option', () 
   assert.match(view, /高级自定义/)
   assert.match(view, /浏览因子库/)
   assert.match(view, /factor\.category_label/)
+  assert.match(view, /时段与昨日同期效应/)
+  assert.match(view, /同期观察交易日/)
+  assert.match(view, /Asia\/Shanghai/)
 })
 
-test('Alpha backtests expose composable protective exit rules', () => {
-  assert.match(view, /固定止损/)
-  assert.match(view, /固定止盈/)
-  assert.match(view, /移动止损/)
-  assert.match(view, /最大持有 K 线/)
+test('Alpha candidate generation explains missing research description', () => {
+  assert.doesNotMatch(
+    view,
+    /:disabled="form\.researchDescription\.trim\(\)\.length < 10"/
+  )
+  assert.match(view, /请先输入不少于 10 个字的研究目标/)
 })
 
 test('AI Alpha research exposes iterative LLM optimization and prompt audit', () => {
@@ -46,15 +51,16 @@ test('AI Alpha research exposes iterative LLM optimization and prompt audit', ()
   assert.match(view, /隐藏测试仅在最终执行一次/)
 })
 
-test('Alpha report separates factor decay from strategy performance metrics', () => {
+test('Alpha report exposes factor diagnostics without strategy performance metrics', () => {
   assert.match(view, /Level 2/)
   assert.match(view, /IC_IR/)
   assert.match(view, /因子衰减 Decay/)
-  assert.match(view, /Level 3/)
-  assert.match(view, /Sharpe（逐笔）/)
-  assert.match(view, /Sortino（逐笔）/)
-  assert.match(view, /Profit Factor/)
-  assert.match(view, /策略换手率/)
+  assert.match(view, /交易规则请进入策略回测工作台验证/)
+  assert.doesNotMatch(view, /Sharpe（逐笔）/)
+  assert.doesNotMatch(view, /Profit Factor/)
+  assert.doesNotMatch(view, /策略换手率/)
+  assert.match(view, /时段规律报告/)
+  assert.match(view, /平均未来收益/)
 })
 
 test('validated Alpha can be published and selected as a strategy signal source', () => {

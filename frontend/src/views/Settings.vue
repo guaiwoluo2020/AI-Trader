@@ -43,6 +43,13 @@
             <v-icon>mdi-brain</v-icon>
           </article>
         </section>
+
+        <v-tabs v-model="settingsTab" color="primary" class="settings-main-tabs">
+          <v-tab value="account"><v-icon start>mdi-account-lock-outline</v-icon>账户与安全</v-tab>
+          <v-tab v-if="isAdmin" value="email"><v-icon start>mdi-email-lock-outline</v-icon>邮件服务</v-tab>
+          <v-tab v-if="isAdmin" value="quota"><v-icon start>mdi-account-star-outline</v-icon>用户配额</v-tab>
+          <v-tab value="llm"><v-icon start>mdi-brain</v-icon>{{ isAdmin ? 'AI 服务管理' : 'AI 功能' }}</v-tab>
+        </v-tabs>
       </v-col>
     </v-row>
 
@@ -184,7 +191,7 @@
     </v-row>
 
     <!-- 账户与安全 -->
-    <v-row v-if="!isStrategyPage">
+    <v-row v-if="!isStrategyPage && settingsTab === 'account'">
       <v-col cols="12">
         <v-card class="user-settings-card" elevation="0">
           <v-card-title class="settings-card-title">
@@ -275,7 +282,7 @@
     </v-row>
 
     <!-- 管理员邮件服务配置 -->
-    <v-row v-if="!isStrategyPage && isAdmin">
+    <v-row v-if="!isStrategyPage && isAdmin && settingsTab === 'email'">
       <v-col cols="12">
         <v-card class="user-settings-card admin-service-card" elevation="0">
           <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
@@ -324,7 +331,7 @@
     </v-row>
 
     <!-- 管理员用户配额白名单 -->
-    <v-row v-if="!isStrategyPage && isAdmin">
+    <v-row v-if="!isStrategyPage && isAdmin && settingsTab === 'quota'">
       <v-col cols="12">
         <v-card class="user-settings-card admin-service-card" elevation="0">
           <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
@@ -358,7 +365,7 @@
     </v-row>
 
     <!-- 大模型功能与管理员配置 -->
-    <v-row v-if="!isStrategyPage">
+    <v-row v-if="!isStrategyPage && settingsTab === 'llm'">
       <v-col cols="12">
         <v-card class="user-settings-card" :class="{ 'admin-service-card': isAdmin }" elevation="0">
           <v-card-title class="settings-card-title">
@@ -366,8 +373,42 @@
             <small>{{ isAdmin ? '全局服务与用户开通申请' : '开通后可使用自主 AI 分析' }}</small>
           </v-card-title>
           <v-card-text>
-            <v-form v-if="isAdmin" ref="llmForm">
+            <v-tabs v-if="isAdmin" v-model="llmWorkspaceTab" color="primary" class="llm-workspace-tabs">
+              <v-tab value="providers"><v-icon start>mdi-server-network-outline</v-icon>供应商</v-tab>
+              <v-tab value="models"><v-icon start>mdi-database-cog-outline</v-icon>模型目录</v-tab>
+              <v-tab value="scenes"><v-icon start>mdi-text-box-edit-outline</v-icon>场景与提示词</v-tab>
+              <v-tab value="requests"><v-icon start>mdi-account-clock-outline</v-icon>开通审批 <v-chip size="x-small" class="ml-2">{{ llmAccessRequests.length }}</v-chip></v-tab>
+            </v-tabs>
+            <v-form v-if="isAdmin && llmWorkspaceTab === 'providers'" ref="llmForm">
+              <div class="llm-section-head">
+                <div>
+                  <div class="font-weight-bold">供应商配置</div>
+                  <div class="text-caption text-medium-emphasis">
+                    可保存多套 BASE URL/API Key；只有一个供应商会作为平台当前有效配置。
+                  </div>
+                </div>
+                <v-btn variant="tonal" prepend-icon="mdi-plus" @click="newLLMProvider">
+                  新增供应商
+                </v-btn>
+              </div>
               <v-row>
+                <v-col cols="12" md="4">
+                  <v-text-field
+                    v-model="llmConfig.provider_name"
+                    label="供应商名称"
+                    dense
+                    hide-details
+                    placeholder="例如 DeepSeek 生产环境"
+                  ></v-text-field>
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-switch
+                    v-model="llmConfig.active"
+                    color="success"
+                    hide-details
+                    label="保存后设为当前有效"
+                  />
+                </v-col>
                 <v-col cols="12" md="4">
                   <v-text-field
                     v-model="llmConfig.api_key"
@@ -390,72 +431,20 @@
                   ></v-text-field>
                 </v-col>
                 <v-col cols="12" md="4">
-                  <v-select
+                  <v-text-field
                     v-model="llmConfig.model"
-                    :items="enabledLLMModelIds"
-                    label="模型名称"
+                    label="供应商默认模型"
                     dense
                     hide-details
                     placeholder="gpt-4o-mini"
-                  ></v-select>
+                  ></v-text-field>
                 </v-col>
               </v-row>
-              <v-expansion-panels class="mt-4" variant="accordion">
-                <v-expansion-panel>
-                  <v-expansion-panel-title>
-                    <div class="d-flex align-center ga-3">
-                      <v-icon color="primary">mdi-text-box-edit-outline</v-icon>
-                      <div>
-                        <div class="font-weight-medium">分析提示词</div>
-                        <div class="text-caption text-medium-emphasis">
-                          版本 {{ llmConfig.prompt_version }} · 修改后实时分析与新回测共同生效
-                        </div>
-                      </div>
-                    </div>
-                  </v-expansion-panel-title>
-                  <v-expansion-panel-text>
-                    <v-alert type="info" variant="tonal" density="compact" class="mb-4">
-                      分析模板必须保留 <code v-pre>{{strategy_context}}</code> 和
-                      <code v-pre>{{market_data}}</code>，系统会在调用前注入策略约束与K线数据。
-                    </v-alert>
-                    <v-textarea
-                      v-model="llmConfig.system_prompt"
-                      label="System Prompt"
-                      rows="4"
-                      auto-grow
-                      counter="10000"
-                      variant="outlined"
-                      hint="定义模型角色、行为边界和输出原则"
-                      persistent-hint
-                    />
-                    <v-textarea
-                      v-model="llmConfig.analysis_prompt_template"
-                      label="分析 Prompt 模板"
-                      rows="14"
-                      auto-grow
-                      counter="50000"
-                      variant="outlined"
-                      hint="建议保留JSON输出结构，避免分析结果无法解析"
-                      persistent-hint
-                      class="mt-3 prompt-template-editor"
-                    />
-                    <v-btn
-                      variant="tonal"
-                      color="warning"
-                      prepend-icon="mdi-restore"
-                      :loading="llmPromptResetting"
-                      @click="resetLLMPrompts"
-                    >
-                      恢复系统默认提示词
-                    </v-btn>
-                  </v-expansion-panel-text>
-                </v-expansion-panel>
-              </v-expansion-panels>
               <v-row class="mt-2">
                 <v-col cols="12">
                   <v-btn color="primary" @click="saveLLMConfig" :loading="llmSaving">
                     <v-icon start>mdi-content-save</v-icon>
-                    保存配置
+                    保存供应商配置
                   </v-btn>
                   <v-chip
                     class="ml-3"
@@ -466,14 +455,42 @@
                   </v-chip>
                 </v-col>
               </v-row>
+              <div v-if="llmGovernance.providers.length" class="provider-grid mt-4">
+                <article
+                  v-for="provider in llmGovernance.providers"
+                  :key="provider.provider_id"
+                  class="provider-card"
+                  :class="{ active: provider.active }"
+                >
+                  <div class="d-flex align-center justify-space-between">
+                    <strong>{{ provider.provider_name }}</strong>
+                    <v-chip size="x-small" :color="provider.active ? 'success' : 'grey'" variant="tonal">
+                      {{ provider.active ? '当前有效' : '未启用' }}
+                    </v-chip>
+                  </div>
+                  <p>{{ provider.api_base }}</p>
+                  <p>默认模型：{{ provider.model || '--' }}</p>
+                  <p>API Key：{{ provider.api_key_set ? '已设置' : '未设置' }}</p>
+                  <div class="d-flex ga-2 mt-3">
+                    <v-btn size="small" variant="tonal" @click="selectLLMProvider(provider)">编辑</v-btn>
+                    <v-btn
+                      size="small"
+                      color="success"
+                      variant="tonal"
+                      :disabled="provider.active"
+                      @click="activateLLMProvider(provider)"
+                    >设为有效</v-btn>
+                  </div>
+                </article>
+              </div>
             </v-form>
 
-            <div v-if="isAdmin" class="mt-6 llm-governance-panel">
+            <div v-if="isAdmin && llmWorkspaceTab === 'models'" class="mt-6 llm-governance-panel">
               <div class="d-flex align-center justify-space-between mb-3">
                 <div>
-                  <div class="font-weight-bold">模型目录与场景路由</div>
+                  <div class="font-weight-bold">模型目录</div>
                   <div class="text-caption text-medium-emphasis">
-                    模型来自 API Base 的 /models；低频场景共享每日 {{ llmGovernance.free_daily_limit || 30 }} 次免费额度
+                    模型来自当前有效供应商的 /models；切换供应商后请重新同步模型。
                   </div>
                 </div>
                 <v-btn
@@ -490,8 +507,40 @@
               >
                 {{ model.model_id }}{{ model.available ? '' : '（已离线）' }}
               </v-chip>
+              <v-alert v-if="!llmGovernance.models.length" type="info" variant="tonal" density="compact" class="mt-3">
+                尚未同步模型列表，请先保存大模型 BASE URL/API Key 后点击“同步模型”。
+              </v-alert>
+              <v-alert v-else-if="!enabledLLMModelIds.length" type="warning" variant="tonal" density="compact" class="mt-3">
+                已同步模型，但还没有启用模型。请点击上方模型标签启用至少一个模型，再为 Alpha 候选生成等场景选择模型。
+              </v-alert>
+              <v-alert
+                v-for="warning in llmGovernance.scene_model_warnings"
+                :key="warning.scene_code"
+                type="warning"
+                variant="tonal"
+                density="compact"
+                class="mt-3"
+              >
+                {{ warning.message }}
+                <span v-if="warning.invalid_model_ids?.length">
+                  失效模型：{{ warning.invalid_model_ids.join('、') }}
+                </span>
+              </v-alert>
 
+            </div>
+
+            <div v-if="isAdmin && llmWorkspaceTab === 'scenes'" class="mt-6 llm-governance-panel">
               <v-row class="mt-2">
+                <v-col cols="12">
+                  <div class="llm-section-head compact">
+                    <div>
+                      <div class="font-weight-bold">场景模型与提示词</div>
+                      <div class="text-caption text-medium-emphasis">
+                        每个调用场景可独立选择模型、默认模型和提示词模板；切换供应商后需要重新确认这些模型。
+                      </div>
+                    </div>
+                  </div>
+                </v-col>
                 <v-col v-for="scene in llmGovernance.scenes" :key="scene.scene_code" cols="12" md="6">
                   <v-card variant="outlined" class="pa-4 h-100">
                     <div class="d-flex align-center justify-space-between">
@@ -515,6 +564,50 @@
                       v-model="scene.allow_user_selection" color="success" hide-details
                       label="允许用户选择模型"
                     />
+                    <template v-if="scene.scene_code === 'ai_signal_analysis'">
+                      <div class="prompt-profile-head mt-4">
+                        <div>
+                          <strong>提示词版本</strong>
+                          <p>可保存多套行情分析提示词，实时 AI 分析只使用标记为默认的版本。</p>
+                        </div>
+                        <v-btn size="small" variant="tonal" color="primary" @click="addAIScenePrompt(scene)">
+                          <v-icon start>mdi-plus</v-icon>新增提示词
+                        </v-btn>
+                      </div>
+                      <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+                        {{ scenePromptHint(scene.scene_code) }}
+                      </v-alert>
+                      <article v-for="prompt in scene.prompt_profiles" :key="prompt.prompt_id" class="prompt-profile-card" :class="{ 'is-default': prompt.is_default }">
+                        <div class="d-flex align-center justify-space-between ga-2 mb-3">
+                          <v-text-field v-model="prompt.prompt_name" label="提示词名称" density="compact" hide-details class="prompt-profile-name" />
+                          <div class="d-flex align-center ga-1">
+                            <v-btn size="small" :color="prompt.is_default ? 'success' : 'primary'" :variant="prompt.is_default ? 'flat' : 'tonal'" @click="setDefaultAIScenePrompt(scene, prompt.prompt_id)">
+                              <v-icon start>{{ prompt.is_default ? 'mdi-check-decagram' : 'mdi-star-outline' }}</v-icon>{{ prompt.is_default ? '默认使用中' : '设为默认' }}
+                            </v-btn>
+                            <v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" :disabled="scene.prompt_profiles.length === 1" @click="removeAIScenePrompt(scene, prompt.prompt_id)" />
+                          </div>
+                        </div>
+                        <v-textarea v-model="prompt.system_prompt" label="System Prompt" rows="3" auto-grow variant="outlined" density="compact" class="prompt-template-editor" />
+                        <v-textarea v-model="prompt.user_prompt_template" label="User Prompt 模板" rows="8" auto-grow variant="outlined" density="compact" class="mt-3 prompt-template-editor" />
+                      </article>
+                    </template>
+                    <v-expansion-panels v-else class="mt-3" variant="accordion">
+                      <v-expansion-panel>
+                        <v-expansion-panel-title>
+                          <div class="d-flex align-center ga-2">
+                            <v-icon color="primary">mdi-text-box-edit-outline</v-icon>
+                            <span>场景提示词</span>
+                          </div>
+                        </v-expansion-panel-title>
+                        <v-expansion-panel-text>
+                          <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+                            {{ scenePromptHint(scene.scene_code) }}
+                          </v-alert>
+                          <v-textarea v-model="scene.system_prompt" label="System Prompt" rows="3" auto-grow variant="outlined" density="compact" class="prompt-template-editor" />
+                          <v-textarea v-model="scene.user_prompt_template" label="User Prompt 模板" rows="10" auto-grow variant="outlined" density="compact" class="mt-3 prompt-template-editor" />
+                        </v-expansion-panel-text>
+                      </v-expansion-panel>
+                    </v-expansion-panels>
                     <v-btn block variant="tonal" color="primary" class="mt-3" @click="saveLLMScene(scene)">
                       保存场景配置
                     </v-btn>
@@ -523,17 +616,17 @@
               </v-row>
             </div>
 
-            <v-alert v-else type="info" variant="tonal" class="mt-4">
+            <v-alert v-if="!isAdmin" type="info" variant="tonal" class="mt-4">
               回测报告和 Alpha 研究无需申请开通，共享每日 30 次免费大模型调用额度；
               今日剩余 {{ llmFreeQuota.remaining }} / {{ llmFreeQuota.limit }} 次。行情 AI 信号仍需申请开通。
             </v-alert>
 
-            <div class="text-caption grey--text mt-3">
+            <div v-if="!isAdmin" class="text-caption grey--text mt-3">
               <v-icon small>mdi-information</v-icon>
               管理员配置共享的大模型服务，审批通过的用户将使用此配置进行行情分析。
             </div>
 
-            <div v-if="isAdmin" class="mt-6">
+            <div v-if="isAdmin && llmWorkspaceTab === 'requests'" class="mt-6">
               <v-divider class="mb-4"></v-divider>
               <div class="d-flex align-center mb-3">
                 <div class="text-h6">开通申请待办</div>
@@ -585,7 +678,7 @@
               </div>
             </div>
 
-            <div v-else class="py-2">
+            <div v-if="!isAdmin" class="py-2">
               <div class="d-flex flex-wrap align-center mb-4">
                 <v-chip :color="llmAccessColor" size="small">
                   {{ llmAccessLabel }}
@@ -910,6 +1003,8 @@ export default {
   setup(props) {
     const isStrategyPage = computed(() => props.mode === 'strategy')
     const pageTitle = computed(() => isStrategyPage.value ? '策略管理' : '用户配置')
+    const settingsTab = ref('account')
+    const llmWorkspaceTab = ref('providers')
 
     // 交易配置
     const tradeConfig = ref({
@@ -935,10 +1030,13 @@ export default {
 
     // 大模型配置
     const llmConfig = ref({
+      provider_id: '',
+      provider_name: '默认供应商',
       api_key: '',
       api_key_set: false,
       api_base: 'https://api.openai.com/v1',
       model: 'gpt-4o-mini',
+      active: true,
       system_prompt: '',
       analysis_prompt_template: '',
       prompt_version: 1,
@@ -946,12 +1044,27 @@ export default {
     })
     const showApiKey = ref(false)
     const llmSaving = ref(false)
-    const llmPromptResetting = ref(false)
     const llmModelsSyncing = ref(false)
-    const llmGovernance = ref({ models: [], scenes: [], free_daily_limit: 30 })
+    const llmGovernance = ref({
+      providers: [],
+      active_provider: null,
+      models: [],
+      scenes: [],
+      scene_model_warnings: [],
+      free_daily_limit: 30
+    })
     const enabledLLMModelIds = computed(() => llmGovernance.value.models
       .filter(model => model.enabled && model.available)
       .map(model => model.model_id))
+    const scenePromptHint = (sceneCode) => {
+      const hints = {
+        ai_signal_analysis: '必须保留 {{strategy_context}} 和 {{market_data}}，系统会注入策略约束与K线数据。',
+        backtest_report_analysis: '必须保留 {{backtest_snapshot}}，系统会注入回测任务、交易流水与资金曲线摘要。',
+        alpha_candidate_generation: '必须保留研究目标、周期、预测窗口、候选数量和因子目录相关变量。',
+        alpha_iterative_refinement: '必须保留当前候选、历史迭代、研究目标和因子目录相关变量。'
+      }
+      return hints[sceneCode] || '请保留模板中的变量占位符，避免调用时缺少上下文。'
+    }
     const llmAccess = ref({
       status: 'not_requested',
       access_granted: false,
@@ -1290,17 +1403,22 @@ export default {
       try {
         const data = await marketAPI.getLLMConfig()
         if (data.config) {
+          const activeProvider = data.governance?.active_provider || {}
           llmConfig.value = {
+            provider_id: activeProvider.provider_id || '',
+            provider_name: activeProvider.provider_name || '默认供应商',
             api_key: '',  // 不显示已有key，只显示是否设置
-            api_key_set: data.config.api_key_set || false,
-            api_base: data.config.api_base || 'https://api.openai.com/v1',
-            model: data.config.model || 'gpt-4o-mini',
+            api_key_set: activeProvider.api_key_set || data.config.api_key_set || false,
+            api_base: activeProvider.api_base || data.config.api_base || 'https://api.openai.com/v1',
+            model: activeProvider.model || data.config.model || 'gpt-4o-mini',
+            active: activeProvider.active ?? true,
             system_prompt: data.config.system_prompt || '',
             analysis_prompt_template: data.config.analysis_prompt_template || '',
             prompt_version: data.config.prompt_version || 1,
             enabled: data.config.enabled || false
           }
         }
+        if (data.governance) llmGovernance.value = data.governance
       } catch (err) {
         console.error('加载大模型配置失败:', err)
       }
@@ -1389,19 +1507,23 @@ export default {
       llmSaving.value = true
       try {
         const updateData = {
+          provider_id: llmConfig.value.provider_id,
+          provider_name: llmConfig.value.provider_name,
           api_base: llmConfig.value.api_base,
           model: llmConfig.value.model,
-          system_prompt: llmConfig.value.system_prompt,
-          analysis_prompt_template: llmConfig.value.analysis_prompt_template
+          active: llmConfig.value.active
         }
         // 只有输入了新的API Key才更新
         if (llmConfig.value.api_key) {
           updateData.api_key = llmConfig.value.api_key
         }
 
-        const data = await marketAPI.configureLLM(updateData)
+        const data = await marketAPI.saveLLMProvider(updateData)
         if (data.status === 'ok') {
-          successMessage.value = '大模型配置已保存'
+          if (data.governance) llmGovernance.value = data.governance
+          successMessage.value = data.governance?.scene_model_warnings?.length
+            ? '供应商配置已保存，请检查场景模型切换提醒'
+            : '供应商配置已保存'
           showSuccess.value = true
           // 重新加载配置
           await loadLLMConfig()
@@ -1417,11 +1539,58 @@ export default {
       }
     }
 
+    const selectLLMProvider = (provider) => {
+      llmConfig.value.provider_id = provider.provider_id
+      llmConfig.value.provider_name = provider.provider_name
+      llmConfig.value.api_key = ''
+      llmConfig.value.api_key_set = provider.api_key_set
+      llmConfig.value.api_base = provider.api_base
+      llmConfig.value.model = provider.model
+      llmConfig.value.active = provider.active
+    }
+
+    const newLLMProvider = () => {
+      llmConfig.value.provider_id = ''
+      llmConfig.value.provider_name = ''
+      llmConfig.value.api_key = ''
+      llmConfig.value.api_key_set = false
+      llmConfig.value.api_base = 'https://api.openai.com/v1'
+      llmConfig.value.model = ''
+      llmConfig.value.active = false
+    }
+
+    const activateLLMProvider = async (provider) => {
+      try {
+        const data = await marketAPI.activateLLMProvider(provider.provider_id)
+        if (data.governance) llmGovernance.value = data.governance
+        if (data.config) {
+          llmConfig.value = {
+            ...llmConfig.value,
+            provider_id: data.provider.provider_id,
+            provider_name: data.provider.provider_name,
+            api_key: '',
+            api_key_set: data.provider.api_key_set,
+            api_base: data.provider.api_base,
+            model: data.provider.model,
+            active: true,
+            enabled: data.config.enabled
+          }
+        }
+        successMessage.value = data.governance?.scene_model_warnings?.length
+          ? '已切换有效供应商，请检查场景模型切换提醒'
+          : '已切换有效供应商'
+        showSuccess.value = true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '切换有效供应商失败'
+        showError.value = true
+      }
+    }
+
     const syncLLMModels = async () => {
       llmModelsSyncing.value = true
       try {
         const data = await marketAPI.syncLLMModels()
-        llmGovernance.value.models = data.models || []
+        llmGovernance.value = data.governance
         successMessage.value = data.message || '模型列表已同步'
         showSuccess.value = true
       } catch (err) {
@@ -1436,7 +1605,7 @@ export default {
       if (!model.available) return
       try {
         const data = await marketAPI.setLLMModelEnabled(model.model_id, !model.enabled)
-        llmGovernance.value.models = data.models || []
+        llmGovernance.value = data.governance
       } catch (err) {
         errorMessage.value = err.response?.data?.detail || '模型状态更新失败'
         showError.value = true
@@ -1456,20 +1625,34 @@ export default {
       }
     }
 
-    const resetLLMPrompts = async () => {
-      if (!confirm('确定恢复系统默认提示词吗？当前自定义内容将被覆盖。')) return
-      llmPromptResetting.value = true
-      try {
-        const data = await marketAPI.resetLLMPrompts()
-        successMessage.value = data.message || '提示词已恢复为系统默认值'
-        showSuccess.value = true
-        await loadLLMConfig()
-      } catch (err) {
-        errorMessage.value = err.response?.data?.detail || '恢复默认提示词失败'
-        showError.value = true
-      } finally {
-        llmPromptResetting.value = false
+    const newPromptProfileId = () => (
+      globalThis.crypto?.randomUUID?.() || `prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    )
+
+    const addAIScenePrompt = (scene) => {
+      const profiles = scene.prompt_profiles ||= []
+      const defaultPrompt = profiles.find(item => item.is_default) || profiles[0] || scene
+      profiles.push({
+        prompt_id: newPromptProfileId(),
+        prompt_name: `提示词 ${profiles.length + 1}`,
+        system_prompt: defaultPrompt.system_prompt || '',
+        user_prompt_template: defaultPrompt.user_prompt_template || '',
+        is_default: false,
+      })
+    }
+
+    const setDefaultAIScenePrompt = (scene, promptId) => {
+      for (const prompt of scene.prompt_profiles || []) {
+        prompt.is_default = prompt.prompt_id === promptId
       }
+    }
+
+    const removeAIScenePrompt = (scene, promptId) => {
+      const profiles = scene.prompt_profiles || []
+      if (profiles.length <= 1) return
+      const removed = profiles.find(item => item.prompt_id === promptId)
+      scene.prompt_profiles = profiles.filter(item => item.prompt_id !== promptId)
+      if (removed?.is_default) scene.prompt_profiles[0].is_default = true
     }
 
     // ==================== 策略配置 ====================
@@ -2366,6 +2549,8 @@ export default {
     return {
       isStrategyPage,
       pageTitle,
+      settingsTab,
+      llmWorkspaceTab,
       tradeConfig,
       newSymbol,
       newVolume,
@@ -2407,7 +2592,6 @@ export default {
       llmConfig,
       showApiKey,
       llmSaving,
-      llmPromptResetting,
       llmModelsSyncing,
       llmGovernance,
       enabledLLMModelIds,
@@ -2415,7 +2599,13 @@ export default {
       syncLLMModels,
       toggleLLMModel,
       saveLLMScene,
-      resetLLMPrompts,
+      addAIScenePrompt,
+      setDefaultAIScenePrompt,
+      removeAIScenePrompt,
+      scenePromptHint,
+      selectLLMProvider,
+      newLLMProvider,
+      activateLLMProvider,
       llmAccess,
       llmFreeQuota,
       llmAccessLabel,
@@ -2526,6 +2716,7 @@ export default {
 .settings-hero>div { z-index: 1; }.settings-hero h2 { max-width: 720px; margin: 4px 0 8px; font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(1.65rem, 3vw, 2.35rem); line-height: 1.15; }.settings-hero p { max-width: 690px; margin: 0; color: rgba(247,255,249,.76); }
 .settings-hero__identity { display: flex; align-items: center; gap: 9px; margin-top: 17px; color: rgba(255,255,255,.9); font-size: .8rem; font-weight: 700; }.settings-hero .v-btn { z-index: 1; font-weight: 700; }
 .settings-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 22px 0 10px; }.settings-metrics article { position: relative; min-height: 123px; padding: 19px 21px; overflow: hidden; border: 1px solid var(--settings-line); border-radius: 17px; background: linear-gradient(145deg, #fff, #f7fbf9); }.settings-metrics span,.settings-metrics small { display: block; color: var(--settings-muted); }.settings-metrics span { font-size: .78rem; }.settings-metrics strong { display: block; margin-top: 4px; color: var(--settings-ink); font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(1.25rem, 2.1vw, 1.8rem); line-height: 1.08; }.settings-metrics small { max-width: 85%; margin-top: 7px; font-size: .67rem; line-height: 1.35; }.settings-metrics .v-icon { position: absolute; right: 17px; bottom: 16px; color: #b9d4c8; }
+.settings-main-tabs { margin-top: 22px; border-bottom: 1px solid var(--settings-line); background: rgba(255,255,255,.68); border-radius: 14px 14px 0 0; }.llm-workspace-tabs { margin: -2px -6px 22px; border-bottom: 1px solid var(--settings-line); }
 .user-settings-card { overflow: hidden; border: 1px solid var(--settings-line); border-radius: 19px !important; background: #fff; }.user-settings-card :deep(.v-card-text) { padding: 22px 24px 26px; }.settings-card-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 18px 24px !important; border-bottom: 1px solid var(--settings-line); color: var(--settings-ink); }.settings-card-title>div { display: flex; align-items: center; gap: 10px; font-size: 1rem; font-weight: 700; }.settings-card-title>div .v-icon { color: var(--settings-green); }.settings-card-title>small { color: var(--settings-muted); font-size: .72rem; font-weight: 400; }.admin-service-card { border-color: #c8ddd4; background: linear-gradient(145deg, #fff 0%, #f7fcfa 100%); }.account-summary { padding: 8px; border: 1px solid #e2ece7; border-radius: 13px; background: #f9fcfa; }.quota-table :deep(th) { color: var(--settings-muted); font-size: .72rem; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }.quota-table :deep(td) { padding-top: 12px; padding-bottom: 12px; }.quota-table small { display: block; margin-top: 3px; color: var(--settings-muted); font-size: .7rem; }
 .admission-panel { padding: 16px; border: 1px solid #dbe7e1; border-radius: 14px; background: linear-gradient(135deg, #f5f9f6, #fffaf0); }
 .admission-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -2534,6 +2725,13 @@ export default {
 .admission-stages article { padding: 12px; border-radius: 10px; background: rgba(255,255,255,.85); }
 .admission-stages article>div:first-child { display: flex; align-items: center; gap: 7px; }.admission-stages p { margin: 6px 0; color: #718079; font-size: .72rem; }
 .admission-checks { display: flex; flex-wrap: wrap; gap: 5px; }
+.llm-section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.llm-section-head.compact { margin: 18px 0 4px; }
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.provider-card { padding: 15px; border: 1px solid #dce7e2; border-radius: 14px; background: #fbfdfc; transition: border-color .18s ease, background .18s ease, box-shadow .18s ease; }
+.provider-card.active { border-color: #6fbd92; background: linear-gradient(135deg, #ecfbf2 0%, #fffaf0 100%); box-shadow: 0 10px 24px rgba(37, 112, 77, .08); }
+.provider-card p { margin: 6px 0 0; color: #61756c; font-size: .74rem; word-break: break-all; }
+.prompt-profile-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }.prompt-profile-head strong,.prompt-profile-head p { display: block; }.prompt-profile-head p { margin: 3px 0 0; color: var(--settings-muted); font-size: .74rem; }.prompt-profile-card { margin-top: 12px; padding: 16px; border: 1px solid #dce7e2; border-radius: 14px; background: #fbfdfc; }.prompt-profile-card.is-default { border-color: #6fbd92; background: linear-gradient(135deg, #effbf4 0%, #fffdf6 100%); }.prompt-profile-name { max-width: 250px; }
 .prompt-template-editor :deep(textarea) { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .78rem; line-height: 1.55; }
 .strategy-toggle-alert { transition: background-color .18s ease, border-color .18s ease; }
 .strategy-toggle-alert--active { background: linear-gradient(135deg, #e5f7ec 0%, #f2fff6 100%) !important; border-color: #68c58c !important; }

@@ -307,6 +307,16 @@ class LLMService:
         payload = f"v{version}\n{system_prompt}\n{prompt}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def _scene_defaults(self, scene_code: str) -> Dict:
+        if self._llm_governance is None:
+            return {}
+        try:
+            return self._llm_governance.scene_options(
+                self.llm_store.user_id, scene_code
+            )
+        except Exception:
+            return {}
+
     # ==================== LLM API 调用 ====================
 
     def call_llm(
@@ -335,7 +345,14 @@ class LLMService:
             data = {
                 "model": reservation["model"],
                 "messages": [
-                    {"role": "system", "content": system_prompt or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
+                    {
+                        "role": "system",
+                        "content": (
+                            system_prompt
+                            or reservation.get("system_prompt")
+                            or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)
+                        ),
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
@@ -349,31 +366,50 @@ class LLMService:
                 timeout=120
             )
 
-            if response.status_code == 200:
-                result = response.json()
-                content = result["choices"][0]["message"]["content"]
-                parsed = self._parse_llm_response(content)
-                if governance:
-                    governance.finish_call(
-                        reservation, "completed" if parsed else "failed",
-                        result.get("usage"), "" if parsed else "模型返回内容无法解析",
-                    )
-                return parsed
-            else:
-                print(f"[LLMService] API调用失败: {response.status_code} - {response.text}")
-                if governance:
-                    governance.finish_call(
-                        reservation, "failed", error=f"HTTP {response.status_code}"
-                    )
-                return None
+            if response.status_code != 200:
+                detail = self._provider_error_detail(response)
+                print(
+                    f"[LLMService] API调用失败: {response.status_code} - {detail}"
+                )
+                raise LLMRequestError(
+                    f"大模型接口返回 HTTP {response.status_code}: {detail[:300]}"
+                )
 
+            result = response.json()
+            message = (result.get("choices") or [{}])[0].get("message") or {}
+            content = message.get("content") or ""
+            parsed = self._parse_llm_response(content)
+            if not parsed:
+                preview = self._content_preview(content)
+                print(
+                    "[LLMService] 模型返回内容无法解析 "
+                    f"(model={reservation['model']}, preview={preview})"
+                )
+                raise LLMRequestError(
+                    "大模型返回内容为空或不是有效 JSON，请检查该场景选择的模型"
+                    "是否支持 Chat Completions，并要求模型只返回 JSON。"
+                )
+
+            if governance:
+                governance.finish_call(reservation, "completed", result.get("usage"))
+            return parsed
+
+        except LLMRequestError as e:
+            if governance:
+                governance.finish_call(reservation, "failed", error=str(e))
+            raise
+        except requests.RequestException as e:
+            print(f"[LLMService] 调用异常: {e}")
+            if governance:
+                governance.finish_call(reservation, "failed", error=str(e))
+            raise LLMRequestError(f"连接大模型服务失败: {e}") from e
         except Exception as e:
             print(f"[LLMService] 调用异常: {e}")
             if governance:
                 governance.finish_call(reservation, "failed", error=str(e))
             if isinstance(e, (PermissionError, ValueError)):
                 raise
-            return None
+            raise LLMRequestError(f"处理大模型响应失败: {e}") from e
 
     def call_llm_stream(
         self, prompt: str, on_chunk: callable = None,
@@ -407,7 +443,14 @@ class LLMService:
             data = {
                 "model": reservation["model"],
                 "messages": [
-                    {"role": "system", "content": system_prompt or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
+                    {
+                        "role": "system",
+                        "content": (
+                            system_prompt
+                            or reservation.get("system_prompt")
+                            or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)
+                        ),
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
@@ -424,17 +467,10 @@ class LLMService:
             )
 
             if response.status_code != 200:
-                print(f"[LLMService] API调用失败: {response.status_code} - {response.text}")
-                detail = response.text
-                try:
-                    payload = response.json()
-                    detail = (
-                        payload.get("error", {}).get("message")
-                        or payload.get("message")
-                        or detail
-                    )
-                except (ValueError, AttributeError):
-                    pass
+                detail = self._provider_error_detail(response)
+                print(
+                    f"[LLMService] API调用失败: {response.status_code} - {detail}"
+                )
                 raise LLMRequestError(
                     f"大模型接口返回 HTTP {response.status_code}: {str(detail)[:300]}"
                 )
@@ -470,6 +506,11 @@ class LLMService:
             print(f"[LLMService] 流式接收完成，共 {chunk_count} 个chunk，{len(full_content)} 字符")
             parsed = self._parse_llm_response(full_content)
             if not parsed:
+                preview = self._content_preview(full_content)
+                print(
+                    "[LLMService] 流式模型返回内容无法解析 "
+                    f"(model={reservation['model']}, preview={preview})"
+                )
                 raise LLMRequestError("大模型返回内容为空或不是有效 JSON")
             if governance:
                 governance.finish_call(reservation, "completed")
@@ -494,17 +535,88 @@ class LLMService:
 
     def _parse_llm_response(self, content: str) -> Optional[Dict]:
         """解析 LLM 响应"""
-        try:
-            # 提取JSON部分
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
+        if not isinstance(content, str) or not content.strip():
+            print("[LLMService] 模型返回内容为空")
+            return None
 
-            return json.loads(content.strip())
+        json_text = self._extract_json_text(content)
+        if json_text is None:
+            print(
+                "[LLMService] 未找到可解析JSON内容: "
+                f"{self._content_preview(content)}"
+            )
+            return None
+
+        try:
+            return json.loads(json_text)
         except json.JSONDecodeError as e:
             print(f"[LLMService] JSON解析失败: {e}")
             return None
+
+    @staticmethod
+    def _provider_error_detail(response) -> str:
+        detail = response.text
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    detail = error.get("message") or error.get("code") or detail
+                else:
+                    detail = payload.get("message") or payload.get("detail") or detail
+        except (ValueError, AttributeError):
+            pass
+        return str(detail)
+
+    @staticmethod
+    def _content_preview(content: str, limit: int = 500) -> str:
+        text = str(content or "").replace("\n", "\\n").strip()
+        return text[:limit] or "<empty>"
+
+    @classmethod
+    def _extract_json_text(cls, content: str) -> Optional[str]:
+        text = content.strip()
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if fence:
+            text = fence.group(1).strip()
+
+        try:
+            json.loads(text)
+            return text
+        except json.JSONDecodeError:
+            pass
+
+        for start_char, end_char in (("{", "}"), ("[", "]")):
+            start = text.find(start_char)
+            if start < 0:
+                continue
+            depth = 0
+            in_string = False
+            escape = False
+            for index in range(start, len(text)):
+                char = text[index]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif char == "\\":
+                        escape = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char == start_char:
+                    depth += 1
+                elif char == end_char:
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start:index + 1]
+                        try:
+                            json.loads(candidate)
+                            return candidate
+                        except json.JSONDecodeError:
+                            break
+        return None
 
     @staticmethod
     def _canonical_period(value, symbol_plan: Dict) -> Optional[str]:
@@ -624,20 +736,28 @@ class LLMService:
     def _group_analysis_plans(self, analysis_plan: Dict[str, Dict]) -> List[Dict]:
         """Group sources only when model, prompts, and references are identical."""
         config = self.llm_store.get_config()
+        scene_defaults = self._scene_defaults(AI_SIGNAL_ANALYSIS)
+        scene_model = scene_defaults.get("default_model_id") or getattr(config, "model", "")
+        scene_system_prompt = (
+            scene_defaults.get("system_prompt")
+            or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)
+        )
+        scene_template = (
+            scene_defaults.get("user_prompt_template")
+            or getattr(
+                config,
+                "analysis_prompt_template",
+                DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
+            )
+        )
         groups: Dict[tuple, Dict] = {}
         for symbol, symbol_plan in analysis_plan.items():
             for profile in symbol_plan.get("strategies", []):
-                model = profile.get("model") or getattr(config, "model", "")
-                system_prompt = profile.get("system_prompt") or getattr(
-                    config, "system_prompt", DEFAULT_SYSTEM_PROMPT
-                )
+                model = profile.get("model") or scene_model
+                system_prompt = profile.get("system_prompt") or scene_system_prompt
                 template = (
                     profile.get("analysis_prompt_template")
-                    or getattr(
-                        config,
-                        "analysis_prompt_template",
-                        DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
-                    )
+                    or scene_template
                 )
                 references = tuple(profile.get("reference_runtime_ids") or [])
                 key = (model, system_prompt, template, references)
@@ -662,15 +782,9 @@ class LLMService:
                     )
         if not groups and analysis_plan:
             return [{
-                "model": getattr(config, "model", ""),
-                "system_prompt": getattr(
-                    config, "system_prompt", DEFAULT_SYSTEM_PROMPT
-                ),
-                "analysis_prompt_template": getattr(
-                    config,
-                    "analysis_prompt_template",
-                    DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
-                ),
+                "model": scene_model,
+                "system_prompt": scene_system_prompt,
+                "analysis_prompt_template": scene_template,
                 "reference_runtime_ids": [],
                 "plan": analysis_plan,
             }]

@@ -162,6 +162,26 @@ class SQLiteStorage:
                         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                     );
 
+                    CREATE TABLE IF NOT EXISTS llm_provider_configs (
+                        provider_id TEXT PRIMARY KEY,
+                        admin_user_id INTEGER NOT NULL,
+                        provider_name TEXT NOT NULL,
+                        api_key TEXT NOT NULL DEFAULT '',
+                        api_base TEXT NOT NULL DEFAULT 'https://api.openai.com/v1',
+                        model TEXT NOT NULL DEFAULT 'gpt-4o-mini',
+                        active INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(admin_user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_provider_active
+                    ON llm_provider_configs(admin_user_id)
+                    WHERE active = 1;
+
+                    CREATE INDEX IF NOT EXISTS idx_llm_provider_owner
+                    ON llm_provider_configs(admin_user_id, updated_at DESC);
+
                     CREATE TABLE IF NOT EXISTS llm_access_requests (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         user_id INTEGER NOT NULL UNIQUE,
@@ -194,6 +214,8 @@ class SQLiteStorage:
                         enabled INTEGER NOT NULL DEFAULT 1,
                         default_model_id TEXT NOT NULL DEFAULT '',
                         allow_user_selection INTEGER NOT NULL DEFAULT 0,
+                        system_prompt TEXT NOT NULL DEFAULT '',
+                        user_prompt_template TEXT NOT NULL DEFAULT '',
                         updated_by INTEGER,
                         updated_at INTEGER NOT NULL,
                         FOREIGN KEY(updated_by) REFERENCES users(id) ON DELETE SET NULL
@@ -206,6 +228,21 @@ class SQLiteStorage:
                         FOREIGN KEY(scene_code) REFERENCES llm_scene_policies(scene_code) ON DELETE CASCADE,
                         FOREIGN KEY(model_id) REFERENCES llm_models(model_id) ON DELETE CASCADE
                     );
+
+                    CREATE TABLE IF NOT EXISTS llm_scene_prompts (
+                        prompt_id TEXT PRIMARY KEY,
+                        scene_code TEXT NOT NULL,
+                        prompt_name TEXT NOT NULL,
+                        system_prompt TEXT NOT NULL,
+                        user_prompt_template TEXT NOT NULL,
+                        is_default INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(scene_code) REFERENCES llm_scene_policies(scene_code) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_llm_scene_prompts_scene
+                    ON llm_scene_prompts(scene_code, is_default, updated_at);
 
                     CREATE TABLE IF NOT EXISTS llm_call_logs (
                         call_id TEXT PRIMARY KEY,
@@ -1124,6 +1161,18 @@ class SQLiteStorage:
                 self._ensure_column(
                     conn, "user_llm_configs", "analysis_prompt_template",
                     "TEXT NOT NULL DEFAULT ''",
+                )
+                self._ensure_column(
+                    conn, "llm_scene_policies", "system_prompt",
+                    "TEXT NOT NULL DEFAULT ''",
+                )
+                self._ensure_column(
+                    conn, "llm_scene_policies", "user_prompt_template",
+                    "TEXT NOT NULL DEFAULT ''",
+                )
+                self._ensure_column(
+                    conn, "llm_provider_configs", "provider_name",
+                    "TEXT NOT NULL DEFAULT '默认供应商'",
                 )
                 for table in ("paper_orders", "paper_positions"):
                     self._ensure_column(
@@ -2676,7 +2725,17 @@ class LLMConfigRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
 
-    def get_config(self, user_id: int) -> "LLMConfig":
+    @staticmethod
+    def _mask_key(api_key: str) -> str:
+        if not api_key:
+            return ""
+        return api_key[:4] + "****" + api_key[-4:] if len(api_key) > 8 else "****"
+
+    def _user_role(self, user_id: int) -> str:
+        row = self.storage.fetchone("SELECT role FROM users WHERE id = ?", (user_id,))
+        return str(row["role"]) if row else ""
+
+    def _base_user_config(self, user_id: int) -> "LLMConfig":
         from market.models.llm_config import (
             DEFAULT_ANALYSIS_PROMPT_TEMPLATE, DEFAULT_SYSTEM_PROMPT, LLMConfig,
         )
@@ -2711,6 +2770,224 @@ class LLMConfigRepository:
             api_base=config.get("api_base"),
             model=config.get("model"),
         )
+
+    def _active_provider_row(self, admin_user_id: int):
+        return self.storage.fetchone(
+            """
+            SELECT provider_id, provider_name, api_key, api_base, model,
+                   active, created_at, updated_at
+            FROM llm_provider_configs
+            WHERE admin_user_id = ? AND active = 1
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (admin_user_id,),
+        )
+
+    def list_provider_configs(self, admin_user_id: int) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT provider_id, provider_name, api_key, api_base, model,
+                   active, created_at, updated_at
+            FROM llm_provider_configs
+            WHERE admin_user_id = ?
+            ORDER BY active DESC, updated_at DESC, provider_name
+            """,
+            (admin_user_id,),
+        )
+        return [{
+            "provider_id": row["provider_id"],
+            "provider_name": row["provider_name"],
+            "api_key": self._mask_key(row["api_key"]),
+            "api_key_set": bool(row["api_key"]),
+            "api_base": row["api_base"],
+            "model": row["model"],
+            "active": bool(row["active"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        } for row in rows]
+
+    def save_provider_config(
+        self,
+        admin_user_id: int,
+        provider_id: Optional[str] = None,
+        provider_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
+        model: Optional[str] = None,
+        active: bool = False,
+    ) -> Dict:
+        current = None
+        if provider_id:
+            current = self.storage.fetchone(
+                """
+                SELECT * FROM llm_provider_configs
+                WHERE admin_user_id = ? AND provider_id = ?
+                """,
+                (admin_user_id, provider_id),
+            )
+            if current is None:
+                raise ValueError("大模型供应商配置不存在")
+        provider_id = provider_id or uuid.uuid4().hex[:12]
+        next_name = str(
+            provider_name
+            if provider_name is not None
+            else (current["provider_name"] if current else "默认供应商")
+        ).strip()
+        if not next_name:
+            raise ValueError("供应商名称不能为空")
+        next_api_key = (
+            current["api_key"] if current and api_key is None else str(api_key or "")
+        )
+        next_api_base = str(
+            api_base
+            if api_base is not None
+            else (current["api_base"] if current else "https://api.openai.com/v1")
+        ).strip().rstrip("/")
+        next_model = str(
+            model if model is not None else (current["model"] if current else "gpt-4o-mini")
+        ).strip()
+        if not next_api_base:
+            raise ValueError("API Base URL不能为空")
+        if not next_model:
+            raise ValueError("默认模型不能为空")
+        if active and not next_api_key:
+            raise ValueError("设为有效配置时 API Key 不能为空")
+        previous_active = self._active_provider_row(admin_user_id) if active else None
+        should_invalidate_models = bool(
+            active
+            and previous_active
+            and (
+                previous_active["provider_id"] != provider_id
+                or previous_active["api_base"] != next_api_base
+            )
+        )
+        now = _now_ts()
+        with self.storage._lock, self.storage._connect() as conn:
+            if active:
+                conn.execute(
+                    "UPDATE llm_provider_configs SET active = 0 WHERE admin_user_id = ?",
+                    (admin_user_id,),
+                )
+            conn.execute(
+                """
+                INSERT INTO llm_provider_configs(
+                    provider_id, admin_user_id, provider_name, api_key,
+                    api_base, model, active, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider_id) DO UPDATE SET
+                    provider_name = excluded.provider_name,
+                    api_key = excluded.api_key,
+                    api_base = excluded.api_base,
+                    model = excluded.model,
+                    active = CASE
+                        WHEN excluded.active = 1 THEN 1
+                        ELSE llm_provider_configs.active
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    provider_id, admin_user_id, next_name, next_api_key,
+                    next_api_base, next_model, int(active), now, now,
+                ),
+            )
+            conn.commit()
+        if active:
+            self.save_config(
+                admin_user_id,
+                api_key=next_api_key,
+                api_base=next_api_base,
+                model=next_model,
+            )
+            if should_invalidate_models:
+                self.storage.execute("UPDATE llm_models SET available = 0")
+        return next(
+            item for item in self.list_provider_configs(admin_user_id)
+            if item["provider_id"] == provider_id
+        )
+
+    def set_active_provider(self, admin_user_id: int, provider_id: str) -> Dict:
+        row = self.storage.fetchone(
+            """
+            SELECT * FROM llm_provider_configs
+            WHERE admin_user_id = ? AND provider_id = ?
+            """,
+            (admin_user_id, provider_id),
+        )
+        if row is None:
+            raise ValueError("大模型供应商配置不存在")
+        if not row["api_key"]:
+            raise ValueError("设为有效配置时 API Key 不能为空")
+        previous_active = self._active_provider_row(admin_user_id)
+        should_invalidate_models = bool(
+            previous_active
+            and (
+                previous_active["provider_id"] != provider_id
+                or previous_active["api_base"] != row["api_base"]
+            )
+        )
+        with self.storage._lock, self.storage._connect() as conn:
+            conn.execute(
+                "UPDATE llm_provider_configs SET active = 0 WHERE admin_user_id = ?",
+                (admin_user_id,),
+            )
+            conn.execute(
+                """
+                UPDATE llm_provider_configs
+                SET active = 1, updated_at = ?
+                WHERE admin_user_id = ? AND provider_id = ?
+                """,
+                (_now_ts(), admin_user_id, provider_id),
+            )
+            conn.commit()
+        self.save_config(
+            admin_user_id,
+            api_key=row["api_key"],
+            api_base=row["api_base"],
+            model=row["model"],
+        )
+        if should_invalidate_models:
+            self.storage.execute("UPDATE llm_models SET available = 0")
+        return next(
+            item for item in self.list_provider_configs(admin_user_id)
+            if item["provider_id"] == provider_id
+        )
+
+    def get_config(self, user_id: int) -> "LLMConfig":
+        from market.models.llm_config import LLMConfig
+
+        base = self._base_user_config(user_id)
+        if self._user_role(user_id) == "admin":
+            provider = self._active_provider_row(user_id)
+            if provider:
+                return LLMConfig(
+                    api_key=provider["api_key"],
+                    api_base=provider["api_base"],
+                    model=provider["model"],
+                    system_prompt=base.system_prompt,
+                    analysis_prompt_template=base.analysis_prompt_template,
+                    prompt_version=base.prompt_version,
+                )
+            if base.enabled and not self.list_provider_configs(user_id):
+                self.save_provider_config(
+                    user_id,
+                    provider_name="默认供应商",
+                    api_key=base.api_key,
+                    api_base=base.api_base,
+                    model=base.model,
+                    active=True,
+                )
+                provider = self._active_provider_row(user_id)
+                if provider:
+                    return LLMConfig(
+                        api_key=provider["api_key"],
+                        api_base=provider["api_base"],
+                        model=provider["model"],
+                        system_prompt=base.system_prompt,
+                        analysis_prompt_template=base.analysis_prompt_template,
+                        prompt_version=base.prompt_version,
+                    )
+        return base
 
     def get_effective_config(self, user_id: int) -> "LLMConfig":
         """管理员使用自己的配置；获批用户使用管理员的共享配置。"""

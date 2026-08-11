@@ -1262,6 +1262,9 @@ def create_market_routes(
     ) -> Dict:
         """Return AI signal configuration capabilities and shared references."""
         access = llm_access_repo.get_status(user.user_id, user.role)
+        scene_options = llm_governance.scene_options(
+            user.user_id, AI_SIGNAL_ANALYSIS
+        )
         shared = [
             item for item in shared_ai_runtime_repo.list_shared(
                 user.user_id, symbol
@@ -1271,11 +1274,14 @@ def create_market_routes(
         return {
             "status": "ok",
             "access_granted": access["access_granted"],
-            "models": llm_governance.scene_options(
-                user.user_id, AI_SIGNAL_ANALYSIS
-            )["models"],
-            "default_system_prompt": DEFAULT_SYSTEM_PROMPT,
-            "default_analysis_prompt_template": DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
+            "models": scene_options["models"],
+            "default_system_prompt": (
+                scene_options.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+            ),
+            "default_analysis_prompt_template": (
+                scene_options.get("user_prompt_template")
+                or DEFAULT_ANALYSIS_PROMPT_TEMPLATE
+            ),
             "shared_runtime_data": shared,
         }
 
@@ -1486,7 +1492,11 @@ def create_market_routes(
                 user, "llm_models_synced", "同步大模型列表",
                 f"同步到 {len(models)} 个模型",
             )
-            return {"status": "ok", "message": f"已同步 {len(models)} 个模型", "models": models}
+            return {
+                "status": "ok",
+                "message": f"已同步 {len(models)} 个模型",
+                "governance": llm_governance.overview(),
+            }
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1502,8 +1512,88 @@ def create_market_routes(
                 f"模型 {model_id} 已{'启用' if data.get('enabled') else '停用'}",
                 {"enabled": bool(data.get("enabled"))}, "llm_model", model_id,
             )
-            return {"status": "ok", "models": llm_governance.list_models()}
+            return {
+                "status": "ok",
+                "governance": llm_governance.overview(),
+            }
         except LLMGovernanceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @protected_router.put("/admin/llm/providers")
+    async def save_llm_provider(
+        request: Request, user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        try:
+            data = await request.json()
+            provider = llm_config_repo.save_provider_config(
+                user.user_id,
+                provider_id=data.get("provider_id"),
+                provider_name=data.get("provider_name"),
+                api_key=data.get("api_key") if data.get("api_key") else None,
+                api_base=data.get("api_base"),
+                model=data.get("model"),
+                active=bool(data.get("active", False)),
+            )
+            config = llm_config_repo.get_config(user.user_id)
+            if provider["active"]:
+                engine = engine_manager.get_engine_for_user(user.user_id)
+                engine.configure_llm(
+                    api_key=config.api_key,
+                    api_base=config.api_base,
+                    model=config.model,
+                )
+            add_audit_event(
+                user, "llm_provider_saved", "保存大模型供应商",
+                f"保存供应商 {provider['provider_name']}",
+                {
+                    "provider_id": provider["provider_id"],
+                    "active": provider["active"],
+                    "api_base": provider["api_base"],
+                    "model": provider["model"],
+                },
+                "llm_provider", provider["provider_id"],
+            )
+            return {
+                "status": "ok",
+                "provider": provider,
+                "governance": llm_governance.overview(),
+                "config": config.to_dict(),
+            }
+        except (ValueError, LLMGovernanceError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @protected_router.post("/admin/llm/providers/{provider_id}/activate")
+    async def activate_llm_provider(
+        provider_id: str, user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        try:
+            provider = llm_config_repo.set_active_provider(
+                user.user_id, provider_id
+            )
+            config = llm_config_repo.get_config(user.user_id)
+            engine = engine_manager.get_engine_for_user(user.user_id)
+            engine.configure_llm(
+                api_key=config.api_key,
+                api_base=config.api_base,
+                model=config.model,
+            )
+            add_audit_event(
+                user, "llm_provider_activated", "切换大模型供应商",
+                f"切换有效供应商为 {provider['provider_name']}",
+                {
+                    "provider_id": provider["provider_id"],
+                    "api_base": provider["api_base"],
+                    "model": provider["model"],
+                },
+                "llm_provider", provider["provider_id"],
+            )
+            return {
+                "status": "ok",
+                "provider": provider,
+                "governance": llm_governance.overview(),
+                "config": config.to_dict(),
+            }
+        except (ValueError, LLMGovernanceError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @protected_router.put("/admin/llm/scenes/{scene_code}")
@@ -1518,7 +1608,14 @@ def create_market_routes(
             add_audit_event(
                 user, "llm_scene_updated", "修改大模型场景",
                 f"修改场景 {scene['display_name']}",
-                {"models": scene["model_ids"], "enabled": scene["enabled"]},
+                {
+                    "models": scene["model_ids"],
+                    "enabled": scene["enabled"],
+                    "prompt_configured": bool(
+                        scene.get("system_prompt")
+                        and scene.get("user_prompt_template")
+                    ),
+                },
                 "llm_scene", scene_code,
             )
             return {"status": "ok", "scene": scene}
@@ -1540,11 +1637,17 @@ def create_market_routes(
         """管理员配置共享大模型参数。"""
         try:
             data = await request.json()
-            config = llm_config_repo.save_config(
+            provider = llm_config_repo.save_provider_config(
                 user.user_id,
-                api_key=data.get("api_key"),
+                provider_id=data.get("provider_id"),
+                provider_name=data.get("provider_name") or "默认供应商",
+                api_key=data.get("api_key") if data.get("api_key") else None,
                 api_base=data.get("api_base"),
                 model=data.get("model"),
+                active=bool(data.get("active", True)),
+            )
+            config = llm_config_repo.save_config(
+                user.user_id,
                 system_prompt=data.get("system_prompt"),
                 analysis_prompt_template=data.get("analysis_prompt_template"),
             )
@@ -1555,22 +1658,29 @@ def create_market_routes(
                 "api_base": config.api_base,
             }
 
-            engine = engine_manager.get_engine_for_user(user.user_id)
-            result = engine.configure_llm(
-                api_key=data.get("api_key"),
-                api_base=data.get("api_base"),
-                model=data.get("model"),
-                system_prompt=data.get("system_prompt"),
-                analysis_prompt_template=data.get("analysis_prompt_template"),
-            )
+            if provider["active"]:
+                engine = engine_manager.get_engine_for_user(user.user_id)
+                result = engine.configure_llm(
+                    api_key=data.get("api_key"),
+                    api_base=data.get("api_base"),
+                    model=data.get("model"),
+                    system_prompt=data.get("system_prompt"),
+                    analysis_prompt_template=data.get("analysis_prompt_template"),
+                )
             add_audit_event(
                 user, "llm_provider_configured", "修改大模型服务配置",
                 "管理员更新了大模型服务配置",
                 {"changed_fields": sorted(data.keys()), "api_base": config.api_base,
-                 "model": config.model},
-                "llm_provider", "default",
+                 "model": config.model, "provider_id": provider["provider_id"]},
+                "llm_provider", provider["provider_id"],
             )
-            return {"status": "ok", "data": result}
+            return {
+                "status": "ok",
+                "data": result,
+                "provider": provider,
+                "governance": llm_governance.overview(),
+                "config": config.to_dict(),
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 

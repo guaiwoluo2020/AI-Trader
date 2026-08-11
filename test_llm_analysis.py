@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from market.llm_analyzer import LLMAnalyzer
 from market.models import TradingStrategy
-from market.services.llm_service import LLMService
+from market.services.llm_service import LLMRequestError, LLMService
 
 
 class _Config:
@@ -89,6 +89,32 @@ class _StrategyStore:
 
 
 class LLMAnalysisTestCase(unittest.TestCase):
+    def test_parse_llm_response_extracts_json_from_text(self):
+        service = LLMService(_Store(), _Klines())
+        content = (
+            "下面是候选结果：\n"
+            "```json\n"
+            "{\"candidates\":[{\"name\":\"趋势动量\",\"factors\":[]}]}\n"
+            "```\n"
+            "请查收。"
+        )
+
+        parsed = service._parse_llm_response(content)
+
+        self.assertEqual(parsed["candidates"][0]["name"], "趋势动量")
+
+    def test_call_llm_raises_when_provider_returns_empty_content(self):
+        service = LLMService(_Store(), _Klines())
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "choices": [{"message": {"content": ""}}],
+            "usage": {"total_tokens": 1},
+        }
+
+        with patch("market.services.llm_service.requests.post", return_value=response):
+            with self.assertRaisesRegex(LLMRequestError, "不是有效 JSON"):
+                service.call_llm("生成候选")
+
     def test_due_ai_plan_respects_each_source_interval(self):
         strategy = TradingStrategy(
             symbol="GOLD_",

@@ -16,16 +16,13 @@ from alpha_research import (
     AlphaOptimizationEngine,
     AlphaLibraryRepository,
     AlphaResearchRepository,
-    EXIT_FIXED,
-    EXIT_NEUTRAL,
-    EXIT_REVERSE,
     FactorCatalog,
 )
 from sqlite_storage import SQLiteStorage
 from market.services.signal.alpha_factor_signal import AlphaRuntimeExecutor
 
 
-class AlphaBacktestExitModeTest(unittest.TestCase):
+class AlphaBacktestFactorValidityTest(unittest.TestCase):
     def setUp(self):
         self.frame = pd.DataFrame([
             {
@@ -40,94 +37,6 @@ class AlphaBacktestExitModeTest(unittest.TestCase):
             for index in range(8)
         ])
 
-    def simulate(self, values, mode, fixed_bars=2):
-        signals = pd.Series(values, dtype="int8")
-        return AlphaBacktestEngine._simulate_trades(
-            self.frame,
-            signals,
-            {
-                "exit_mode": mode,
-                "fixed_horizon_bars": fixed_bars,
-                "prediction_horizon": 2,
-            },
-        )
-
-    def test_reverse_signal_closes_and_reverses_at_next_bar_open(self):
-        trades = self.simulate([1, 1, -1, -1, 0, 0, 0, 0], EXIT_REVERSE)
-        self.assertEqual(2, len(trades))
-        self.assertEqual("buy", trades[0]["direction"])
-        self.assertEqual(60, trades[0]["entry_time"])
-        self.assertEqual(180, trades[0]["exit_time"])
-        self.assertEqual(EXIT_REVERSE, trades[0]["exit_reason"])
-        self.assertEqual("sell", trades[1]["direction"])
-
-    def test_fixed_horizon_ignores_neutral_and_closes_after_configured_bars(self):
-        trades = self.simulate([1, 0, 0, 0, 0, 0, 0, 0], EXIT_FIXED, fixed_bars=2)
-        self.assertEqual(1, len(trades))
-        self.assertEqual(60, trades[0]["entry_time"])
-        self.assertEqual(180, trades[0]["exit_time"])
-        self.assertEqual(EXIT_FIXED, trades[0]["exit_reason"])
-
-    def test_neutral_signal_exits_on_next_open(self):
-        trades = self.simulate([1, 1, 0, 0, 0, 0, 0, 0], EXIT_NEUTRAL)
-        self.assertEqual(1, len(trades))
-        self.assertEqual(180, trades[0]["exit_time"])
-        self.assertEqual(EXIT_NEUTRAL, trades[0]["exit_reason"])
-
-    def test_ambiguous_bar_uses_stop_loss_before_take_profit(self):
-        signals = pd.Series([1, 0, 0, 0, 0, 0, 0, 0], dtype="int8")
-        trades = AlphaBacktestEngine._simulate_trades(
-            self.frame,
-            signals,
-            {
-                "exit_mode": EXIT_REVERSE,
-                "prediction_horizon": 2,
-                "fixed_horizon_bars": 2,
-                "stop_loss_percent": 0.5,
-                "take_profit_percent": 0.5,
-            },
-        )
-        self.assertEqual(1, len(trades))
-        self.assertEqual("stop_loss", trades[0]["exit_reason"])
-        self.assertAlmostEqual(101 * 0.995, trades[0]["exit_price"])
-
-    def test_max_holding_rule_closes_at_bar_open(self):
-        signals = pd.Series([1, 1, 1, 1, 0, 0, 0, 0], dtype="int8")
-        trades = AlphaBacktestEngine._simulate_trades(
-            self.frame,
-            signals,
-            {
-                "exit_mode": EXIT_REVERSE,
-                "prediction_horizon": 2,
-                "fixed_horizon_bars": 20,
-                "max_holding_bars": 2,
-            },
-        )
-        self.assertGreaterEqual(len(trades), 1)
-        self.assertEqual("max_holding", trades[0]["exit_reason"])
-        self.assertEqual(2, trades[0]["holding_bars"])
-
-    def test_trailing_stop_uses_best_price_from_prior_bar(self):
-        frame = pd.DataFrame([
-            {"time": 0, "open": 100, "high": 101, "low": 99, "close": 100, "tick_volume": 10, "spread": 0},
-            {"time": 60, "open": 100, "high": 110, "low": 100, "close": 109, "tick_volume": 10, "spread": 0},
-            {"time": 120, "open": 109, "high": 109, "low": 103, "close": 104, "tick_volume": 10, "spread": 0},
-            {"time": 180, "open": 104, "high": 105, "low": 102, "close": 103, "tick_volume": 10, "spread": 0},
-        ])
-        trades = AlphaBacktestEngine._simulate_trades(
-            frame,
-            pd.Series([1, 0, 0, 0], dtype="int8"),
-            {
-                "exit_mode": EXIT_REVERSE,
-                "prediction_horizon": 2,
-                "fixed_horizon_bars": 20,
-                "trailing_stop_percent": 5,
-            },
-        )
-        self.assertEqual(1, len(trades))
-        self.assertEqual("trailing_stop", trades[0]["exit_reason"])
-        self.assertAlmostEqual(104.5, trades[0]["exit_price"])
-
     def test_factor_catalog_exposes_and_calculates_ema(self):
         catalog = FactorCatalog()
         names = {item["name"] for item in catalog.list()}
@@ -138,6 +47,66 @@ class AlphaBacktestExitModeTest(unittest.TestCase):
         ema = next(item for item in catalog.list() if item["name"] == "ema")
         self.assertEqual("指数移动平均", ema["display_name"])
         self.assertEqual("价格平滑", ema["category_label"])
+
+    def test_time_session_factors_use_only_prior_same_slot_bars(self):
+        rows = []
+        start = pd.Timestamp("2026-01-05 01:00:00", tz="UTC")
+        for day in range(4):
+            for minute, multiplier in ((0, 1.01), (15, 0.99)):
+                open_price = 100 + day * 2 + minute / 100
+                rows.append({
+                    "time": int((start + pd.Timedelta(days=day, minutes=minute)).timestamp()),
+                    "open": open_price, "high": open_price * 1.02,
+                    "low": open_price * 0.98, "close": open_price * multiplier,
+                    "tick_volume": 100, "spread": 0,
+                })
+        frame = pd.DataFrame(rows)
+        catalog = FactorCatalog()
+        names = {item["name"] for item in catalog.list()}
+        self.assertIn("previous_day_same_slot_return", names)
+        self.assertIn("same_slot_mean_return", names)
+        previous = catalog.calculate(
+            frame, "previous_day_same_slot_return", 2, "Asia/Shanghai"
+        )
+        average = catalog.calculate(
+            frame, "same_slot_mean_return", 2, "Asia/Shanghai"
+        )
+        self.assertAlmostEqual(0.01, previous.iloc[4], places=8)
+        self.assertAlmostEqual(-0.01, previous.iloc[5], places=8)
+        self.assertAlmostEqual(0.01, average.iloc[4], places=8)
+        self.assertAlmostEqual(-0.01, average.iloc[5], places=8)
+
+    def test_time_slot_report_uses_configured_local_time_zone(self):
+        rows = []
+        start = pd.Timestamp("2026-01-05 01:00:00", tz="UTC")
+        for day in range(35):
+            for minute, base_multiplier in ((0, 1.005), (15, 0.995)):
+                open_price = 100 + day * 0.1 + minute / 100
+                multiplier = base_multiplier + (day % 3 - 1) * 0.001
+                rows.append({
+                    "time": int((start + pd.Timedelta(days=day, minutes=minute)).timestamp()),
+                    "open": open_price, "high": open_price * 1.01,
+                    "low": open_price * 0.99, "close": open_price * multiplier,
+                    "tick_volume": 100, "spread": 0,
+                })
+        frame = pd.DataFrame(rows)
+        config = {
+            "factors": [{
+                "name": "same_slot_mean_return", "length_min": 5,
+                "length_max": 5, "weight_min": 1, "weight_max": 1,
+            }],
+            "time_zone": "Asia/Shanghai", "same_slot_lookback_days": 5,
+            "prediction_horizon": 1, "buy_threshold_min": 0.2,
+            "sell_threshold_max": -0.2, "confirmation_bars": 1,
+            "cooldown_bars": 0,
+        }
+        params = {
+            "factor_0_length": 5, "factor_0_weight": 1,
+            "buy_threshold": 0.2, "sell_threshold": -0.2,
+        }
+        report = AlphaBacktestEngine().time_slot_report(frame, config, params)
+        self.assertEqual("Asia/Shanghai", report["time_zone"])
+        self.assertIn("09:00", [item["slot"] for item in report["items"]])
 
     def test_optuna_can_search_a_factor_backtest(self):
         count = 600
@@ -159,8 +128,6 @@ class AlphaBacktestExitModeTest(unittest.TestCase):
             "buy_threshold_min": 0.2,
             "sell_threshold_max": -0.2,
             "prediction_horizon": 10,
-            "exit_mode": EXIT_REVERSE,
-            "fixed_horizon_bars": 10,
             "confirmation_bars": 1,
             "cooldown_bars": 0,
         }
@@ -203,8 +170,6 @@ class AlphaBacktestExitModeTest(unittest.TestCase):
             "buy_threshold_min": 0.2,
             "sell_threshold_max": -0.2,
             "prediction_horizon": 1,
-            "exit_mode": EXIT_REVERSE,
-            "fixed_horizon_bars": 5,
             "confirmation_bars": 1,
             "cooldown_bars": 0,
         }
@@ -212,11 +177,9 @@ class AlphaBacktestExitModeTest(unittest.TestCase):
             "factor_0_length": 5, "factor_0_weight": 1,
             "buy_threshold": 0.2, "sell_threshold": -0.2,
         }
-        result = AlphaBacktestEngine().run(
-            frame, config, params, evaluation_start=100, include_trades=False
-        )
+        result = AlphaBacktestEngine().run(frame, config, params, evaluation_start=100)
         self.assertLessEqual(result.metrics["sample_count"], 20)
-        self.assertEqual([], result.trades)
+        self.assertFalse(hasattr(result, "trades"))
 
     def test_rolling_ic_and_decay_measure_factor_predictive_power(self):
         alpha = pd.Series(np.linspace(-2, 2, 120))
@@ -245,18 +208,6 @@ class AlphaBacktestExitModeTest(unittest.TestCase):
             pd.concat([first, pd.Series([10000.0] * 20)], ignore_index=True), 10
         )
         pd.testing.assert_series_equal(baseline, extended.iloc[:160], check_names=False)
-
-    def test_strategy_metrics_include_sharpe_sortino_and_profit_factor(self):
-        returns = np.array([0.10, -0.05, 0.20, -0.10], dtype=float)
-        trades = [{"holding_bars": value} for value in [2, 3, 4, 5]]
-        metrics = AlphaBacktestEngine._trade_metrics(returns, trades, bar_count=100)
-        self.assertAlmostEqual(2.0, metrics["profit_factor"], places=6)
-        self.assertGreater(metrics["sharpe"], 0)
-        self.assertGreater(metrics["sortino"], 0)
-        self.assertAlmostEqual(0.08, metrics["strategy_turnover"], places=6)
-        self.assertEqual(
-            "per_trade_unannualized_gross_return", metrics["risk_ratio_basis"]
-        )
 
 
 class AlphaIterationAuditTest(unittest.TestCase):
@@ -369,11 +320,8 @@ class AlphaIterationAuditTest(unittest.TestCase):
                 "name": "ema", "length_min": 5, "length_max": 15,
                 "weight_min": 0.5, "weight_max": 1.5,
             }],
-            "prediction_horizon": 5, "exit_mode": EXIT_REVERSE,
-            "fixed_horizon_bars": 5, "confirmation_bars": 1,
-            "cooldown_bars": 0, "max_holding_bars": 0,
-            "stop_loss_percent": 0, "take_profit_percent": 0,
-            "trailing_stop_percent": 0,
+            "prediction_horizon": 5, "confirmation_bars": 1,
+            "cooldown_bars": 0,
             "buy_threshold_min": 0.2, "buy_threshold_max": 1.2,
             "sell_threshold_min": -1.2, "sell_threshold_max": -0.2,
             "trial_count": 5, "random_seed": 42,
@@ -387,7 +335,7 @@ class AlphaIterationAuditTest(unittest.TestCase):
             datasets.return_value.get_visible.return_value = {
                 "status": "ready", "file_path": "ignored", "data_format": "csv.gz"
             }
-            result, _, _, _ = engine.run({
+            result, _, _ = engine.run({
                 "run_id": "run-2", "user_id": 1, "config": config
             })
 
@@ -428,7 +376,6 @@ class AlphaLibraryAndRuntimeTest(unittest.TestCase):
             } for _ in range(factor_count)],
             "prediction_horizon": 5,
             "buy_threshold_min": 0.5, "sell_threshold_max": -0.5,
-            "exit_mode": EXIT_REVERSE, "fixed_horizon_bars": 5,
             "confirmation_bars": 1, "cooldown_bars": 0,
         }
 
@@ -462,9 +409,7 @@ class AlphaLibraryAndRuntimeTest(unittest.TestCase):
         config = self.research_config()
         params = self.research_params()
         engine = AlphaOptimizationEngine(object())
-        baseline = engine.backtest.run(
-            frame, config, params, evaluation_start=180, include_trades=False
-        )
+        baseline = engine.backtest.run(frame, config, params, evaluation_start=180)
         experiment = engine.ablation_experiment(
             frame, 180, config, params, baseline
         )
