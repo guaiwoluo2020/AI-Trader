@@ -147,12 +147,29 @@
               @click:append-inner="showConfirmPassword = !showConfirmPassword"
             />
 
+            <div class="registration-consent">
+              <v-checkbox
+                v-model="acceptedServiceNotice"
+                color="primary"
+                density="compact"
+                hide-details
+                :disabled="loading"
+                @update:model-value="consentTouched = true"
+              >
+                <template #label>
+                  <span>我已阅读并同意：本平台仅提供数据与技术服务，所有分析、信号及其他输出仅供测试和参考，不构成任何投资建议或收益承诺。</span>
+                </template>
+              </v-checkbox>
+              <p v-if="consentError" class="consent-error">{{ consentError }}</p>
+            </div>
+
             <v-btn
               type="submit"
               color="primary"
               size="x-large"
               block
               :loading="loading"
+              :disabled="!acceptedServiceNotice"
               class="register-button"
             >
               验证并创建账号
@@ -185,6 +202,8 @@ const codeTouched = ref(false)
 const usernameTouched = ref(false)
 const passwordTouched = ref(false)
 const confirmTouched = ref(false)
+const consentTouched = ref(false)
+const acceptedServiceNotice = ref(false)
 const showPassword = ref(false)
 const showConfirmPassword = ref(false)
 const loading = ref(false)
@@ -225,6 +244,9 @@ const passwordError = computed(() =>
 const confirmPasswordError = computed(() =>
   confirmTouched.value && confirmPassword.value !== password.value ? '两次输入的密码不一致' : '',
 )
+const consentError = computed(() =>
+  consentTouched.value && !acceptedServiceNotice.value ? '请先阅读并同意平台服务说明' : '',
+)
 
 const passwordStrength = computed(() => {
   if (!password.value) return 0
@@ -245,6 +267,7 @@ async function handleRegister() {
   usernameTouched.value = true
   passwordTouched.value = true
   confirmTouched.value = true
+  consentTouched.value = true
   errorMessage.value = ''
 
   if (
@@ -252,7 +275,8 @@ async function handleRegister() {
     !codeValid.value ||
     !usernameValid.value ||
     !passwordValid.value ||
-    confirmPassword.value !== password.value
+    confirmPassword.value !== password.value ||
+    !acceptedServiceNotice.value
   ) {
     return
   }
@@ -455,6 +479,22 @@ onUnmounted(() => clearInterval(countdownTimer))
   min-width: 54px;
   color: #778079;
   text-align: right;
+}
+
+.registration-consent {
+  margin: 2px 0 8px;
+}
+
+.registration-consent :deep(.v-label) {
+  color: #5d685f;
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.consent-error {
+  margin: -2px 0 0 34px;
+  color: #b3261e;
+  font-size: 0.75rem;
 }
 
 .register-button {
