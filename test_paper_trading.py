@@ -412,6 +412,73 @@ class PaperTradingServiceTests(unittest.TestCase):
         )[0]
         self.assertEqual(expired["status"], "completed")
 
+    def test_ai_only_backtest_deployment_skips_trade_count_gate(self):
+        row = self.storage.fetchone(
+            "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
+        )
+        current = json.loads(row["config_json"])
+        current.update({
+            "lifecycle_status": "backtesting",
+            "signal_sources": [{
+                "signal_source_id": "ai-m1",
+                "source": "ai_entry",
+                "enabled": True,
+                "period": "M1",
+                "weight": 100,
+                "params": {},
+            }],
+        })
+        self.storage.execute(
+            "UPDATE user_strategy_configs SET config_json = ? WHERE strategy_id = 'strategy-1'",
+            (json.dumps(current),),
+        )
+        snapshot = {**current, "symbol": "GOLD_"}
+        now = 100
+        with self.storage._lock, self.storage._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO backtest_batches(
+                    batch_id, user_id, batch_name, status, task_count,
+                    strategy_id, strategy_name, strategy_snapshot_json,
+                    strategy_snapshot_hash, template_snapshot_json, created_at
+                ) VALUES('batch-ai-paper', ?, 'AI short paper', 'completed', 1,
+                         'strategy-1', 'Gold Auto', ?, 'hash', '{}', ?)
+                """,
+                (self.user.user_id, json.dumps(snapshot), now),
+            )
+            conn.execute(
+                """
+                INSERT INTO backtest_tasks(
+                    task_id, batch_id, user_id, status, dataset_file_path,
+                    dataset_snapshot_json, result_json, created_at, completed_at
+                ) VALUES('task-ai-paper', 'batch-ai-paper', ?, 'completed', '/tmp/source.csv',
+                         '{}', ?, ?, ?)
+                """,
+                (
+                    self.user.user_id,
+                    json.dumps({
+                        "enabled_signal_sources": ["ai_entry"],
+                        "signal_source_trade_counts": {"ai_entry": 2},
+                        "trade_count": 2,
+                        "net_profit": 31.58,
+                        "profit_factor": None,
+                        "max_drawdown_pct": 0.01,
+                    }),
+                    now, now,
+                ),
+            )
+            conn.commit()
+
+        deployment = self.service.deploy_backtest(
+            self.user.user_id, self.account.account_id, "task-ai-paper", 30
+        )
+        promoted = json.loads(self.storage.fetchone(
+            "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
+        )["config_json"])
+
+        self.assertEqual(promoted["lifecycle_status"], "backtest_passed")
+        self.assertEqual(deployment["source_backtest_task_id"], "task-ai-paper")
+
     def test_background_maintenance_records_heartbeat_and_runtime_events(self):
         self.service.deploy(self.user.user_id, self.account.account_id, "strategy-1")
         self.service.enqueue_decisions(self.user.user_id, [self.decision()])

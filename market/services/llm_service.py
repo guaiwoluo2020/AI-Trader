@@ -126,6 +126,7 @@ class LLMService:
 
         available = set(available_symbols)
         plan: Dict[str, Dict] = {}
+        seen_sources = set()
         for strategy in self._strategy_store.get_all_strategies():
             if not strategy.enabled or strategy.symbol not in available:
                 continue
@@ -138,60 +139,110 @@ class LLMService:
             for source in strategy.get_signal_sources(
                 "ai_entry", enabled_only=True
             ):
-                params = source.get("params") or {}
-                if params.get("analysis_mode", "self_analysis") == "shared_reference":
-                    continue
-                source_id = source["signal_source_id"]
-                interval = max(
-                    1, int(params.get("analysis_interval_minutes", 5))
-                ) * 60
-                if due_only and (
-                    time.monotonic()
-                    - self._source_last_analysis_at.get(source_id, -interval)
-                    < interval
-                ):
-                    continue
-                period = source["period"]
-                symbol_plan = plan.setdefault(
-                    strategy.symbol,
-                    {"periods": {}, "strategies": []},
+                self._append_ai_source_to_plan(
+                    plan, strategy, source, due_only, seen_sources
                 )
-                current = symbol_plan["periods"].get(
-                    period, {"weight": 0, "kline_count": 0}
+
+        for strategy in self._paper_deployed_strategies(available):
+            for source in strategy.get_signal_sources(
+                "ai_entry", enabled_only=True
+            ):
+                self._append_ai_source_to_plan(
+                    plan, strategy, source, due_only, seen_sources
                 )
-                current["weight"] = max(current["weight"], int(source["weight"]))
-                current["kline_count"] = max(
-                    current["kline_count"],
-                    max(10, min(500, int(params.get("kline_count", 100)))),
-                )
-                symbol_plan["periods"][period] = current
-                symbol_plan["strategies"].append({
-                    "strategy_id": strategy.strategy_id,
-                    "strategy_name": strategy.strategy_name,
-                    "signal_source_id": source_id,
-                    "periods": {period: int(source["weight"])},
-                    "min_confidence": int(
-                        params.get("min_confidence", strategy.min_confidence)
-                    ),
-                    "min_risk_reward": strategy.min_risk_reward,
-                    "analysis_interval_minutes": interval // 60,
-                    "kline_count": int(params.get("kline_count", 100)),
-                    "model": str(params.get("model") or ""),
-                    "system_prompt": str(params.get("system_prompt") or ""),
-                    "analysis_prompt_template": str(
-                        params.get("analysis_prompt_template") or ""
-                    ),
-                    "share_runtime_data": bool(
-                        params.get("share_runtime_data", False)
-                    ),
-                    "reference_runtime_ids": list(
-                        params.get("reference_runtime_ids") or []
-                    ),
-                    "signal_params": dict(params),
-                    "symbol": strategy.symbol,
-                    "strategy_lifecycle": strategy.lifecycle_status,
-                })
         return plan
+
+    def _paper_deployed_strategies(self, available_symbols) -> List:
+        repo = getattr(self.llm_store, "_repo", None)
+        storage = getattr(repo, "storage", None)
+        if storage is None:
+            return []
+        try:
+            from ..models import TradingStrategy
+
+            rows = storage.fetchall(
+                """
+                SELECT d.strategy_snapshot_json
+                FROM strategy_deployments d
+                JOIN trading_accounts a ON a.id = d.account_id
+                WHERE d.user_id = ? AND d.execution_mode = 'paper'
+                  AND d.status = 'active' AND d.symbol IN ({})
+                  AND a.account_type = 'paper' AND a.status = 'active'
+                  AND a.enabled = 1 AND a.trading_enabled = 1
+                  AND a.auto_trading_enabled = 1
+                """.format(",".join("?" for _ in available_symbols)),
+                (self.llm_store.user_id, *list(available_symbols)),
+            )
+            return [
+                TradingStrategy.from_dict(json.loads(row["strategy_snapshot_json"]))
+                for row in rows
+                if row["strategy_snapshot_json"]
+            ]
+        except Exception as exc:
+            print(f"[LLMService] 加载模拟部署AI策略失败: {exc}")
+            return []
+
+    def _append_ai_source_to_plan(
+        self, plan: Dict[str, Dict], strategy, source: Dict,
+        due_only: bool, seen_sources: set,
+    ) -> None:
+        params = source.get("params") or {}
+        if params.get("analysis_mode", "self_analysis") == "shared_reference":
+            return
+        source_id = source["signal_source_id"]
+        source_key = (strategy.strategy_id, source_id)
+        if source_key in seen_sources:
+            return
+        interval = max(
+            1, int(params.get("analysis_interval_minutes", 5))
+        ) * 60
+        if due_only and (
+            time.monotonic()
+            - self._source_last_analysis_at.get(source_id, -interval)
+            < interval
+        ):
+            return
+        seen_sources.add(source_key)
+        period = source["period"]
+        symbol_plan = plan.setdefault(
+            strategy.symbol,
+            {"periods": {}, "strategies": []},
+        )
+        current = symbol_plan["periods"].get(
+            period, {"weight": 0, "kline_count": 0}
+        )
+        current["weight"] = max(current["weight"], int(source["weight"]))
+        current["kline_count"] = max(
+            current["kline_count"],
+            max(10, min(500, int(params.get("kline_count", 100)))),
+        )
+        symbol_plan["periods"][period] = current
+        symbol_plan["strategies"].append({
+            "strategy_id": strategy.strategy_id,
+            "strategy_name": strategy.strategy_name,
+            "signal_source_id": source_id,
+            "periods": {period: int(source["weight"])},
+            "min_confidence": int(
+                params.get("min_confidence", strategy.min_confidence)
+            ),
+            "min_risk_reward": strategy.min_risk_reward,
+            "analysis_interval_minutes": interval // 60,
+            "kline_count": int(params.get("kline_count", 100)),
+            "model": str(params.get("model") or ""),
+            "system_prompt": str(params.get("system_prompt") or ""),
+            "analysis_prompt_template": str(
+                params.get("analysis_prompt_template") or ""
+            ),
+            "share_runtime_data": bool(
+                params.get("share_runtime_data", False)
+            ),
+            "reference_runtime_ids": list(
+                params.get("reference_runtime_ids") or []
+            ),
+            "signal_params": dict(params),
+            "symbol": strategy.symbol,
+            "strategy_lifecycle": strategy.lifecycle_status,
+        })
 
     def _load_env_config(self):
         """从环境变量加载配置"""

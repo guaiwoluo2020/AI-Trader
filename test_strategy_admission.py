@@ -75,6 +75,53 @@ class StrategyAdmissionTests(unittest.TestCase):
                 self.user.user_id, self.strategy, StrategyLifecycle.PRODUCTION
             )
 
+    def test_ai_only_backtest_skips_trade_count_gate(self):
+        snapshot = self.strategy.to_dict()
+        now = 100
+        self.storage.execute(
+            """
+            INSERT INTO backtest_batches(
+                batch_id, user_id, batch_name, status, task_count,
+                strategy_id, strategy_name, strategy_snapshot_json,
+                strategy_snapshot_hash, template_snapshot_json, created_at
+            ) VALUES('batch-ai', ?, 'AI short run', 'completed', 1, ?, ?, ?, 'hash', '{}', ?)
+            """,
+            (
+                self.user.user_id, self.strategy.strategy_id,
+                self.strategy.strategy_name, json.dumps(snapshot), now,
+            ),
+        )
+        result = {
+            "enabled_signal_sources": ["ai_entry"],
+            "signal_source_trade_counts": {"ai_entry": 2},
+            "trade_count": 2,
+            "net_profit": 31.58,
+            "profit_factor": None,
+            "max_drawdown_pct": 0.01,
+            "win_rate_pct": 100,
+        }
+        self.storage.execute(
+            """
+            INSERT INTO backtest_tasks(
+                task_id, batch_id, user_id, status, progress,
+                dataset_file_path, dataset_snapshot_json, result_json,
+                created_at, completed_at
+            ) VALUES('task-ai', 'batch-ai', ?, 'completed', 100, '', '{}', ?, ?, ?)
+            """,
+            (self.user.user_id, json.dumps(result), now, now),
+        )
+
+        admission = self.service.evaluate(self.user.user_id, self.strategy)
+        trade_check = next(
+            item for item in admission["backtest"]["checks"]
+            if item["key"] == "trade_count"
+        )
+
+        self.assertTrue(admission["backtest"]["passed"])
+        self.assertTrue(admission["eligible_for_paper"])
+        self.assertTrue(trade_check["passed"])
+        self.assertTrue(trade_check["skipped"])
+
     def test_changed_strategy_invalidates_old_backtest(self):
         admission = self.service.evaluate(self.user.user_id, self.strategy)
         self.assertFalse(admission["backtest"]["passed"])

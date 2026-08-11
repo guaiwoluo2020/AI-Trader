@@ -190,9 +190,11 @@ class PaperTradingService:
         lifecycle = current.get("lifecycle_status", "draft")
         if lifecycle == "backtesting":
             strategy_model = TradingStrategy.from_dict(current)
-            checks = StrategyAdmissionService(self, self.storage)._checks(
+            admission = StrategyAdmissionService(self, self.storage)
+            checks = admission._checks(
                 result.get("trade_count", 0), result.get("net_profit", 0),
                 result.get("profit_factor"), result.get("max_drawdown_pct", 0),
+                skip_trade_count=admission._is_ai_only_backtest(result),
             )
             if not all(item["passed"] for item in checks):
                 raise ValueError("本次回测报告尚未达到策略准入门槛")

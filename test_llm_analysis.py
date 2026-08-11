@@ -2,14 +2,18 @@
 # -*- coding: utf-8 -*-
 """LLM 分析状态与错误处理测试。"""
 
+import json
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from market.llm_analyzer import LLMAnalyzer
 from market.models import TradingStrategy
 from market.services.llm_service import LLMRequestError, LLMService
+from sqlite_storage import SQLiteStorage, TradingAccountRepository, UserRepository
 
 
 class _Config:
@@ -86,6 +90,17 @@ class _StrategyStore:
 
     def get_all_strategies(self):
         return self.strategies
+
+
+class _RepoBackedStore(_Store):
+    def __init__(self, storage, user_id):
+        super().__init__()
+        self._repo = type("Repo", (), {"storage": storage})()
+        self._user_id = int(user_id)
+
+    @property
+    def user_id(self):
+        return self._user_id
 
 
 class LLMAnalysisTestCase(unittest.TestCase):
@@ -518,6 +533,59 @@ class LLMAnalysisTestCase(unittest.TestCase):
             [item["strategy_id"] for item in plan["GOLD_"]["strategies"]],
             [strategies[0].strategy_id],
         )
+
+    def test_paper_deployment_is_included_in_ai_analysis_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = SQLiteStorage(str(Path(temp_dir) / "paper-ai.db"))
+            storage.initialize()
+            user = UserRepository(storage).create_user("paper-ai", "hash", "salt")
+            account = TradingAccountRepository(storage).create_paper_account(
+                user.user_id, "Paper AI", 1000
+            )
+            strategy = TradingStrategy.from_dict({
+                "strategy_id": "paper-ai-strategy",
+                "strategy_name": "模拟AI策略",
+                "symbol": "GOLD_",
+                "enabled": False,
+                "auto_execute": False,
+                "lifecycle_status": "backtest_passed",
+                "signal_sources": [{
+                    "signal_source_id": "paper-ai-source",
+                    "source": "ai_entry",
+                    "enabled": True,
+                    "period": "M1",
+                    "weight": 30,
+                    "params": {"analysis_interval_minutes": 5},
+                }],
+            })
+            now = int(time.time())
+            storage.execute(
+                """
+                INSERT INTO strategy_deployments(
+                    deployment_id, user_id, account_id, strategy_id, symbol,
+                    strategy_snapshot_hash, strategy_snapshot_json,
+                    source_backtest_task_id, strategy_version_at, scheduled_end_at,
+                    execution_mode, status, created_at, updated_at
+                ) VALUES('paper-ai-deploy', ?, ?, ?, 'GOLD_', 'hash', ?,
+                         '', ?, NULL, 'paper', 'active', ?, ?)
+                """,
+                (
+                    user.user_id, account.account_id, strategy.strategy_id,
+                    json.dumps(strategy.to_dict()), now, now, now,
+                ),
+            )
+            service = LLMService(_RepoBackedStore(storage, user.user_id), _Klines())
+            service.set_strategy_store(_StrategyStore([]))
+            service.set_allowed_strategy_ids([])
+
+            plan = service._build_ai_analysis_plan(["GOLD_"], due_only=True)
+
+            self.assertEqual(set(plan), {"GOLD_"})
+            self.assertEqual(
+                plan["GOLD_"]["strategies"][0]["strategy_id"],
+                "paper-ai-strategy",
+            )
+            self.assertEqual(set(plan["GOLD_"]["periods"]), {"M1"})
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ class StrategyAdmissionService:
                 "min_profit_factor": self.MIN_PROFIT_FACTOR,
                 "max_drawdown_pct": self.MAX_DRAWDOWN_PCT,
                 "net_profit_must_be_positive": True,
+                "ai_only_backtest_skips_trade_count": True,
             },
             "backtest": backtest,
             "paper": paper,
@@ -86,6 +87,7 @@ class StrategyAdmissionService:
         checks = self._checks(
             result.get("trade_count", 0), result.get("net_profit", 0),
             result.get("profit_factor"), result.get("max_drawdown_pct", 0),
+            skip_trade_count=self._is_ai_only_backtest(result),
         )
         return {
             "passed": all(item["passed"] for item in checks),
@@ -131,10 +133,28 @@ class StrategyAdmissionService:
             "checks": checks,
         }
 
-    def _checks(self, trade_count, net_profit, profit_factor, drawdown) -> list:
+    @staticmethod
+    def _is_ai_only_backtest(result: Dict) -> bool:
+        sources = result.get("enabled_signal_sources") or []
+        if not sources and result.get("signal_source_trade_counts"):
+            sources = list(result["signal_source_trade_counts"])
+        return bool(sources) and set(sources) == {"ai_entry"}
+
+    def _checks(
+        self, trade_count, net_profit, profit_factor, drawdown,
+        skip_trade_count: bool = False,
+    ) -> list:
         effective_factor = float("inf") if profit_factor is None and net_profit > 0 else float(profit_factor or 0)
         return [
-            {"key": "trade_count", "label": f"交易次数 >= {self.MIN_TRADES}", "passed": int(trade_count) >= self.MIN_TRADES},
+            {
+                "key": "trade_count",
+                "label": (
+                    "交易次数：AI 专属回测不强制要求"
+                    if skip_trade_count else f"交易次数 >= {self.MIN_TRADES}"
+                ),
+                "passed": True if skip_trade_count else int(trade_count) >= self.MIN_TRADES,
+                "skipped": bool(skip_trade_count),
+            },
             {"key": "net_profit", "label": "净利润 > 0", "passed": float(net_profit) > 0},
             {"key": "profit_factor", "label": f"收益因子 >= {self.MIN_PROFIT_FACTOR}", "passed": effective_factor >= self.MIN_PROFIT_FACTOR},
             {"key": "max_drawdown_pct", "label": f"最大回撤 <= {self.MAX_DRAWDOWN_PCT}%", "passed": float(drawdown or 0) <= self.MAX_DRAWDOWN_PCT},
