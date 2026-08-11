@@ -11,7 +11,6 @@ from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import asyncio
 import json
-import random
 
 from auth import AuthUser, get_auth_manager, require_admin, require_auth
 from ea_auth import EAIdentity, require_ea_auth
@@ -20,7 +19,7 @@ from market.models.llm_config import (
     DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
     DEFAULT_SYSTEM_PROMPT,
 )
-from market.models.trading_strategy import AI_SIGNAL_MODELS
+from llm_governance import AI_SIGNAL_ANALYSIS, LLMGovernanceError, LLMGovernanceService
 from sqlite_storage import (
     LLMAccessRepository,
     LLMConfigRepository,
@@ -35,6 +34,8 @@ from strategy_admission import StrategyAdmissionService
 from web_account_context import resolve_web_engine
 from user_quotas import UserQuotaService
 from alpha_research import AlphaLibraryRepository
+from system_event_log import SystemEventLogRepository
+from market.system_log import get_system_log_broadcaster
 
 
 def create_market_routes(
@@ -44,8 +45,6 @@ def create_market_routes(
     router = APIRouter()
     protected_router = APIRouter(dependencies=[Depends(require_auth)])
 
-    # 增量K线日志打印概率 (5%)
-    KLINE_LOG_PROBABILITY = 0.05
     trade_config_repo = TradeConfigRepository()
     strategy_repo = StrategyConfigRepository()
     position_policy_repo = PositionManagementPolicyRepository()
@@ -55,6 +54,23 @@ def create_market_routes(
     quota_service = UserQuotaService()
     admission_service = StrategyAdmissionService(engine_manager.paper_trading)
     alpha_library = AlphaLibraryRepository()
+    llm_governance = LLMGovernanceService()
+    event_logs = SystemEventLogRepository()
+
+    def add_audit_event(
+        user: AuthUser, event_type: str, event_name: str, message: str,
+        detail: Optional[Dict] = None, entity_type: str = "",
+        entity_id: str = "",
+    ) -> None:
+        event_logs.add({
+            "level": "info", "category": "audit",
+            "event_type": event_type, "event_name": event_name,
+            "user_id": user.user_id, "actor_type": "user",
+            "actor_id": str(user.user_id), "message": message,
+            "status": "completed", "detail": detail or {},
+            "entity_type": entity_type, "entity_id": entity_id,
+            "correlation_id": entity_id,
+        })
 
     def bind_alpha_signal_snapshots(user: AuthUser, data: Dict) -> None:
         """Resolve validated Alpha definitions server-side and pin their version."""
@@ -107,6 +123,11 @@ def create_market_routes(
                 continue
             if not access["access_granted"]:
                 raise ValueError("自主AI分析仅对已开通大模型分析的付费用户开放")
+            options = llm_governance.scene_options(
+                user.user_id, AI_SIGNAL_ANALYSIS
+            )
+            if str(params.get("model") or "") not in options["models"]:
+                raise ValueError("AI入场信号选择的模型不在管理员开放列表中")
             for share_id in params.get("reference_runtime_ids") or []:
                 shared = shared_ai_runtime_repo.get_shared(str(share_id))
                 if shared is None:
@@ -216,7 +237,7 @@ def create_market_routes(
                 })
 
             # 记录日志
-            if is_full or random.random() < KLINE_LOG_PROBABILITY:
+            if is_full:
                 system_log = engine.system_log
                 event_type = "ea_kline_full" if is_full else "ea_kline_incremental"
                 system_log.add_log(
@@ -267,7 +288,7 @@ def create_market_routes(
                 result = kline_service.process_kline_data(symbol, period, klines, is_full)
                 results[period] = result
 
-                if is_full or random.random() < KLINE_LOG_PROBABILITY:
+                if is_full:
                     event_type = "ea_kline_full" if is_full else "ea_kline_incremental"
                     system_log.add_log(
                         event_type,
@@ -750,6 +771,11 @@ def create_market_routes(
                 user.user_id, strategy.to_dict()
             )
             engine_manager.refresh_user_strategies(user.user_id)
+            add_audit_event(
+                user, "strategy_created", "创建策略",
+                f"创建策略 {strategy.strategy_name}",
+                {"symbol": strategy.symbol}, "strategy", strategy.strategy_id,
+            )
             return {
                 "status": "ok",
                 "message": "策略已创建",
@@ -903,6 +929,12 @@ def create_market_routes(
                 user.user_id, strategy.to_dict()
             )
             engine_manager.refresh_user_strategies(user.user_id)
+            add_audit_event(
+                user, "strategy_updated", "修改策略",
+                f"修改策略 {strategy.strategy_name}",
+                {"changed_fields": sorted(data.keys())},
+                "strategy", strategy.strategy_id,
+            )
 
             return {
                 "status": "ok",
@@ -943,6 +975,12 @@ def create_market_routes(
                 user.user_id, strategy.to_dict()
             )
             engine_manager.refresh_user_strategies(user.user_id)
+            add_audit_event(
+                user, "strategy_lifecycle_changed", "策略生命周期变更",
+                f"策略进入 {strategy.lifecycle_status}",
+                {"target_status": target_status, "reason": reason},
+                "strategy", strategy.strategy_id,
+            )
             return {
                 "status": "ok",
                 "message": f"策略已进入“{strategy.to_dict()['lifecycle_label']}”状态",
@@ -991,6 +1029,11 @@ def create_market_routes(
                     )
         if success:
             engine_manager.refresh_user_strategies(user.user_id)
+            add_audit_event(
+                user, "strategy_deleted", "删除策略",
+                f"删除策略 {strategy_ref}", entity_type="strategy",
+                entity_id=strategy_ref,
+            )
             return {"status": "ok", "message": "策略配置已删除"}
         return {"status": "error", "message": "策略配置不存在"}
 
@@ -1013,34 +1056,82 @@ def create_market_routes(
 
     # ==================== 系统日志接口 ====================
 
-    @protected_router.get("/system/logs")
-    async def get_system_logs(count: int = 50, event_type: str = None,
-                               symbol: str = None,
-                               user: AuthUser = Depends(require_auth)) -> Dict:
-        """获取系统运行日志"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
-        system_log = engine.system_log
-
-        event_types = None
-        if event_type:
-            event_types = [et.strip() for et in event_type.split(',') if et.strip()]
-
-        logs = system_log.get_logs(count, event_types, symbol)
-        return {
-            "status": "ok",
-            "count": len(logs),
-            "logs": logs
+    def build_log_filters(user: AuthUser, values: Dict) -> Dict:
+        filters = {
+            key: values.get(key) for key in (
+                "account_id", "user_id", "symbol", "search", "start_at", "end_at",
+                "page", "page_size", "correlation_id",
+            ) if values.get(key) not in (None, "")
         }
+        for source, target in (
+            ("level", "levels"), ("category", "categories"),
+            ("event_type", "event_types"),
+        ):
+            if values.get(source):
+                filters[target] = [
+                    item.strip() for item in str(values[source]).split(",")
+                    if item.strip()
+                ]
+        if user.role != "admin":
+            filters["user_id"] = user.user_id
+            account_id = filters.get("account_id")
+            if account_id and TradingAccountRepository().get_by_id(
+                user.user_id, int(account_id)
+            ) is None:
+                raise HTTPException(status_code=404, detail="交易账户不存在")
+        return filters
 
-    @protected_router.delete("/system/logs")
-    async def clear_system_logs(
+    @protected_router.get("/system/logs")
+    async def get_system_logs(
+        page: int = 1, page_size: int = 50,
+        level: Optional[str] = None, category: Optional[str] = None,
+        event_type: Optional[str] = None, symbol: Optional[str] = None,
+        search: Optional[str] = None, account_id: Optional[int] = None,
+        user_id: Optional[int] = None, start_at: Optional[int] = None,
+        end_at: Optional[int] = None, correlation_id: Optional[str] = None,
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        """清空系统日志"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
-        system_log = engine.system_log
-        system_log.clear_logs()
-        return {"status": "ok", "message": "日志已清空"}
+        """Tenant-scoped event search; administrators may search the platform."""
+        filters = build_log_filters(user, locals())
+        result = event_logs.list(filters)
+        return {
+            "status": "ok", "logs": result["items"],
+            "total": result["total"], "page": result["page"],
+            "page_size": result["page_size"],
+            "facets": event_logs.facets(None if user.role == "admin" else user.user_id),
+        }
+
+    @protected_router.get("/system/logs/summary")
+    async def get_system_log_summary(
+        level: Optional[str] = None, category: Optional[str] = None,
+        account_id: Optional[int] = None, user_id: Optional[int] = None,
+        start_at: Optional[int] = None, end_at: Optional[int] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        filters = build_log_filters(user, locals())
+        return {"status": "ok", "summary": event_logs.summary(filters)}
+
+    @protected_router.post("/admin/system/logs/purge")
+    async def purge_system_logs(
+        request: Request, user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        data = await request.json()
+        before = int(data.get("before") or 0)
+        if before <= 0:
+            raise HTTPException(status_code=400, detail="必须指定日志保留截止时间")
+        deleted = event_logs.purge_operational(before)
+        event_logs.add({
+            "level": "warning", "category": "audit",
+            "event_type": "system_log_purged", "event_name": "清理运行日志",
+            "user_id": user.user_id, "actor_type": "user",
+            "actor_id": str(user.user_id), "status": "completed",
+            "message": f"管理员清理了 {deleted} 条过期运行日志",
+            "detail": {"before": before, "deleted": deleted},
+        })
+        return {
+            "status": "ok", "deleted": deleted,
+            "message": f"已清理 {deleted} 条过期运行日志，审计日志未删除",
+        }
 
     # ==================== WebSocket接口 ====================
 
@@ -1103,6 +1194,44 @@ def create_market_routes(
                 )
                 engine.remove_ws_client(websocket)
 
+    @router.websocket("/ws/system-logs")
+    async def websocket_system_logs(websocket: WebSocket):
+        """Authenticated live event stream with tenant filtering."""
+        await websocket.accept()
+        broadcaster = get_system_log_broadcaster()
+        subscribed = False
+        try:
+            auth_text = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            auth_message = json.loads(auth_text)
+            if auth_message.get("type") != "auth" or not auth_message.get("token"):
+                await websocket.close(code=1008, reason="请先登录")
+                return
+            user = get_auth_manager().verify_token(auth_message["token"])
+            account_id = auth_message.get("account_id")
+            if account_id is not None:
+                account_id = int(account_id)
+            if user.role != "admin" and account_id and TradingAccountRepository().get_by_id(
+                user.user_id, account_id
+            ) is None:
+                await websocket.close(code=1008, reason="交易账户不存在")
+                return
+            broadcaster.add(
+                websocket, user.user_id, account_id, user.role == "admin"
+            )
+            subscribed = True
+            await websocket.send_text(json.dumps({
+                "type": "connected", "message": "日志实时流已连接",
+            }))
+            while True:
+                payload = json.loads(await websocket.receive_text())
+                if payload.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+        except (asyncio.TimeoutError, WebSocketDisconnect, json.JSONDecodeError):
+            pass
+        finally:
+            if subscribed:
+                broadcaster.remove(websocket)
+
     # ==================== 大模型分析接口 ====================
 
     def require_llm_access(user: AuthUser) -> Dict:
@@ -1142,7 +1271,9 @@ def create_market_routes(
         return {
             "status": "ok",
             "access_granted": access["access_granted"],
-            "models": list(AI_SIGNAL_MODELS),
+            "models": llm_governance.scene_options(
+                user.user_id, AI_SIGNAL_ANALYSIS
+            )["models"],
             "default_system_prompt": DEFAULT_SYSTEM_PROMPT,
             "default_analysis_prompt_template": DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
             "shared_runtime_data": shared,
@@ -1331,8 +1462,68 @@ def create_market_routes(
         """管理员获取共享大模型配置。"""
         return {
             "status": "ok",
-            "config": llm_config_repo.get_config(user.user_id).to_dict()
+            "config": llm_config_repo.get_config(user.user_id).to_dict(),
+            "governance": llm_governance.overview(),
         }
+
+    @protected_router.get("/llm/scenes/{scene_code}")
+    async def get_llm_scene_options(
+        scene_code: str, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        try:
+            return {
+                "status": "ok",
+                "scene": llm_governance.scene_options(user.user_id, scene_code),
+            }
+        except LLMGovernanceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @protected_router.post("/admin/llm/models/sync")
+    async def sync_llm_models(user: AuthUser = Depends(require_admin)) -> Dict:
+        try:
+            models = llm_governance.sync_models()
+            add_audit_event(
+                user, "llm_models_synced", "同步大模型列表",
+                f"同步到 {len(models)} 个模型",
+            )
+            return {"status": "ok", "message": f"已同步 {len(models)} 个模型", "models": models}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @protected_router.put("/admin/llm/models/{model_id:path}")
+    async def update_llm_model(
+        model_id: str, request: Request, user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        try:
+            data = await request.json()
+            llm_governance.set_model_enabled(model_id, bool(data.get("enabled")))
+            add_audit_event(
+                user, "llm_model_status_changed", "修改大模型状态",
+                f"模型 {model_id} 已{'启用' if data.get('enabled') else '停用'}",
+                {"enabled": bool(data.get("enabled"))}, "llm_model", model_id,
+            )
+            return {"status": "ok", "models": llm_governance.list_models()}
+        except LLMGovernanceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @protected_router.put("/admin/llm/scenes/{scene_code}")
+    async def update_llm_scene(
+        scene_code: str, request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        try:
+            scene = llm_governance.save_scene(
+                scene_code, await request.json(), user.user_id
+            )
+            add_audit_event(
+                user, "llm_scene_updated", "修改大模型场景",
+                f"修改场景 {scene['display_name']}",
+                {"models": scene["model_ids"], "enabled": scene["enabled"]},
+                "llm_scene", scene_code,
+            )
+            return {"status": "ok", "scene": scene}
+        except LLMGovernanceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @protected_router.post("/llm/trigger")
     async def trigger_llm_analysis(
@@ -1371,6 +1562,13 @@ def create_market_routes(
                 model=data.get("model"),
                 system_prompt=data.get("system_prompt"),
                 analysis_prompt_template=data.get("analysis_prompt_template"),
+            )
+            add_audit_event(
+                user, "llm_provider_configured", "修改大模型服务配置",
+                "管理员更新了大模型服务配置",
+                {"changed_fields": sorted(data.keys()), "api_base": config.api_base,
+                 "model": config.model},
+                "llm_provider", "default",
             )
             return {"status": "ok", "data": result}
         except Exception as e:

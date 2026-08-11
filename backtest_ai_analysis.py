@@ -12,7 +12,8 @@ from typing import Callable, Dict, List, Optional
 from market.services.llm_service import LLMRequestError, LLMService
 from market.models import TradingStrategy
 from market.store.llm_store import LLMStore
-from sqlite_storage import LLMAccessRepository, SQLiteStorage, get_storage
+from sqlite_storage import SQLiteStorage, get_storage
+from llm_governance import BACKTEST_REPORT_ANALYSIS
 
 
 class BacktestAIAnalysisService:
@@ -25,7 +26,6 @@ class BacktestAIAnalysisService:
         llm_factory: Optional[Callable[[int], LLMService]] = None,
     ):
         self.storage = storage or get_storage()
-        self.access = LLMAccessRepository(self.storage)
         self._llm_factory = llm_factory or self._create_llm_service
         self._lock = threading.RLock()
         self._running_task_ids = set()
@@ -57,13 +57,20 @@ class BacktestAIAnalysisService:
             raise LookupError("回测任务不存在")
         if task["status"] not in self.ALLOWED_TASK_STATUSES:
             raise ValueError("只有已完成或已取消的回测任务可以进行 AI 分析")
-        if not self.access.get_status(user_id, user_role)["access_granted"]:
-            raise PermissionError("大模型行情分析功能尚未开通")
-
         llm_service = self._llm_factory(user_id)
-        config = llm_service.llm_store.get_config()
-        if not config.enabled:
-            raise ValueError("管理员尚未配置可用的大模型服务")
+        governance = getattr(llm_service, "_llm_governance", None)
+        if governance is not None:
+            scene = governance.scene_options(
+                user_id, BACKTEST_REPORT_ANALYSIS
+            )
+            if user_role != "admin" and scene["quota"]["remaining"] <= 0:
+                from llm_governance import LLMQuotaExceeded
+                raise LLMQuotaExceeded(
+                    f"今日免费大模型调用额度（{scene['quota']['limit']}次）已用完，明日可继续使用"
+                )
+            model = scene["default_model_id"]
+        else:
+            model = llm_service.llm_store.get_config().model
 
         current = self.get_analysis(user_id, task_id)
         if current["status"] in self.ACTIVE_STATUSES:
@@ -83,7 +90,7 @@ class BacktestAIAnalysisService:
                 result_json = '{}', error_message = '', updated_at = excluded.updated_at,
                 completed_at = NULL
             """,
-            (task_id, user_id, config.model, now, now),
+            (task_id, user_id, model, now, now),
         )
         with self._lock:
             if task_id not in self._running_task_ids:
@@ -109,7 +116,12 @@ class BacktestAIAnalysisService:
                 """,
                 (prompt_hash, int(time.time()), user_id, task_id),
             )
-            result = llm_service.call_llm_stream(prompt)
+            result = llm_service.call_llm_stream(
+                prompt,
+                scene_code=BACKTEST_REPORT_ANALYSIS,
+                object_type="backtest_task",
+                object_id=task_id,
+            )
             normalized = self._normalize_result(result)
             now = int(time.time())
             self.storage.execute(

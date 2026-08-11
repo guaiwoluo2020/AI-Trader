@@ -390,13 +390,14 @@
                   ></v-text-field>
                 </v-col>
                 <v-col cols="12" md="4">
-                  <v-text-field
+                  <v-select
                     v-model="llmConfig.model"
+                    :items="enabledLLMModelIds"
                     label="模型名称"
                     dense
                     hide-details
                     placeholder="gpt-4o-mini"
-                  ></v-text-field>
+                  ></v-select>
                 </v-col>
               </v-row>
               <v-expansion-panels class="mt-4" variant="accordion">
@@ -466,6 +467,66 @@
                 </v-col>
               </v-row>
             </v-form>
+
+            <div v-if="isAdmin" class="mt-6 llm-governance-panel">
+              <div class="d-flex align-center justify-space-between mb-3">
+                <div>
+                  <div class="font-weight-bold">模型目录与场景路由</div>
+                  <div class="text-caption text-medium-emphasis">
+                    模型来自 API Base 的 /models；低频场景共享每日 {{ llmGovernance.free_daily_limit || 30 }} 次免费额度
+                  </div>
+                </div>
+                <v-btn
+                  color="primary" variant="tonal" prepend-icon="mdi-sync"
+                  :loading="llmModelsSyncing" @click="syncLLMModels"
+                >同步模型</v-btn>
+              </div>
+              <v-chip
+                v-for="model in llmGovernance.models" :key="model.model_id"
+                class="mr-2 mb-2" :color="model.enabled ? 'success' : 'grey'"
+                :variant="model.enabled ? 'flat' : 'tonal'"
+                :disabled="!model.available"
+                @click="toggleLLMModel(model)"
+              >
+                {{ model.model_id }}{{ model.available ? '' : '（已离线）' }}
+              </v-chip>
+
+              <v-row class="mt-2">
+                <v-col v-for="scene in llmGovernance.scenes" :key="scene.scene_code" cols="12" md="6">
+                  <v-card variant="outlined" class="pa-4 h-100">
+                    <div class="d-flex align-center justify-space-between">
+                      <div>
+                        <strong>{{ scene.display_name }}</strong>
+                        <div class="text-caption text-medium-emphasis">
+                          {{ scene.frequency_class === 'high' ? '高频 · 需要开通' : '低频 · 使用免费额度' }}
+                        </div>
+                      </div>
+                      <v-switch v-model="scene.enabled" color="success" hide-details density="compact" />
+                    </div>
+                    <v-select
+                      v-model="scene.model_ids" :items="enabledLLMModelIds"
+                      label="允许使用的模型" multiple chips closable-chips class="mt-3"
+                    />
+                    <v-select
+                      v-model="scene.default_model_id" :items="scene.model_ids"
+                      label="默认模型"
+                    />
+                    <v-switch
+                      v-model="scene.allow_user_selection" color="success" hide-details
+                      label="允许用户选择模型"
+                    />
+                    <v-btn block variant="tonal" color="primary" class="mt-3" @click="saveLLMScene(scene)">
+                      保存场景配置
+                    </v-btn>
+                  </v-card>
+                </v-col>
+              </v-row>
+            </div>
+
+            <v-alert v-else type="info" variant="tonal" class="mt-4">
+              回测报告和 Alpha 研究无需申请开通，共享每日 30 次免费大模型调用额度；
+              今日剩余 {{ llmFreeQuota.remaining }} / {{ llmFreeQuota.limit }} 次。行情 AI 信号仍需申请开通。
+            </v-alert>
 
             <div class="text-caption grey--text mt-3">
               <v-icon small>mdi-information</v-icon>
@@ -886,6 +947,11 @@ export default {
     const showApiKey = ref(false)
     const llmSaving = ref(false)
     const llmPromptResetting = ref(false)
+    const llmModelsSyncing = ref(false)
+    const llmGovernance = ref({ models: [], scenes: [], free_daily_limit: 30 })
+    const enabledLLMModelIds = computed(() => llmGovernance.value.models
+      .filter(model => model.enabled && model.available)
+      .map(model => model.model_id))
     const llmAccess = ref({
       status: 'not_requested',
       access_granted: false,
@@ -894,6 +960,7 @@ export default {
       review_note: ''
     })
     const llmAccessRequesting = ref(false)
+    const llmFreeQuota = ref({ limit: 30, used: 0, remaining: 30 })
     const llmAccessRequests = ref([])
     const llmRequestsLoading = ref(false)
     const llmReviewingId = ref(null)
@@ -1138,6 +1205,7 @@ export default {
             symbol_config: data.config.symbol_config || {}
           }
         }
+        if (data.governance) llmGovernance.value = data.governance
       } catch (err) {
         console.error('加载交易配置失败:', err)
       }
@@ -1247,6 +1315,15 @@ export default {
       }
     }
 
+    const loadLLMFreeQuota = async () => {
+      try {
+        const data = await marketAPI.getLLMScene('backtest_report_analysis')
+        if (data.scene?.quota) llmFreeQuota.value = data.scene.quota
+      } catch (err) {
+        console.error('加载大模型免费额度失败:', err)
+      }
+    }
+
     const requestLLMAccess = async () => {
       llmAccessRequesting.value = true
       try {
@@ -1340,6 +1417,45 @@ export default {
       }
     }
 
+    const syncLLMModels = async () => {
+      llmModelsSyncing.value = true
+      try {
+        const data = await marketAPI.syncLLMModels()
+        llmGovernance.value.models = data.models || []
+        successMessage.value = data.message || '模型列表已同步'
+        showSuccess.value = true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '模型同步失败'
+        showError.value = true
+      } finally {
+        llmModelsSyncing.value = false
+      }
+    }
+
+    const toggleLLMModel = async (model) => {
+      if (!model.available) return
+      try {
+        const data = await marketAPI.setLLMModelEnabled(model.model_id, !model.enabled)
+        llmGovernance.value.models = data.models || []
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '模型状态更新失败'
+        showError.value = true
+      }
+    }
+
+    const saveLLMScene = async (scene) => {
+      try {
+        const data = await marketAPI.saveLLMScene(scene.scene_code, scene)
+        const index = llmGovernance.value.scenes.findIndex(item => item.scene_code === scene.scene_code)
+        if (index >= 0) llmGovernance.value.scenes[index] = data.scene
+        successMessage.value = `${scene.display_name}配置已保存`
+        showSuccess.value = true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '场景配置保存失败'
+        showError.value = true
+      }
+    }
+
     const resetLLMPrompts = async () => {
       if (!confirm('确定恢复系统默认提示词吗？当前自定义内容将被覆盖。')) return
       llmPromptResetting.value = true
@@ -1392,7 +1508,7 @@ export default {
     const alphaLibrary = ref([])
     const aiSignalOptions = reactive({
       accessGranted: false,
-      models: ['deepseek-v4-pro', 'deepseek-v4-flash', 'glm-5.2', 'qwen3.7-max', 'qwen3.8-max'],
+      models: [],
       defaultSystemPrompt: '',
       defaultAnalysisPromptTemplate: '',
       sharedRuntimeData: []
@@ -1571,7 +1687,7 @@ export default {
               analysis_mode: 'self_analysis',
               analysis_interval_minutes: Math.max(5, periodMinutes(period)), kline_count: 100,
               min_confidence: 70, entry_threshold: 0.0001,
-              model: aiSignalOptions.models[0] || 'deepseek-v4-pro',
+              model: aiSignalOptions.models[0] || '',
               system_prompt: aiSignalOptions.defaultSystemPrompt,
               analysis_prompt_template: aiSignalOptions.defaultAnalysisPromptTemplate,
               share_runtime_data: false,
@@ -1591,7 +1707,7 @@ export default {
       }
       if (newSignalSource.source === 'ai_entry') {
         newSignalSource.params.analysis_mode ||= 'self_analysis'
-        newSignalSource.params.model ||= aiSignalOptions.models[0] || 'deepseek-v4-pro'
+        newSignalSource.params.model ||= aiSignalOptions.models[0] || ''
         newSignalSource.params.system_prompt ||= aiSignalOptions.defaultSystemPrompt
         newSignalSource.params.analysis_prompt_template ||= aiSignalOptions.defaultAnalysisPromptTemplate
         newSignalSource.params.share_runtime_data ??= false
@@ -2242,6 +2358,7 @@ export default {
         loadAdminWorkspace()
       } else {
         loadLLMAccess()
+        loadLLMFreeQuota()
         loadMyQuota()
       }
     })
@@ -2291,9 +2408,16 @@ export default {
       showApiKey,
       llmSaving,
       llmPromptResetting,
+      llmModelsSyncing,
+      llmGovernance,
+      enabledLLMModelIds,
       saveLLMConfig,
+      syncLLMModels,
+      toggleLLMModel,
+      saveLLMScene,
       resetLLMPrompts,
       llmAccess,
+      llmFreeQuota,
       llmAccessLabel,
       llmAccessColor,
       llmAccessDescription,

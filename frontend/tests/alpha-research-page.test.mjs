@@ -67,3 +67,13 @@ test('validated Alpha can be published and selected as a strategy signal source'
   assert.match(settings, /已验证 Alpha/)
   assert.match(settings, /onAlphaSelected/)
 })
+
+test('Alpha report exposes layered independent residual and ablation experiments', () => {
+  assert.match(view, /独立因子评估 · 每个 Trial 门槛/)
+  assert.match(view, /残差评估 · 本轮 Top 5 增量信息/)
+  assert.match(view, /最终消融实验 · N\+1 组合/)
+  assert.match(view, /残差调整后/)
+  assert.match(view, /可能冗余/)
+  assert.match(view, /independent_pruned_trials/)
+  assert.match(view, /residual_candidates/)
+})

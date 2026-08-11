@@ -500,6 +500,10 @@ class AlphaLibraryRepository:
             "parameter_robustness": result.get("parameter_robustness") or [],
             "subperiod_robustness": result.get("subperiod_robustness") or [],
             "library_correlations": result.get("library_correlations") or [],
+            "independent_evaluation": result.get("independent_evaluation") or {},
+            "residual_evaluation": result.get("residual_evaluation") or {},
+            "ablation_experiment": result.get("ablation_experiment") or {},
+            "experiment_cost": result.get("experiment_cost") or {},
         }
         self.storage.execute(
             """
@@ -548,6 +552,7 @@ class AlphaLibraryRepository:
             (abs(float(item.get("correlation", 0))) for item in correlations),
             default=0.0,
         )
+        ablation = result.get("ablation_experiment") or {}
         values = [
             ("coverage", "因子有效覆盖率", float(metrics.get("factor_coverage", 0)), 0.8, ">="),
             ("rolling_samples", "滚动 IC 样本", float(metrics.get("rolling_ic_count", 0)), 3, ">="),
@@ -558,6 +563,7 @@ class AlphaLibraryRepository:
             ("hidden_rank_ic", "隐藏测试 Rank IC", float(hidden.get("rank_ic", 0)), 0, ">"),
             ("subperiods", "分时段正 Rank IC 比例", positive_subperiod_ratio, 0.66, ">="),
             ("orthogonality", "与已有 Alpha 最大相关", max_library_correlation, 0.85, "<="),
+            ("ablation", "消融有效因子比例", float(ablation.get("useful_factor_ratio", 0)), 0.5, ">="),
         ]
         checks = [{
             "key": key, "label": label, "value": round(value, 8),
@@ -609,20 +615,34 @@ class AlphaBacktestEngine:
         return frame.reset_index(drop=True)
 
     def calculate_alpha(self, frame: pd.DataFrame, config: Dict, params: Dict) -> pd.Series:
-        parts = []
-        for index, factor in enumerate(config["factors"]):
-            length = int(params.get(f"factor_{index}_length", factor["length_min"]))
-            weight = float(params.get(f"factor_{index}_weight", factor.get("weight_min", 1)))
-            values = self.catalog.calculate(frame, factor["name"], length)
-            normalized = self._preprocess_factor(values, length)
-            parts.append(normalized * weight)
-        if not parts:
+        components = self.calculate_factor_components(frame, config, params)
+        if not components:
             raise ValueError("至少需要选择一个因子")
-        alpha = sum(parts)
-        weight_total = sum(abs(float(params.get(
-            f"factor_{index}_weight", factor.get("weight_min", 1)
-        ))) for index, factor in enumerate(config["factors"]))
+        alpha = sum(item["values"] * item["weight"] for item in components)
+        weight_total = sum(abs(item["weight"]) for item in components)
         return alpha / max(weight_total, 1e-9)
+
+    def calculate_factor_components(
+        self, frame: pd.DataFrame, config: Dict, params: Dict,
+    ) -> List[Dict]:
+        """Return the exact causal factor series used by the composite Alpha."""
+        components = []
+        for index, factor in enumerate(config["factors"]):
+            length = int(params.get(
+                f"factor_{index}_length", factor["length_min"]
+            ))
+            weight = float(params.get(
+                f"factor_{index}_weight", factor.get("weight_min", 1)
+            ))
+            raw = self.catalog.calculate(frame, factor["name"], length)
+            components.append({
+                "index": index,
+                "name": factor["name"],
+                "length": length,
+                "weight": weight,
+                "values": self._preprocess_factor(raw, length),
+            })
+        return components
 
     @staticmethod
     def _preprocess_factor(values: pd.Series, length: int) -> pd.Series:
@@ -640,8 +660,15 @@ class AlphaBacktestEngine:
     def run(
         self, frame: pd.DataFrame, config: Dict, params: Dict,
         evaluation_start: int = 0, include_trades: bool = True,
+        alpha_override: Optional[pd.Series] = None,
     ) -> BacktestResult:
-        alpha = self.calculate_alpha(frame, config, params)
+        alpha = (
+            pd.Series(alpha_override).reset_index(drop=True)
+            if alpha_override is not None
+            else self.calculate_alpha(frame, config, params)
+        )
+        if len(alpha) != len(frame):
+            raise ValueError("预计算 Alpha 长度与行情数据不一致")
         buy_threshold = float(params.get("buy_threshold", config["buy_threshold_min"]))
         sell_threshold = float(params.get("sell_threshold", config["sell_threshold_max"]))
         signals = pd.Series(0, index=frame.index, dtype="int8")
@@ -1161,6 +1188,248 @@ class AlphaOptimizationEngine:
         self.backtest = AlphaBacktestEngine()
         self.candidate_service = candidate_service or AlphaCandidateService()
 
+    def independent_evaluation(
+        self, frame: pd.DataFrame, config: Dict, params: Dict,
+        evaluation_start: int = 0,
+        components: Optional[List[Dict]] = None,
+    ) -> Dict:
+        """Cheap per-factor gate executed for every Optuna trial."""
+        started = time.monotonic()
+        horizon = int(config["prediction_horizon"])
+        future = frame["close"].shift(-horizon).div(frame["close"]).sub(1)
+        start = max(0, min(int(evaluation_start), len(frame)))
+        future = future.iloc[start:]
+        rows = []
+        factor_components = components or self.backtest.calculate_factor_components(
+            frame, config, params
+        )
+        for component in factor_components:
+            direction = -1.0 if component["weight"] < 0 else 1.0
+            values = (component["values"] * direction).iloc[start:]
+            valid = values.notna() & future.notna()
+            sample_count = int(valid.sum())
+            coverage = sample_count / max(1, int(future.notna().sum()))
+            rank_ic = values[valid].rank().corr(future[valid].rank())
+            rank_ic = float(rank_ic) if pd.notna(rank_ic) else 0.0
+            rolling = self.backtest._rolling_ic(values, future)
+            stable_ratio = float(rolling.get("positive_rank_ic_ratio", 0))
+            standard_deviation = float(values[valid].std()) if sample_count else 0.0
+            passed = bool(
+                sample_count >= 20
+                and coverage >= 0.6
+                and math.isfinite(standard_deviation)
+                and standard_deviation > 1e-9
+                and abs(rank_ic) >= 0.001
+            )
+            rows.append({
+                "factor_index": component["index"],
+                "name": component["name"],
+                "length": component["length"],
+                "weight": round(component["weight"], 6),
+                "coverage": round(coverage, 6),
+                "sample_count": sample_count,
+                "rank_ic": round(rank_ic, 6),
+                "positive_rank_ic_ratio": round(stable_ratio, 6),
+                "standard_deviation": round(standard_deviation, 8),
+                "passed": passed,
+            })
+        mean_rank_ic = float(np.mean([item["rank_ic"] for item in rows])) if rows else 0.0
+        mean_positive_ratio = float(np.mean([
+            item["positive_rank_ic_ratio"] for item in rows
+        ])) if rows else 0.0
+        adjustment = (
+            float(np.clip(mean_rank_ic, -0.05, 0.05)) * 10
+            + (mean_positive_ratio - 0.5) * 0.25
+        )
+        return {
+            "passed": bool(rows) and all(item["passed"] for item in rows),
+            "factor_count": len(rows),
+            "mean_rank_ic": round(mean_rank_ic, 6),
+            "mean_positive_rank_ic_ratio": round(mean_positive_ratio, 6),
+            "score_adjustment": round(adjustment, 6),
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "factors": rows,
+        }
+
+    def residual_evaluation(
+        self, frame: pd.DataFrame, train_end: int,
+        config: Dict, params: Dict,
+    ) -> Dict:
+        """Fit factor residuals on train and measure incremental IC on validation."""
+        started = time.monotonic()
+        horizon = int(config["prediction_horizon"])
+        future = frame["close"].shift(-horizon).div(frame["close"]).sub(1)
+        components = self.backtest.calculate_factor_components(frame, config, params)
+        oriented = [
+            item["values"] * (-1.0 if item["weight"] < 0 else 1.0)
+            for item in components
+        ]
+        rows = []
+        for index, component in enumerate(components):
+            target = oriented[index]
+            peers = [values for peer_index, values in enumerate(oriented) if peer_index != index]
+            residual = target.copy()
+            if peers:
+                peer_frame = pd.concat(peers, axis=1)
+                train_data = pd.concat(
+                    [target.rename("target"), peer_frame], axis=1
+                ).iloc[:train_end].dropna()
+                if len(train_data) >= max(20, len(peers) + 5):
+                    train_x = train_data.iloc[:, 1:].to_numpy(dtype=float)
+                    train_x = np.column_stack([np.ones(len(train_x)), train_x])
+                    coefficients = np.linalg.lstsq(
+                        train_x, train_data["target"].to_numpy(dtype=float),
+                        rcond=None,
+                    )[0]
+                    available = pd.concat(
+                        [target.rename("target"), peer_frame], axis=1
+                    ).dropna()
+                    apply_x = available.iloc[:, 1:].to_numpy(dtype=float)
+                    apply_x = np.column_stack([np.ones(len(apply_x)), apply_x])
+                    residual = pd.Series(np.nan, index=frame.index, dtype=float)
+                    residual.loc[available.index] = (
+                        available["target"].to_numpy(dtype=float)
+                        - apply_x.dot(coefficients)
+                    )
+            validation_target = target.iloc[train_end:]
+            validation_residual = residual.iloc[train_end:]
+            validation_future = future.iloc[train_end:]
+            raw_valid = validation_target.notna() & validation_future.notna()
+            residual_valid = validation_residual.notna() & validation_future.notna()
+            raw_rank_ic = validation_target[raw_valid].rank().corr(
+                validation_future[raw_valid].rank()
+            )
+            residual_rank_ic = validation_residual[residual_valid].rank().corr(
+                validation_future[residual_valid].rank()
+            )
+            raw_rank_ic = float(raw_rank_ic) if pd.notna(raw_rank_ic) else 0.0
+            residual_rank_ic = (
+                float(residual_rank_ic) if pd.notna(residual_rank_ic) else 0.0
+            )
+            rolling = self.backtest._rolling_ic(
+                validation_residual, validation_future
+            )
+            target_std = float(validation_target[raw_valid].std()) if raw_valid.any() else 0.0
+            residual_std = (
+                float(validation_residual[residual_valid].std())
+                if residual_valid.any() else 0.0
+            )
+            rows.append({
+                "factor_index": component["index"],
+                "name": component["name"],
+                "raw_rank_ic": round(raw_rank_ic, 6),
+                "residual_rank_ic": round(residual_rank_ic, 6),
+                "incremental_rank_ic": round(residual_rank_ic, 6),
+                "retained_variance_ratio": round(
+                    residual_std / target_std if target_std > 1e-12 else 0.0, 6
+                ),
+                "positive_rank_ic_ratio": rolling.get(
+                    "positive_rank_ic_ratio", 0.0
+                ),
+                "sample_count": int(residual_valid.sum()),
+            })
+        mean_incremental = float(np.mean([
+            item["incremental_rank_ic"] for item in rows
+        ])) if rows else 0.0
+        mean_positive_ratio = float(np.mean([
+            item["positive_rank_ic_ratio"] for item in rows
+        ])) if rows else 0.0
+        adjustment = (
+            float(np.clip(mean_incremental, -0.05, 0.05)) * 20
+            + (mean_positive_ratio - 0.5) * 0.5
+        )
+        return {
+            "factor_count": len(rows),
+            "mean_incremental_rank_ic": round(mean_incremental, 6),
+            "mean_positive_rank_ic_ratio": round(mean_positive_ratio, 6),
+            "score_adjustment": round(adjustment, 6),
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "factors": rows,
+        }
+
+    def ablation_experiment(
+        self, frame: pd.DataFrame, evaluation_start: int,
+        config: Dict, params: Dict, baseline: BacktestResult,
+    ) -> Dict:
+        """Run the final baseline plus one variant with each factor removed."""
+        started = time.monotonic()
+        variants = [{
+            "variant": "baseline", "removed_factor": None,
+            "score": baseline.score,
+            "score_delta": 0.0,
+            "rank_ic": baseline.metrics.get("rank_ic", 0),
+            "rank_ic_delta": 0.0,
+            "turnover": baseline.metrics.get("turnover", 0),
+            "contribution": "baseline",
+        }]
+        factors = config.get("factors") or []
+        for removed_index, removed_factor in enumerate(factors):
+            reduced_factors = [
+                factor for index, factor in enumerate(factors)
+                if index != removed_index
+            ]
+            if not reduced_factors:
+                variants.append({
+                    "variant": "remove_factor",
+                    "removed_factor": removed_factor["name"],
+                    "score": None, "score_delta": None,
+                    "rank_ic": None, "rank_ic_delta": None,
+                    "turnover": None, "contribution": "sole_factor",
+                })
+                continue
+            reduced_config = {**config, "factors": reduced_factors}
+            reduced_params = {
+                key: value for key, value in params.items()
+                if not key.startswith("factor_")
+            }
+            next_index = 0
+            for original_index in range(len(factors)):
+                if original_index == removed_index:
+                    continue
+                reduced_params[f"factor_{next_index}_length"] = params[
+                    f"factor_{original_index}_length"
+                ]
+                reduced_params[f"factor_{next_index}_weight"] = params[
+                    f"factor_{original_index}_weight"
+                ]
+                next_index += 1
+            result = self.backtest.run(
+                frame, reduced_config, reduced_params,
+                evaluation_start=evaluation_start, include_trades=False,
+            )
+            score_delta = baseline.score - result.score
+            rank_ic_delta = (
+                float(baseline.metrics.get("rank_ic", 0))
+                - float(result.metrics.get("rank_ic", 0))
+            )
+            variants.append({
+                "variant": "remove_factor",
+                "removed_factor": removed_factor["name"],
+                "score": result.score,
+                "score_delta": round(score_delta, 6),
+                "rank_ic": result.metrics.get("rank_ic", 0),
+                "rank_ic_delta": round(rank_ic_delta, 6),
+                "turnover": result.metrics.get("turnover", 0),
+                "contribution": (
+                    "essential" if score_delta >= 1.0 or rank_ic_delta >= 0.02
+                    else "useful" if score_delta >= 0.1 or rank_ic_delta >= 0.005
+                    else "redundant"
+                ),
+            })
+        removable = [item for item in variants if item["variant"] == "remove_factor"]
+        useful = [
+            item for item in removable
+            if item["contribution"] in {"essential", "useful", "sole_factor"}
+        ]
+        return {
+            "variant_count": len(variants),
+            "useful_factor_ratio": round(
+                len(useful) / max(1, len(removable)), 6
+            ),
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "variants": variants,
+        }
+
     def run(self, task: Dict) -> Tuple[Dict, Dict, List[Dict], List[Dict]]:
         try:
             import optuna
@@ -1191,6 +1460,10 @@ class AlphaOptimizationEngine:
         history = []
         global_best = None
         completed_total = 0
+        pruned_total = 0
+        independent_duration_ms = 0
+        residual_candidate_total = 0
+        residual_duration_ms = 0
         no_improvement_rounds = 0
         stopped_reason = "达到配置的最大迭代轮次"
 
@@ -1208,23 +1481,60 @@ class AlphaOptimizationEngine:
                 params = self._suggest_params(trial, current_config)
                 trial_number = (iteration - 1) * trial_count + trial.number
                 try:
+                    components = self.backtest.calculate_factor_components(
+                        optimization_frame, current_config, params
+                    )
+                    independent = self.independent_evaluation(
+                        optimization_frame, current_config, params,
+                        evaluation_start=train_end,
+                        components=components,
+                    )
+                    if not independent["passed"]:
+                        metrics = {
+                            "independent_evaluation": independent,
+                            "gate_status": "pruned",
+                        }
+                        trial.set_user_attr("metrics", metrics)
+                        self.repository.save_trial(
+                            task["run_id"], trial_number, "pruned", None,
+                            params, metrics,
+                            int((time.monotonic() - started) * 1000),
+                            "独立因子评估未通过", iteration,
+                        )
+                        raise optuna.TrialPruned("独立因子评估未通过")
+                    weight_total = sum(
+                        abs(item["weight"]) for item in components
+                    )
+                    trial_alpha = sum(
+                        item["values"] * item["weight"]
+                        for item in components
+                    ) / max(weight_total, 1e-9)
                     train_result = self.backtest.run(
                         optimization_frame.iloc[:train_end].reset_index(drop=True),
                         current_config, params, include_trades=False,
+                        alpha_override=trial_alpha.iloc[:train_end],
                     )
                     validation_result = self.backtest.run(
                         optimization_frame, current_config, params,
                         evaluation_start=train_end, include_trades=False,
+                        alpha_override=trial_alpha,
                     )
                     gap = train_result.score - validation_result.score
+                    base_objective_score = (
+                        validation_result.score - max(0.0, gap) * 0.25
+                    )
                     objective_score = round(
-                        validation_result.score - max(0.0, gap) * 0.25, 6
+                        base_objective_score
+                        + float(independent["score_adjustment"]), 6
                     )
                     metrics = {
                         "train": train_result.metrics,
                         "validation": validation_result.metrics,
                         "generalization_gap": round(gap, 6),
+                        "base_objective_score": round(base_objective_score, 6),
                         "objective_score": objective_score,
+                        "independent_evaluation": independent,
+                        "gate_status": "passed",
                     }
                     trial.set_user_attr("metrics", metrics)
                     self.repository.save_trial(
@@ -1234,6 +1544,8 @@ class AlphaOptimizationEngine:
                     )
                     return objective_score
                 except AlphaResearchCanceled:
+                    raise
+                except optuna.TrialPruned:
                     raise
                 except Exception as exc:
                     self.repository.save_trial(
@@ -1269,11 +1581,61 @@ class AlphaOptimizationEngine:
                 and trial.value is not None
             ]
             if not completed_trials:
+                pruned_count = sum(
+                    trial.state == optuna.trial.TrialState.PRUNED
+                    for trial in study.trials
+                )
+                if pruned_count == len(study.trials):
+                    raise RuntimeError(
+                        f"第 {iteration} 轮所有 Trial 均未通过独立因子门槛"
+                    )
                 raise RuntimeError(f"第 {iteration} 轮全部参数试验均失败")
+            pruned_total += sum(
+                trial.state == optuna.trial.TrialState.PRUNED
+                for trial in study.trials
+            )
+            independent_duration_ms += sum(
+                int(((trial.user_attrs.get("metrics") or {}).get(
+                    "independent_evaluation"
+                ) or {}).get("duration_ms", 0))
+                for trial in study.trials
+            )
 
-            best_trial = study.best_trial
+            top_trials = sorted(
+                completed_trials, key=lambda item: float(item.value), reverse=True
+            )[:5]
+            residual_ranked = []
+            for candidate_trial in top_trials:
+                residual = self.residual_evaluation(
+                    optimization_frame, train_end, current_config,
+                    dict(candidate_trial.params),
+                )
+                adjusted_score = round(
+                    float(candidate_trial.value)
+                    + float(residual["score_adjustment"]), 6
+                )
+                residual_ranked.append({
+                    "trial": candidate_trial,
+                    "residual_evaluation": residual,
+                    "adjusted_score": adjusted_score,
+                })
+            residual_candidate_total += len(residual_ranked)
+            residual_duration_ms += sum(
+                int(item["residual_evaluation"].get("duration_ms", 0))
+                for item in residual_ranked
+            )
+            selected_trial = max(
+                residual_ranked, key=lambda item: item["adjusted_score"]
+            )
+            best_trial = selected_trial["trial"]
             best_params = dict(best_trial.params)
             best_metrics = dict(best_trial.user_attrs.get("metrics") or {})
+            best_metrics["residual_evaluation"] = selected_trial[
+                "residual_evaluation"
+            ]
+            best_metrics["adjusted_objective_score"] = selected_trial[
+                "adjusted_score"
+            ]
             detailed_train = self.backtest.run(
                 optimization_frame.iloc[:train_end].reset_index(drop=True),
                 current_config, best_params, include_trades=True,
@@ -1285,13 +1647,15 @@ class AlphaOptimizationEngine:
             best_metrics["train"] = detailed_train.metrics
             best_metrics["validation"] = detailed_validation.metrics
             scores = sorted(float(item.value) for item in completed_trials)
-            top_trials = sorted(
-                completed_trials, key=lambda item: float(item.value), reverse=True
-            )[:5]
             best_metrics.update({
                 "top_trials": [
-                    {"score": round(float(item.value), 6), "params": dict(item.params)}
-                    for item in top_trials
+                    {
+                        "score": round(float(item["trial"].value), 6),
+                        "residual_adjusted_score": item["adjusted_score"],
+                        "params": dict(item["trial"].params),
+                        "residual_evaluation": item["residual_evaluation"],
+                    }
+                    for item in residual_ranked
                 ],
                 "median_score": round(float(np.median(scores)), 6),
                 "successful_trials": len(completed_trials),
@@ -1305,7 +1669,7 @@ class AlphaOptimizationEngine:
                 "metrics": best_metrics,
             }
             history.append(iteration_record)
-            iteration_score = float(best_metrics["objective_score"])
+            iteration_score = float(best_metrics["adjusted_objective_score"])
             if global_best is None or iteration_score > global_best["score"] + 0.1:
                 global_best = {
                     "score": iteration_score,
@@ -1313,6 +1677,12 @@ class AlphaOptimizationEngine:
                     "candidate": current_candidate,
                     "config": dict(current_config),
                     "params": best_params,
+                    "independent_evaluation": best_metrics.get(
+                        "independent_evaluation", {}
+                    ),
+                    "residual_evaluation": best_metrics.get(
+                        "residual_evaluation", {}
+                    ),
                 }
                 no_improvement_rounds = 0
             else:
@@ -1365,7 +1735,11 @@ class AlphaOptimizationEngine:
             frame.iloc[:validation_end].reset_index(drop=True), selected_config,
             best_params, evaluation_start=train_end, include_trades=False,
         )
-        # Hidden test is evaluated exactly once, after all LLM and Optuna iteration.
+        ablation = self.ablation_experiment(
+            frame.iloc[:validation_end].reset_index(drop=True), train_end,
+            selected_config, best_params, validation_result,
+        )
+        # Hidden test is evaluated exactly once after optimization and ablation.
         test_result = self.backtest.run(
             frame, selected_config, best_params,
             evaluation_start=validation_end, include_trades=False,
@@ -1454,6 +1828,22 @@ class AlphaOptimizationEngine:
             "selected_iteration": global_best["iteration"],
             "stopped_reason": stopped_reason,
             "selected_candidate": global_best["candidate"],
+            "independent_evaluation": global_best.get(
+                "independent_evaluation", {}
+            ),
+            "residual_evaluation": global_best.get(
+                "residual_evaluation", {}
+            ),
+            "ablation_experiment": ablation,
+            "experiment_cost": {
+                "independent_runs": completed_total,
+                "independent_pruned_trials": pruned_total,
+                "independent_duration_ms": independent_duration_ms,
+                "residual_candidates": residual_candidate_total,
+                "residual_duration_ms": residual_duration_ms,
+                "ablation_variants": ablation["variant_count"],
+                "ablation_duration_ms": ablation["duration_ms"],
+            },
             "factor_diagnostics": factor_diagnostics,
             "parameter_robustness": parameter_robustness,
             "subperiod_robustness": subperiod_robustness,
@@ -1604,10 +1994,13 @@ class AlphaCandidateService:
         from market.services.llm_service import LLMService
         from market.store.llm_store import LLMStore
 
+        from llm_governance import ALPHA_CANDIDATE_GENERATION
         service = LLMService(LLMStore(user_id=user_id, account_id=0), None)
-        if not service.is_enabled():
-            raise PermissionError("当前用户尚未开通大模型功能，请先申请开通或使用高级自定义")
-        response = service.call_llm(prompt, system_prompt=self.SYSTEM_PROMPT)
+        response = service.call_llm(
+            prompt, system_prompt=self.SYSTEM_PROMPT,
+            scene_code=ALPHA_CANDIDATE_GENERATION,
+            object_type="alpha_research", object_id="candidate_generation",
+        )
         if not response or not isinstance(response.get("candidates"), list):
             raise RuntimeError("大模型未返回有效的 Alpha 候选，请稍后重试")
         catalog_by_name = {item["name"]: item for item in factors}
@@ -1652,6 +2045,9 @@ class AlphaCandidateService:
 请按研究漏斗诊断：因子级重点检查 IC、Rank IC、滚动 IC、IC_IR、
 Rank IC_IR 与多周期 Decay；策略级检查 Sharpe、Sortino、Profit Factor、
 毛收益、最大回撤、策略换手率与交易样本数；同时检查训练/验证过拟合差距。
+独立评估用于判断单因子是否具有预测信息；残差 Rank IC 用于判断该因子
+在剔除其他因子解释部分后是否仍提供增量信息。优先替换独立评估失败、
+残差信息弱或与其他因子高度重复的因子。
 输出一个下一轮候选。优先做有理由的结构调整，可保留、增加、删除或替换因子；
 不要只复制失败结构并微调参数。参数精调将由 Optuna 完成。
 
@@ -1674,23 +2070,35 @@ Rank IC_IR 与多周期 Decay；策略级检查 Sharpe、Sortino、Profit Factor
 每个候选使用 1-5 个因子；周期范围 2-500；权重范围 -3 到 3。
 """.strip()
         service = self._llm_service(user_id)
-        response = service.call_llm(prompt, system_prompt=self.SYSTEM_PROMPT)
+        from llm_governance import ALPHA_ITERATIVE_REFINEMENT
+        response = service.call_llm(
+            prompt, system_prompt=self.SYSTEM_PROMPT,
+            scene_code=ALPHA_ITERATIVE_REFINEMENT,
+            object_type="alpha_research", object_id="iterative_refinement",
+        )
         raw_candidate = response.get("candidate") if isinstance(response, dict) else None
         candidate = self._normalize_candidate(raw_candidate, catalog_by_name)
         if candidate is None:
             raise RuntimeError("大模型未返回可执行的 Alpha 改进候选")
-        config = service.get_config()
+        scene = service._llm_governance.scene_options(
+            user_id, ALPHA_ITERATIVE_REFINEMENT
+        )
         return {
             "candidate": candidate,
             "prompt": prompt,
             "response": response,
-            "model": str(config.get("model") or ""),
+            "model": str(scene.get("default_model_id") or ""),
         }
 
     @staticmethod
     def _prompt_iteration(item: Dict) -> Dict:
         """Keep prompts compact and explicitly exclude any hidden-test payload."""
         metrics = item.get("metrics") or {}
+        top_trials = [{
+            "score": trial.get("score"),
+            "residual_adjusted_score": trial.get("residual_adjusted_score"),
+            "params": trial.get("params") or {},
+        } for trial in (metrics.get("top_trials") or [])[:5]]
         return {
             "iteration": item.get("iteration"),
             "expression": item.get("expression", ""),
@@ -1703,7 +2111,14 @@ Rank IC_IR 与多周期 Decay；策略级检查 Sharpe、Sortino、Profit Factor
             "validation": metrics.get("validation") or {},
             "generalization_gap": metrics.get("generalization_gap", 0),
             "objective_score": metrics.get("objective_score", 0),
-            "top_trials": metrics.get("top_trials", [])[:5],
+            "adjusted_objective_score": metrics.get(
+                "adjusted_objective_score", 0
+            ),
+            "independent_evaluation": metrics.get(
+                "independent_evaluation", {}
+            ),
+            "residual_evaluation": metrics.get("residual_evaluation", {}),
+            "top_trials": top_trials,
             "median_score": metrics.get("median_score", 0),
         }
 
@@ -1712,10 +2127,7 @@ Rank IC_IR 与多周期 Decay；策略级检查 Sharpe、Sortino、Profit Factor
         from market.services.llm_service import LLMService
         from market.store.llm_store import LLMStore
 
-        service = LLMService(LLMStore(user_id=user_id, account_id=0), None)
-        if not service.is_enabled():
-            raise PermissionError("当前用户尚未开通大模型功能")
-        return service
+        return LLMService(LLMStore(user_id=user_id, account_id=0), None)
 
     @staticmethod
     def _normalize_candidate(raw: Dict, catalog_by_name: Dict[str, Dict]) -> Optional[Dict]:

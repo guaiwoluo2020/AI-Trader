@@ -177,6 +177,89 @@ class SQLiteStorage:
                     CREATE INDEX IF NOT EXISTS idx_llm_access_requests_status
                     ON llm_access_requests(status, requested_at);
 
+                    CREATE TABLE IF NOT EXISTS llm_models (
+                        model_id TEXT PRIMARY KEY,
+                        display_name TEXT NOT NULL,
+                        available INTEGER NOT NULL DEFAULT 1,
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        discovered_at INTEGER NOT NULL,
+                        last_seen_at INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS llm_scene_policies (
+                        scene_code TEXT PRIMARY KEY,
+                        display_name TEXT NOT NULL,
+                        frequency_class TEXT NOT NULL,
+                        requires_access INTEGER NOT NULL DEFAULT 0,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        default_model_id TEXT NOT NULL DEFAULT '',
+                        allow_user_selection INTEGER NOT NULL DEFAULT 0,
+                        updated_by INTEGER,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(updated_by) REFERENCES users(id) ON DELETE SET NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS llm_scene_models (
+                        scene_code TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        PRIMARY KEY(scene_code, model_id),
+                        FOREIGN KEY(scene_code) REFERENCES llm_scene_policies(scene_code) ON DELETE CASCADE,
+                        FOREIGN KEY(model_id) REFERENCES llm_models(model_id) ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS llm_call_logs (
+                        call_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        scene_code TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'reserved',
+                        object_type TEXT NOT NULL DEFAULT '',
+                        object_id TEXT NOT NULL DEFAULT '',
+                        duration_ms INTEGER,
+                        prompt_tokens INTEGER,
+                        completion_tokens INTEGER,
+                        total_tokens INTEGER,
+                        error_message TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        completed_at INTEGER,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_llm_call_quota
+                    ON llm_call_logs(user_id, created_at, scene_code);
+
+                    CREATE TABLE IF NOT EXISTS system_event_logs (
+                        event_id TEXT PRIMARY KEY,
+                        occurred_at INTEGER NOT NULL,
+                        level TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        event_name TEXT NOT NULL,
+                        user_id INTEGER,
+                        account_id INTEGER,
+                        symbol TEXT NOT NULL DEFAULT '',
+                        actor_type TEXT NOT NULL DEFAULT 'system',
+                        actor_id TEXT NOT NULL DEFAULT '',
+                        entity_type TEXT NOT NULL DEFAULT '',
+                        entity_id TEXT NOT NULL DEFAULT '',
+                        correlation_id TEXT NOT NULL DEFAULT '',
+                        message TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT '',
+                        detail_json TEXT NOT NULL DEFAULT '{}',
+                        request_id TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_system_event_scope_time
+                    ON system_event_logs(user_id, account_id, occurred_at DESC);
+
+                    CREATE INDEX IF NOT EXISTS idx_system_event_category_time
+                    ON system_event_logs(category, level, occurred_at DESC);
+
+                    CREATE INDEX IF NOT EXISTS idx_system_event_correlation
+                    ON system_event_logs(correlation_id, occurred_at);
+
                     CREATE TABLE IF NOT EXISTS user_quota_overrides (
                         user_id INTEGER PRIMARY KEY,
                         max_datasets INTEGER,

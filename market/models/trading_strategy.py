@@ -100,14 +100,6 @@ SIGNAL_PERIOD_MINUTES = {
     "H4": 240,
 }
 
-AI_SIGNAL_MODELS = (
-    "deepseek-v4-pro",
-    "deepseek-v4-flash",
-    "glm-5.2",
-    "qwen3.7-max",
-    "qwen3.8-max",
-)
-
 def signal_source_defaults(source: str, period: str = "M5") -> Dict:
     """创建一条可独立配置的信号源实例。"""
     period = period if period in SIGNAL_PERIODS else "M5"
@@ -132,7 +124,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "kline_count": 100,
             "min_confidence": 70,
             "entry_threshold": 0.0001,
-            "model": AI_SIGNAL_MODELS[0],
+            "model": "",
             "system_prompt": "",
             "analysis_prompt_template": "",
             "share_runtime_data": False,
@@ -310,9 +302,9 @@ def normalize_signal_sources(
             params["entry_threshold"] = max(
                 0.0, min(0.1, float(params["entry_threshold"]))
             )
-            params["model"] = str(params.get("model") or AI_SIGNAL_MODELS[0])
-            if params["model"] not in AI_SIGNAL_MODELS:
-                raise ValueError("AI入场信号选择了不支持的大模型")
+            params["model"] = str(params.get("model") or "").strip()
+            if len(params["model"]) > 200:
+                raise ValueError("AI入场信号选择的大模型无效")
             params["system_prompt"] = str(
                 params.get("system_prompt") or ""
             ).strip()

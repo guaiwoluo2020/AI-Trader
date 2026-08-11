@@ -268,6 +268,31 @@
               <tbody><tr v-for="item in detailRun.result.factor_diagnostics" :key="item.name"><td>{{ item.name }}</td><td>{{ asPercent(item.coverage) }}</td><td>{{ scoreValue(autocorrelationAt(item, 1)) }}</td><td>{{ scoreValue(item.rank_ic) }}</td><td>{{ asPercent(item.positive_rank_ic_ratio) }}</td><td>{{ scoreValue(item.max_peer_correlation) }}</td></tr></tbody>
             </v-table>
           </template>
+          <template v-if="detailRun.result.independent_evaluation?.factors?.length">
+            <h3 class="table-title">独立因子评估 · 每个 Trial 门槛</h3>
+            <v-alert v-if="detailRun.result.experiment_cost" type="info" variant="tonal" density="compact" class="mb-2">
+              本次执行 {{ detailRun.result.experiment_cost.independent_runs }} 次独立评估（剪枝 {{ detailRun.result.experiment_cost.independent_pruned_trials }} 次，{{ durationText(detailRun.result.experiment_cost.independent_duration_ms) }}），对 {{ detailRun.result.experiment_cost.residual_candidates }} 个 Top 候选做残差评估（{{ durationText(detailRun.result.experiment_cost.residual_duration_ms) }}），最终完成 {{ detailRun.result.experiment_cost.ablation_variants }} 个消融组合（{{ durationText(detailRun.result.experiment_cost.ablation_duration_ms) }}）。
+            </v-alert>
+            <v-table density="compact" class="decay-table">
+              <thead><tr><th>因子</th><th>参数</th><th>覆盖率</th><th>独立 Rank IC</th><th>正 IC 比例</th><th>门槛</th></tr></thead>
+              <tbody><tr v-for="item in detailRun.result.independent_evaluation.factors" :key="item.factor_index"><td>{{ item.name }}</td><td>{{ item.length }} / 权重 {{ scoreValue(item.weight) }}</td><td>{{ asPercent(item.coverage) }}</td><td>{{ scoreValue(item.rank_ic) }}</td><td>{{ asPercent(item.positive_rank_ic_ratio) }}</td><td><v-chip :color="item.passed ? 'success' : 'error'" size="x-small" variant="tonal">{{ item.passed ? '通过' : '未通过' }}</v-chip></td></tr></tbody>
+            </v-table>
+          </template>
+          <template v-if="detailRun.result.residual_evaluation?.factors?.length">
+            <h3 class="table-title">残差评估 · 本轮 Top 5 增量信息</h3>
+            <v-table density="compact" class="decay-table">
+              <thead><tr><th>因子</th><th>原始 Rank IC</th><th>残差 Rank IC</th><th>正残差 IC 比例</th><th>保留方差</th><th>判断</th></tr></thead>
+              <tbody><tr v-for="item in detailRun.result.residual_evaluation.factors" :key="item.factor_index"><td>{{ item.name }}</td><td>{{ scoreValue(item.raw_rank_ic) }}</td><td>{{ scoreValue(item.residual_rank_ic) }}</td><td>{{ asPercent(item.positive_rank_ic_ratio) }}</td><td>{{ asPercent(item.retained_variance_ratio) }}</td><td><v-chip :color="item.residual_rank_ic > 0 ? 'success' : 'warning'" size="x-small" variant="tonal">{{ item.residual_rank_ic > 0 ? '有增量' : '增量偏弱' }}</v-chip></td></tr></tbody>
+            </v-table>
+          </template>
+          <template v-if="detailRun.result.ablation_experiment?.variants?.length">
+            <h3 class="table-title">最终消融实验 · N+1 组合</h3>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-2">仅在最终验证阶段执行；分数差值为“完整组合 − 删除该因子”，正数表示该因子有贡献。</v-alert>
+            <v-table density="compact" class="decay-table">
+              <thead><tr><th>实验</th><th>验证分数</th><th>分数贡献</th><th>Rank IC</th><th>IC 贡献</th><th>结论</th></tr></thead>
+              <tbody><tr v-for="item in detailRun.result.ablation_experiment.variants" :key="item.removed_factor || 'baseline'"><td>{{ item.variant === 'baseline' ? '完整组合' : `删除 ${item.removed_factor}` }}</td><td>{{ scoreValue(item.score) }}</td><td>{{ scoreValue(item.score_delta) }}</td><td>{{ scoreValue(item.rank_ic) }}</td><td>{{ scoreValue(item.rank_ic_delta) }}</td><td><v-chip :color="ablationMeta(item.contribution).color" size="x-small" variant="tonal">{{ ablationMeta(item.contribution).label }}</v-chip></td></tr></tbody>
+            </v-table>
+          </template>
           <template v-if="detailRun.result.metrics?.decay?.length">
             <h3 class="table-title">因子衰减 Decay</h3>
             <v-table density="compact" class="decay-table">
@@ -304,6 +329,8 @@
                     <span>验证 IC_IR <b>{{ scoreValue(iteration.metrics.validation?.ic_ir) }}</b></span>
                     <span>验证 Sharpe <b>{{ scoreValue(iteration.metrics.validation?.sharpe) }}</b></span>
                     <span>优化目标 <b>{{ scoreValue(iteration.metrics.objective_score) }}</b></span>
+                    <span>残差调整后 <b>{{ scoreValue(iteration.metrics.adjusted_objective_score) }}</b></span>
+                    <span>平均残差 IC <b>{{ scoreValue(iteration.metrics.residual_evaluation?.mean_incremental_rank_ic) }}</b></span>
                     <span>中位数 <b>{{ scoreValue(iteration.metrics.median_score) }}</b></span>
                   </div>
                   <details v-if="iteration.feedback_prompt" class="prompt-audit">
@@ -503,6 +530,8 @@ function metric(key) { const value = detailRun.value?.result?.metrics?.[key]; re
 function percentMetric(key, child = null) { let value = detailRun.value?.result?.metrics?.[key]; if (child) value = value?.[child]; return value == null ? '--' : `${(Number(value) * 100).toFixed(2)}%` }
 function asPercent(value) { return value == null ? '--' : `${(Number(value) * 100).toFixed(2)}%` }
 function autocorrelationAt(item, lag) { return item?.autocorrelation?.find(value => value.lag === lag)?.correlation }
+function durationText(value) { const milliseconds = Number(value || 0); return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(2)} 秒` : `${milliseconds} 毫秒` }
+function ablationMeta(value) { return ({ baseline: { label: '基准', color: 'info' }, essential: { label: '关键因子', color: 'success' }, useful: { label: '有效贡献', color: 'teal' }, redundant: { label: '可能冗余', color: 'warning' }, sole_factor: { label: '唯一因子', color: 'info' } })[value] || { label: value || '--', color: 'grey' } }
 function signedPercent(value) { const number = Number(value || 0) * 100; return `${number >= 0 ? '+' : ''}${number.toFixed(2)}%` }
 function formatParam(value) { return typeof value === 'number' ? Number(value).toFixed(4).replace(/\.0+$/, '') : value }
 function formatTime(value) { return value ? new Date(value * 1000).toLocaleString('zh-CN') : '--' }

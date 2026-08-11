@@ -95,9 +95,16 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
 
         self.assertEqual(normalized["model"], "qwen3.8-max")
         self.assertEqual(normalized["reference_runtime_ids"], ["share-a", "share-b"])
+        dynamic = signal_source_defaults("ai_entry", "M5")
+        dynamic["params"]["model"] = "provider/new-model"
+        self.assertEqual(
+            TradingStrategy(symbol="GOLD#", signal_sources=[dynamic])
+            .get_signal_sources("ai_entry")[0]["params"]["model"],
+            "provider/new-model",
+        )
         invalid = signal_source_defaults("ai_entry", "M5")
-        invalid["params"]["model"] = "unsupported-model"
-        with self.assertRaisesRegex(ValueError, "不支持的大模型"):
+        invalid["params"]["model"] = "x" * 201
+        with self.assertRaisesRegex(ValueError, "大模型无效"):
             TradingStrategy(symbol="GOLD#", signal_sources=[invalid])
 
         shared_source = signal_source_defaults("ai_entry", "M5")

@@ -394,6 +394,12 @@ class AlphaIterationAuditTest(unittest.TestCase):
         self.assertEqual(2, result["completed_iterations"])
         self.assertEqual(10, result["trial_count"])
         self.assertIn("hidden_test", result["splits"])
+        self.assertEqual(10, result["experiment_cost"]["independent_runs"])
+        self.assertGreater(result["experiment_cost"]["residual_candidates"], 0)
+        self.assertEqual(2, result["experiment_cost"]["ablation_variants"])
+        self.assertIn("independent_evaluation", result)
+        self.assertIn("residual_evaluation", result)
+        self.assertIn("ablation_experiment", result)
         self.assertEqual(1, len(candidate_service.histories))
         self.assertEqual(1, len(candidate_service.histories[0]))
         self.assertEqual(
@@ -403,6 +409,71 @@ class AlphaIterationAuditTest(unittest.TestCase):
 
 
 class AlphaLibraryAndRuntimeTest(unittest.TestCase):
+    @staticmethod
+    def research_frame(count=300):
+        close = 100 + np.linspace(0, 4, count) + np.sin(np.arange(count) / 7)
+        return pd.DataFrame({
+            "time": np.arange(count) * 60,
+            "open": close, "high": close + 0.2, "low": close - 0.2,
+            "close": close, "tick_volume": np.full(count, 100),
+            "spread": np.zeros(count),
+        })
+
+    @staticmethod
+    def research_config(factor_count=2):
+        return {
+            "factors": [{
+                "name": "ema", "length_min": 8, "length_max": 8,
+                "weight_min": 1, "weight_max": 1,
+            } for _ in range(factor_count)],
+            "prediction_horizon": 5,
+            "buy_threshold_min": 0.5, "sell_threshold_max": -0.5,
+            "exit_mode": EXIT_REVERSE, "fixed_horizon_bars": 5,
+            "confirmation_bars": 1, "cooldown_bars": 0,
+        }
+
+    @staticmethod
+    def research_params(factor_count=2):
+        params = {"buy_threshold": 0.5, "sell_threshold": -0.5}
+        for index in range(factor_count):
+            params[f"factor_{index}_length"] = 8
+            params[f"factor_{index}_weight"] = 1
+        return params
+
+    def test_independent_gate_and_residual_evaluation_are_layered(self):
+        frame = self.research_frame()
+        config = self.research_config()
+        params = self.research_params()
+        engine = AlphaOptimizationEngine(object())
+        independent = engine.independent_evaluation(
+            frame, config, params, evaluation_start=180
+        )
+        residual = engine.residual_evaluation(frame, 180, config, params)
+        self.assertEqual(2, independent["factor_count"])
+        self.assertTrue(all("rank_ic" in item for item in independent["factors"]))
+        self.assertEqual(2, residual["factor_count"])
+        self.assertTrue(all(
+            item["retained_variance_ratio"] < 0.001
+            for item in residual["factors"]
+        ))
+
+    def test_final_ablation_runs_baseline_plus_each_factor(self):
+        frame = self.research_frame()
+        config = self.research_config()
+        params = self.research_params()
+        engine = AlphaOptimizationEngine(object())
+        baseline = engine.backtest.run(
+            frame, config, params, evaluation_start=180, include_trades=False
+        )
+        experiment = engine.ablation_experiment(
+            frame, 180, config, params, baseline
+        )
+        self.assertEqual(3, experiment["variant_count"])
+        self.assertEqual(
+            ["baseline", "remove_factor", "remove_factor"],
+            [item["variant"] for item in experiment["variants"]],
+        )
+
     def test_validated_run_can_be_published_and_read_as_shared(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = SQLiteStorage(f"{directory}/alpha-library.db")
@@ -434,6 +505,7 @@ class AlphaLibraryAndRuntimeTest(unittest.TestCase):
                     "quintile_analysis": {"monotonicity": 0.75, "top_bottom_spread": 0.01},
                 },
                 "splits": {"hidden_test": {"rank_ic": 0.1}},
+                "ablation_experiment": {"useful_factor_ratio": 1.0},
             }
             repository = AlphaLibraryRepository(storage)
             alpha = repository.publish_run(1, {

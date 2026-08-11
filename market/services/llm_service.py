@@ -21,6 +21,7 @@ from ..models.llm_config import (
 from ..store import LLMStore
 from .kline_service import KlineService
 from sqlite_storage import SharedAIRuntimeRepository
+from llm_governance import AI_SIGNAL_ANALYSIS, LLMGovernanceService
 
 
 class LLMRequestError(RuntimeError):
@@ -52,6 +53,10 @@ class LLMService:
         self._allowed_strategy_ids = None
         self._source_last_analysis_at = {}
         self._shared_runtime_repo = SharedAIRuntimeRepository()
+        repo = getattr(self.llm_store, "_repo", None)
+        self._llm_governance = (
+            LLMGovernanceService(repo.storage) if repo is not None else None
+        )
 
         # 从环境变量补充配置
         self._load_env_config()
@@ -307,11 +312,19 @@ class LLMService:
     def call_llm(
         self, prompt: str, model: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        scene_code: str = AI_SIGNAL_ANALYSIS,
+        object_type: str = "", object_id: str = "",
     ) -> Optional[Dict]:
         """调用 LLM API（非流式）"""
-        config = self.llm_store.get_config()
-        if not config.api_key:
-            return None
+        governance = self._llm_governance
+        if governance is None:
+            config = self.llm_store.get_config()
+            reservation = {"model": model or config.model}
+        else:
+            reservation = governance.reserve_call(
+                self.llm_store.user_id, scene_code, model, object_type, object_id
+            )
+            config = reservation["config"]
 
         try:
             headers = {
@@ -320,7 +333,7 @@ class LLMService:
             }
 
             data = {
-                "model": model or config.model,
+                "model": reservation["model"],
                 "messages": [
                     {"role": "system", "content": system_prompt or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
                     {"role": "user", "content": prompt}
@@ -339,18 +352,34 @@ class LLMService:
             if response.status_code == 200:
                 result = response.json()
                 content = result["choices"][0]["message"]["content"]
-                return self._parse_llm_response(content)
+                parsed = self._parse_llm_response(content)
+                if governance:
+                    governance.finish_call(
+                        reservation, "completed" if parsed else "failed",
+                        result.get("usage"), "" if parsed else "模型返回内容无法解析",
+                    )
+                return parsed
             else:
                 print(f"[LLMService] API调用失败: {response.status_code} - {response.text}")
+                if governance:
+                    governance.finish_call(
+                        reservation, "failed", error=f"HTTP {response.status_code}"
+                    )
                 return None
 
         except Exception as e:
             print(f"[LLMService] 调用异常: {e}")
+            if governance:
+                governance.finish_call(reservation, "failed", error=str(e))
+            if isinstance(e, (PermissionError, ValueError)):
+                raise
             return None
 
     def call_llm_stream(
         self, prompt: str, on_chunk: callable = None,
         model: Optional[str] = None, system_prompt: Optional[str] = None,
+        scene_code: str = AI_SIGNAL_ANALYSIS,
+        object_type: str = "", object_id: str = "",
     ) -> Optional[Dict]:
         """
         调用 LLM API（流式）
@@ -359,9 +388,15 @@ class LLMService:
             prompt: 提示词
             on_chunk: 回调函数，参数为 (chunk_count, full_content)
         """
-        config = self.llm_store.get_config()
-        if not config.api_key:
-            raise LLMRequestError("未配置大模型 API Key")
+        governance = self._llm_governance
+        if governance is None:
+            config = self.llm_store.get_config()
+            reservation = {"model": model or config.model}
+        else:
+            reservation = governance.reserve_call(
+                self.llm_store.user_id, scene_code, model, object_type, object_id
+            )
+            config = reservation["config"]
 
         try:
             headers = {
@@ -370,7 +405,7 @@ class LLMService:
             }
 
             data = {
-                "model": model or config.model,
+                "model": reservation["model"],
                 "messages": [
                     {"role": "system", "content": system_prompt or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)},
                     {"role": "user", "content": prompt}
@@ -436,15 +471,25 @@ class LLMService:
             parsed = self._parse_llm_response(full_content)
             if not parsed:
                 raise LLMRequestError("大模型返回内容为空或不是有效 JSON")
+            if governance:
+                governance.finish_call(reservation, "completed")
             return parsed
 
-        except LLMRequestError:
+        except LLMRequestError as exc:
+            if governance:
+                governance.finish_call(reservation, "failed", error=str(exc))
             raise
         except requests.RequestException as e:
             print(f"[LLMService] 流式调用异常: {e}")
+            if governance:
+                governance.finish_call(reservation, "failed", error=str(e))
             raise LLMRequestError(f"连接大模型服务失败: {e}") from e
         except Exception as e:
             print(f"[LLMService] 流式调用异常: {e}")
+            if governance:
+                governance.finish_call(reservation, "failed", error=str(e))
+            if isinstance(e, (PermissionError, ValueError)):
+                raise
             raise LLMRequestError(f"处理大模型响应失败: {e}") from e
 
     def _parse_llm_response(self, content: str) -> Optional[Dict]:

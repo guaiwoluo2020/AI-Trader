@@ -40,7 +40,7 @@ class _FakeLLMService:
         }
         self.prompt = ""
 
-    def call_llm_stream(self, prompt):
+    def call_llm_stream(self, prompt, **_kwargs):
         self.prompt = prompt
         return self.result
 

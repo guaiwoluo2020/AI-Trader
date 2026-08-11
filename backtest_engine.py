@@ -774,6 +774,8 @@ class CachedLLMProvider:
                         prompt,
                         model=group["model"],
                         system_prompt=group["system_prompt"],
+                        object_type="backtest_replay",
+                        object_id=cache_key,
                     )
                     if group_response:
                         break

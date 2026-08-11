@@ -415,6 +415,30 @@ export const marketAPI = {
     return response.data
   },
 
+  async getLLMScene(sceneCode) {
+    const response = await api.get(`/llm/scenes/${encodeURIComponent(sceneCode)}`)
+    return response.data
+  },
+
+  async syncLLMModels() {
+    const response = await api.post('/admin/llm/models/sync')
+    return response.data
+  },
+
+  async setLLMModelEnabled(modelId, enabled) {
+    const response = await api.put(
+      `/admin/llm/models/${encodeURIComponent(modelId)}`, { enabled }
+    )
+    return response.data
+  },
+
+  async saveLLMScene(sceneCode, payload) {
+    const response = await api.put(
+      `/admin/llm/scenes/${encodeURIComponent(sceneCode)}`, payload
+    )
+    return response.data
+  },
+
   // 获取当前用户的大模型功能开通状态
   async getLLMAccess() {
     const response = await api.get('/llm/access')
@@ -493,19 +517,18 @@ export const marketAPI = {
   },
 
   // 获取系统运行日志
-  async getSystemLogs(count = 50, eventTypes = null, symbol = null) {
-    const params = { count }
-    if (eventTypes && eventTypes.length > 0) {
-      params.event_type = eventTypes.join(',')
-    }
-    if (symbol) params.symbol = symbol
+  async getSystemLogs(params = {}) {
     const response = await api.get('/system/logs', { params })
     return response.data
   },
 
-  // 清空系统日志
-  async clearSystemLogs() {
-    const response = await api.delete('/system/logs')
+  async getSystemLogSummary(params = {}) {
+    const response = await api.get('/system/logs/summary', { params })
+    return response.data
+  },
+
+  async purgeSystemLogs(before) {
+    const response = await api.post('/admin/system/logs/purge', { before })
     return response.data
   },
 

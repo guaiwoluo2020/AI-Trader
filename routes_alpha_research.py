@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from alpha_research import AlphaResearchService
 from auth import AuthUser, require_auth
+from llm_governance import LLMQuotaExceeded
 
 
 def create_alpha_research_routes() -> APIRouter:
@@ -29,6 +30,8 @@ def create_alpha_research_routes() -> APIRouter:
     ) -> Dict:
         try:
             candidates = service.candidates.generate(user.user_id, await request.json())
+        except LLMQuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (TypeError, ValueError) as exc:

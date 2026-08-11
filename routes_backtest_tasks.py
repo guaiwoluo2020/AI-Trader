@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from auth import AuthUser, require_auth
 from backtest_ai_analysis import BacktestAIAnalysisService
+from llm_governance import LLMQuotaExceeded
 from backtest_tasks import BacktestTemplateService
 
 
@@ -176,6 +177,8 @@ def create_backtest_task_routes() -> APIRouter:
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LLMQuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
