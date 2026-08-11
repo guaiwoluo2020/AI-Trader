@@ -462,6 +462,33 @@ class AlphaLibraryAndRuntimeTest(unittest.TestCase):
             self.assertEqual("M5", visible["definition"]["timeframe"])
             self.assertFalse(visible["is_owner"])
 
+    def test_admission_uses_core_gates_and_relaxed_diagnostic_majority(self):
+        result = {
+            "metrics": {
+                "factor_coverage": 0.70,
+                "rolling_ic_count": 2,
+                "rank_ic": 0.006,
+                "positive_rank_ic_ratio": 0.46,
+                "quintile_analysis": {
+                    "monotonicity": 0.36,
+                    "top_bottom_spread": 0.001,
+                },
+            },
+            "splits": {"hidden_test": {"rank_ic": -0.01}},
+            "subperiod_robustness": [
+                {"rank_ic": 0.02}, {"rank_ic": -0.01},
+                {"rank_ic": 0.01}, {"rank_ic": -0.02},
+            ],
+            "ablation_experiment": {"useful_factor_ratio": 0.0},
+        }
+        admission = AlphaLibraryRepository.admission_report(result)
+        self.assertTrue(admission["required_passed"])
+        self.assertTrue(admission["passed"])
+        self.assertEqual(4, admission["optional_passed_count"])
+
+        result["metrics"]["rank_ic"] = 0.001
+        self.assertFalse(AlphaLibraryRepository.admission_report(result)["passed"])
+
     def test_runtime_executor_is_deterministic_for_same_snapshot(self):
         close = 100 + np.sin(np.arange(300) / 8) + np.arange(300) / 200
         bars = [{

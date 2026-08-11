@@ -65,6 +65,8 @@ test('Alpha report exposes factor diagnostics without strategy performance metri
 
 test('validated Alpha can be published and selected as a strategy signal source', () => {
   assert.match(view, /Alpha 准入检查/)
+  assert.match(view, /核心门槛必须全部通过/)
+  assert.match(view, /check\.required/)
   assert.match(view, /发布到 Alpha 库/)
   assert.match(view, /因子诊断与正交性/)
   assert.match(api, /publishAlphaResearchRun/)

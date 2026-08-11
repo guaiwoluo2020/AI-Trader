@@ -212,7 +212,7 @@
               <v-chip :color="detailRun.admission?.passed ? 'success' : 'warning'" variant="tonal">
                 {{ detailRun.admission?.passed ? '准入检查已通过' : '尚未达到 Alpha 库准入标准' }}
               </v-chip>
-              <p>通过覆盖率、IC、五分组单调性和隐藏测试后，才可作为策略信号源。</p>
+              <p>核心门槛必须全部通过；其余诊断项通过 {{ detailRun.admission?.optional_passed_count ?? 0 }}/{{ detailRun.admission?.minimum_optional_passes ?? 3 }} 项后，即可作为策略信号源。</p>
             </div>
             <div class="publish-actions">
               <v-select v-model="publishVisibility" :items="visibilityOptions" label="发布范围" density="compact" hide-details></v-select>
@@ -224,9 +224,9 @@
           <template v-if="detailRun.admission?.checks?.length">
             <h3 class="table-title">Alpha 准入检查</h3>
             <div class="admission-grid">
-              <div v-for="check in detailRun.admission.checks" :key="check.key" :class="{ passed: check.passed }">
+              <div v-for="check in detailRun.admission.checks" :key="check.key" :class="{ passed: check.passed, required: check.required }">
                 <v-icon>{{ check.passed ? 'mdi-check-circle' : 'mdi-alert-circle' }}</v-icon>
-                <span>{{ check.label }}</span><b>{{ scoreValue(check.value) }} {{ check.operator }} {{ check.threshold }}</b>
+                <span>{{ check.label }} <em v-if="check.required">核心</em></span><b>{{ scoreValue(check.value) }} {{ check.operator }} {{ check.threshold }}</b>
               </div>
             </div>
           </template>

@@ -601,28 +601,44 @@ class AlphaLibraryRepository:
             default=0.0,
         )
         ablation = result.get("ablation_experiment") or {}
+        # Alpha discovery should not require every diagnostic to be perfect.
+        # Four core checks protect against unusable signals; the remaining
+        # diagnostics measure maturity and need a majority to pass.
         values = [
-            ("coverage", "因子有效覆盖率", float(metrics.get("factor_coverage", 0)), 0.8, ">="),
-            ("rolling_samples", "滚动 IC 样本", float(metrics.get("rolling_ic_count", 0)), 3, ">="),
-            ("rank_ic", "Rank IC", float(metrics.get("rank_ic", 0)), 0.01, ">="),
-            ("positive_ic", "正 Rank IC 比例", float(metrics.get("positive_rank_ic_ratio", 0)), 0.5, ">="),
-            ("monotonicity", "五分组单调性", float(quintile.get("monotonicity", 0)), 0.5, ">="),
-            ("spread", "最高组与最低组收益差", float(quintile.get("top_bottom_spread", 0)), 0, ">"),
-            ("hidden_rank_ic", "隐藏测试 Rank IC", float(hidden.get("rank_ic", 0)), 0, ">"),
-            ("subperiods", "分时段正 Rank IC 比例", positive_subperiod_ratio, 0.66, ">="),
-            ("orthogonality", "与已有 Alpha 最大相关", max_library_correlation, 0.85, "<="),
-            ("ablation", "消融有效因子比例", float(ablation.get("useful_factor_ratio", 0)), 0.5, ">="),
+            ("coverage", "因子有效覆盖率", float(metrics.get("factor_coverage", 0)), 0.65, ">=", True),
+            ("rolling_samples", "滚动 IC 样本", float(metrics.get("rolling_ic_count", 0)), 2, ">=", True),
+            ("rank_ic", "Rank IC", float(metrics.get("rank_ic", 0)), 0.005, ">=", True),
+            ("positive_ic", "正 Rank IC 比例", float(metrics.get("positive_rank_ic_ratio", 0)), 0.45, ">=", False),
+            ("monotonicity", "五分组单调性", float(quintile.get("monotonicity", 0)), 0.35, ">=", False),
+            ("spread", "最高组与最低组收益差", float(quintile.get("top_bottom_spread", 0)), 0, ">", True),
+            ("hidden_rank_ic", "隐藏测试 Rank IC", float(hidden.get("rank_ic", 0)), -0.005, ">=", False),
+            ("subperiods", "分时段正 Rank IC 比例", positive_subperiod_ratio, 0.5, ">=", False),
+            ("orthogonality", "与已有 Alpha 最大相关", max_library_correlation, 0.95, "<=", False),
+            ("ablation", "消融有效因子比例", float(ablation.get("useful_factor_ratio", 0)), 0.25, ">=", False),
         ]
         checks = [{
             "key": key, "label": label, "value": round(value, 8),
-            "threshold": threshold, "operator": operator,
+            "threshold": threshold, "operator": operator, "required": required,
             "passed": (
                 value >= threshold if operator == ">="
                 else value <= threshold if operator == "<="
                 else value > threshold
             ),
-        } for key, label, value, threshold, operator in values]
-        return {"passed": all(item["passed"] for item in checks), "checks": checks}
+        } for key, label, value, threshold, operator, required in values]
+        required_checks = [item for item in checks if item["required"]]
+        optional_checks = [item for item in checks if not item["required"]]
+        required_passed = all(item["passed"] for item in required_checks)
+        optional_passed_count = sum(item["passed"] for item in optional_checks)
+        minimum_optional_passes = 3
+        return {
+            "passed": required_passed and optional_passed_count >= minimum_optional_passes,
+            "checks": checks,
+            "required_passed": required_passed,
+            "passed_count": sum(item["passed"] for item in checks),
+            "required_count": len(required_checks),
+            "optional_passed_count": optional_passed_count,
+            "minimum_optional_passes": minimum_optional_passes,
+        }
 
     @staticmethod
     def _row(row, viewer_user_id: int) -> Dict:

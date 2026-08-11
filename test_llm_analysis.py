@@ -115,6 +115,74 @@ class LLMAnalysisTestCase(unittest.TestCase):
             with self.assertRaisesRegex(LLMRequestError, "不是有效 JSON"):
                 service.call_llm("生成候选")
 
+    def test_call_llm_uses_reasoning_content_when_content_is_empty(self):
+        service = LLMService(_Store(), _Klines())
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "choices": [{"message": {
+                "content": "",
+                "reasoning_content": '{"candidates":[{"name":"趋势候选"}]}'
+            }}],
+            "usage": {"total_tokens": 1},
+        }
+
+        with patch("market.services.llm_service.requests.post", return_value=response):
+            result = service.call_llm("生成候选")
+
+        self.assertEqual("趋势候选", result["candidates"][0]["name"])
+
+    def test_message_content_supports_segmented_text(self):
+        content = LLMService._message_content({
+            "content": [
+                {"type": "text", "text": "{\"candidates\":"},
+                {"type": "text", "text": "[]}"},
+            ]
+        })
+        self.assertEqual('{"candidates":[]}', content)
+
+    def test_call_llm_reads_choice_text_payload(self):
+        service = LLMService(_Store(), _Klines())
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "choices": [{"text": '{"candidates":[{"name":"文本字段候选"}]}'}],
+            "usage": {"total_tokens": 1},
+        }
+
+        with patch("market.services.llm_service.requests.post", return_value=response):
+            result = service.call_llm("生成候选")
+
+        self.assertEqual("文本字段候选", result["candidates"][0]["name"])
+
+    def test_call_llm_reads_responses_output_payload(self):
+        service = LLMService(_Store(), _Klines())
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "output": [{
+                "content": [{
+                    "type": "output_text",
+                    "text": '{"candidates":[{"name":"Responses候选"}]}',
+                }],
+            }],
+            "usage": {"total_tokens": 1},
+        }
+
+        with patch("market.services.llm_service.requests.post", return_value=response):
+            result = service.call_llm("生成候选")
+
+        self.assertEqual("Responses候选", result["candidates"][0]["name"])
+
+    def test_call_llm_error_includes_response_preview(self):
+        service = LLMService(_Store(), _Klines())
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+            "usage": {"total_tokens": 1},
+        }
+
+        with patch("market.services.llm_service.requests.post", return_value=response):
+            with self.assertRaisesRegex(LLMRequestError, "finish_reason"):
+                service.call_llm("生成候选")
+
     def test_due_ai_plan_respects_each_source_interval(self):
         strategy = TradingStrategy(
             symbol="GOLD_",
@@ -367,6 +435,64 @@ class LLMAnalysisTestCase(unittest.TestCase):
             sorted(item["take_profit"] for item in suggestions),
             [4115.0, 4120.0],
         )
+
+    def test_normalize_accepts_list_response_for_single_symbol(self):
+        strategy = TradingStrategy(
+            symbol="GOLD_",
+            strategy_id="2e0ea156",
+            strategy_name="大模型策略",
+            signal_config={
+                "ai_entry": {
+                    "enabled": True,
+                    "periods": {"M5": {"enabled": True, "weight": 30}},
+                },
+            },
+        )
+        service = LLMService(_Store(), _Klines())
+        service.set_strategy_store(_StrategyStore([strategy]))
+        plan = service._build_ai_analysis_plan(["GOLD_"])
+        response = [{
+            "period": "M5",
+            "direction": "buy",
+            "entry_price": 4100.0,
+            "stop_loss": 4090.0,
+            "take_profit": 4120.0,
+            "confidence": 82,
+        }]
+
+        suggestions = service._normalize_analysis_response(
+            response, plan
+        )["GOLD_"]["trade_suggestions"]
+
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0]["strategy_id"], "2e0ea156")
+        self.assertEqual(suggestions[0]["period"], "M5")
+
+    def test_period_weight_items_accepts_list_period_profiles(self):
+        service = LLMService(_Store(), _Klines())
+        plan = {
+            "GOLD_": {
+                "periods": {"M5": {"weight": 30, "kline_count": 100}},
+                "strategies": [{
+                    "strategy_id": "s1",
+                    "strategy_name": "列表周期策略",
+                    "signal_source_id": "src1",
+                    "periods": [{"period": "M5", "weight": 30}],
+                    "min_confidence": 70,
+                    "min_risk_reward": 1.0,
+                    "kline_count": 100,
+                }],
+            },
+        }
+
+        prompt = service.build_analysis_prompt(
+            {"GOLD_": {"M5": _Klines().get_klines("GOLD_", "M5", 1)}},
+            plan,
+        )
+        groups = service._group_analysis_plans(plan)
+
+        self.assertIn("M5(权重30)", prompt)
+        self.assertEqual(groups[0]["plan"]["GOLD_"]["periods"]["M5"]["weight"], 30)
 
     def test_ai_plan_only_contains_strategies_deployed_on_account(self):
         strategies = [

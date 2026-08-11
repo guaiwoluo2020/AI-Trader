@@ -12,7 +12,7 @@ import re
 import time
 import requests
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..models import LLMConfig, LLMAnalysisResult
 from ..models.llm_config import (
@@ -33,6 +33,43 @@ class LLMService:
 
     # 分析间隔（秒）
     ANALYZE_INTERVAL = 300  # 5分钟
+
+    @staticmethod
+    def _period_weight_items(periods) -> List[Tuple[str, int]]:
+        """Return normalized (period, weight) pairs from dict/list period shapes."""
+        if isinstance(periods, dict):
+            items = []
+            for period, config in periods.items():
+                weight = config.get("weight", 0) if isinstance(config, dict) else config
+                items.append((str(period).upper(), int(weight or 0)))
+            return items
+        if isinstance(periods, list):
+            items = []
+            for item in periods:
+                if isinstance(item, dict):
+                    period = item.get("period") or item.get("timeframe")
+                    if period:
+                        items.append((str(period).upper(), int(item.get("weight", 0) or 0)))
+                elif item:
+                    items.append((str(item).upper(), 0))
+            return items
+        return []
+
+    @staticmethod
+    def _coerce_analysis_response(response, analysis_plan: Dict[str, Dict]) -> Dict:
+        """Accept common LLM response shapes without crashing replay jobs."""
+        if isinstance(response, list):
+            symbols = list(analysis_plan)
+            if len(symbols) == 1:
+                return {symbols[0]: {"trade_suggestions": response}}
+            return {}
+        if not isinstance(response, dict):
+            return {}
+        if "trade_suggestions" in response or "trend_analysis" in response:
+            symbols = list(analysis_plan)
+            if len(symbols) == 1:
+                return {symbols[0]: response}
+        return response
 
     # 各周期K线数量限制
     KLINE_LIMITS = {
@@ -252,7 +289,9 @@ class LLMService:
                 for profile in analysis_plan[symbol]["strategies"]:
                     periods = "、".join(
                         f"{period}(权重{weight})"
-                        for period, weight in profile["periods"].items()
+                        for period, weight in self._period_weight_items(
+                            profile.get("periods")
+                        )
                     )
                     constraints.append(
                         f"- {profile['strategy_name']} ({profile['strategy_id']}), "
@@ -376,18 +415,20 @@ class LLMService:
                 )
 
             result = response.json()
-            message = (result.get("choices") or [{}])[0].get("message") or {}
-            content = message.get("content") or ""
+            content = self._response_content(result)
             parsed = self._parse_llm_response(content)
             if not parsed:
                 preview = self._content_preview(content)
+                response_preview = self._response_preview(result)
                 print(
                     "[LLMService] 模型返回内容无法解析 "
-                    f"(model={reservation['model']}, preview={preview})"
+                    f"(model={reservation['model']}, preview={preview}, "
+                    f"response={response_preview})"
                 )
                 raise LLMRequestError(
                     "大模型返回内容为空或不是有效 JSON，请检查该场景选择的模型"
                     "是否支持 Chat Completions，并要求模型只返回 JSON。"
+                    f"响应摘要: {response_preview}"
                 )
 
             if governance:
@@ -492,8 +533,13 @@ class LLMService:
                     try:
                         chunk_data = json.loads(data_str)
                         if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
-                            delta = chunk_data['choices'][0].get('delta', {})
-                            content_piece = delta.get('content', '')
+                            choice = chunk_data['choices'][0]
+                            delta = choice.get('delta', {})
+                            content_piece = self._message_content(delta)
+                            if not content_piece:
+                                content_piece = self._message_content(
+                                    choice.get("message") or {}
+                                )
                             if content_piece:
                                 full_content += content_piece
                                 chunk_count += 1
@@ -511,7 +557,10 @@ class LLMService:
                     "[LLMService] 流式模型返回内容无法解析 "
                     f"(model={reservation['model']}, preview={preview})"
                 )
-                raise LLMRequestError("大模型返回内容为空或不是有效 JSON")
+                raise LLMRequestError(
+                    "大模型返回内容为空或不是有效 JSON，"
+                    f"响应摘要: {preview}"
+                )
             if governance:
                 governance.finish_call(reservation, "completed")
             return parsed
@@ -552,6 +601,100 @@ class LLMService:
         except json.JSONDecodeError as e:
             print(f"[LLMService] JSON解析失败: {e}")
             return None
+
+    @staticmethod
+    def _message_content(message: Dict) -> str:
+        """Normalize OpenAI-compatible text and reasoning response shapes."""
+        if not isinstance(message, dict):
+            return ""
+
+        def as_text(value) -> str:
+            if isinstance(value, str):
+                return value
+            if not isinstance(value, list):
+                return ""
+            chunks = []
+            for item in value:
+                if isinstance(item, str):
+                    chunks.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or ""
+                    if isinstance(text, dict):
+                        text = text.get("value") or ""
+                    if isinstance(text, str):
+                        chunks.append(text)
+            return "".join(chunks)
+
+        content = as_text(message.get("content"))
+        if content.strip():
+            return content
+
+        # Some reasoning models keep their final structured response here.
+        for key in ("reasoning_content", "reasoning", "analysis"):
+            fallback = as_text(message.get(key))
+            if fallback.strip():
+                return fallback
+
+        # Tool-call style providers may put the JSON payload in arguments.
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            arguments = (call.get("function") or {}).get("arguments")
+            if isinstance(arguments, str) and arguments.strip():
+                return arguments
+        return ""
+
+    @classmethod
+    def _response_content(cls, payload: Dict) -> str:
+        """Extract text from OpenAI-compatible and Responses-like payloads."""
+        if not isinstance(payload, dict):
+            return ""
+
+        for key in ("output_text", "text", "content"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+
+        choices = payload.get("choices") or []
+        if choices:
+            choice = choices[0] if isinstance(choices[0], dict) else {}
+            content = cls._message_content(choice.get("message") or {})
+            if content.strip():
+                return content
+            for key in ("text", "content", "reasoning_content"):
+                value = choice.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+            delta_content = cls._message_content(choice.get("delta") or {})
+            if delta_content.strip():
+                return delta_content
+
+        output = payload.get("output")
+        if isinstance(output, list):
+            chunks = []
+            for item in output:
+                if isinstance(item, str):
+                    chunks.append(item)
+                elif isinstance(item, dict):
+                    chunks.append(cls._message_content(item))
+                    for part in item.get("content") or []:
+                        if isinstance(part, dict):
+                            text = part.get("text") or part.get("content")
+                            if isinstance(text, str):
+                                chunks.append(text)
+            content = "".join(chunks)
+            if content.strip():
+                return content
+        return ""
+
+    @classmethod
+    def _response_preview(cls, payload, limit: int = 700) -> str:
+        """Keep enough provider shape to debug empty-content failures."""
+        try:
+            safe = json.dumps(payload, ensure_ascii=False)
+        except (TypeError, ValueError):
+            safe = str(payload)
+        return cls._content_preview(safe, limit)
 
     @staticmethod
     def _provider_error_detail(response) -> str:
@@ -646,6 +789,7 @@ class LLMService:
         self, response: Dict, analysis_plan: Dict[str, Dict]
     ) -> Dict:
         """规范模型建议，并确保止盈满足对应策略的最低盈亏比。"""
+        response = self._coerce_analysis_response(response, analysis_plan)
         for symbol, analysis in response.items():
             if not isinstance(analysis, dict) or symbol not in analysis_plan:
                 continue
@@ -678,7 +822,9 @@ class LLMService:
 
                 profiles = [
                     profile for profile in symbol_plan.get("strategies", [])
-                    if period in profile.get("periods", {})
+                    if period in dict(
+                        self._period_weight_items(profile.get("periods"))
+                    )
                 ]
                 requested_strategy_id = str(
                     suggestion.get("strategy_id") or ""
@@ -772,7 +918,9 @@ class LLMService:
                     symbol, {"periods": {}, "strategies": []}
                 )
                 target["strategies"].append(profile)
-                for period, weight in profile.get("periods", {}).items():
+                for period, weight in self._period_weight_items(
+                    profile.get("periods")
+                ):
                     current = target["periods"].setdefault(
                         period, {"weight": 0, "kline_count": 0}
                     )

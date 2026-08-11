@@ -11,6 +11,7 @@ import math
 import os
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -2314,6 +2315,7 @@ class BacktestWorker:
         except BacktestCanceled:
             self.tasks.cancel(task["task_id"])
         except Exception as exc:
+            traceback.print_exc()
             self.tasks.fail(task["task_id"], str(exc))
         return True
 

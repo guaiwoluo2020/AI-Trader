@@ -5,6 +5,7 @@
 import unittest
 
 from market.models import (
+    PositionManagementPolicy,
     StrategyLifecycle,
     TradingDecision,
     TradingSignal,
@@ -573,6 +574,65 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(decision.volume, 0.01)
         self.assertIn("同向持仓将超过限制 2", decision.decision_reason)
         self.assertIsNone(service.execute_decision(decision))
+
+    def test_no_fixed_take_profit_policy_can_create_decision(self):
+        strategy = TradingStrategy(
+            symbol="GOLD_",
+            signal_sources=[{
+                "signal_source_id": "ma-m1",
+                "source": "moving_average",
+                "period": "M1",
+                "weight": 100,
+                "params": {},
+            }],
+            min_confidence=60,
+            min_risk_reward=2,
+        )
+        policy = PositionManagementPolicy(
+            name="移动止损出场",
+            user_id=1,
+            config={
+                "initial_stop_rules": [{"type": "fixed_percent", "value": 0.003}],
+                "initial_take_profit_rules": [{"type": "none"}],
+                "management_rules": [
+                    {"type": "break_even", "activation_r": 1, "offset_r": 0},
+                    {"type": "trailing_stop", "activation_r": 1.5, "distance_r": 0.8},
+                ],
+                "min_risk_reward": 0,
+            },
+        )
+        service = StrategyService(
+            strategy_store=_StrategyStore(strategy),
+            risk_manager=_RiskManager(),
+        )
+        signal = TradingSignal(
+            symbol="GOLD_",
+            action="buy",
+            market_direction="up",
+            state_ready=True,
+            is_entry_trigger=True,
+            confidence=80,
+            source="moving_average",
+            source_period="M1",
+            signal_source_id="ma-m1",
+            suggested_entry=4100.0,
+            suggested_sl=0,
+            suggested_tp=0,
+        )
+
+        decision = service.make_decision(
+            "GOLD_",
+            current_price=4100.0,
+            force_signals=[signal],
+            strategy=strategy,
+            position_policy=policy,
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, "buy")
+        self.assertGreater(decision.sl, 0)
+        self.assertEqual(decision.tp, 0)
+        self.assertEqual(decision.risk_reward_ratio, 0)
 
     def test_same_symbol_strategies_make_independent_decisions(self):
         strategies = [

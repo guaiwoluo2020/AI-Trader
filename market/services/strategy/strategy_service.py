@@ -426,17 +426,21 @@ class StrategyService:
             "explanation": plan.explanation,
         }
 
-        if not sl or not tp or sl == 0 or tp == 0:
+        has_fixed_take_profit = bool(tp and tp > 0)
+        if not sl or sl == 0:
             print(f"[StrategyService] 无效的止损止盈: sl={sl}, tp={tp}")
             return None
 
         # 计算风险
         risk_points = abs(entry_price - sl)
-        reward_points = abs(tp - entry_price)
-        rr_ratio = reward_points / risk_points if risk_points > 0 else 0
+        reward_points = abs(tp - entry_price) if has_fixed_take_profit else 0
+        rr_ratio = (
+            reward_points / risk_points
+            if risk_points > 0 and has_fixed_take_profit else 0
+        )
 
         # 检查风险回报比
-        if rr_ratio < strategy.min_risk_reward:
+        if has_fixed_take_profit and rr_ratio < strategy.min_risk_reward:
             print(f"[StrategyService] 风险回报比 {rr_ratio:.2f} 低于最小要求 {strategy.min_risk_reward}")
             return None
 

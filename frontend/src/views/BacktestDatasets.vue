@@ -71,7 +71,7 @@
           <div class="section-tag">NEW DATASET</div>
           <h2>建立历史行情任务</h2>
           <p class="section-copy">
-            创建后，匹配品种的 MT5 EA 会自动领取并分片上传。时间可精确到小时，最短采集 2 小时；预热数据仅用于指标初始化。
+            创建后，匹配品种的 MT5 EA 会自动领取并分片上传。时间可精确到分钟，最短采集 2 小时；预热数据仅用于指标初始化。
           </p>
 
           <v-form @submit.prevent="createDataset">
@@ -104,24 +104,38 @@
               hint="必须与挂载 EA 的图表品种完全一致"
               persistent-hint
             />
+            <div class="range-presets">
+              <v-btn
+                v-for="preset in rangePresets"
+                :key="preset.hours"
+                size="small"
+                variant="tonal"
+                color="teal"
+                @click="applyRangePreset(preset.hours)"
+              >
+                {{ preset.label }}
+              </v-btn>
+            </div>
             <div class="date-grid">
               <v-text-field
                 v-model="form.startDate"
                 label="回测开始时间"
                 type="datetime-local"
-                step="3600"
+                step="60"
                 variant="outlined"
                 density="comfortable"
+                hint="可手动输入，也可点上方快捷区间"
+                persistent-hint
               />
               <v-text-field
                 v-model="form.endDate"
                 label="回测结束时间"
                 type="datetime-local"
-                step="3600"
+                step="60"
                 variant="outlined"
                 density="comfortable"
                 :error="rangeTooShort"
-                :hint="rangeTooShort ? '结束时间至少要比开始时间晚 2 小时' : '按浏览器本地时间选择，最短采集区间为 2 小时'"
+                :hint="rangeTooShort ? '结束时间至少要比开始时间晚 2 小时' : '按浏览器本地时间选择，支持同一天内的 2 小时以上区间'"
                 persistent-hint
               />
             </div>
@@ -346,6 +360,15 @@ const warmupOptions = [
   { title: '不额外预热', value: 0 },
 ]
 
+const rangePresets = [
+  { label: '最近 2 小时', hours: 2 },
+  { label: '最近 6 小时', hours: 6 },
+  { label: '最近 12 小时', hours: 12 },
+  { label: '最近 1 天', hours: 24 },
+  { label: '最近 3 天', hours: 72 },
+  { label: '最近 7 天', hours: 168 },
+]
+
 const statusMap = {
   pending: { label: '等待 EA', color: 'grey', hint: '保持对应品种的 EA 在线' },
   downloading: { label: '下载中', color: 'info', hint: 'EA 正在分批上传经纪商历史行情' },
@@ -374,6 +397,14 @@ const accountOptions = computed(() => context.accounts.map(item => ({
 function parseLocalDateTime(value) {
   const timestamp = new Date(value).getTime()
   return Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : 0
+}
+
+function applyRangePreset(hours) {
+  const end = new Date()
+  end.setSeconds(0, 0)
+  const start = new Date(end.getTime() - Number(hours) * 60 * 60 * 1000)
+  form.startDate = toDateTimeInput(start)
+  form.endDate = toDateTimeInput(end)
 }
 
 const requestedStart = computed(() => parseLocalDateTime(form.startDate))
@@ -607,6 +638,12 @@ onUnmounted(() => {
 .create-card { position: sticky; top: 20px; }
 .create-card h2, .list-card h2 { margin: 4px 0 8px; color: #183f35; font-family: Georgia, serif; }
 .section-copy { color: #68736e; font-size: .9rem; line-height: 1.55; }
+.range-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 14px;
+}
 .date-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .visibility-switch { margin-top: -4px; }
 .visibility-hint { margin: -2px 0 16px 54px; color: #718078; font-size: .76rem; }
