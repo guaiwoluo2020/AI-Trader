@@ -26,7 +26,8 @@ class TradingAccountRepositoryTests(unittest.TestCase):
         self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "accounts.db"))
         self.storage.initialize()
         self.user = UserRepository(self.storage).create_user(
-            "account-user", "hash", "salt"
+            "account-user", "hash", "salt",
+            membership_level="diamond", live_trading_enabled=True,
         )
         self.repository = TradingAccountRepository(self.storage)
 
@@ -81,6 +82,7 @@ class TradingAccountRepositoryTests(unittest.TestCase):
         self.assertEqual(paper.currency, "USD")
         self.assertEqual(paper.balance, 50000)
         self.assertEqual(paper.free_margin, 50000)
+        self.assertEqual(paper.daily_order_limit, 100)
         self.assertIsNone(connection)
         self.assertIsNone(self.repository.authenticate(self.user.user_id, "invalid"))
 

@@ -29,6 +29,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cat >"$ENV_FILE" <<EOF
 PYTHONUNBUFFERED=1
 AI_TRADER_DB_FILE=$DATA_DIR/ai_trader.db
+AI_TRADER_DATA_DIR=$DATA_DIR
 AI_TRADER_DEFAULT_ADMIN_USERNAME=admin
 AI_TRADER_DEFAULT_ADMIN_PASSWORD=$admin_password
 AI_TRADER_PUBLIC_BASE_URL=$PUBLIC_BASE_URL
@@ -37,6 +38,10 @@ EOF
   chmod 0600 "$ENV_FILE"
   printf 'username=admin\npassword=%s\n' "$admin_password" >"$CREDENTIAL_FILE"
   chmod 0600 "$CREDENTIAL_FILE"
+fi
+
+if ! grep -q '^AI_TRADER_DATA_DIR=' "$ENV_FILE"; then
+  printf '\nAI_TRADER_DATA_DIR=%s\n' "$DATA_DIR" >>"$ENV_FILE"
 fi
 
 chown -R root:root "$APP_DIR"

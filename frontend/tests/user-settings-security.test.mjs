@@ -16,9 +16,10 @@ const apiSource = readFileSync(
 
 assert.match(settingsSource, /账户与安全/)
 assert.match(settingsSource, /currentUser\.role/)
-assert.match(settingsSource, /修改密码/)
-assert.match(settingsSource, /authAPI\.changePassword/)
-assert.match(apiSource, /async changePassword\(passwords\)/)
-assert.match(apiSource, /\/auth\/change-password/)
+assert.doesNotMatch(settingsSource, /修改密码/)
+assert.doesNotMatch(settingsSource, /authAPI\.changePassword/)
+assert.doesNotMatch(apiSource, /async changePassword\(passwords\)/)
+assert.match(settingsSource, /所有成员（包括管理员）统一使用注册邮箱接收验证码登录/)
+assert.doesNotMatch(apiSource, /\/auth\/change-password/)
 
 console.log('user-settings-security test passed')

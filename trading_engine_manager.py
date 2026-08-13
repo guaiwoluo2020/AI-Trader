@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
 from background_scheduler import SharedTaskScheduler
+from data_retention import DataRetentionService
 from ea_auth import EAIdentity
 from paper_trading import PaperTradingService
 from server import TradingServer
@@ -45,6 +46,7 @@ class TradingEngineManager:
         self._event_loop = None
         self._account_repo = TradingAccountRepository()
         self.paper_trading = PaperTradingService()
+        self.data_retention = DataRetentionService()
         self._idle_timeout_seconds = float(
             idle_timeout_seconds
             if idle_timeout_seconds is not None
@@ -57,6 +59,7 @@ class TradingEngineManager:
         )
         self._scheduler_started = False
         self._next_paper_maintenance_at = time.monotonic() + 10
+        self._next_data_retention_at = time.monotonic() + 60
 
     @staticmethod
     def _create_engine(user_id: int, account_id: int) -> TradingServer:
@@ -125,6 +128,7 @@ class TradingEngineManager:
             runtimes = list(self._engines.values())
         for runtime in runtimes:
             runtime.engine.set_event_loop(loop)
+        self._ensure_scheduler_started()
 
     def get_status(self) -> Dict:
         with self._lock:
@@ -159,6 +163,17 @@ class TradingEngineManager:
             if reload_strategy:
                 reload_strategy()
 
+    def suspend_user_live_orders(self, user_id: int) -> None:
+        """撤销实盘授权后清理内存中尚未发送的开仓订单。"""
+        with self._lock:
+            engines = [
+                runtime.engine for key, runtime in self._engines.items()
+                if key.user_id == int(user_id)
+            ]
+        for engine in engines:
+            engine.pending_order_service.clear_all()
+            engine.trading_instruction_service.clear_all()
+
     def close_all(self) -> None:
         with self._lock:
             runtimes = list(self._engines.values())
@@ -187,6 +202,12 @@ class TradingEngineManager:
             self._next_paper_maintenance_at = now + 10
             scheduler.submit(
                 ("paper", "maintenance"), self.paper_trading.run_maintenance
+            )
+        if now >= self._next_data_retention_at:
+            self._next_data_retention_at = now + 86400
+            scheduler.submit(
+                ("system", "data_retention"),
+                self.data_retention.run_maintenance,
             )
 
         with self._lock:

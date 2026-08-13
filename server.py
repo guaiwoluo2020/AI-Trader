@@ -31,7 +31,9 @@ from market.services import StatisticsService, PositionService, TradeHistoryServ
 from market.trade_config import TradeConfig
 from market.llm_analyzer import LLMAnalyzer
 from market.system_log import SystemLog
+from membership import MembershipService
 from sqlite_storage import (
+    PositionManagementEventRepository,
     PositionManagementPolicyRepository,
     RuntimeStateRepository,
     SharedAIRuntimeRepository,
@@ -54,6 +56,7 @@ class TradingServer:
         self.account_id = account_id
         self.strategy_deployments = StrategyDeploymentRepository()
         self.account_repository = TradingAccountRepository()
+        self.memberships = MembershipService()
 
         # 线程锁
         self.lock = threading.RLock()
@@ -150,7 +153,9 @@ class TradingServer:
         )
         self._close_position_instructions = defaultdict(list)
         self._position_update_instructions = defaultdict(dict)
+        self._position_partial_instructions = defaultdict(dict)
         self._managed_position_state = {}
+        self._position_event_repository = PositionManagementEventRepository()
         self._position_policy_repository = PositionManagementPolicyRepository()
         self._ma_trailing_extremes = {}
         if self._runtime_repository:
@@ -395,6 +400,8 @@ class TradingServer:
                 daily_order_limit=account.daily_order_limit,
             )
 
+        allow_new_orders = self._live_entries_allowed()
+
         # Each deployed strategy owns its signal generation and cooldown state.
         strategy_ids = self._active_strategy_ids("live")
         self.strategy_service.set_allowed_strategy_ids(strategy_ids)
@@ -419,6 +426,8 @@ class TradingServer:
                     f"[TradingServer] {symbol} 策略 {strategy.strategy_id} "
                     f"生成了 {trigger_count} 个入场触发"
                 )
+            if not allow_new_orders:
+                continue
             decision = self.strategy_service.make_decision(
                 symbol, current_price, force_signals=signals, strategy=strategy
             )
@@ -497,11 +506,15 @@ class TradingServer:
                 "entry_price": float(position.price_open),
                 "stop_loss": float(position.sl),
                 "take_profit": float(position.tp),
+                "volume": float(position.volume),
+                "remaining_volume": float(position.volume),
                 "initial_risk": abs(float(position.price_open) - float(position.sl)),
                 "favorable_price": float(position.price_open),
                 "holding_bars": 0,
                 "opened_at": position.opened_at or datetime.now(),
             })
+            state["volume"] = float(position.volume)
+            state["remaining_volume"] = float(position.volume)
             state["stop_loss"] = float(position.sl or state["stop_loss"])
             state["take_profit"] = float(position.tp or state["take_profit"])
             state["favorable_price"] = (
@@ -521,6 +534,10 @@ class TradingServer:
                     )
                 ),
             )
+            TradingServer._record_position_management_events(
+                self,
+                symbol, ticket, state, action.events
+            )
             if action.action == "close":
                 self.add_close_position_instruction(symbol, position.ticket)
                 self._managed_position_state.pop(ticket, None)
@@ -531,12 +548,65 @@ class TradingServer:
                     "tp": round(float(position.tp or 0), 8),
                     "reason": action.reason,
                 }
+            elif action.action == "partial_close" and action.close_volume > 0:
+                done = set(state.get("partial_levels_done") or [])
+                if action.level_id not in done:
+                    close_volume = round(float(action.close_volume), 2)
+                    if close_volume <= 0:
+                        continue
+                    done.add(action.level_id)
+                    state["partial_levels_done"] = sorted(done)
+                    if action.stop_loss:
+                        state["stop_loss"] = float(action.stop_loss)
+                        self._position_update_instructions[symbol][ticket] = {
+                            "ticket": ticket,
+                            "sl": round(float(action.stop_loss), 8),
+                            "tp": round(float(position.tp or 0), 8),
+                            "reason": f"{action.reason}:move_sl",
+                        }
+                    self._position_partial_instructions[symbol][
+                        f"{ticket}:{action.level_id}"
+                    ] = {
+                        "ticket": ticket,
+                        "volume": close_volume,
+                        "level_id": action.level_id,
+                        "reason": action.reason,
+                    }
+
+    def _record_position_management_events(
+        self, symbol: str, ticket: int, state: Dict, events: List[Dict],
+    ) -> None:
+        user_id = getattr(self, "user_id", None)
+        account_id = getattr(self, "account_id", None)
+        if not user_id or not account_id or not events:
+            return
+        for event in events:
+            if event.get("status") not in {"triggered"}:
+                continue
+            self._position_event_repository.record(
+                int(user_id), int(account_id), str(ticket),
+                event.get("rule_type") or "position_management",
+                event.get("message", ""),
+                symbol=symbol,
+                ticket=ticket,
+                rule_type=event.get("rule_type", ""),
+                status=event.get("status", ""),
+                price=event.get("price", 0),
+                stop_loss=state.get("stop_loss", 0),
+                take_profit=state.get("take_profit", 0),
+                volume=state.get("remaining_volume") or state.get("volume", 0),
+                payload=event,
+            )
 
     # ==================== 订单确认回调 ====================
 
     def _on_order_confirmed(self, order: PendingOrder):
         """订单确认回调"""
         print(f"[TradingServer] 订单确认: {order.order_id}")
+
+        if not self._live_entries_allowed():
+            print(f"[TradingServer] 实盘权限已关闭，忽略开仓订单: {order.order_id}")
+            return
 
         # 广播订单确认
         self._broadcast_pending_order(order)
@@ -572,16 +642,24 @@ class TradingServer:
         if price is not None:
             process_result = self.process_price(symbol, price)
 
-        # 获取交易指令
-        trades = self.trading_instruction_service.fetch_instructions_for_ea(symbol, price)
-
-        # 获取待确认订单
-        pending_orders = self.pending_order_service.get_pending_orders_dict(symbol)
+        if self._live_entries_allowed():
+            trades = self.trading_instruction_service.fetch_instructions_for_ea(
+                symbol, price
+            )
+            pending_orders = self.pending_order_service.get_pending_orders_dict(symbol)
+        else:
+            self.trading_instruction_service.clear_by_symbol(symbol)
+            self.pending_order_service.clear_all()
+            trades = []
+            pending_orders = []
 
         # 获取平仓指令
         close_tickets = self.get_close_position_instructions(symbol)
         position_updates = list(
             self._position_update_instructions.pop(symbol, {}).values()
+        )
+        position_partials = list(
+            self._position_partial_instructions.pop(symbol, {}).values()
         )
 
         return {
@@ -589,8 +667,18 @@ class TradingServer:
             "pending_orders": pending_orders,
             "close_tickets": close_tickets,
             "position_updates": position_updates,
+            "position_partials": position_partials,
             "process_result": process_result
         }
+
+    def _live_entries_allowed(self) -> bool:
+        if self.user_id is None:
+            return False
+        try:
+            self.memberships.assert_live_trading(self.user_id, self.account_id)
+            return True
+        except ValueError:
+            return False
 
     # ==================== 统计数据 ====================
 

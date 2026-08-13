@@ -39,7 +39,10 @@
                 <td>{{ pos.volume }}</td><td>{{ formatPrice(pos.price_open) }}</td>
                 <td><strong :class="Number(pos.profit) >= 0 ? 'text-success' : 'text-error'">{{ signedMoney(pos.profit) }}</strong></td>
                 <td>{{ pos.distance_sl || '-' }}</td><td>{{ pos.distance_tp || '-' }}</td><td>{{ formatTime(pos.updated_at) }}</td>
-                <td><v-btn size="small" color="error" variant="tonal" @click="closePosition(pos)">平仓</v-btn></td>
+                <td class="action-cell">
+                  <v-btn size="small" color="primary" variant="tonal" @click="openManagementTimeline(pos)">轨迹</v-btn>
+                  <v-btn size="small" color="error" variant="tonal" @click="closePosition(pos)">平仓</v-btn>
+                </td>
               </tr>
             </tbody>
           </v-table>
@@ -104,6 +107,55 @@
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="managementDialog" max-width="760">
+      <v-card class="timeline-card">
+        <v-card-title class="d-flex align-center justify-space-between">
+          <span>持仓管理轨迹</span>
+          <v-btn icon="mdi-close" variant="text" @click="managementDialog = false"></v-btn>
+        </v-card-title>
+        <v-card-text>
+          <div v-if="managementPosition" class="timeline-summary">
+            <v-chip color="primary" variant="tonal">#{{ managementPosition.ticket }}</v-chip>
+            <v-chip variant="tonal">{{ managementPosition.symbol }}</v-chip>
+            <v-chip :color="managementPosition.type === 'BUY' ? 'success' : 'error'" variant="tonal">
+              {{ managementPosition.type === 'BUY' ? '买入' : '卖出' }}
+            </v-chip>
+            <v-chip variant="tonal">开仓 {{ formatPrice(managementPosition.price_open) }}</v-chip>
+          </div>
+
+          <v-skeleton-loader v-if="managementLoading" type="list-item-three-line@3"></v-skeleton-loader>
+          <v-timeline v-else-if="managementEvents.length" side="end" density="compact" class="management-timeline">
+            <v-timeline-item
+              v-for="event in managementEvents"
+              :key="event.event_id || `${event.event_time}-${event.message}`"
+              :dot-color="eventColor(event.rule_type)"
+              size="small"
+            >
+              <div class="timeline-item">
+                <div class="d-flex align-center justify-space-between ga-3">
+                  <strong>{{ eventTypeLabel(event.rule_type) }}</strong>
+                  <span class="text-caption text-medium-emphasis">{{ formatDateTime(event.event_time) }}</span>
+                </div>
+                <p>{{ event.message || '-' }}</p>
+                <div class="timeline-metrics">
+                  <span>价格 {{ formatPrice(event.price) }}</span>
+                  <span>止损 {{ formatPrice(event.stop_loss) }}</span>
+                  <span v-if="event.payload?.candidate_stop_loss">候选止损 {{ formatPrice(event.payload.candidate_stop_loss) }}</span>
+                  <span v-if="event.payload?.close_volume">平仓手数 {{ Number(event.payload.close_volume).toFixed(2) }}</span>
+                  <span v-if="event.payload?.profit_r">浮盈 {{ Number(event.payload.profit_r).toFixed(2) }}R</span>
+                </div>
+              </div>
+            </v-timeline-item>
+          </v-timeline>
+          <div v-else class="empty-state compact">
+            <v-icon size="42">mdi-timeline-clock-outline</v-icon>
+            <h3>暂无管理轨迹</h3>
+            <p>当保本、移动止损、分批止盈等规则触发后，会在这里记录。</p>
+          </div>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
+
     <!-- 提示 -->
     <v-snackbar v-model="showSnackbar" :color="snackbarColor" timeout="3000">
       {{ snackbarMessage }}
@@ -129,6 +181,10 @@ export default {
     })
     const loading = ref(false)
     const closeDialog = ref(false)
+    const managementDialog = ref(false)
+    const managementLoading = ref(false)
+    const managementPosition = ref(null)
+    const managementEvents = ref([])
     const selectedPosition = ref(null)
     const closing = ref(false)
     const showSnackbar = ref(false)
@@ -200,6 +256,27 @@ export default {
       closeDialog.value = true
     }
 
+    const openManagementTimeline = async (pos) => {
+      managementPosition.value = pos
+      managementEvents.value = []
+      managementDialog.value = true
+      managementLoading.value = true
+      try {
+        const data = await marketAPI.getPositionManagementEvents(
+          pos.symbol,
+          pos.ticket,
+          selectedAccountId.value
+        )
+        managementEvents.value = data.events || []
+      } catch (err) {
+        snackbarMessage.value = '加载持仓轨迹失败: ' + (err.response?.data?.detail || err.message)
+        snackbarColor.value = 'error'
+        showSnackbar.value = true
+      } finally {
+        managementLoading.value = false
+      }
+    }
+
     const confirmClosePosition = async () => {
       if (!selectedPosition.value) return
 
@@ -240,6 +317,16 @@ export default {
         second: '2-digit'
       })
     }
+    const formatDateTime = (timestamp) => {
+      if (!timestamp) return '-'
+      return new Date(timestamp).toLocaleString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      })
+    }
 
     const formatMoney = (value) => Number(value || 0).toFixed(2)
     const signedMoney = (value) => {
@@ -256,6 +343,24 @@ export default {
       '止盈触发': 'success',
       '强制平仓': 'error'
     })[source] || 'grey'
+    const eventTypeLabel = (type) => ({
+      break_even: '保本止损',
+      trailing_stop: '移动止损',
+      pivot_trailing: '转折跟进',
+      partial_take_profit: '分批止盈',
+      stop_loss_update: '止损更新',
+      reverse_signal: '反向退出',
+      max_holding_bars: '时间退出'
+    })[type] || type || '持仓管理'
+    const eventColor = (type) => ({
+      partial_take_profit: 'success',
+      stop_loss_update: 'primary',
+      trailing_stop: 'primary',
+      break_even: 'teal',
+      pivot_trailing: 'orange',
+      reverse_signal: 'error',
+      max_holding_bars: 'warning'
+    })[type] || 'grey'
 
     onMounted(() => {
       if (selectedAccountId.value) {
@@ -289,6 +394,10 @@ export default {
       summary,
       loading,
       closeDialog,
+      managementDialog,
+      managementLoading,
+      managementPosition,
+      managementEvents,
       selectedPosition,
       closing,
       showSnackbar,
@@ -302,12 +411,16 @@ export default {
       loadPositions,
       loadTradeHistory,
       closePosition,
+      openManagementTimeline,
       confirmClosePosition,
       formatTime,
+      formatDateTime,
       formatMoney,
       signedMoney,
       formatPrice,
-      sourceColor
+      sourceColor,
+      eventTypeLabel,
+      eventColor
     }
   }
 }
@@ -331,7 +444,16 @@ export default {
 .distribution-panel { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:16px; border-radius:14px; background:#fbf6e9; }
 .distribution-title { margin-right:6px; color:#6e5d28; font-weight:800; }
 .category-table { border:1px solid #e2ebe5; border-radius:14px; overflow:hidden; }
+.action-cell { display:flex; flex-wrap:wrap; gap:8px; }
+.timeline-card { border-radius:22px!important; }
+.timeline-summary { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; }
+.management-timeline { margin-left:-18px; }
+.timeline-item { padding:12px 14px; border:1px solid #dde9e2; border-radius:14px; background:linear-gradient(145deg,#fff,#f7fbf8); }
+.timeline-item p { margin:6px 0 10px; color:#385148; }
+.timeline-metrics { display:flex; flex-wrap:wrap; gap:8px; }
+.timeline-metrics span { padding:4px 8px; border-radius:999px; color:#536b62; background:#eef5f1; font-size:.76rem; }
 .empty-state { padding:64px 20px; text-align:center; color:#718078; }
+.empty-state.compact { padding:34px 12px; }
 .empty-state h3 { margin:12px 0 4px; color:#385148; }
 .empty-state p { margin:0; }
 @media (max-width:700px) { .positions-page{padding:16px}.positions-hero{align-items:stretch;flex-direction:column;padding:22px}.positions-hero .v-chip{align-self:flex-start}.section-toolbar{align-items:flex-start;flex-direction:column}.section-toolbar .v-btn{width:100%} }

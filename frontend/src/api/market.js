@@ -544,6 +544,16 @@ export const marketAPI = {
     return response.data
   },
 
+  async getDataMaintenance() {
+    const response = await api.get('/admin/system/data-maintenance')
+    return response.data
+  },
+
+  async runDataMaintenance() {
+    const response = await api.post('/admin/system/data-maintenance/run')
+    return response.data
+  },
+
   // ==================== 仓位管理 ====================
 
   // 获取持仓数据
@@ -559,6 +569,14 @@ export const marketAPI = {
     const params = symbol ? { symbol } : {}
     if (accountId) params.account_id = accountId
     const response = await api.get('/positions/summary', { params })
+    return response.data
+  },
+
+  async getPositionManagementEvents(symbol, ticket, accountId = null) {
+    const response = await api.get(
+      `/positions/${encodeURIComponent(symbol)}/${encodeURIComponent(ticket)}/management-events`,
+      { params: accountId ? { account_id: accountId } : {} }
+    )
     return response.data
   },
 
@@ -624,10 +642,10 @@ export const marketAPI = {
     return response.data
   },
 
-  // 复制共享策略为当前用户的私有草稿
-  async copySharedStrategy(ownerUserId, strategyId, data = {}) {
+  // 使用平台共享策略；服务端创建不可编辑的安全引用
+  async useSharedStrategy(ownerUserId, strategyId, data = {}) {
     const response = await api.post(
-      `/strategy/shared/${encodeURIComponent(ownerUserId)}/${encodeURIComponent(strategyId)}/copy`,
+      `/strategy/shared/${encodeURIComponent(ownerUserId)}/${encodeURIComponent(strategyId)}/use`,
       data
     )
     return response.data

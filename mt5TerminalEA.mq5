@@ -681,6 +681,36 @@ void ParseAndExecuteTrades(string jsonData)
                else
                   Print("[持仓更新失败] Ticket: ", ticket, " Retcode: ", trade.ResultRetcodeDescription());
               }
+           cursor = objectEnd + 1;
+           }
+        }
+     }
+
+   int partialsPos = StringFind(jsonData, "\"position_partials\":");
+   if(partialsPos != -1)
+     {
+      int partialsStart = StringFind(jsonData, "[", partialsPos);
+      int partialsEnd = StringFind(jsonData, "]", partialsStart);
+      if(partialsStart != -1 && partialsEnd != -1 && partialsEnd > partialsStart + 1)
+        {
+         string partialsJson = StringSubstr(jsonData, partialsStart + 1, partialsEnd - partialsStart - 1);
+         int cursor = 0;
+         while(cursor < StringLen(partialsJson))
+           {
+            int objectStart = StringFind(partialsJson, "{", cursor);
+            int objectEnd = StringFind(partialsJson, "}", objectStart);
+            if(objectStart == -1 || objectEnd == -1) break;
+            string partialJson = StringSubstr(partialsJson, objectStart, objectEnd - objectStart + 1);
+            long ticket = (long)ExtractJsonDouble(partialJson, "ticket");
+            double volume = ExtractJsonDouble(partialJson, "volume");
+            string levelId = ExtractJsonString(partialJson, "level_id");
+            if(ticket > 0 && volume > 0 && PositionSelectByTicket(ticket))
+              {
+               if(trade.PositionClosePartial(ticket, volume))
+                  Print("[分批止盈成功] Ticket: ", ticket, " Volume: ", volume, " Level: ", levelId);
+               else
+                  Print("[分批止盈失败] Ticket: ", ticket, " Volume: ", volume, " Retcode: ", trade.ResultRetcodeDescription());
+              }
             cursor = objectEnd + 1;
            }
         }

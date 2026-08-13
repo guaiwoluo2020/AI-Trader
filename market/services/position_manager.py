@@ -177,13 +177,39 @@ class PositionManager:
         current_sl = float(position["stop_loss"])
         risk = float(position.get("initial_risk") or abs(entry - current_sl))
         price = float(market.get("price", market.get("close", 0)))
+        volume = float(position.get("remaining_volume") or position.get("volume") or 0)
         favorable = float(position.get("favorable_price") or entry)
         favorable = max(favorable, price) if direction == "buy" else min(favorable, price)
         candidates = []
+        events = []
+        profit = favorable - entry if direction == "buy" else entry - favorable
+        profit_r = profit / risk if risk > 0 else 0.0
+        triggered_partials = set(position.get("partial_levels_done") or [])
+        if isinstance(position.get("partial_levels_done"), str):
+            triggered_partials = {
+                item for item in position["partial_levels_done"].split(",") if item
+            }
+
+        def add_event(rule_type: str, status: str, message: str, **payload):
+            events.append({
+                "rule_type": rule_type,
+                "status": status,
+                "message": message,
+                "price": price,
+                "entry_price": entry,
+                "stop_loss": current_sl,
+                "favorable_price": favorable,
+                "profit_r": round(profit_r, 4),
+                **payload,
+            })
+
         for rule in policy_config.get("management_rules", []):
             kind = rule.get("type")
             if kind == "reverse_signal" and reverse_signal:
-                return PositionAction("close", reason="reverse_signal")
+                add_event(kind, "triggered", "出现反向信号，触发退出")
+                return PositionAction(
+                    "close", reason="reverse_signal", events=events
+                )
             if kind == "max_holding_bars":
                 holding_bars = int(position.get("holding_bars", 0))
                 opened_at = position.get("opened_at")
@@ -197,17 +223,112 @@ class PositionManager:
                         int(max(0, float(current_time) - float(opened_at)) // period_seconds),
                     )
                 if holding_bars >= int(rule["bars"]):
-                    return PositionAction("close", reason="max_holding_bars")
+                    add_event(
+                        kind, "triggered",
+                        f"持仓 {holding_bars} 根K线，达到时间退出条件",
+                        holding_bars=holding_bars,
+                    )
+                    return PositionAction(
+                        "close", reason="max_holding_bars", events=events
+                    )
+                add_event(
+                    kind, "checked",
+                    f"持仓 {holding_bars} 根K线，未达到 {rule['bars']} 根",
+                    holding_bars=holding_bars,
+                )
             if kind == "break_even" and risk > 0:
-                profit = favorable - entry if direction == "buy" else entry - favorable
                 if profit >= risk * float(rule["activation_r"]):
                     offset = risk * float(rule.get("offset_r", 0))
-                    candidates.append(entry + offset if direction == "buy" else entry - offset)
+                    candidate = entry + offset if direction == "buy" else entry - offset
+                    candidates.append(candidate)
+                    add_event(
+                        kind, "triggered",
+                        f"浮盈 {profit_r:.2f}R 达到保本 {rule['activation_r']}R",
+                        candidate_stop_loss=candidate,
+                    )
+                else:
+                    add_event(
+                        kind, "checked",
+                        f"浮盈 {profit_r:.2f}R，未达到保本 {rule['activation_r']}R",
+                    )
             if kind == "trailing_stop" and risk > 0:
-                profit = favorable - entry if direction == "buy" else entry - favorable
                 if profit >= risk * float(rule["activation_r"]):
                     distance = risk * float(rule["distance_r"])
-                    candidates.append(favorable - distance if direction == "buy" else favorable + distance)
+                    candidate = (
+                        favorable - distance
+                        if direction == "buy" else favorable + distance
+                    )
+                    candidates.append(candidate)
+                    add_event(
+                        kind, "triggered",
+                        f"浮盈 {profit_r:.2f}R 达到移动止损 {rule['activation_r']}R",
+                        candidate_stop_loss=candidate,
+                        distance_r=rule["distance_r"],
+                    )
+                else:
+                    add_event(
+                        kind, "checked",
+                        f"浮盈 {profit_r:.2f}R，未达到移动止损 {rule['activation_r']}R",
+                    )
+            if kind == "partial_take_profit" and risk > 0 and volume > 0:
+                for level in rule.get("levels", []):
+                    level_id = str(level.get("level_id") or "")
+                    if not level_id or level_id in triggered_partials:
+                        continue
+                    trigger_r = float(level.get("trigger_r", 0))
+                    if profit_r >= trigger_r:
+                        close_percent = min(
+                            100.0, max(0.0, float(level.get("close_percent", 0)))
+                        )
+                        close_volume = volume * close_percent / 100.0
+                        move_sl = level.get("move_sl", "none")
+                        partial_stop = None
+                        if move_sl == "break_even":
+                            partial_stop = entry
+                        elif move_sl == "trail":
+                            trail_rule = next(
+                                (
+                                    item for item in policy_config.get("management_rules", [])
+                                    if item.get("type") == "trailing_stop"
+                                ),
+                                {},
+                            )
+                            distance_r = float(trail_rule.get("distance_r", 0.8) or 0.8)
+                            distance = risk * distance_r
+                            partial_stop = (
+                                favorable - distance
+                                if direction == "buy" else favorable + distance
+                            )
+                        if partial_stop is not None:
+                            can_tighten = (
+                                current_sl < partial_stop < price if direction == "buy"
+                                else price < partial_stop < current_sl
+                            )
+                            if not can_tighten:
+                                partial_stop = None
+                        add_event(
+                            kind, "triggered",
+                            f"浮盈 {profit_r:.2f}R 达到分批止盈 {trigger_r}R，平 {close_percent:.0f}%",
+                            level_id=level_id,
+                            close_percent=close_percent,
+                            close_volume=close_volume,
+                            move_sl=move_sl,
+                            candidate_stop_loss=partial_stop,
+                        )
+                        return PositionAction(
+                            "partial_close",
+                            stop_loss=partial_stop,
+                            close_percent=close_percent,
+                            close_volume=close_volume,
+                            level_id=level_id,
+                            reason="partial_take_profit",
+                            events=events,
+                        )
+                    add_event(
+                        kind, "checked",
+                        f"浮盈 {profit_r:.2f}R，未达到分批止盈 {trigger_r}R",
+                        level_id=level_id,
+                    )
             if kind == "pivot_trailing":
                 candidate = self._pivot_candidate(
                     direction, price, rule, pivots or [],
@@ -216,11 +337,26 @@ class PositionManager:
                 )
                 if candidate is not None:
                     candidates.append(candidate)
+                    add_event(
+                        kind, "triggered",
+                        "转折点跟进给出新的止损候选",
+                        candidate_stop_loss=candidate,
+                    )
+                else:
+                    add_event(kind, "checked", "暂无可用转折点跟进止损")
         valid = [candidate for candidate in candidates if (
             current_sl < candidate < price if direction == "buy"
             else price < candidate < current_sl
         )]
         if not valid:
-            return PositionAction()
+            return PositionAction(events=events)
         new_stop = max(valid) if direction == "buy" else min(valid)
-        return PositionAction("modify_sl", stop_loss=new_stop, reason="position_management")
+        add_event(
+            "stop_loss_update", "triggered",
+            f"止损从 {current_sl:.5f} 调整为 {new_stop:.5f}",
+            new_stop_loss=new_stop,
+        )
+        return PositionAction(
+            "modify_sl", stop_loss=new_stop,
+            reason="position_management", events=events,
+        )

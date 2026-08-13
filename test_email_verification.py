@@ -66,13 +66,15 @@ class EmailVerificationTestCase(unittest.TestCase):
         service = EmailVerificationService()
         captured = {}
 
-        def capture_message(config, target, code):
-            captured.update({"target": target, "code": code})
+        def capture_message(config, target, code, purpose):
+            captured.update({"target": target, "code": code, "purpose": purpose})
 
         with patch.object(service, "_send_message", side_effect=capture_message):
             result = service.send_code("Trader@Example.com")
 
         self.assertEqual(result["email"], "trader@example.com")
+        self.assertEqual(result["expires_in"], 180)
+        self.assertEqual(captured["purpose"], "registration")
         row = service.repository.get("trader@example.com")
         self.assertNotEqual(row["code_hash"], captured["code"])
         with self.assertRaisesRegex(EmailVerificationError, "发送过于频繁"):
@@ -88,6 +90,27 @@ class EmailVerificationTestCase(unittest.TestCase):
 
         self.assertEqual(user.email, "trader@example.com")
         self.assertIsNone(service.repository.get(email))
+
+    def test_login_code_only_works_for_existing_user_and_login_purpose(self):
+        self.auth.register("verified", "TradePass2026", "trader@example.com")
+        service = EmailVerificationService()
+        captured = {}
+
+        def capture_message(config, target, code, purpose):
+            captured.update({"code": code, "purpose": purpose})
+
+        with patch.object(service, "_send_message", side_effect=capture_message):
+            service.send_code("trader@example.com", purpose="login")
+
+        self.assertEqual(captured["purpose"], "login")
+        with self.assertRaisesRegex(EmailVerificationError, "用途不匹配"):
+            service.assert_valid_code("trader@example.com", captured["code"])
+        self.assertEqual(
+            service.assert_valid_code(
+                "trader@example.com", captured["code"], purpose="login"
+            ),
+            "trader@example.com",
+        )
 
 
 if __name__ == "__main__":

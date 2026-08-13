@@ -126,9 +126,75 @@ class LLMAnalysisTestCase(unittest.TestCase):
             "usage": {"total_tokens": 1},
         }
 
-        with patch("market.services.llm_service.requests.post", return_value=response):
+        with patch(
+            "market.services.llm_service.requests.post", return_value=response
+        ) as request:
             with self.assertRaisesRegex(LLMRequestError, "不是有效 JSON"):
                 service.call_llm("生成候选")
+        self.assertEqual(3, request.call_count)
+
+    def test_call_llm_retries_invalid_json_and_uses_correction_prompt(self):
+        service = LLMService(_Store(), _Klines())
+        invalid = Mock(status_code=200)
+        invalid.json.return_value = {
+            "choices": [{"message": {"content": "这不是 JSON"}}],
+        }
+        valid = Mock(status_code=200)
+        valid.json.return_value = {
+            "choices": [{"message": {"content": '{"status":"ok"}'}}],
+            "usage": {"total_tokens": 2},
+        }
+
+        with patch(
+            "market.services.llm_service.requests.post",
+            side_effect=[invalid, valid],
+        ) as request:
+            result = service.call_llm("生成信号")
+
+        self.assertEqual({"status": "ok"}, result)
+        self.assertEqual(2, request.call_count)
+        retry_prompt = request.call_args_list[1].kwargs["json"]["messages"][-1]["content"]
+        self.assertIn("响应格式纠正", retry_prompt)
+        self.assertIn("生成信号", retry_prompt)
+
+    def test_call_llm_does_not_retry_http_error(self):
+        service = LLMService(_Store(), _Klines())
+        response = Mock(status_code=500, text="provider unavailable")
+        response.json.side_effect = ValueError("not json")
+
+        with patch(
+            "market.services.llm_service.requests.post", return_value=response
+        ) as request:
+            with self.assertRaisesRegex(LLMRequestError, "HTTP 500"):
+                service.call_llm("生成信号")
+
+        self.assertEqual(1, request.call_count)
+
+    def test_call_llm_stream_retries_invalid_json(self):
+        service = LLMService(_Store(), _Klines())
+
+        def stream_response(content):
+            response = Mock(status_code=200)
+            chunk = json.dumps({
+                "choices": [{"delta": {"content": content}}],
+            }, ensure_ascii=False)
+            response.iter_lines.return_value = [
+                f"data: {chunk}".encode("utf-8"),
+                b"data: [DONE]",
+            ]
+            return response
+
+        with patch(
+            "market.services.llm_service.requests.post",
+            side_effect=[
+                stream_response("不是 JSON"),
+                stream_response('{"direction":"buy"}'),
+            ],
+        ) as request:
+            result = service.call_llm_stream("分析行情")
+
+        self.assertEqual({"direction": "buy"}, result)
+        self.assertEqual(2, request.call_count)
 
     def test_call_llm_uses_reasoning_content_when_content_is_empty(self):
         service = LLMService(_Store(), _Klines())

@@ -11,6 +11,7 @@ from auth import AuthUser, require_auth
 from ea_auth import EAIdentity, require_ea_auth
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
+from sqlite_storage import PositionManagementEventRepository
 
 
 def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -137,6 +138,19 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
             "status": "ok",
             "position": position
         }
+
+    @protected_router.get("/positions/{symbol}/{ticket}/management-events")
+    async def get_position_management_events(
+        symbol: str,
+        ticket: int,
+        account_id: Optional[int] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        account, _ = resolve_web_engine(engine_manager, user, account_id)
+        events = PositionManagementEventRepository().list_for_position(
+            user.user_id, account.account_id, str(ticket)
+        )
+        return {"status": "ok", "events": events}
 
     # ==================== 交易历史接口 ====================
 

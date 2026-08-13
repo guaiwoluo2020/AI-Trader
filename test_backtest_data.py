@@ -115,6 +115,9 @@ class BacktestDatasetTestCase(unittest.TestCase):
         self.assertEqual(ready["broker_server"], "DemoBroker")
         self.assertTrue(Path(ready["file_path"]).exists())
         self.assertTrue(ready["data_hash"])
+        self.assertEqual(
+            self.repository.list_chunks(dataset["dataset_id"]), []
+        )
 
     def test_duplicate_chunk_is_idempotent_after_completion(self):
         dataset, start, end = self._create_dataset()

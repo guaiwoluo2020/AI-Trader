@@ -62,7 +62,7 @@ class BacktestTemplateService:
             SELECT t.*, u.username AS creator_username
             FROM backtest_templates t
             JOIN users u ON u.id = t.user_id
-            WHERE t.user_id = ? OR t.visibility = 'shared'
+            WHERE t.user_id = ?
             ORDER BY t.updated_at DESC
             """,
             (user_id,),
@@ -195,8 +195,7 @@ class BacktestTemplateService:
             SELECT t.*, u.username AS creator_username
             FROM backtest_templates t
             JOIN users u ON u.id = t.user_id
-            WHERE t.template_id = ?
-              AND (t.user_id = ? OR t.visibility = 'shared')
+            WHERE t.template_id = ? AND t.user_id = ?
             """,
             (template_id, user_id),
         )
@@ -424,7 +423,6 @@ class BacktestTemplateService:
     def _validate_template(self, user_id: int, payload: Dict) -> Dict:
         name = str(payload.get("template_name", "")).strip()
         strategy_id = str(payload.get("strategy_id", "")).strip()
-        visibility = str(payload.get("visibility", "shared")).strip()
         raw_dataset_ids = payload.get("dataset_ids") or []
         if not isinstance(raw_dataset_ids, list):
             raise ValueError("历史数据集参数格式无效")
@@ -438,8 +436,6 @@ class BacktestTemplateService:
         strategy = self.strategies.get_strategy_by_id(user_id, strategy_id)
         if strategy is None:
             raise ValueError("请选择当前用户的有效策略")
-        if visibility not in {"shared", "private"}:
-            raise ValueError("模板可见性必须是 shared 或 private")
         if not dataset_ids:
             raise ValueError("请至少选择一个可用数据集")
         for dataset_id in dataset_ids:
@@ -450,15 +446,13 @@ class BacktestTemplateService:
                 raise ValueError(
                     f"数据集 {dataset['dataset_name']} 与策略品种 {strategy.symbol} 不一致"
                 )
-            if visibility == "shared" and dataset["visibility"] != "shared":
-                raise ValueError("共享模板只能关联共享数据集")
 
         mode = str(payload.get("position_sizing_mode", "strategy"))
         if mode not in self.POSITION_MODES:
             raise ValueError("仓位模式无效")
         values = {
             "template_name": name,
-            "visibility": visibility,
+            "visibility": "private",
             "strategy_id": strategy_id,
             "dataset_ids": [str(item) for item in dataset_ids],
             "description": str(payload.get("description", "")).strip()[:500],

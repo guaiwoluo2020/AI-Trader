@@ -28,11 +28,16 @@ class LLMRequestError(RuntimeError):
     """大模型供应商请求失败。"""
 
 
+class LLMResponseFormatError(LLMRequestError):
+    """大模型响应不是可用的 JSON。"""
+
+
 class LLMService:
     """LLM 服务（处理业务逻辑）"""
 
     # 分析间隔（秒）
     ANALYZE_INTERVAL = 300  # 5分钟
+    MAX_RESPONSE_ATTEMPTS = 3
 
     @staticmethod
     def _period_weight_items(periods) -> List[Tuple[str, int]]:
@@ -415,7 +420,29 @@ class LLMService:
         scene_code: str = AI_SIGNAL_ANALYSIS,
         object_type: str = "", object_id: str = "",
     ) -> Optional[Dict]:
-        """调用 LLM API（非流式）"""
+        """调用 LLM API；响应格式错误时最多尝试三次。"""
+        for attempt in range(1, self.MAX_RESPONSE_ATTEMPTS + 1):
+            attempt_prompt = self._retry_prompt(prompt, attempt)
+            try:
+                return self._call_llm_once(
+                    attempt_prompt, model, system_prompt,
+                    scene_code, object_type, object_id,
+                )
+            except LLMResponseFormatError as exc:
+                if attempt >= self.MAX_RESPONSE_ATTEMPTS:
+                    raise LLMResponseFormatError(
+                        f"{exc} 已尝试 {self.MAX_RESPONSE_ATTEMPTS} 次。"
+                    ) from exc
+                print(
+                    "[LLMService] 响应格式无效，立即重试 "
+                    f"({attempt + 1}/{self.MAX_RESPONSE_ATTEMPTS})"
+                )
+        return None
+
+    def _call_llm_once(
+        self, prompt: str, model: Optional[str], system_prompt: Optional[str],
+        scene_code: str, object_type: str, object_id: str,
+    ) -> Optional[Dict]:
         governance = self._llm_governance
         if governance is None:
             config = self.llm_store.get_config()
@@ -465,7 +492,13 @@ class LLMService:
                     f"大模型接口返回 HTTP {response.status_code}: {detail[:300]}"
                 )
 
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as exc:
+                raise LLMResponseFormatError(
+                    "大模型接口响应不是有效 JSON。"
+                    f"响应摘要: {self._content_preview(response.text)}"
+                ) from exc
             content = self._response_content(result)
             parsed = self._parse_llm_response(content)
             if not parsed:
@@ -476,7 +509,7 @@ class LLMService:
                     f"(model={reservation['model']}, preview={preview}, "
                     f"response={response_preview})"
                 )
-                raise LLMRequestError(
+                raise LLMResponseFormatError(
                     "大模型返回内容为空或不是有效 JSON，请检查该场景选择的模型"
                     "是否支持 Chat Completions，并要求模型只返回 JSON。"
                     f"响应摘要: {response_preview}"
@@ -509,13 +542,35 @@ class LLMService:
         scene_code: str = AI_SIGNAL_ANALYSIS,
         object_type: str = "", object_id: str = "",
     ) -> Optional[Dict]:
-        """
-        调用 LLM API（流式）
+        """调用 LLM API（流式）；响应格式错误时最多尝试三次。
 
         Args:
             prompt: 提示词
             on_chunk: 回调函数，参数为 (chunk_count, full_content)
         """
+        for attempt in range(1, self.MAX_RESPONSE_ATTEMPTS + 1):
+            attempt_prompt = self._retry_prompt(prompt, attempt)
+            try:
+                return self._call_llm_stream_once(
+                    attempt_prompt, on_chunk, model, system_prompt,
+                    scene_code, object_type, object_id,
+                )
+            except LLMResponseFormatError as exc:
+                if attempt >= self.MAX_RESPONSE_ATTEMPTS:
+                    raise LLMResponseFormatError(
+                        f"{exc} 已尝试 {self.MAX_RESPONSE_ATTEMPTS} 次。"
+                    ) from exc
+                print(
+                    "[LLMService] 流式响应格式无效，立即重试 "
+                    f"({attempt + 1}/{self.MAX_RESPONSE_ATTEMPTS})"
+                )
+        return None
+
+    def _call_llm_stream_once(
+        self, prompt: str, on_chunk: callable,
+        model: Optional[str], system_prompt: Optional[str],
+        scene_code: str, object_type: str, object_id: str,
+    ) -> Optional[Dict]:
         governance = self._llm_governance
         if governance is None:
             config = self.llm_store.get_config()
@@ -608,7 +663,7 @@ class LLMService:
                     "[LLMService] 流式模型返回内容无法解析 "
                     f"(model={reservation['model']}, preview={preview})"
                 )
-                raise LLMRequestError(
+                raise LLMResponseFormatError(
                     "大模型返回内容为空或不是有效 JSON，"
                     f"响应摘要: {preview}"
                 )
@@ -632,6 +687,16 @@ class LLMService:
             if isinstance(e, (PermissionError, ValueError)):
                 raise
             raise LLMRequestError(f"处理大模型响应失败: {e}") from e
+
+    @classmethod
+    def _retry_prompt(cls, prompt: str, attempt: int) -> str:
+        if attempt <= 1:
+            return prompt
+        return prompt + (
+            "\n\n## 响应格式纠正\n"
+            "上一次响应为空或无法解析。请重新生成，并且只返回一个完整、合法的 "
+            "JSON 对象或数组；不要输出 Markdown 代码块、解释、前后缀或截断内容。"
+        )
 
     def _parse_llm_response(self, content: str) -> Optional[Dict]:
         """解析 LLM 响应"""

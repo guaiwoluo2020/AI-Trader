@@ -17,6 +17,8 @@ import BacktestTasks from '../views/BacktestTasks.vue'
 import Accounts from '../views/Accounts.vue'
 import PositionManagement from '../views/PositionManagement.vue'
 import AlphaResearch from '../views/AlphaResearch.vue'
+import DataMaintenance from '../views/DataMaintenance.vue'
+import { authState } from '../auth'
 
 const routes = [
   {
@@ -120,6 +122,12 @@ const routes = [
     name: 'SystemLog',
     component: SystemLog,
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/data-maintenance',
+    name: 'DataMaintenance',
+    component: DataMaintenance,
+    meta: { requiresAuth: true, requiresAdmin: true }
   }
 ]
 
@@ -138,6 +146,10 @@ router.beforeEach((to) => {
       path: '/login',
       query: { redirect: to.fullPath },
     }
+  }
+
+  if (to.meta.requiresAdmin && authState.user?.role !== 'admin') {
+    return '/'
   }
 
   return true

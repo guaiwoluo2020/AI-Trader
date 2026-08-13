@@ -31,17 +31,22 @@ api.interceptors.response.use(
 )
 
 export const authAPI = {
-  async sendRegistrationCode(email) {
-    const response = await api.post('/auth/email-code', { email })
+  async sendRegistrationCode(email, invitationCode) {
+    const response = await api.post('/auth/email-code', {
+      email,
+      invitation_code: invitationCode,
+    })
     return response.data
   },
 
-  async login(credentials) {
-    const response = await api.post('/auth/login', credentials)
-    setAuthSession({
-      token: response.data.token,
-      user: response.data.user,
-    })
+  async sendLoginCode(email) {
+    const response = await api.post('/auth/login/email-code', { email })
+    return response.data
+  },
+
+  async loginWithEmail(credentials) {
+    const response = await api.post('/auth/login/email', credentials)
+    setAuthSession({ token: response.data.token, user: response.data.user })
     return response.data
   },
 
@@ -58,15 +63,6 @@ export const authAPI = {
     const response = await api.get('/auth/me')
     setAuthSession({
       token: getAuthToken(),
-      user: response.data.user,
-    })
-    return response.data
-  },
-
-  async changePassword(passwords) {
-    const response = await api.post('/auth/change-password', passwords)
-    setAuthSession({
-      token: response.data.token,
       user: response.data.user,
     })
     return response.data
@@ -102,6 +98,30 @@ export const authAPI = {
   async saveUserQuota(userId, quota) {
     const response = await api.put(
       `/auth/admin/users/${encodeURIComponent(userId)}/quota`, quota
+    )
+    return response.data
+  },
+
+  async saveUserMembership(userId, membership) {
+    const response = await api.put(
+      `/auth/admin/users/${encodeURIComponent(userId)}/membership`, membership
+    )
+    return response.data
+  },
+
+  async getInvitations() {
+    const response = await api.get('/auth/admin/invitations')
+    return response.data
+  },
+
+  async createInvitation(payload) {
+    const response = await api.post('/auth/admin/invitations', payload)
+    return response.data
+  },
+
+  async setInvitationActive(invitationId, active) {
+    const response = await api.patch(
+      `/auth/admin/invitations/${encodeURIComponent(invitationId)}`, { active }
     )
     return response.data
   },

@@ -67,6 +67,7 @@
             <v-col cols="12" md="4"><v-switch v-model="management.breakEven" color="success" label="盈利后移动至保本" /></v-col>
             <v-col cols="6" md="2"><v-text-field v-model.number="management.breakEvenR" label="启动盈利" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
             <v-col cols="12" md="4"><v-switch v-model="management.trailing" color="success" label="启用移动止损" /></v-col>
+            <v-col cols="6" md="2"><v-text-field v-model.number="management.trailingActivationR" label="移动启动" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
             <v-col cols="6" md="2"><v-text-field v-model.number="management.trailingR" label="移动距离" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
             <v-col cols="12" md="4"><v-switch v-model="management.pivotTrailing" color="success" label="按新转折点跟进" /></v-col>
             <v-col cols="6" md="2"><v-select v-model="management.pivotPeriod" :items="periods" label="转折周期" /></v-col>
@@ -75,6 +76,18 @@
             <v-col cols="6" md="2"><v-text-field v-model.number="management.timeoutBars" label="K线数量" type="number" min="1" /></v-col>
             <v-col cols="6" md="2"><v-select v-model="management.timeoutPeriod" :items="periods" label="计时周期" /></v-col>
           </v-row>
+          <div class="section-title mt-6">分批止盈</div>
+          <v-switch v-model="management.partialTakeProfit" color="success" label="启用分批止盈" />
+          <div v-if="management.partialTakeProfit" class="partial-levels">
+            <div v-for="(level, index) in management.partialLevels" :key="level.level_id" class="partial-row">
+              <span class="rule-index">{{ index + 1 }}</span>
+              <v-text-field v-model.number="level.trigger_r" label="触发盈利" suffix="R" type="number" min="0.1" step="0.1" density="compact" />
+              <v-text-field v-model.number="level.close_percent" label="平仓比例" suffix="%" type="number" min="1" max="100" density="compact" />
+              <v-select v-model="level.move_sl" :items="partialMoveOptions" label="触发后止损" density="compact" />
+              <v-btn icon="mdi-delete-outline" color="error" variant="text" :disabled="management.partialLevels.length === 1" @click="removePartialLevel(index)" />
+            </div>
+            <v-btn variant="tonal" color="primary" prepend-icon="mdi-plus" @click="addPartialLevel">增加止盈层级</v-btn>
+          </div>
           <v-row>
             <v-col cols="6" md="3"><v-text-field v-model.number="form.config.min_risk_reward" label="最小盈亏比" type="number" min="0" step="0.1" /></v-col>
             <v-col cols="6" md="3"><v-text-field v-model.number="form.config.min_stop_distance" label="最小止损距离" type="number" min="0" /></v-col>
@@ -92,7 +105,12 @@ import { computed, defineComponent, h, onMounted, reactive, ref } from 'vue'
 import { marketAPI } from '../api/market'
 
 const periods = ['M1', 'M5', 'M15', 'H1', 'H4']
-const labels = { signal: '信号建议', pivot: '转折点', atr: 'ATR', fixed_points: '固定点数', fixed_percent: '固定比例', risk_reward: '盈亏比', none: '不设固定止盈', break_even: '保本', pivot_trailing: '转折跟进', trailing_stop: '移动止损', reverse_signal: '反向退出', max_holding_bars: '时间退出' }
+const labels = { signal: '信号建议', pivot: '转折点', atr: 'ATR', fixed_points: '固定点数', fixed_percent: '固定比例', risk_reward: '盈亏比', none: '不设固定止盈', break_even: '保本', pivot_trailing: '转折跟进', trailing_stop: '移动止损', partial_take_profit: '分批止盈', reverse_signal: '反向退出', max_holding_bars: '时间退出' }
+const partialMoveOptions = [
+  { title: '不调整', value: 'none' },
+  { title: '推到保本', value: 'break_even' },
+  { title: '跟随移动止损', value: 'trail' },
+]
 const policies = ref([])
 const dialog = ref(false)
 const saving = ref(false)
@@ -106,7 +124,17 @@ const defaultConfig = () => ({
   management_rules: [], min_risk_reward: 1, min_stop_distance: 0, max_stop_distance: 0,
 })
 const form = reactive({ policy_id: '', name: '', enabled: true, config: defaultConfig() })
-const management = reactive({ breakEven: true, breakEvenR: 1, trailing: true, trailingR: 0.8, pivotTrailing: true, pivotPeriod: 'M5', reverse: false, timeout: false, timeoutBars: 120, timeoutPeriod: 'M1' })
+const management = reactive({
+  breakEven: true, breakEvenR: 1,
+  trailing: true, trailingActivationR: 1, trailingR: 0.8,
+  partialTakeProfit: true,
+  partialLevels: [
+    { level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' },
+    { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' },
+  ],
+  pivotTrailing: true, pivotPeriod: 'M5',
+  reverse: false, timeout: false, timeoutBars: 120, timeoutPeriod: 'M1'
+})
 
 const RuleChain = defineComponent({
   props: { modelValue: Array, title: String, kind: String }, emits: ['update:modelValue'],
@@ -133,7 +161,8 @@ const RuleChain = defineComponent({
 function syncManagement(rules = []) {
   const find = type => rules.find(rule => rule.type === type)
   const be = find('break_even'); management.breakEven = Boolean(be); management.breakEvenR = be?.activation_r || 1
-  const trail = find('trailing_stop'); management.trailing = Boolean(trail); management.trailingR = trail?.distance_r || 0.8
+  const trail = find('trailing_stop'); management.trailing = Boolean(trail); management.trailingActivationR = trail?.activation_r || 1; management.trailingR = trail?.distance_r || 0.8
+  const partial = find('partial_take_profit'); management.partialTakeProfit = Boolean(partial); management.partialLevels = deepClone(partial?.levels?.length ? partial.levels : [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }])
   const pivot = find('pivot_trailing'); management.pivotTrailing = Boolean(pivot); management.pivotPeriod = pivot?.period || 'M5'
   management.reverse = Boolean(find('reverse_signal'))
   const timeout = find('max_holding_bars'); management.timeout = Boolean(timeout); management.timeoutBars = timeout?.bars || 120; management.timeoutPeriod = timeout?.period || 'M1'
@@ -142,13 +171,19 @@ function buildManagementRules() {
   const rules = []
   if (management.breakEven) rules.push({ type: 'break_even', activation_r: management.breakEvenR, offset_r: 0 })
   if (management.pivotTrailing) rules.push({ type: 'pivot_trailing', period: management.pivotPeriod, buffer: { type: 'fixed_points', value: 0 } })
-  if (management.trailing) rules.push({ type: 'trailing_stop', activation_r: 1.5, distance_r: management.trailingR })
+  if (management.trailing) rules.push({ type: 'trailing_stop', activation_r: management.trailingActivationR, distance_r: management.trailingR })
+  if (management.partialTakeProfit) rules.push({ type: 'partial_take_profit', levels: deepClone(management.partialLevels) })
   if (management.reverse) rules.push({ type: 'reverse_signal' })
   if (management.timeout) rules.push({ type: 'max_holding_bars', period: management.timeoutPeriod, bars: management.timeoutBars })
   return rules
 }
+function addPartialLevel() {
+  const next = management.partialLevels.length + 1
+  management.partialLevels.push({ level_id: `tp${next}`, trigger_r: next, close_percent: 25, move_sl: 'trail' })
+}
+function removePartialLevel(index) { management.partialLevels.splice(index, 1) }
 async function load() { const data = await marketAPI.getPositionManagementPolicies(); policies.value = data.policies || [] }
-function openCreate() { Object.assign(form, { policy_id: '', name: '', enabled: true, config: defaultConfig() }); syncManagement([{ type: 'break_even', activation_r: 1 }, { type: 'pivot_trailing', period: 'M5' }, { type: 'trailing_stop', distance_r: 0.8 }]); dialog.value = true }
+function openCreate() { Object.assign(form, { policy_id: '', name: '', enabled: true, config: defaultConfig() }); syncManagement([{ type: 'break_even', activation_r: 1 }, { type: 'pivot_trailing', period: 'M5' }, { type: 'trailing_stop', activation_r: 1, distance_r: 0.8 }, { type: 'partial_take_profit', levels: [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }, { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' }] }]); dialog.value = true }
 function openEdit(policy) { Object.assign(form, deepClone(policy)); syncManagement(form.config.management_rules); dialog.value = true }
 async function save() { saving.value = true; try { form.config.management_rules = buildManagementRules(); const payload = { name: form.name, enabled: form.enabled, config: form.config }; if (form.policy_id) await marketAPI.updatePositionManagementPolicy(form.policy_id, payload); else await marketAPI.createPositionManagementPolicy(payload); dialog.value = false; messageType.value = 'success'; message.value = '持仓管理方案已保存'; await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } finally { saving.value = false } }
 async function remove(policy) { if (!confirm(`确定删除“${policy.name}”吗？`)) return; try { await marketAPI.deletePositionManagementPolicy(policy.policy_id); await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } }
@@ -166,5 +201,7 @@ onMounted(load)
 .empty-state { padding:70px; text-align:center; border:1px dashed #aebdb4; border-radius:22px; color:#607269; }
 .section-title { font-size:14px; font-weight:800; color:#26483d; }.rule-chain { padding:18px; border:1px solid #dce7e0; border-radius:16px; background:#f8fbf9; }
 .rule-row { display:grid; grid-template-columns:32px minmax(160px,1fr) 110px 110px 62px; gap:10px; align-items:center; margin-top:8px; }.rule-row select,.rule-row input { height:40px; border:1px solid #c9d6ce; border-radius:8px; padding:0 10px; background:white; }.rule-index { width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#245d4c;color:white;font-size:12px; }.add-rule,.remove-rule { border:0;background:transparent;color:#23745c;cursor:pointer;font-weight:700; }.remove-rule { color:#b84b43; }
+.partial-levels { display:grid; gap:10px; padding:16px; border:1px solid #dce7e0; border-radius:16px; background:#fbfdfb; }
+.partial-row { display:grid; grid-template-columns:32px 1fr 1fr 1fr 44px; gap:10px; align-items:center; }
 @media (max-width:700px) { .policy-page{padding:16px}.page-hero{align-items:start;gap:20px;flex-direction:column}.rule-row{grid-template-columns:28px 1fr}.rule-row select,.rule-row input,.remove-rule{grid-column:2}.page-hero h1{font-size:34px} }
 </style>

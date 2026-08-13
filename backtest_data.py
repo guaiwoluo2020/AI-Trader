@@ -352,6 +352,15 @@ class BacktestDatasetRepository:
             )
         ]
 
+    def delete_chunks(self, dataset_id: str) -> int:
+        with self.storage._lock, self.storage._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM backtest_dataset_chunks WHERE dataset_id = ?",
+                (dataset_id,),
+            )
+            conn.commit()
+            return max(0, int(cursor.rowcount))
+
     def mark_ready(
         self,
         dataset_id: str,
@@ -585,6 +594,11 @@ class BacktestDatasetService:
             raise ValueError("历史数据分片参数无效")
         if range_end > int(dataset["requested_end"]):
             raise ValueError("分片结束时间超过数据集范围")
+        if (
+            dataset["status"] == DatasetStatus.READY
+            and chunk_index < int(dataset["next_chunk_index"])
+        ):
+            return {"result": "duplicate", "dataset": dataset}
 
         bars, invalid_count = self._normalize_bars(
             payload.get("bars", []), range_start, range_end
@@ -680,8 +694,22 @@ class BacktestDatasetService:
                 file_path=str(output_path),
                 data_hash=data_hash,
             )
+            self._cleanup_completed_chunks(dataset_id)
         except Exception as exc:
             self.repository.mark_failed(dataset_id, str(exc))
+
+    def _cleanup_completed_chunks(self, dataset_id: str) -> None:
+        try:
+            chunks = self.repository.list_chunks(dataset_id)
+            for chunk in chunks:
+                Path(chunk["file_path"]).unlink(missing_ok=True)
+            if chunks:
+                chunk_dir = Path(chunks[0]["file_path"]).parent
+                if chunk_dir.exists():
+                    shutil.rmtree(chunk_dir)
+            self.repository.delete_chunks(dataset_id)
+        except Exception as exc:
+            print(f"[BacktestDatasetService] 清理分片失败 {dataset_id}: {exc}")
 
     def _write_final_dataset(
         self, user_id: int, dataset_id: str, symbol: str, bars: List[Dict]

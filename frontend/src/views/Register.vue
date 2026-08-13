@@ -4,30 +4,30 @@
       <section class="story-panel">
         <router-link class="brand" to="/login">AI TRADER</router-link>
         <div class="story-content">
-          <span class="eyebrow">START TRADING WITH CLARITY</span>
-          <h1>创建账户，连接你的交易终端</h1>
+          <span class="eyebrow">PRIVATE RESEARCH CIRCLE</span>
+          <h1>受邀加入技术验证小组</h1>
           <p>
-            每位用户拥有独立的策略配置、交易状态和 MT5 凭证。完成注册后，我们会引导你下载专属 EA。
+            本站不对公众开放，仅限站长本人及受邀私人小圈子进行量化交易技术验证。
           </p>
 
           <ol>
             <li>
               <span>01</span>
-              验证常用邮箱
+              验证邀请资格
             </li>
             <li>
               <span>02</span>
-              下载免编译 MT5 EA
+              验证常用邮箱
             </li>
             <li>
               <span>03</span>
-              自动激活并建立连接
+              创建独立验证账号
             </li>
           </ol>
         </div>
         <div class="security-line">
           <v-icon icon="mdi-shield-lock-outline" size="18" />
-          密码经过加盐哈希保存，不存储明文
+          普通成员使用邮箱验证码登录，不设置账户密码
         </div>
       </section>
 
@@ -36,7 +36,7 @@
           <div class="mobile-brand">AI TRADER</div>
           <span class="form-kicker">NEW ACCOUNT</span>
           <h2>注册新账号</h2>
-          <p class="form-intro">验证邮箱并设置账号，下一步即可连接 MT5。</p>
+          <p class="form-intro">输入邀请码，验证邮箱后创建私人测试账号。</p>
 
           <v-alert
             v-if="errorMessage"
@@ -50,6 +50,20 @@
           </v-alert>
 
           <v-form @submit.prevent="handleRegister">
+            <label class="field-label" for="register-invite">邀请码</label>
+            <v-text-field
+              id="register-invite"
+              v-model="invitationCode"
+              placeholder="输入邀请码，或通过邀请链接自动填写"
+              prepend-inner-icon="mdi-ticket-confirmation-outline"
+              variant="outlined"
+              autocomplete="one-time-code"
+              :disabled="loading"
+              :error-messages="invitationError"
+              class="mb-2"
+              @blur="invitationTouched = true"
+            />
+
             <label class="field-label" for="register-email">邮箱</label>
             <v-text-field
               id="register-email"
@@ -83,7 +97,7 @@
                 variant="tonal"
                 height="56"
                 :loading="codeSending"
-                :disabled="!emailValid || resendCountdown > 0 || loading"
+                :disabled="!emailValid || !invitationValid || resendCountdown > 0 || loading"
                 @click="sendVerificationCode"
               >
                 {{ resendCountdown > 0 ? `${resendCountdown}s 后重发` : '发送验证码' }}
@@ -104,49 +118,6 @@
               @blur="usernameTouched = true"
             />
 
-            <label class="field-label" for="register-password">密码</label>
-            <v-text-field
-              id="register-password"
-              v-model="password"
-              placeholder="至少 8 位，同时包含字母和数字"
-              prepend-inner-icon="mdi-lock-outline"
-              variant="outlined"
-              autocomplete="new-password"
-              :type="showPassword ? 'text' : 'password'"
-              :append-inner-icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
-              :disabled="loading"
-              :error-messages="passwordError"
-              class="mb-2"
-              @blur="passwordTouched = true"
-              @click:append-inner="showPassword = !showPassword"
-            />
-
-            <div class="strength-row" aria-live="polite">
-              <span
-                v-for="level in 3"
-                :key="level"
-                class="strength-bar"
-                :class="{ active: passwordStrength >= level }"
-              />
-              <small>{{ strengthLabel }}</small>
-            </div>
-
-            <label class="field-label" for="register-confirm-password">确认密码</label>
-            <v-text-field
-              id="register-confirm-password"
-              v-model="confirmPassword"
-              placeholder="再次输入密码"
-              prepend-inner-icon="mdi-lock-check-outline"
-              variant="outlined"
-              autocomplete="new-password"
-              :type="showConfirmPassword ? 'text' : 'password'"
-              :append-inner-icon="showConfirmPassword ? 'mdi-eye-off' : 'mdi-eye'"
-              :disabled="loading"
-              :error-messages="confirmPasswordError"
-              @blur="confirmTouched = true"
-              @click:append-inner="showConfirmPassword = !showConfirmPassword"
-            />
-
             <div class="registration-consent">
               <v-checkbox
                 v-model="acceptedServiceNotice"
@@ -157,7 +128,7 @@
                 @update:model-value="consentTouched = true"
               >
                 <template #label>
-                  <span>我已阅读并同意：本平台仅提供数据与技术服务，所有分析、信号及其他输出仅供测试和参考，不构成任何投资建议或收益承诺。</span>
+                  <span>我已阅读并同意：本网站仅限站长本人及受邀私人小圈子进行技术验证，不面向公众开放，仅接受邀请码或邀请链接加入。平台仅提供数据与技术测试服务，所有分析、信号和输出仅供测试参考，不构成投资建议、交易邀约或收益承诺；使用者独立承担交易及资金风险。</span>
                 </template>
               </v-checkbox>
               <p v-if="consentError" class="consent-error">{{ consentError }}</p>
@@ -188,24 +159,21 @@
 
 <script setup>
 import { computed, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { authAPI } from '../api/trading'
 
 const router = useRouter()
+const route = useRoute()
+const invitationCode = ref(String(route.query.invite || '').trim().toUpperCase())
 const email = ref('')
 const verificationCode = ref('')
 const username = ref('')
-const password = ref('')
-const confirmPassword = ref('')
+const invitationTouched = ref(Boolean(route.query.invite))
 const emailTouched = ref(false)
 const codeTouched = ref(false)
 const usernameTouched = ref(false)
-const passwordTouched = ref(false)
-const confirmTouched = ref(false)
 const consentTouched = ref(false)
 const acceptedServiceNotice = ref(false)
-const showPassword = ref(false)
-const showConfirmPassword = ref(false)
 const loading = ref(false)
 const codeSending = ref(false)
 const resendCountdown = ref(0)
@@ -213,16 +181,14 @@ const errorMessage = ref('')
 let countdownTimer = null
 
 const normalizedEmail = computed(() => email.value.trim().toLowerCase())
+const normalizedInvitationCode = computed(() => invitationCode.value.trim().toUpperCase())
+const invitationValid = computed(() => /^[A-Z0-9]{8,32}$/.test(normalizedInvitationCode.value))
 const emailValid = computed(() => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail.value))
 const codeValid = computed(() => /^\d{6}$/.test(verificationCode.value))
 const normalizedUsername = computed(() => username.value.trim().toLowerCase())
 const usernameValid = computed(() => /^[a-z0-9_-]{3,32}$/.test(normalizedUsername.value))
-const passwordValid = computed(
-  () =>
-    password.value.length >= 8 &&
-    password.value.length <= 128 &&
-    /[a-z]/i.test(password.value) &&
-    /\d/.test(password.value),
+const invitationError = computed(() =>
+  invitationTouched.value && !invitationValid.value ? '请输入有效邀请码' : '',
 )
 
 const emailError = computed(() =>
@@ -236,46 +202,23 @@ const usernameError = computed(() =>
     ? '请输入 3-32 位用户名，仅支持字母、数字、下划线和短横线'
     : '',
 )
-const passwordError = computed(() =>
-  passwordTouched.value && !passwordValid.value
-    ? '密码需为 8-128 位，并同时包含字母和数字'
-    : '',
-)
-const confirmPasswordError = computed(() =>
-  confirmTouched.value && confirmPassword.value !== password.value ? '两次输入的密码不一致' : '',
-)
 const consentError = computed(() =>
   consentTouched.value && !acceptedServiceNotice.value ? '请先阅读并同意平台服务说明' : '',
 )
 
-const passwordStrength = computed(() => {
-  if (!password.value) return 0
-  let score = password.value.length >= 8 ? 1 : 0
-  if (/[a-z]/i.test(password.value) && /\d/.test(password.value)) score += 1
-  if (password.value.length >= 12 && /[^a-z0-9]/i.test(password.value)) score += 1
-  return score
-})
-
-const strengthLabel = computed(() => {
-  if (!password.value) return '密码强度'
-  return ['较弱', '可用', '较强'][Math.max(0, passwordStrength.value - 1)]
-})
-
 async function handleRegister() {
+  invitationTouched.value = true
   emailTouched.value = true
   codeTouched.value = true
   usernameTouched.value = true
-  passwordTouched.value = true
-  confirmTouched.value = true
   consentTouched.value = true
   errorMessage.value = ''
 
   if (
+    !invitationValid.value ||
     !emailValid.value ||
     !codeValid.value ||
     !usernameValid.value ||
-    !passwordValid.value ||
-    confirmPassword.value !== password.value ||
     !acceptedServiceNotice.value
   ) {
     return
@@ -287,7 +230,8 @@ async function handleRegister() {
       email: normalizedEmail.value,
       verification_code: verificationCode.value,
       username: normalizedUsername.value,
-      password: password.value,
+      invitation_code: normalizedInvitationCode.value,
+      accepted_private_use_terms: true,
     })
     router.replace(registerResult.next_path || '/mt5-setup')
   } catch (error) {
@@ -298,12 +242,15 @@ async function handleRegister() {
 }
 
 async function sendVerificationCode() {
+  invitationTouched.value = true
   emailTouched.value = true
   errorMessage.value = ''
-  if (!emailValid.value) return
+  if (!emailValid.value || !invitationValid.value) return
   codeSending.value = true
   try {
-    const result = await authAPI.sendRegistrationCode(normalizedEmail.value)
+    const result = await authAPI.sendRegistrationCode(
+      normalizedEmail.value, normalizedInvitationCode.value
+    )
     resendCountdown.value = Number(result.resend_in || 60)
     clearInterval(countdownTimer)
     countdownTimer = setInterval(() => {

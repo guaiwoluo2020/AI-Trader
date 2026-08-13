@@ -49,12 +49,15 @@ class AuthRoutesTestCase(unittest.TestCase):
         app = create_app()
         paths = {route.path for route in app.routes}
         self.assertIn("/health", paths)
-        self.assertIn("/auth/login", paths)
+        self.assertIn("/auth/login/email", paths)
+        self.assertIn("/auth/login/email-code", paths)
         self.assertIn("/auth/register", paths)
         self.assertIn("/auth/email-code", paths)
         self.assertIn("/auth/admin/email-config", paths)
+        self.assertIn("/auth/admin/invitations", paths)
         self.assertIn("/auth/me", paths)
-        self.assertIn("/auth/change-password", paths)
+        self.assertNotIn("/auth/login", paths)
+        self.assertNotIn("/auth/change-password", paths)
 
     def test_login_and_fetch_current_user(self):
         user = self.auth_manager.authenticate("admin", "admin123456")
@@ -65,6 +68,7 @@ class AuthRoutesTestCase(unittest.TestCase):
         self.assertGreater(verified.user_id, 0)
         self.assertEqual(verified.username, "admin")
         self.assertEqual(verified.role, "admin")
+        self.assertEqual(verified.email, "175821555@qq.com")
 
     def test_register_creates_login_ready_user(self):
         user = self.auth_manager.register(
@@ -74,8 +78,22 @@ class AuthRoutesTestCase(unittest.TestCase):
         self.assertEqual("new_trader", user.username)
         self.assertEqual("new@example.com", user.email)
         self.assertEqual("user", user.role)
+        self.assertEqual("silver", user.membership_level)
+        self.assertFalse(user.live_trading_enabled)
         self.assertIsNotNone(
             self.auth_manager.authenticate("NEW_TRADER", "TradePass2026")
+        )
+        self.assertIsNotNone(
+            self.auth_manager.authenticate_email("NEW@EXAMPLE.COM", "TradePass2026")
+        )
+
+    def test_passwordless_registration_has_no_known_user_password(self):
+        user = self.auth_manager.register_passwordless(
+            "invited_trader", "invited@example.com"
+        )
+        self.assertEqual(user.email, "invited@example.com")
+        self.assertIsNone(
+            self.auth_manager.authenticate_email("invited@example.com", "TradePass2026")
         )
 
     def test_change_password_revokes_old_token_and_preserves_role(self):

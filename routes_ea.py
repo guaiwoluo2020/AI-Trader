@@ -119,9 +119,11 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         # 如果结果不为空，记录到运行日志
         trades = result.get("trades", [])
         close_tickets = result.get("close_tickets", [])
+        position_updates = result.get("position_updates", [])
+        position_partials = result.get("position_partials", [])
         pivot_alerts = result.get("pivot_alerts", [])
 
-        if trades or close_tickets:
+        if trades or close_tickets or position_updates or position_partials:
             import json
             system_log = server.system_log
 
@@ -154,6 +156,20 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     symbol=symbol,
                     message=f"平仓指令: {close_tickets}"
                 )
+            if position_updates:
+                system_log.add_log(
+                    "position_sl_update",
+                    {"updates": position_updates},
+                    symbol=symbol,
+                    message=f"移动止损/修改止损: {len(position_updates)}个"
+                )
+            if position_partials:
+                system_log.add_log(
+                    "position_partial_close",
+                    {"partials": position_partials},
+                    symbol=symbol,
+                    message=f"分批止盈: {len(position_partials)}个"
+                )
 
             # 记录汇总日志
             system_log.add_log(
@@ -161,10 +177,17 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 {
                     "trades_count": len(trades),
                     "close_count": len(close_tickets),
+                    "position_update_count": len(position_updates),
+                    "position_partial_count": len(position_partials),
                     "pivot_alerts_count": len(pivot_alerts)
                 },
                 symbol=symbol,
-                message=f"下发交易指令: {len(trades)}个开仓, {len(close_tickets)}个平仓"
+                message=(
+                    f"下发交易指令: {len(trades)}个开仓, "
+                    f"{len(close_tickets)}个平仓, "
+                    f"{len(position_updates)}个改止损, "
+                    f"{len(position_partials)}个分批止盈"
+                )
             )
 
         return result

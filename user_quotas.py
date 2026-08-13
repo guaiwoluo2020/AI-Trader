@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import time
 from typing import Dict, Optional
 
+from membership import MEMBERSHIP_LIMITS, MembershipService
 from sqlite_storage import get_storage
 
 
@@ -16,9 +17,8 @@ RESOURCE_LABELS = {
 }
 
 DEFAULT_LIMITS = {
-    "datasets": 10,
-    "strategies": 5,
-    "signal_sources": 10,
+    key: MEMBERSHIP_LIMITS["silver"][key]
+    for key in ("datasets", "strategies", "signal_sources")
 }
 
 
@@ -91,6 +91,7 @@ class UserQuotaService:
     def __init__(self, storage=None):
         self.storage = storage or get_storage()
         self.repository = UserQuotaRepository(self.storage)
+        self.memberships = MembershipService(self.storage)
 
     @contextmanager
     def guarded(self):
@@ -125,9 +126,11 @@ class UserQuotaService:
         usage = self.get_usage(user_id)
         overrides = self.repository.get_overrides(user_id)
         admin = role == "admin"
+        access = self.memberships.get_access(user_id)
+        plan_limits = access["limits"]
         limits = {
             field: None if admin else (
-                overrides[field] if overrides[field] is not None else DEFAULT_LIMITS[field]
+                overrides[field] if overrides[field] is not None else plan_limits[field]
             )
             for field in DEFAULT_LIMITS
         }
@@ -136,6 +139,7 @@ class UserQuotaService:
             "limits": limits,
             "overrides": overrides,
             "is_unlimited": admin,
+            "membership": access,
         }
 
     def assert_capacity(

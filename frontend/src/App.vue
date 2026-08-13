@@ -77,7 +77,7 @@ export default {
     const router = useRouter()
     const drawer = ref(false)
     const openedGroups = ref([])
-    const menuGroups = [
+    const baseMenuGroups = [
       {
         value: 'trading',
         title: '交易管理',
@@ -118,9 +118,14 @@ export default {
           { title: '连接 MT5', path: '/mt5-setup', icon: 'mdi-connection' },
           { title: '用户配置', path: '/settings', icon: 'mdi-account-cog' },
           { title: '运行日志', path: '/logs', icon: 'mdi-text-box-outline' },
+          { title: '数据维护', path: '/data-maintenance', icon: 'mdi-database-cog-outline', adminOnly: true },
         ],
       },
     ]
+    const menuGroups = computed(() => baseMenuGroups.map(group => ({
+      ...group,
+      items: group.items.filter(item => !item.adminOnly || authState.user?.role === 'admin'),
+    })))
     const showShell = computed(() => !route.meta.public)
     const currentUsername = computed(() => authState.user?.username || '未登录')
     const accountRoutes = new Set(['Dashboard', 'TradeOrders', 'AIMarket', 'Market', 'Positions'])

@@ -113,7 +113,7 @@ class BacktestTemplateTestCase(unittest.TestCase):
         )
 
         self.assertEqual(batch["status"], "queued")
-        self.assertEqual(template["visibility"], "shared")
+        self.assertEqual(template["visibility"], "private")
         self.assertEqual(batch["task_count"], 2)
         self.assertEqual(len(batch["tasks"]), 2)
         self.assertEqual(
@@ -262,27 +262,17 @@ class BacktestTemplateTestCase(unittest.TestCase):
         self.assertIsNone(retained["template_id"])
         self.assertEqual(retained["task_count"], 1)
 
-    def test_shared_template_can_be_run_but_not_managed_by_other_user(self):
-        dataset = self._ready_dataset("Shared template Gold")
+    def test_template_cannot_be_seen_or_run_by_other_user(self):
+        dataset = self._ready_dataset("Private template Gold")
         template = self.service.create_template(
             self.user.user_id, self._payload([dataset["dataset_id"]])
         )
         other = self.users.create_user("template-runner", "hash", "salt")
 
         visible = self.service.list_templates(other.user_id)
-        batch = self.service.run_template(other.user_id, template["template_id"])
-
-        self.assertEqual(len(visible), 1)
-        self.assertFalse(visible[0]["is_owner"])
-        self.assertFalse(visible[0]["can_manage"])
-        self.assertEqual(visible[0]["creator_username"], "template-user")
-        self.assertEqual(batch["strategy_name"], self.strategy.strategy_name)
-        self.assertEqual(batch["task_count"], 1)
-        owner = self.storage.fetchone(
-            "SELECT user_id FROM backtest_batches WHERE batch_id = ?",
-            (batch["batch_id"],),
-        )
-        self.assertEqual(int(owner["user_id"]), other.user_id)
+        self.assertEqual(visible, [])
+        with self.assertRaisesRegex(ValueError, "不存在"):
+            self.service.run_template(other.user_id, template["template_id"])
         self.assertIsNone(
             self.service.update_template(
                 other.user_id,
@@ -305,20 +295,15 @@ class BacktestTemplateTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不存在"):
             self.service.run_template(other.user_id, template["template_id"])
 
-    def test_shared_template_rejects_private_dataset(self):
+    def test_template_can_reference_private_dataset(self):
         dataset = self._ready_dataset("Private source Gold")
         self.dataset_repository.update_visibility(
             self.user.user_id, dataset["dataset_id"], "private"
         )
 
-        with self.assertRaisesRegex(ValueError, "共享模板"):
-            self.service.create_template(
-                self.user.user_id, self._payload([dataset["dataset_id"]])
-            )
-
-        payload = self._payload([dataset["dataset_id"]])
-        payload["visibility"] = "private"
-        private_template = self.service.create_template(self.user.user_id, payload)
+        private_template = self.service.create_template(
+            self.user.user_id, self._payload([dataset["dataset_id"]])
+        )
         self.assertEqual(private_template["visibility"], "private")
 
     def test_dataset_referenced_by_template_cannot_be_deleted(self):

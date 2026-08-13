@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 import requests
 
 from sqlite_storage import LLMAccessRepository, LLMConfigRepository, SQLiteStorage, get_storage
+from membership import MEMBERSHIP_LIMITS
 from system_event_log import SystemEventLogRepository
 
 
@@ -551,7 +552,18 @@ class LLMGovernanceService:
             (user_id, start_ts, *low_codes),
         )
         used = int(row["used"] if row else 0)
-        return {"limit": FREE_DAILY_LIMIT, "used": used, "remaining": max(0, FREE_DAILY_LIMIT - used)}
+        limit = self._daily_limit(user_id)
+        return {"limit": limit, "used": used, "remaining": max(0, limit - used)}
+
+    def _daily_limit(self, user_id: int) -> int:
+        row = self.storage.fetchone(
+            "SELECT role, membership_level FROM users WHERE id = ?", (user_id,)
+        )
+        if row and row["role"] == "admin":
+            return MEMBERSHIP_LIMITS["diamond"]["low_llm_daily"]
+        level = str(row["membership_level"] if row else "silver")
+        plan = MEMBERSHIP_LIMITS.get(level, MEMBERSHIP_LIMITS["silver"])
+        return int(plan["low_llm_daily"])
 
     def scene_options(self, user_id: int, scene_code: str) -> Dict:
         scene = next((item for item in self.list_scenes() if item["scene_code"] == scene_code), None)
@@ -598,9 +610,10 @@ class LLMGovernanceService:
                     f"SELECT COUNT(*) AS used FROM llm_call_logs WHERE user_id = ? AND created_at >= ? AND scene_code IN ({placeholders})",
                     (user_id, int(start.timestamp()), *low_codes),
                 ).fetchone()["used"]
-                if int(used) >= FREE_DAILY_LIMIT:
+                daily_limit = self._daily_limit(user_id)
+                if int(used) >= daily_limit:
                     raise LLMQuotaExceeded(
-                        f"今日免费大模型调用额度（{FREE_DAILY_LIMIT}次）已用完，明日可继续使用"
+                        f"今日免费大模型调用额度（{daily_limit}次）已用完，明日可继续使用"
                     )
                 conn.execute(
                     """

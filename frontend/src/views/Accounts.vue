@@ -361,7 +361,7 @@ const managedAccount = ref(null)
 const accountForm = reactive({
   accountName: '', tradingEnabled: true, autoTradingEnabled: true,
   maxTotalPositions: 10, maxSingleVolume: 10,
-  dailyLossLimit: 5, dailyOrderLimit: 20,
+  dailyLossLimit: 5, dailyOrderLimit: 100,
 })
 const strategyDialog = ref(false)
 const selectedAccount = ref(null)

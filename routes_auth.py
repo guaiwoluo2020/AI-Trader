@@ -23,21 +23,24 @@ from auth import (
 )
 from models import (
     AuthUserInfo,
-    ChangePasswordRequest,
-    ChangePasswordResponse,
-    LoginRequest,
+    EmailLoginRequest,
+    InvitationCreateRequest,
+    InvitationStatusRequest,
     LoginResponse,
     RegisterRequest,
     SendEmailCodeRequest,
     SystemEmailConfigRequest,
     TestSystemEmailRequest,
+    UserMembershipUpdateRequest,
     UserQuotaOverrideRequest,
 )
+from invitations import InvitationError, InvitationService
 from email_verification import (
     EmailVerificationError,
     EmailVerificationService,
     SystemEmailConfigRepository,
 )
+from membership import MembershipService
 from sqlite_storage import EAActivationRepository, TradingAccountRepository, UserRepository
 from trading_engine_manager import TradingEngineManager
 from user_quotas import UserQuotaService
@@ -56,7 +59,22 @@ def create_auth_routes(
     email_service = EmailVerificationService()
     email_config_repository = SystemEmailConfigRepository()
     quota_service = UserQuotaService()
+    membership_service = MembershipService()
     user_repository = UserRepository()
+    invitation_service = InvitationService()
+
+    def login_response(user: AuthUser) -> LoginResponse:
+        auth_manager = get_auth_manager()
+        return LoginResponse(
+            status="ok",
+            token=auth_manager.create_token(user),
+            expires_in=auth_manager.token_ttl_seconds,
+            user=_user_info(user),
+            next_path=(
+                "/" if EAActivationRepository().has_downloaded(user.user_id)
+                else "/mt5-setup"
+            ),
+        )
 
     @router.post("/email-code")
     async def send_registration_email_code(
@@ -64,11 +82,52 @@ def create_auth_routes(
         request: Request,
     ):
         try:
+            invitation_service.assert_available(payload.invitation_code or "")
             requester = request.client.host if request.client else "unknown"
             result = await asyncio.to_thread(
-                email_service.send_code, payload.email, requester
+                email_service.send_code, payload.email, requester, "registration"
             )
             return {"status": "ok", "message": "验证码已发送，请检查邮箱", **result}
+        except (EmailVerificationError, InvitationError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        except (RuntimeError, OSError, smtplib.SMTPException) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"验证码发送失败: {exc}",
+            ) from exc
+
+    @router.post("/login/email-code")
+    async def send_login_email_code(
+        payload: SendEmailCodeRequest,
+        request: Request,
+    ):
+        try:
+            requester = request.client.host if request.client else "unknown"
+            result = await asyncio.to_thread(
+                email_service.send_code, payload.email, requester, "login"
+            )
+            return {"status": "ok", "message": "登录验证码已发送", **result}
+        except EmailVerificationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+    @router.post("/login/email", response_model=LoginResponse)
+    async def login_with_email(payload: EmailLoginRequest) -> LoginResponse:
+        auth_manager = get_auth_manager()
+        try:
+            email = email_service.assert_valid_code(
+                payload.email, payload.verification_code, "login"
+            )
+            user = auth_manager.get_user_by_email(email)
+            if user is None:
+                raise EmailVerificationError("该邮箱尚未加入")
+            email_service.consume(email)
+            return login_response(user)
         except EmailVerificationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -80,28 +139,6 @@ def create_auth_routes(
                 detail=f"验证码发送失败: {exc}",
             ) from exc
 
-    @router.post("/login", response_model=LoginResponse)
-    async def login(payload: LoginRequest) -> LoginResponse:
-        auth_manager = get_auth_manager()
-        user = auth_manager.authenticate(payload.username, payload.password)
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="用户名或密码错误",
-            )
-
-        return LoginResponse(
-            status="ok",
-            token=auth_manager.create_token(user),
-            expires_in=auth_manager.token_ttl_seconds,
-            user=_user_info(user),
-            next_path=(
-                "/"
-                if EAActivationRepository().has_downloaded(user.user_id)
-                else "/mt5-setup"
-            ),
-        )
-
     @router.post(
         "/register",
         response_model=LoginResponse,
@@ -109,30 +146,62 @@ def create_auth_routes(
     )
     async def register(payload: RegisterRequest) -> LoginResponse:
         auth_manager = get_auth_manager()
+        invitation_id = None
         try:
+            if not payload.accepted_private_use_terms:
+                raise ValueError("请先阅读并同意私人技术验证使用协议")
+            invitation_service.assert_available(payload.invitation_code)
             email = email_service.assert_valid_code(
-                payload.email, payload.verification_code
+                payload.email, payload.verification_code, "registration"
             )
-            user = auth_manager.register(payload.username, payload.password, email)
+            invitation_id = invitation_service.claim(payload.invitation_code)
+            user = auth_manager.register_passwordless(payload.username, email)
             email_service.consume(email)
-        except UsernameAlreadyExistsError as exc:
+        except (UsernameAlreadyExistsError, InvitationError) as exc:
+            if invitation_id:
+                invitation_service.release(invitation_id)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(exc),
             ) from exc
-        except ValueError as exc:
+        except (EmailVerificationError, ValueError) as exc:
+            if invitation_id:
+                invitation_service.release(invitation_id)
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
+        return login_response(user)
 
-        return LoginResponse(
-            status="ok",
-            token=auth_manager.create_token(user),
-            expires_in=auth_manager.token_ttl_seconds,
-            user=_user_info(user),
-            next_path="/mt5-setup",
-        )
+    @router.get("/admin/invitations")
+    async def list_invitations(user: AuthUser = Depends(require_admin)):
+        return {"status": "ok", "invitations": invitation_service.list_all()}
+
+    @router.post("/admin/invitations", status_code=status.HTTP_201_CREATED)
+    async def create_invitation(
+        payload: InvitationCreateRequest,
+        user: AuthUser = Depends(require_admin),
+    ):
+        try:
+            invitation = invitation_service.create(
+                user.user_id, payload.label, payload.max_uses, payload.expires_days
+            )
+            invitation["invite_path"] = f'/register?invite={invitation["code"]}'
+            return {"status": "ok", "invitation": invitation}
+        except InvitationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.patch("/admin/invitations/{invitation_id}")
+    async def update_invitation_status(
+        invitation_id: str,
+        payload: InvitationStatusRequest,
+        user: AuthUser = Depends(require_admin),
+    ):
+        try:
+            invitation = invitation_service.set_active(invitation_id, payload.active)
+            return {"status": "ok", "invitation": invitation}
+        except InvitationError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.get("/admin/email-config")
     async def get_system_email_config(
@@ -185,6 +254,8 @@ def create_auth_routes(
                 "username": record.username,
                 "email": record.email,
                 "role": record.role,
+                "membership_level": record.membership_level,
+                "live_trading_enabled": record.live_trading_enabled,
                 **summary,
             })
         return {"status": "ok", "users": users}
@@ -219,41 +290,35 @@ def create_auth_routes(
             },
         }
 
+    @router.put("/admin/users/{user_id}/membership")
+    async def save_user_membership(
+        user_id: int,
+        payload: UserMembershipUpdateRequest,
+        user: AuthUser = Depends(require_admin),
+    ):
+        try:
+            access = membership_service.update_user(
+                user_id,
+                payload.membership_level,
+                payload.live_trading_enabled,
+                user.user_id,
+            )
+            if not access["can_live_trade"] and engine_manager is not None:
+                engine_manager.suspend_user_live_orders(user_id)
+            return {
+                "status": "ok",
+                "message": "用户会员等级和实盘权限已更新",
+                "membership": access,
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @router.get("/me")
     async def me(user: AuthUser = Depends(require_auth)):
         return {
             "status": "ok",
             "user": _user_info(user).model_dump(),
         }
-
-    @router.post(
-        "/change-password",
-        response_model=ChangePasswordResponse,
-    )
-    async def change_password(
-        payload: ChangePasswordRequest,
-        user: AuthUser = Depends(require_auth),
-    ) -> ChangePasswordResponse:
-        auth_manager = get_auth_manager()
-        try:
-            updated_user = auth_manager.change_password(
-                user.user_id,
-                payload.current_password,
-                payload.new_password,
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(exc),
-            ) from exc
-
-        return ChangePasswordResponse(
-            status="ok",
-            message="密码修改成功",
-            token=auth_manager.create_token(updated_user),
-            expires_in=auth_manager.token_ttl_seconds,
-            user=_user_info(updated_user),
-        )
 
     @router.get("/mt5-binding")
     async def get_mt5_binding(user: AuthUser = Depends(require_auth)):
@@ -382,6 +447,8 @@ def _user_info(user: AuthUser) -> AuthUserInfo:
         username=user.username,
         email=user.email,
         role=user.role,
+        membership_level=user.membership_level,
+        live_trading_enabled=user.live_trading_enabled,
     )
 
 

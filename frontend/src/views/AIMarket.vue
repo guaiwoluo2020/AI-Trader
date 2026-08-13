@@ -94,9 +94,7 @@
           <h3>整体判断</h3><p>{{ detailCard.overall_trend?.summary || '模型未返回整体行情总结' }}</p>
           <h3>关键点位</h3><div class="level-row"><span>压力位：{{ levels(detailCard.key_levels?.resistance) }}</span><span>支撑位：{{ levels(detailCard.key_levels?.support) }}</span></div>
           <h3>运行参数</h3><p>{{ detailCard.model || '平台默认模型' }} · {{ detailCard.period }} · {{ detailCard.signal_params?.kline_count || detailCard.kline_count || '-' }} 根 K 线</p>
-          <v-expansion-panels v-if="detailShared" variant="accordion">
-            <v-expansion-panel title="查看共享提示词"><v-expansion-panel-text><div class="prompt-label">系统提示词</div><pre>{{ detailCard.system_prompt || '未单独配置' }}</pre><div class="prompt-label">分析提示词</div><pre>{{ detailCard.analysis_prompt_template || '未单独配置' }}</pre></v-expansion-panel-text></v-expansion-panel>
-          </v-expansion-panels>
+          <v-alert v-if="detailShared" type="info" variant="tonal">共享结果可以作为信号源使用；模型提示词和私有参数受共享者保护，不对外展示。</v-alert>
         </v-card-text>
         <v-card-actions v-if="detailShared" class="pa-4"><v-spacer /><v-btn color="primary" prepend-icon="mdi-tune-variant" @click="goToStrategySettings">前往策略配置引用</v-btn></v-card-actions>
       </v-card>

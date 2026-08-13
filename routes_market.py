@@ -20,6 +20,7 @@ from market.models.llm_config import (
     DEFAULT_SYSTEM_PROMPT,
 )
 from llm_governance import AI_SIGNAL_ANALYSIS, LLMGovernanceError, LLMGovernanceService
+from membership import MembershipService
 from sqlite_storage import (
     LLMAccessRepository,
     LLMConfigRepository,
@@ -36,6 +37,7 @@ from user_quotas import UserQuotaService
 from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
 from market.system_log import get_system_log_broadcaster
+from data_retention import DataRetentionService
 
 
 def create_market_routes(
@@ -56,6 +58,16 @@ def create_market_routes(
     alpha_library = AlphaLibraryRepository()
     llm_governance = LLMGovernanceService()
     event_logs = SystemEventLogRepository()
+    data_retention = DataRetentionService()
+    memberships = MembershipService()
+
+    def strategy_payload(strategy) -> Dict:
+        payload = strategy.to_dict()
+        payload["readonly_reference"] = bool(strategy.source_owner_user_id)
+        if payload["readonly_reference"]:
+            for source in payload.get("signal_sources") or []:
+                source["params"] = {}
+        return payload
 
     def add_audit_event(
         user: AuthUser, event_type: str, event_name: str, message: str,
@@ -561,6 +573,10 @@ def create_market_routes(
             account.status != "active" or not account.trading_enabled
         ):
             raise HTTPException(status_code=409, detail="当前账户交易已暂停")
+        try:
+            memberships.assert_live_trading(user.user_id, account.account_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         pending_order_service = engine.pending_order_service
         update_data = {}
         if request:
@@ -738,7 +754,7 @@ def create_market_routes(
         return {
             "status": "ok",
             "count": len(strategies),
-            "strategies": [s.to_dict() for s in strategies],
+            "strategies": [strategy_payload(s) for s in strategies],
             "quota": quota_service.get_summary(user.user_id, user.role),
         }
 
@@ -779,7 +795,7 @@ def create_market_routes(
             return {
                 "status": "ok",
                 "message": "策略已创建",
-                "strategy": strategy.to_dict(),
+                "strategy": strategy_payload(strategy),
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -818,7 +834,7 @@ def create_market_routes(
     async def get_shared_strategies(
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        """获取平台共享策略库；共享策略只能复制，不能直接修改。"""
+        """获取平台共享策略库；共享内容只允许引用，不暴露机密配置。"""
         strategies = strategy_repo.list_shared_strategies(user.user_id)
         return {
             "status": "ok",
@@ -826,14 +842,14 @@ def create_market_routes(
             "strategies": strategies,
         }
 
-    @protected_router.post("/strategy/shared/{owner_user_id}/{strategy_id}/copy")
-    async def copy_shared_strategy(
+    @protected_router.post("/strategy/shared/{owner_user_id}/{strategy_id}/use")
+    async def use_shared_strategy(
         owner_user_id: int,
         strategy_id: str,
         request: Request,
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        """把共享策略复制为当前用户的私有草稿。"""
+        """为当前用户创建不可编辑的平台策略引用。"""
         try:
             data = await request.json()
         except Exception:
@@ -856,23 +872,26 @@ def create_market_routes(
 
         source = strategy_repo.get_strategy_by_id(owner_user_id, strategy_id)
         if source is None or source.visibility != "shared":
-            return {"status": "error", "message": "共享策略不存在或未开放复制"}
-        with quota_service.guarded():
-            quota_service.assert_can_create(user.user_id, user.role, "strategies")
-            quota_service.assert_strategy_sources(
-                user.user_id, user.role, "", source.signal_sources or [],
-            )
-            strategy = strategy_repo.copy_shared_strategy(
-                user.user_id, owner_user_id, strategy_id, policy_id
-            )
+            return {"status": "error", "message": "共享策略不存在或未开放使用"}
+        try:
+            with quota_service.guarded():
+                quota_service.assert_can_create(user.user_id, user.role, "strategies")
+                quota_service.assert_strategy_sources(
+                    user.user_id, user.role, "", source.signal_sources or [],
+                )
+                strategy = strategy_repo.use_shared_strategy(
+                    user.user_id, owner_user_id, strategy_id, policy_id
+                )
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
         if strategy is None:
-            return {"status": "error", "message": "共享策略不存在或未开放复制"}
+            return {"status": "error", "message": "共享策略不存在或未开放使用"}
 
         engine_manager.refresh_user_strategies(user.user_id)
         return {
             "status": "ok",
-            "message": "共享策略已复制为你的私有草稿",
-            "strategy": strategy.to_dict(),
+            "message": "已添加平台策略引用，原作者配置受保护且不可修改",
+            "strategy": strategy_payload(strategy),
         }
 
     @protected_router.get("/strategy/{strategy_ref}")
@@ -887,7 +906,7 @@ def create_market_routes(
             return {"status": "error", "message": "策略配置不存在"}
         return {
             "status": "ok",
-            "strategy": strategy.to_dict()
+            "strategy": strategy_payload(strategy)
         }
 
     @protected_router.post("/strategy/{strategy_ref}")
@@ -906,6 +925,11 @@ def create_market_routes(
             )
             if strategy is None:
                 return {"status": "error", "message": "策略配置不存在"}
+            if strategy.source_owner_user_id:
+                return {
+                    "status": "error",
+                    "message": "平台共享策略为只读引用，不能修改；如不再使用可以删除引用",
+                }
             if "signal_sources" in data:
                 bind_alpha_signal_snapshots(user, data)
                 validate_ai_signal_configuration(user, data)
@@ -939,7 +963,7 @@ def create_market_routes(
             return {
                 "status": "ok",
                 "message": "策略配置已更新",
-                "strategy": strategy.to_dict()
+                "strategy": strategy_payload(strategy)
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -963,6 +987,13 @@ def create_market_routes(
             current = store.get_strategy_by_id(strategy_ref)
             if current is None:
                 return {"status": "error", "message": "策略配置不存在"}
+            if current.source_owner_user_id:
+                return {
+                    "status": "error",
+                    "message": "平台共享策略为只读引用，不能修改生命周期",
+                }
+            if target_status == "production":
+                memberships.assert_live_trading(user.user_id)
             admission_service.validate_transition(
                 user.user_id, current, target_status
             )
@@ -984,7 +1015,7 @@ def create_market_routes(
             return {
                 "status": "ok",
                 "message": f"策略已进入“{strategy.to_dict()['lifecycle_label']}”状态",
-                "strategy": strategy.to_dict(),
+                "strategy": strategy_payload(strategy),
             }
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
@@ -1131,6 +1162,35 @@ def create_market_routes(
         return {
             "status": "ok", "deleted": deleted,
             "message": f"已清理 {deleted} 条过期运行日志，审计日志未删除",
+        }
+
+    @protected_router.get("/admin/system/data-maintenance")
+    async def get_data_maintenance(
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        return {"status": "ok", **data_retention.get_status()}
+
+    @protected_router.post("/admin/system/data-maintenance/run")
+    async def run_data_maintenance(
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        result = await asyncio.to_thread(
+            data_retention.run_maintenance, "manual"
+        )
+        event_logs.add({
+            "level": "info" if result.get("status") == "completed" else "error",
+            "category": "audit", "event_type": "data_maintenance_run",
+            "event_name": "执行数据维护", "user_id": user.user_id,
+            "actor_type": "user", "actor_id": str(user.user_id),
+            "status": result.get("status", "unknown"),
+            "message": "管理员手动执行数据维护",
+            "detail": {"run_id": result.get("run_id")},
+        })
+        return {
+            "status": result.get("status", "failed"),
+            "message": "数据维护执行完成" if result.get("status") == "completed"
+            else result.get("error_message") or "数据维护执行失败",
+            "run": result,
         }
 
     # ==================== WebSocket接口 ====================

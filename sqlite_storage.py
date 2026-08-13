@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 ROOT_DIR = Path(__file__).resolve().parent
-DATA_DIR = ROOT_DIR / "data"
+DATA_DIR = Path(os.getenv("AI_TRADER_DATA_DIR") or (ROOT_DIR / "data"))
 DEFAULT_DB_FILE = DATA_DIR / "ai_trader.db"
 DEFAULT_AUTH_FILE = ROOT_DIR / ".auth_users.json"
 DEFAULT_TRADE_CONFIG_FILE = DATA_DIR / "trade_config.json"
@@ -48,6 +48,10 @@ def _get_env_default_admin_password() -> str:
     return os.getenv("AI_TRADER_DEFAULT_ADMIN_PASSWORD", "admin123456")
 
 
+def _get_env_default_admin_email() -> str:
+    return os.getenv("AI_TRADER_DEFAULT_ADMIN_EMAIL", "175821555@qq.com").strip().lower()
+
+
 def get_runtime_username() -> str:
     return os.getenv("AI_TRADER_RUNTIME_USERNAME", _get_env_default_admin_username())
 
@@ -60,6 +64,8 @@ class UserRecord:
     password_hash: str
     salt: str
     role: str
+    membership_level: str
+    live_trading_enabled: bool
     token_version: int
     created_at: int
     updated_at: int
@@ -297,6 +303,29 @@ class SQLiteStorage:
                     CREATE INDEX IF NOT EXISTS idx_system_event_correlation
                     ON system_event_logs(correlation_id, occurred_at);
 
+                    CREATE TABLE IF NOT EXISTS data_maintenance_runs (
+                        run_id TEXT PRIMARY KEY,
+                        trigger_type TEXT NOT NULL DEFAULT 'scheduled',
+                        status TEXT NOT NULL DEFAULT 'running',
+                        started_at INTEGER NOT NULL,
+                        completed_at INTEGER,
+                        duration_ms INTEGER,
+                        db_size_before INTEGER NOT NULL DEFAULT 0,
+                        db_size_after INTEGER NOT NULL DEFAULT 0,
+                        page_count INTEGER NOT NULL DEFAULT 0,
+                        free_page_count INTEGER NOT NULL DEFAULT 0,
+                        reclaimable_bytes INTEGER NOT NULL DEFAULT 0,
+                        free_ratio REAL NOT NULL DEFAULT 0,
+                        checkpoint_status TEXT NOT NULL DEFAULT '',
+                        vacuum_status TEXT NOT NULL DEFAULT 'not_due',
+                        vacuum_reason TEXT NOT NULL DEFAULT '',
+                        cleanup_json TEXT NOT NULL DEFAULT '{}',
+                        error_message TEXT NOT NULL DEFAULT ''
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_data_maintenance_started
+                    ON data_maintenance_runs(started_at DESC);
+
                     CREATE TABLE IF NOT EXISTS user_quota_overrides (
                         user_id INTEGER PRIMARY KEY,
                         max_datasets INTEGER,
@@ -343,6 +372,24 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_email_send_events_requester
                     ON email_verification_send_events(requester_hash, sent_at);
+
+                    CREATE TABLE IF NOT EXISTS invitation_codes (
+                        invitation_id TEXT PRIMARY KEY,
+                        code_hash TEXT NOT NULL UNIQUE,
+                        code_prefix TEXT NOT NULL,
+                        label TEXT NOT NULL DEFAULT '',
+                        max_uses INTEGER NOT NULL DEFAULT 1,
+                        used_count INTEGER NOT NULL DEFAULT 0,
+                        expires_at INTEGER,
+                        active INTEGER NOT NULL DEFAULT 1,
+                        created_by INTEGER NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_invitation_codes_status
+                    ON invitation_codes(active, expires_at, created_at DESC);
 
                     CREATE TABLE IF NOT EXISTS shared_ai_runtime_data (
                         share_id TEXT PRIMARY KEY,
@@ -419,7 +466,7 @@ class SQLiteStorage:
                         max_total_positions INTEGER NOT NULL DEFAULT 10,
                         max_single_volume REAL NOT NULL DEFAULT 10,
                         daily_loss_limit REAL NOT NULL DEFAULT 5,
-                        daily_order_limit INTEGER NOT NULL DEFAULT 20,
+                        daily_order_limit INTEGER NOT NULL DEFAULT 100,
                         archived_at INTEGER,
                         last_seen_at INTEGER,
                         mt5_login TEXT,
@@ -574,7 +621,7 @@ class SQLiteStorage:
                         template_id TEXT PRIMARY KEY,
                         user_id INTEGER NOT NULL,
                         template_name TEXT NOT NULL,
-                        visibility TEXT NOT NULL DEFAULT 'shared',
+                        visibility TEXT NOT NULL DEFAULT 'private',
                         strategy_id TEXT NOT NULL,
                         description TEXT NOT NULL DEFAULT '',
                         initial_capital REAL NOT NULL DEFAULT 100000,
@@ -756,6 +803,8 @@ class SQLiteStorage:
                         close_price REAL,
                         close_reason TEXT NOT NULL DEFAULT '',
                         net_profit REAL NOT NULL DEFAULT 0,
+                        remaining_volume REAL NOT NULL DEFAULT 0,
+                        partial_levels_done_json TEXT NOT NULL DEFAULT '[]',
                         created_at INTEGER NOT NULL,
                         updated_at INTEGER NOT NULL,
                         FOREIGN KEY(task_id) REFERENCES backtest_tasks(task_id) ON DELETE CASCADE,
@@ -765,6 +814,31 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_backtest_positions_task
                     ON backtest_positions(task_id, status, opened_at);
+
+                    CREATE TABLE IF NOT EXISTS backtest_position_events (
+                        event_id TEXT PRIMARY KEY,
+                        task_id TEXT NOT NULL,
+                        position_id TEXT NOT NULL,
+                        order_id TEXT NOT NULL DEFAULT '',
+                        user_id INTEGER NOT NULL,
+                        event_time INTEGER NOT NULL,
+                        event_type TEXT NOT NULL,
+                        rule_type TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT '',
+                        message TEXT NOT NULL DEFAULT '',
+                        price REAL NOT NULL DEFAULT 0,
+                        stop_loss REAL NOT NULL DEFAULT 0,
+                        take_profit REAL NOT NULL DEFAULT 0,
+                        volume REAL NOT NULL DEFAULT 0,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        created_at INTEGER NOT NULL,
+                        FOREIGN KEY(task_id) REFERENCES backtest_tasks(task_id) ON DELETE CASCADE,
+                        FOREIGN KEY(position_id) REFERENCES backtest_positions(position_id) ON DELETE CASCADE,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_backtest_position_events
+                    ON backtest_position_events(task_id, position_id, event_time);
 
                     CREATE TABLE IF NOT EXISTS backtest_trades (
                         trade_id TEXT PRIMARY KEY,
@@ -1010,6 +1084,8 @@ class SQLiteStorage:
                         current_price REAL NOT NULL,
                         unrealized_profit REAL NOT NULL DEFAULT 0,
                         net_profit REAL NOT NULL DEFAULT 0,
+                        remaining_volume REAL NOT NULL DEFAULT 0,
+                        partial_levels_done_json TEXT NOT NULL DEFAULT '[]',
                         opened_at INTEGER NOT NULL,
                         closed_at INTEGER,
                         close_price REAL,
@@ -1024,6 +1100,32 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_paper_positions_account
                     ON paper_positions(account_id, status, symbol);
+
+                    CREATE TABLE IF NOT EXISTS position_management_events (
+                        event_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        account_id INTEGER NOT NULL,
+                        position_key TEXT NOT NULL,
+                        position_id TEXT NOT NULL DEFAULT '',
+                        ticket INTEGER,
+                        symbol TEXT NOT NULL DEFAULT '',
+                        event_time INTEGER NOT NULL,
+                        event_type TEXT NOT NULL,
+                        rule_type TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT '',
+                        message TEXT NOT NULL DEFAULT '',
+                        price REAL NOT NULL DEFAULT 0,
+                        stop_loss REAL NOT NULL DEFAULT 0,
+                        take_profit REAL NOT NULL DEFAULT 0,
+                        volume REAL NOT NULL DEFAULT 0,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        created_at INTEGER NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY(account_id) REFERENCES trading_accounts(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_position_management_events
+                    ON position_management_events(user_id, account_id, position_key, event_time);
 
                     CREATE TABLE IF NOT EXISTS paper_trades (
                         trade_id TEXT PRIMARY KEY,
@@ -1201,6 +1303,21 @@ class SQLiteStorage:
                     conn, "paper_positions", "holding_bars", "INTEGER NOT NULL DEFAULT 0",
                 )
                 self._ensure_column(
+                    conn, "paper_positions", "remaining_volume", "REAL NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "paper_positions", "partial_levels_done_json",
+                    "TEXT NOT NULL DEFAULT '[]'",
+                )
+                self._ensure_column(
+                    conn, "backtest_positions", "remaining_volume",
+                    "REAL NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "backtest_positions", "partial_levels_done_json",
+                    "TEXT NOT NULL DEFAULT '[]'",
+                )
+                self._ensure_column(
                     conn, "user_llm_configs", "prompt_version",
                     "INTEGER NOT NULL DEFAULT 1",
                 )
@@ -1293,8 +1410,26 @@ class SQLiteStorage:
                 )
                 self._ensure_column(
                     conn, "trading_accounts", "daily_order_limit",
-                    "INTEGER NOT NULL DEFAULT 20",
+                    "INTEGER NOT NULL DEFAULT 100",
                 )
+                daily_limit_migration = "paper_daily_order_limit_100_v1"
+                if conn.execute(
+                    "SELECT 1 FROM app_meta WHERE key = ?",
+                    (daily_limit_migration,),
+                ).fetchone() is None:
+                    conn.execute(
+                        """
+                        UPDATE trading_accounts
+                        SET daily_order_limit = 100, updated_at = ?
+                        WHERE account_type = 'paper'
+                          AND daily_order_limit IN (20, 60)
+                        """,
+                        (_now_ts(),),
+                    )
+                    conn.execute(
+                        "INSERT INTO app_meta(key, value) VALUES(?, ?)",
+                        (daily_limit_migration, str(_now_ts())),
+                    )
                 self._ensure_column(
                     conn, "trading_accounts", "archived_at", "INTEGER"
                 )
@@ -1351,8 +1486,20 @@ class SQLiteStorage:
                     conn,
                     "backtest_templates",
                     "visibility",
-                    "TEXT NOT NULL DEFAULT 'shared'",
+                    "TEXT NOT NULL DEFAULT 'private'",
                 )
+                template_visibility_migration = "backtest_templates_private_v1"
+                if conn.execute(
+                    "SELECT 1 FROM app_meta WHERE key = ?",
+                    (template_visibility_migration,),
+                ).fetchone() is None:
+                    conn.execute(
+                        "UPDATE backtest_templates SET visibility = 'private'"
+                    )
+                    conn.execute(
+                        "INSERT INTO app_meta(key, value) VALUES(?, ?)",
+                        (template_visibility_migration, str(_now_ts())),
+                    )
                 self._ensure_column(
                     conn,
                     "backtest_templates",
@@ -1384,7 +1531,23 @@ class SQLiteStorage:
                     "token_version",
                     "INTEGER NOT NULL DEFAULT 1",
                 )
+                self._ensure_column(
+                    conn,
+                    "users",
+                    "membership_level",
+                    "TEXT NOT NULL DEFAULT 'silver'",
+                )
+                self._ensure_column(
+                    conn,
+                    "users",
+                    "live_trading_enabled",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
                 self._ensure_column(conn, "users", "email", "TEXT")
+                self._ensure_column(
+                    conn, "email_verification_codes", "purpose",
+                    "TEXT NOT NULL DEFAULT 'registration'",
+                )
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email "
                     "ON users(email) WHERE email IS NOT NULL"
@@ -1429,6 +1592,16 @@ class SQLiteStorage:
                     END
                     """,
                     (admin_username,),
+                )
+                admin_email = _get_env_default_admin_email()
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET email = ?, updated_at = ?
+                    WHERE lower(username) = ? AND email IS NULL
+                      AND NOT EXISTS(SELECT 1 FROM users WHERE email = ?)
+                    """,
+                    (admin_email, _now_ts(), admin_username, admin_email),
                 )
                 conn.commit()
 
@@ -1722,7 +1895,8 @@ class UserRepository:
     def get_by_username(self, username: str) -> Optional[UserRecord]:
         row = self.storage.fetchone(
             """
-            SELECT id, username, email, password_hash, salt, role, token_version,
+            SELECT id, username, email, password_hash, salt, role,
+                   membership_level, live_trading_enabled, token_version,
                    created_at, updated_at
             FROM users
             WHERE username = ?
@@ -1734,7 +1908,8 @@ class UserRepository:
     def get_by_id(self, user_id: int) -> Optional[UserRecord]:
         row = self.storage.fetchone(
             """
-            SELECT id, username, email, password_hash, salt, role, token_version,
+            SELECT id, username, email, password_hash, salt, role,
+                   membership_level, live_trading_enabled, token_version,
                    created_at, updated_at
             FROM users
             WHERE id = ?
@@ -1746,7 +1921,8 @@ class UserRepository:
     def get_by_email(self, email: str) -> Optional[UserRecord]:
         row = self.storage.fetchone(
             """
-            SELECT id, username, email, password_hash, salt, role, token_version,
+            SELECT id, username, email, password_hash, salt, role,
+                   membership_level, live_trading_enabled, token_version,
                    created_at, updated_at
             FROM users
             WHERE email = ?
@@ -1762,17 +1938,23 @@ class UserRepository:
         salt: str,
         role: str = "user",
         email: Optional[str] = None,
+        membership_level: str = "silver",
+        live_trading_enabled: bool = False,
     ) -> UserRecord:
         now = _now_ts()
         self.storage.execute(
             """
             INSERT INTO users(
-                username, email, password_hash, salt, role, token_version,
+                username, email, password_hash, salt, role, membership_level,
+                live_trading_enabled, token_version,
                 created_at, updated_at
             )
-            VALUES(?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
-            (username, email, password_hash, salt, role, now, now),
+            (
+                username, email, password_hash, salt, role, membership_level,
+                int(live_trading_enabled), now, now,
+            ),
         )
         user = self.get_by_username(username)
         if user is None:
@@ -1808,7 +1990,8 @@ class UserRepository:
     def list_users(self) -> List[UserRecord]:
         rows = self.storage.fetchall(
             """
-            SELECT id, username, email, password_hash, salt, role, token_version,
+            SELECT id, username, email, password_hash, salt, role,
+                   membership_level, live_trading_enabled, token_version,
                    created_at, updated_at
             FROM users
             ORDER BY created_at, id
@@ -1829,7 +2012,10 @@ class UserRepository:
             == _get_env_default_admin_username().strip().lower()
             else "user"
         )
-        return self.create_user(username, password_hash, salt, role=role)
+        email = _get_env_default_admin_email() if role == "admin" else None
+        return self.create_user(
+            username, password_hash, salt, role=role, email=email
+        )
 
     @staticmethod
     def _row_to_user(row: Optional[sqlite3.Row]) -> Optional[UserRecord]:
@@ -1842,6 +2028,8 @@ class UserRepository:
             password_hash=row["password_hash"],
             salt=row["salt"],
             role=row["role"],
+            membership_level=row["membership_level"],
+            live_trading_enabled=bool(row["live_trading_enabled"]),
             token_version=int(row["token_version"]),
             created_at=int(row["created_at"]),
             updated_at=int(row["updated_at"]),
@@ -2178,9 +2366,9 @@ class TradingAccountRepository:
                     user_id, account_key, account_name, account_type,
                     environment, currency, initial_balance, balance, equity,
                     free_margin, margin, status, token_hash, enabled,
-                    financial_updated_at, created_at, updated_at
+                    daily_order_limit, financial_updated_at, created_at, updated_at
                 ) VALUES(?, ?, ?, 'paper', 'simulated', ?, ?, ?, ?, ?, 0,
-                         'active', ?, 1, ?, ?, ?)
+                         'active', ?, 1, 100, ?, ?, ?)
                 """,
                 (
                     user_id, account_key, name[:100], normalized_currency,
@@ -3343,8 +3531,11 @@ class SharedAIRuntimeRepository:
             (
                 share_id, int(user_id), strategy_id, source_id,
                 str(strategy.get("symbol", "")), str(source.get("period", "")),
-                str(model), json.dumps(source.get("params") or {}, ensure_ascii=False),
-                str(system_prompt), str(analysis_prompt_template),
+                str(model), json.dumps(
+                    self.sanitize_signal_params(source.get("params") or {}),
+                    ensure_ascii=False,
+                ),
+                "", "",
                 str(strategy.get("strategy_name", "")),
                 str(strategy.get("lifecycle_status", "draft")),
                 json.dumps(result or {}, ensure_ascii=False), now, now, now,
@@ -3406,8 +3597,22 @@ class SharedAIRuntimeRepository:
             (int(user_id), str(strategy_id)),
         )
 
-    @staticmethod
-    def _row_to_dict(row, viewer_user_id: Optional[int]) -> Dict:
+    CONFIDENTIAL_PARAM_KEYS = {
+        "system_prompt", "analysis_prompt_template", "prompt",
+        "prompt_template", "custom_prompt", "user_prompt",
+    }
+
+    @classmethod
+    def sanitize_signal_params(cls, params: Dict) -> Dict:
+        """Remove prompt material before data crosses a sharing boundary."""
+        return {
+            key: value
+            for key, value in dict(params or {}).items()
+            if key not in cls.CONFIDENTIAL_PARAM_KEYS
+        }
+
+    @classmethod
+    def _row_to_dict(cls, row, viewer_user_id: Optional[int]) -> Dict:
         return {
             "share_id": row["share_id"],
             "owner_user_id": int(row["owner_user_id"]),
@@ -3423,9 +3628,9 @@ class SharedAIRuntimeRepository:
             "symbol": row["symbol"],
             "period": row["period"],
             "model": row["model"],
-            "signal_params": json.loads(row["signal_params_json"] or "{}"),
-            "system_prompt": row["system_prompt"],
-            "analysis_prompt_template": row["analysis_prompt_template"],
+            "signal_params": cls.sanitize_signal_params(
+                json.loads(row["signal_params_json"] or "{}")
+            ),
             "result": json.loads(row["result_json"] or "{}"),
             "last_run_at": int(row["last_run_at"]),
             "updated_at": int(row["updated_at"]),
@@ -3530,6 +3735,80 @@ class PositionManagementPolicyRepository:
             (user_id, policy_id),
         )
         return True
+
+
+class PositionManagementEventRepository:
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or get_storage()
+
+    def record(
+        self, user_id: int, account_id: int, position_key: str,
+        event_type: str, message: str, *, symbol: str = "",
+        position_id: str = "", ticket: Optional[int] = None,
+        rule_type: str = "", status: str = "", price: float = 0,
+        stop_loss: float = 0, take_profit: float = 0, volume: float = 0,
+        payload: Optional[Dict] = None, event_time: Optional[int] = None,
+    ) -> Dict:
+        now = _now_ts()
+        event = {
+            "event_id": uuid.uuid4().hex,
+            "user_id": int(user_id),
+            "account_id": int(account_id),
+            "position_key": str(position_key),
+            "position_id": str(position_id or ""),
+            "ticket": int(ticket) if ticket is not None else None,
+            "symbol": str(symbol or ""),
+            "event_time": int(event_time or now),
+            "event_type": str(event_type or ""),
+            "rule_type": str(rule_type or ""),
+            "status": str(status or ""),
+            "message": str(message or ""),
+            "price": float(price or 0),
+            "stop_loss": float(stop_loss or 0),
+            "take_profit": float(take_profit or 0),
+            "volume": float(volume or 0),
+            "payload": payload or {},
+            "created_at": now,
+        }
+        self.storage.execute(
+            """
+            INSERT INTO position_management_events(
+                event_id, user_id, account_id, position_key, position_id, ticket,
+                symbol, event_time, event_type, rule_type, status, message,
+                price, stop_loss, take_profit, volume, payload_json, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event["event_id"], event["user_id"], event["account_id"],
+                event["position_key"], event["position_id"], event["ticket"],
+                event["symbol"], event["event_time"], event["event_type"],
+                event["rule_type"], event["status"], event["message"],
+                event["price"], event["stop_loss"], event["take_profit"],
+                event["volume"], json.dumps(event["payload"], ensure_ascii=False),
+                event["created_at"],
+            ),
+        )
+        return event
+
+    def list_for_position(
+        self, user_id: int, account_id: int, position_key: str,
+        limit: int = 100,
+    ) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT * FROM position_management_events
+            WHERE user_id = ? AND account_id = ? AND position_key = ?
+            ORDER BY event_time, created_at LIMIT ?
+            """,
+            (int(user_id), int(account_id), str(position_key), int(limit)),
+        )
+        return [self._row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _row_to_dict(row) -> Dict:
+        data = dict(row)
+        data["payload"] = json.loads(data.pop("payload_json") or "{}")
+        return data
 
 
 class StrategyConfigRepository:
@@ -3644,7 +3923,9 @@ class StrategyConfigRepository:
             strategy = TradingStrategy.from_dict(json.loads(row["config_json"]))
             if strategy.visibility != "shared":
                 continue
-            item = strategy.to_dict()
+            item = self._sanitize_shared_strategy(strategy.to_dict())
+            for signal_source in item.get("signal_sources") or []:
+                signal_source["params"] = {}
             item.update({
                 "owner_user_id": owner_user_id,
                 "owner_username": row["username"],
@@ -3652,14 +3933,26 @@ class StrategyConfigRepository:
             shared.append(item)
         return shared
 
-    def copy_shared_strategy(
+    @staticmethod
+    def _sanitize_shared_strategy(payload: Dict) -> Dict:
+        sanitized = dict(payload)
+        sanitized["signal_sources"] = []
+        for source in payload.get("signal_sources") or []:
+            item = dict(source)
+            item["params"] = SharedAIRuntimeRepository.sanitize_signal_params(
+                source.get("params") or {}
+            )
+            sanitized["signal_sources"].append(item)
+        return sanitized
+
+    def use_shared_strategy(
         self,
         target_user_id: int,
         owner_user_id: int,
         strategy_id: str,
         position_management_policy_id: str,
     ) -> Optional["TradingStrategy"]:
-        from market.models.trading_strategy import StrategyLifecycle, TradingStrategy
+        from market.models.trading_strategy import TradingStrategy
 
         source = self.get_strategy_by_id(int(owner_user_id), strategy_id)
         if source is None or source.visibility != "shared":
@@ -3667,17 +3960,36 @@ class StrategyConfigRepository:
 
         owner = UserRepository(self.storage).get_by_id(int(owner_user_id))
         now = datetime.now()
-        payload = source.to_dict()
+        payload = self._sanitize_shared_strategy(source.to_dict())
+        signal_sources = []
+        for signal_source in payload.get("signal_sources") or []:
+            item = dict(signal_source)
+            params = dict(item.get("params") or {})
+            if item.get("source") == "ai_entry":
+                source_id = str(item.get("signal_source_id") or "")
+                if not params.get("share_runtime_data"):
+                    raise ValueError(
+                        "共享策略包含未开放运行数据的 AI 信号源，暂不能直接使用"
+                    )
+                params = {
+                    "analysis_mode": "shared_reference",
+                    "shared_runtime_id": (
+                        f"{int(owner_user_id)}:{source.strategy_id}:{source_id}"
+                    ),
+                    "min_confidence": params.get("min_confidence", 70),
+                    "entry_threshold": params.get("entry_threshold", 0.0001),
+                    "share_runtime_data": False,
+                    "reference_runtime_ids": [],
+                }
+            item["params"] = params
+            signal_sources.append(item)
+        payload["signal_sources"] = signal_sources
         payload.update({
             "strategy_id": "",
-            "strategy_name": f"{source.strategy_name}（副本）",
+            "strategy_name": source.strategy_name,
             "visibility": "private",
             "is_shared": False,
-            "enabled": False,
-            "auto_execute": False,
-            "lifecycle_status": StrategyLifecycle.DRAFT,
             "lifecycle_updated_at": now.isoformat(),
-            "lifecycle_history": [],
             "position_management_policy_id": position_management_policy_id,
             "source_strategy_id": source.strategy_id,
             "source_owner_user_id": int(owner_user_id),
@@ -3685,8 +3997,8 @@ class StrategyConfigRepository:
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
         })
-        copied = TradingStrategy.from_dict(payload)
-        return self.save_strategy(int(target_user_id), copied)
+        reference = TradingStrategy.from_dict(payload)
+        return self.save_strategy(int(target_user_id), reference)
 
     def delete_strategy(self, user_id: int, symbol: str) -> bool:
         """兼容旧调用，删除该品种的全部策略。"""

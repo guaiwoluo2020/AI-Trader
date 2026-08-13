@@ -7,6 +7,7 @@ from typing import Dict
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from auth import AuthUser, require_auth
+from membership import MembershipService
 from sqlite_storage import TradingAccountRecord, TradingAccountRepository
 from trading_engine_manager import TradingEngineManager
 
@@ -14,6 +15,7 @@ from trading_engine_manager import TradingEngineManager
 def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     router = APIRouter()
     repository = TradingAccountRepository()
+    memberships = MembershipService()
 
     @router.get("/accounts")
     async def list_accounts(
@@ -42,8 +44,11 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 account.account_type == "paper"
                 for account in repository.list_for_user(user.user_id)
             )
-            if paper_count >= 10:
-                raise ValueError("每个用户最多创建 10 个模拟账户")
+            paper_limit = memberships.paper_account_limit(user.user_id)
+            if paper_limit is not None and paper_count >= paper_limit:
+                raise ValueError(
+                    f"当前会员等级最多创建 {paper_limit} 个模拟账户"
+                )
             account = repository.create_paper_account(
                 user.user_id,
                 account_name=payload.get("account_name", ""),

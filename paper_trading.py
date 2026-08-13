@@ -14,7 +14,9 @@ from typing import Dict, List, Optional, Tuple
 
 from market.models import PositionManagementPolicy, TradingStrategy
 from market.services.position_manager import PositionManager
+from membership import MembershipService
 from sqlite_storage import (
+    PositionManagementEventRepository,
     PositionManagementPolicyRepository, SQLiteStorage,
     StrategyConfigRepository, TradingAccountRepository, get_storage,
 )
@@ -40,6 +42,8 @@ class PaperTradingService:
         self.accounts = TradingAccountRepository(self.storage)
         self.position_policies = PositionManagementPolicyRepository(self.storage)
         self.position_manager = PositionManager()
+        self.position_events = PositionManagementEventRepository(self.storage)
+        self.memberships = MembershipService(self.storage)
         self._lock = threading.RLock()
         self._quotes: Dict[Tuple[int, str], Tuple[float, float]] = {}
 
@@ -101,6 +105,7 @@ class PaperTradingService:
                 raise ValueError("策略通过回测后才能部署到模拟账户")
             execution_mode = "paper"
         elif account.account_type == "mt5":
+            self.memberships.assert_live_trading(user_id, account.account_id)
             if lifecycle != "production":
                 raise ValueError("只有已批准用于实盘的策略才能绑定 MT5 账户")
             execution_mode = "live"
@@ -217,7 +222,7 @@ class PaperTradingService:
     def set_deployment_status(
         self, user_id: int, account_id: int, deployment_id: str, active: bool
     ) -> Optional[Dict]:
-        self._account(user_id, account_id)
+        account = self._account(user_id, account_id)
         now = int(time.time())
         current = self.storage.fetchone(
             "SELECT scheduled_end_at FROM strategy_deployments WHERE deployment_id = ?",
@@ -226,6 +231,8 @@ class PaperTradingService:
         if active and current and current["scheduled_end_at"]:
             if int(current["scheduled_end_at"]) <= now:
                 raise ValueError("模拟运行期限已结束，请从回测报告重新部署")
+        if active and account.account_type == "mt5":
+            self.memberships.assert_live_trading(user_id, account_id)
         status = "active" if active else "paused"
         with self.storage._lock, self.storage._connect() as conn:
             cursor = conn.execute(
@@ -965,11 +972,12 @@ class PaperTradingService:
                         position_id, user_id, account_id, order_id, deployment_id,
                         strategy_id, symbol, direction, status, volume,
                         entry_price, stop_loss, take_profit, open_commission,
-                        current_price, signal_source_id, exit_mode,
+                        current_price, remaining_volume,
+                        partial_levels_done_json, signal_source_id, exit_mode,
                         trailing_activation_r, trailing_distance_r, initial_risk,
                         favorable_price, position_policy_snapshot_json,
                         opened_at, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         position_id, user_id, account_id, order["order_id"],
@@ -977,6 +985,7 @@ class PaperTradingService:
                         order["direction"], volume, fill_price, order["stop_loss"],
                         order["take_profit"], commission,
                         bid if order["direction"] == "buy" else ask,
+                        volume, "[]",
                         order["signal_source_id"], order["exit_mode"],
                         order["trailing_activation_r"], order["trailing_distance_r"],
                         abs(fill_price - float(order["stop_loss"])), fill_price,
@@ -1052,6 +1061,12 @@ class PaperTradingService:
                     )
                     position_state = dict(position)
                     position_state["favorable_price"] = favorable
+                    position_state["remaining_volume"] = float(
+                        position["remaining_volume"] or position["volume"]
+                    )
+                    position_state["partial_levels_done"] = json.loads(
+                        position["partial_levels_done_json"] or "[]"
+                    )
                     max_bars = 0
                     period_seconds = {
                         "M1": 60, "M5": 300, "M15": 900,
@@ -1066,8 +1081,73 @@ class PaperTradingService:
                         policy_snapshot.get("config", {}), position_state,
                         {"price": mark, "time": now}, pivots=pivots,
                     )
+                    for event in action.events:
+                        if event.get("status") == "triggered":
+                            self.position_events.record(
+                                user_id, account_id, position["position_id"],
+                                event.get("rule_type", "position_management"),
+                                event.get("message", ""),
+                                symbol=symbol,
+                                position_id=position["position_id"],
+                                rule_type=event.get("rule_type", ""),
+                                status=event.get("status", ""),
+                                price=event.get("price", mark),
+                                stop_loss=position["stop_loss"],
+                                take_profit=position["take_profit"],
+                                volume=position_state["remaining_volume"],
+                                payload=event,
+                                event_time=now,
+                            )
                     if action.action == "close":
                         reason = action.reason
+                    elif action.action == "partial_close" and action.close_volume:
+                        remaining = float(
+                            position["remaining_volume"] or position["volume"]
+                        )
+                        close_volume = min(remaining, float(action.close_volume))
+                        if close_volume > 0:
+                            multiplier = 1 if position["direction"] == "buy" else -1
+                            gross = (
+                                mark - float(position["entry_price"])
+                            ) * multiplier * close_volume * contract_size
+                            commission = close_volume * settings["commission_per_lot"]
+                            net = gross - commission
+                            balance += gross - commission
+                            trade_id = uuid.uuid4().hex[:12]
+                            done = set(position_state["partial_levels_done"])
+                            done.add(action.level_id)
+                            conn.execute(
+                                """
+                                INSERT INTO paper_trades(
+                                    trade_id, user_id, account_id, order_id, position_id,
+                                    deployment_id, strategy_id, symbol, direction, volume,
+                                    entry_price, exit_price, gross_profit, commission,
+                                    net_profit, exit_reason, opened_at, closed_at, created_at
+                                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    trade_id, user_id, account_id, position["order_id"],
+                                    position["position_id"], position["deployment_id"],
+                                    position["strategy_id"], symbol, position["direction"],
+                                    close_volume, position["entry_price"], mark,
+                                    gross, commission, net, "partial_take_profit",
+                                    position["opened_at"], now, now,
+                                ),
+                            )
+                            conn.execute(
+                                """
+                                UPDATE paper_positions SET remaining_volume = ?,
+                                    partial_levels_done_json = ?, stop_loss = ?,
+                                    favorable_price = ?,
+                                    updated_at = ? WHERE position_id = ?
+                                """,
+                                (
+                                    max(0.0, remaining - close_volume),
+                                    json.dumps(sorted(done), ensure_ascii=False),
+                                    action.stop_loss or position["stop_loss"],
+                                    favorable, now, position["position_id"],
+                                ),
+                            )
                     elif action.action == "modify_sl" and action.stop_loss:
                         conn.execute(
                             """
@@ -1080,10 +1160,13 @@ class PaperTradingService:
                 if reason:
                     exit_price = bid - slippage if position["direction"] == "buy" else ask + slippage
                     multiplier = 1 if position["direction"] == "buy" else -1
+                    close_volume = float(
+                        position["remaining_volume"] or position["volume"]
+                    )
                     gross = (
                         exit_price - float(position["entry_price"])
-                    ) * multiplier * float(position["volume"]) * contract_size
-                    close_commission = float(position["volume"]) * settings["commission_per_lot"]
+                    ) * multiplier * close_volume * contract_size
+                    close_commission = close_volume * settings["commission_per_lot"]
                     total_commission = float(position["open_commission"]) + close_commission
                     net = gross - total_commission
                     balance += gross - close_commission
@@ -1110,7 +1193,7 @@ class PaperTradingService:
                             trade_id, user_id, account_id, position["order_id"],
                             position["position_id"], position["deployment_id"],
                             position["strategy_id"], symbol, position["direction"],
-                            position["volume"], position["entry_price"], exit_price,
+                            close_volume, position["entry_price"], exit_price,
                             gross, total_commission, net, reason,
                             position["opened_at"], now, now,
                         ),
@@ -1231,11 +1314,12 @@ class PaperTradingService:
             ) if quote else float(position["current_price"])
             _, contract_size = market_spec(position["symbol"])
             multiplier = 1 if position["direction"] == "buy" else -1
+            active_volume = float(position["remaining_volume"] or position["volume"])
             unrealized = (
                 mark - float(position["entry_price"])
-            ) * multiplier * float(position["volume"]) * contract_size
+            ) * multiplier * active_volume * contract_size
             margin += (
-                float(position["entry_price"]) * float(position["volume"])
+                float(position["entry_price"]) * active_volume
                 * contract_size / leverage
             )
             unrealized_total += unrealized

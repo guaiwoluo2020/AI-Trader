@@ -138,6 +138,31 @@ class PositionManagerTests(unittest.TestCase):
         self.assertEqual(action.action, "modify_sl")
         self.assertEqual(action.stop_loss, 103)
 
+    def test_partial_take_profit_can_move_stop_to_break_even(self):
+        manager = PositionManager()
+        action = manager.evaluate({
+            "management_rules": [{
+                "type": "partial_take_profit",
+                "levels": [{
+                    "level_id": "tp1",
+                    "trigger_r": 1,
+                    "close_percent": 30,
+                    "move_sl": "break_even",
+                }],
+            }]
+        }, {
+            "direction": "sell",
+            "entry_price": 100,
+            "stop_loss": 105,
+            "initial_risk": 5,
+            "remaining_volume": 1,
+            "favorable_price": 94,
+        }, {"price": 95})
+        self.assertEqual(action.action, "partial_close")
+        self.assertEqual(action.close_volume, 0.3)
+        self.assertEqual(action.stop_loss, 100)
+        self.assertEqual(action.level_id, "tp1")
+
     def test_reverse_signal_and_time_limit_close_position(self):
         manager = PositionManager()
         position = {

@@ -16,7 +16,7 @@ RULE_TYPES = {
 }
 MANAGEMENT_RULE_TYPES = {
     "break_even", "pivot_trailing", "trailing_stop",
-    "reverse_signal", "max_holding_bars",
+    "partial_take_profit", "reverse_signal", "max_holding_bars",
 }
 PERIODS = {"M1", "M5", "M15", "H1", "H4"}
 
@@ -36,8 +36,14 @@ def default_position_management_config() -> Dict:
             {"type": "break_even", "activation_r": 1.0, "offset_r": 0.0},
             {"type": "pivot_trailing", "period": "M5",
              "buffer": {"type": "fixed_points", "value": 0}},
-            {"type": "trailing_stop", "activation_r": 1.5,
+            {"type": "trailing_stop", "activation_r": 1.0,
              "distance_r": 0.8},
+            {"type": "partial_take_profit", "levels": [
+                {"trigger_r": 1.0, "close_percent": 30,
+                 "move_sl": "break_even"},
+                {"trigger_r": 2.0, "close_percent": 30,
+                 "move_sl": "trail"},
+            ]},
         ],
         "min_risk_reward": 1.0,
         "min_stop_distance": 0.0,
@@ -91,8 +97,29 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
             rule["activation_r"] = _positive(rule.get("activation_r", 1), "保本启动R")
             rule["offset_r"] = _positive(rule.get("offset_r", 0), "保本偏移R", True)
         elif rule_type == "trailing_stop":
-            rule["activation_r"] = _positive(rule.get("activation_r", 1.5), "移动止损启动R")
+            rule["activation_r"] = _positive(rule.get("activation_r", 1.0), "移动止损启动R")
             rule["distance_r"] = _positive(rule.get("distance_r", 0.8), "移动止损距离R")
+        elif rule_type == "partial_take_profit":
+            levels = []
+            for index, level in enumerate(rule.get("levels") or [], start=1):
+                trigger_r = _positive(
+                    level.get("trigger_r", index), "分批止盈触发R"
+                )
+                close_percent = _positive(
+                    level.get("close_percent", 30), "分批止盈比例"
+                )
+                if close_percent > 100:
+                    raise ValueError("分批止盈比例不能超过100%")
+                move_sl = str(level.get("move_sl", "none")).strip()
+                if move_sl not in {"none", "break_even", "trail"}:
+                    move_sl = "none"
+                levels.append({
+                    "level_id": str(level.get("level_id") or f"tp{index}"),
+                    "trigger_r": trigger_r,
+                    "close_percent": close_percent,
+                    "move_sl": move_sl,
+                })
+            rule["levels"] = sorted(levels, key=lambda item: item["trigger_r"])
         elif rule_type == "max_holding_bars":
             rule["period"] = str(rule.get("period", "M1")).upper()
             rule["bars"] = max(1, int(rule.get("bars", 1)))
@@ -181,4 +208,8 @@ class PositionAction:
     action: str = "none"
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    close_percent: float = 0.0
+    close_volume: float = 0.0
+    level_id: str = ""
     reason: str = ""
+    events: List[Dict] = field(default_factory=list)

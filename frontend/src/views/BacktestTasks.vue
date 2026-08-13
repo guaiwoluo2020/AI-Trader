@@ -115,16 +115,6 @@
               label="使用策略中的止盈止损规则"
               hide-details
             />
-            <v-switch
-              v-model="form.isShared"
-              color="success"
-              inset
-              label="共享给其他用户"
-              hint="其他用户可以使用模板发起自己的回测，但不能修改或删除模板"
-              persistent-hint
-              @update:model-value="removeIncompatibleDatasets"
-            />
-
             <v-btn
               type="submit"
               color="primary"
@@ -163,14 +153,6 @@
                   </span>
                 </div>
                 <div class="template-chips">
-                  <v-chip
-                    :prepend-icon="template.visibility === 'shared' ? 'mdi-account-group-outline' : 'mdi-lock-outline'"
-                    :color="template.visibility === 'shared' ? 'teal' : 'grey'"
-                    variant="tonal"
-                    size="small"
-                  >
-                    {{ template.visibility === 'shared' ? '共享' : '私有' }}
-                  </v-chip>
                   <v-chip color="teal" variant="tonal" size="small">
                     {{ template.dataset_ids.length }} 个任务
                   </v-chip>
@@ -799,7 +781,6 @@ const defaults = () => ({
   riskPercent: 1, spreadPoints: 0, slippagePoints: 0,
   commissionPerLot: 0, maxPositions: 1, maxSameDirection: 1,
   useStrategyExits: true,
-  isShared: true,
 })
 const form = reactive(defaults())
 
@@ -836,8 +817,7 @@ const strategyOptions = computed(() => context.strategies.map(item => ({
 })))
 const selectedStrategy = computed(() => context.strategies.find(item => item.strategy_id === form.strategyId))
 const datasetOptions = computed(() => context.datasets
-  .filter(item => (!selectedStrategy.value || item.symbol === selectedStrategy.value.symbol)
-    && (!form.isShared || item.visibility === 'shared'))
+  .filter(item => !selectedStrategy.value || item.symbol === selectedStrategy.value.symbol)
   .map(item => ({
     value: item.dataset_id,
     label: `${item.dataset_name} · ${item.symbol} · 质量 ${item.quality_score}`,
@@ -997,7 +977,6 @@ function payload() {
     max_positions: form.maxPositions,
     max_same_direction: form.maxSameDirection,
     use_strategy_exits: form.useStrategyExits,
-    visibility: form.isShared ? 'shared' : 'private',
   }
 }
 
@@ -1063,7 +1042,6 @@ function editTemplate(template) {
     maxPositions: template.max_positions,
     maxSameDirection: template.max_same_direction ?? template.max_positions,
     useStrategyExits: template.use_strategy_exits,
-    isShared: template.visibility === 'shared',
   })
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }

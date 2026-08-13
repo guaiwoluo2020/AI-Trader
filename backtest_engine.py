@@ -1323,6 +1323,8 @@ class SimPosition:
     trailing_distance_r: float = 1.0
     initial_risk: float = 0.0
     favorable_price: float = 0.0
+    remaining_volume: float = 0.0
+    partial_levels_done: List[str] = None
     status: str = "open"
     closed_at: Optional[int] = None
     close_price: Optional[float] = None
@@ -1339,6 +1341,7 @@ class SimPosition:
             "direction": self.direction,
             "status": self.status,
             "volume": self.volume,
+            "remaining_volume": self.remaining_volume or self.volume,
             "entry_price": self.entry_price,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
@@ -1349,6 +1352,7 @@ class SimPosition:
             "net_profit": self.net_profit,
             "signal_source_id": self.signal_source_id,
             "exit_mode": self.exit_mode,
+            "partial_levels_done": self.partial_levels_done or [],
         }
 
 
@@ -1596,9 +1600,25 @@ class M1BacktestEngine:
                         )
                         trades.append(trade)
                     else:
+                        if action.action == "partial_close" and action.close_volume:
+                            trade, balance = self._close_at_price(
+                                position, bar, balance, template, point_size,
+                                contract_size, float(bar["close"]),
+                                "partial_take_profit",
+                                close_volume=action.close_volume,
+                            )
+                            trades.append(trade)
+                            position.partial_levels_done = (
+                                position.partial_levels_done or []
+                            )
+                            if action.level_id not in position.partial_levels_done:
+                                position.partial_levels_done.append(action.level_id)
+                            if action.stop_loss:
+                                position.stop_loss = float(action.stop_loss)
                         if action.action == "modify_sl" and action.stop_loss:
                             position.stop_loss = float(action.stop_loss)
-                        remaining_positions.append(position)
+                        if position.status == "open":
+                            remaining_positions.append(position)
                 positions = remaining_positions
                 decision_time = datetime.fromtimestamp(
                     timestamp + 60, timezone.utc
@@ -1850,6 +1870,8 @@ class M1BacktestEngine:
             trailing_distance_r=order.trailing_distance_r,
             initial_risk=abs(entry - order.stop_loss),
             favorable_price=entry,
+            remaining_volume=volume,
+            partial_levels_done=[],
             position_policy_snapshot=order.position_policy_snapshot,
         ), balance - commission
 
@@ -1890,28 +1912,34 @@ class M1BacktestEngine:
 
     @staticmethod
     def _close_at_price(
-        position, bar, balance, template, point_size, contract_size, price, reason
+        position, bar, balance, template, point_size, contract_size, price, reason,
+        close_volume: Optional[float] = None,
     ) -> Tuple[Dict, float]:
         slippage = float(template.get("slippage_points", 0)) * point_size
         exit_price = float(price) - slippage * (1 if position.direction == "buy" else -1)
         multiplier = 1 if position.direction == "buy" else -1
-        gross = (exit_price - position.entry_price) * multiplier * position.volume * contract_size
-        close_commission = float(template.get("commission_per_lot", 0)) * position.volume
-        net = gross - position.open_commission - close_commission
+        active_volume = position.remaining_volume or position.volume
+        closed_volume = min(active_volume, close_volume or active_volume)
+        gross = (exit_price - position.entry_price) * multiplier * closed_volume * contract_size
+        close_commission = float(template.get("commission_per_lot", 0)) * closed_volume
+        open_commission = position.open_commission * (closed_volume / position.volume)
+        net = gross - open_commission - close_commission
         # Opening commission was already deducted, so only add gross minus closing commission.
         new_balance = balance + gross - close_commission
-        position.status = "closed"
-        position.closed_at = int(bar["time"])
-        position.close_price = exit_price
-        position.close_reason = reason
-        position.net_profit = round(net, 2)
+        position.remaining_volume = max(0.0, active_volume - closed_volume)
+        if position.remaining_volume <= 1e-9:
+            position.status = "closed"
+            position.closed_at = int(bar["time"])
+            position.close_price = exit_price
+            position.close_reason = reason
+        position.net_profit = round(position.net_profit + net, 2)
         trade = {
             "trade_id": uuid.uuid4().hex[:16],
             "order_id": position.order_id,
             "position_id": position.position_id,
             "symbol": position.symbol,
             "direction": position.direction,
-            "volume": position.volume,
+            "volume": closed_volume,
             "entry_price": round(position.entry_price, 8),
             "exit_price": round(exit_price, 8),
             "stop_loss": round(position.stop_loss, 8),
@@ -1924,7 +1952,7 @@ class M1BacktestEngine:
             "confidence": position.confidence,
             "exit_reason": reason,
             "gross_profit": round(gross, 2),
-            "commission": round(position.open_commission + close_commission, 2),
+            "commission": round(open_commission + close_commission, 2),
             "net_profit": round(net, 2),
         }
         return trade, new_balance

@@ -158,6 +158,12 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.assertEqual(visible[0]["symbol_similarity"], 0.98)
         self.assertFalse(visible[0]["is_owner"])
         self.assertEqual(visible[0]["strategy_name"], "共享黄金AI")
+        self.assertNotIn("system_prompt", visible[0])
+        self.assertNotIn("analysis_prompt_template", visible[0])
+        self.assertNotIn("system_prompt", visible[0]["signal_params"])
+        self.assertNotIn(
+            "analysis_prompt_template", visible[0]["signal_params"]
+        )
         self.assertEqual(
             visible[0]["result"]["trade_suggestions"][0]["direction"], "buy"
         )
@@ -277,7 +283,15 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.assertEqual(shared_items[0]["owner_user_id"], self.user_a.user_id)
         self.assertEqual(shared_items[0]["owner_username"], "alice")
 
-    def test_copy_shared_strategy_creates_private_draft_for_target_user(self):
+    def test_use_shared_strategy_creates_readonly_prompt_safe_reference(self):
+        ai_source = signal_source_defaults("ai_entry", "M5")
+        ai_source["params"].update({
+            "share_runtime_data": True,
+            "system_prompt": "保密系统提示词",
+            "analysis_prompt_template": (
+                "保密分析提示词 {{strategy_context}} {{market_data}}"
+            ),
+        })
         source = TradingStrategy(
             symbol="GOLD#",
             strategy_name="平台策略",
@@ -286,10 +300,11 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
             auto_execute=True,
             lifecycle_status=StrategyLifecycle.PRODUCTION,
             position_management_policy_id="alice-policy",
+            signal_sources=[ai_source],
         )
         self.strategy_repo.save_strategy(self.user_a.user_id, source)
 
-        copied = self.strategy_repo.copy_shared_strategy(
+        copied = self.strategy_repo.use_shared_strategy(
             self.user_b.user_id,
             self.user_a.user_id,
             source.strategy_id,
@@ -299,9 +314,9 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.assertIsNotNone(copied)
         self.assertNotEqual(copied.strategy_id, source.strategy_id)
         self.assertEqual(copied.visibility, "private")
-        self.assertFalse(copied.enabled)
-        self.assertFalse(copied.auto_execute)
-        self.assertEqual(copied.lifecycle_status, StrategyLifecycle.DRAFT)
+        self.assertTrue(copied.enabled)
+        self.assertTrue(copied.auto_execute)
+        self.assertEqual(copied.lifecycle_status, StrategyLifecycle.PRODUCTION)
         self.assertEqual(copied.position_management_policy_id, "bob-policy")
         self.assertEqual(copied.source_strategy_id, source.strategy_id)
         self.assertEqual(copied.source_owner_user_id, self.user_a.user_id)
@@ -310,7 +325,18 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
             self.user_b.user_id
         )
         self.assertEqual(len(bob_strategies), 1)
-        self.assertEqual(bob_strategies[0].strategy_name, "平台策略（副本）")
+        self.assertEqual(bob_strategies[0].strategy_name, "平台策略")
+        params = bob_strategies[0].signal_sources[0]["params"]
+        self.assertEqual(params["analysis_mode"], "shared_reference")
+        self.assertEqual(params["system_prompt"], "")
+        self.assertEqual(params["analysis_prompt_template"], "")
+
+        library_item = self.strategy_repo.list_shared_strategies(
+            self.user_b.user_id
+        )[0]
+        library_params = library_item["signal_sources"][0]["params"]
+        self.assertNotIn("system_prompt", library_params)
+        self.assertNotIn("analysis_prompt_template", library_params)
 
     def test_same_user_can_store_multiple_strategies_for_symbol(self):
         first = TradingStrategy(symbol="GOLD#", strategy_name="TrendGold")

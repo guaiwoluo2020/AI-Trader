@@ -33,7 +33,7 @@
           <article>
             <span>{{ isAdmin ? '邮件服务' : '信号源额度' }}</span>
             <strong>{{ isAdmin ? (emailConfig.enabled && emailConfig.password_set ? '在线' : '待配置') : `${myQuota.usage.signal_sources} / ${myQuota.limits.signal_sources ?? '∞'}` }}</strong>
-            <small>{{ isAdmin ? '负责新用户注册验证码' : '所有策略下已保存的信号源' }}</small>
+            <small>{{ isAdmin ? '负责注册与登录验证码' : '所有策略下已保存的信号源' }}</small>
             <v-icon>mdi-access-point</v-icon>
           </article>
           <article>
@@ -47,7 +47,7 @@
         <v-tabs v-model="settingsTab" color="primary" class="settings-main-tabs">
           <v-tab value="account"><v-icon start>mdi-account-lock-outline</v-icon>账户与安全</v-tab>
           <v-tab v-if="isAdmin" value="email"><v-icon start>mdi-email-lock-outline</v-icon>邮件服务</v-tab>
-          <v-tab v-if="isAdmin" value="quota"><v-icon start>mdi-account-star-outline</v-icon>用户配额</v-tab>
+          <v-tab v-if="isAdmin" value="quota"><v-icon start>mdi-account-star-outline</v-icon>用户与会员</v-tab>
           <v-tab value="llm"><v-icon start>mdi-brain</v-icon>{{ isAdmin ? 'AI 服务管理' : 'AI 功能' }}</v-tab>
         </v-tabs>
       </v-col>
@@ -121,13 +121,13 @@
             </v-window-item>
 
             <v-window-item value="shared">
-              <div class="shared-library-head"><div><h3>平台策略库</h3><p>复制一份经过分享的策略作为私有草稿，再按你的交易账户进行调整。</p></div><v-btn icon="mdi-refresh" variant="text" :loading="sharedStrategiesLoading" @click="loadSharedStrategies"></v-btn></div>
+              <div class="shared-library-head"><div><h3>平台策略库</h3><p>直接使用共享策略；原作者的配置与提示词受保护，引用后不可复制或修改。</p></div><v-btn icon="mdi-refresh" variant="text" :loading="sharedStrategiesLoading" @click="loadSharedStrategies"></v-btn></div>
               <div v-if="sharedStrategiesLoading" class="strategy-empty"><v-progress-circular indeterminate color="primary"></v-progress-circular></div>
               <div v-else-if="sharedStrategies.length" class="shared-strategy-list">
                 <article v-for="item in sharedStrategies" :key="`${item.owner_user_id}-${item.strategy_id}`" class="shared-strategy-card">
                   <div class="shared-strategy-card__head"><div><span class="strategy-symbol">{{ item.symbol }}</span><h3>{{ item.strategy_name }}</h3><p>由 {{ item.owner_username }} 分享</p></div><v-chip :color="getLifecycleColor(item.lifecycle_status)" size="small" variant="tonal">{{ item.lifecycle_label || getLifecycleMeta(item).label }}</v-chip></div>
                   <div class="shared-strategy-card__body"><v-chip size="x-small" variant="outlined">{{ signalSourceCount(item) }} 个信号源</v-chip><v-chip size="x-small" variant="outlined">置信度 {{ item.min_confidence }}%</v-chip><v-chip size="x-small" variant="outlined">{{ getConsistencyLabel(item.consistency_requirement) }}</v-chip></div>
-                  <div class="shared-card-footer"><span>更新于 {{ formatStrategyTime(item.updated_at) }}</span><v-btn color="primary" size="small" :loading="sharedStrategyCopying === `${item.owner_user_id}-${item.strategy_id}`" @click="copySharedStrategy(item)"><v-icon start>mdi-content-copy</v-icon>复制并修改</v-btn></div>
+                  <div class="shared-card-footer"><span>更新于 {{ formatStrategyTime(item.updated_at) }}</span><v-btn color="primary" size="small" :loading="sharedStrategyCopying === `${item.owner_user_id}-${item.strategy_id}`" @click="useSharedStrategy(item)"><v-icon start>mdi-link-variant</v-icon>使用策略</v-btn></div>
                 </article>
               </div>
               <div v-else class="strategy-empty"><v-icon size="52">mdi-bookshelf</v-icon><h3>暂无平台共享策略</h3><p>用户共享的策略会出现在这里。</p></div>
@@ -144,11 +144,12 @@
             <div class="d-flex align-center flex-wrap ga-2">
               <v-chip :color="getLifecycleMeta(selectedStrategy).color" variant="tonal">{{ getLifecycleMeta(selectedStrategy).label }}</v-chip>
               <v-chip variant="outlined"><v-icon start size="16">{{ selectedStrategy.is_shared ? 'mdi-earth' : 'mdi-lock-outline' }}</v-icon>{{ selectedStrategy.is_shared ? '已共享' : '私有' }}</v-chip>
-              <v-btn color="primary" :loading="strategySaving === selectedStrategy.strategy_id" :disabled="!hasStrategyChanges" @click="saveSelectedStrategy"><v-icon start>mdi-content-save-outline</v-icon>保存修改</v-btn>
+              <v-btn v-if="!selectedStrategy.readonly_reference" color="primary" :loading="strategySaving === selectedStrategy.strategy_id" :disabled="!hasStrategyChanges" @click="saveSelectedStrategy"><v-icon start>mdi-content-save-outline</v-icon>保存修改</v-btn>
             </div>
           </section>
 
           <v-card class="strategy-detail-shell" elevation="0">
+            <v-alert v-if="selectedStrategy.readonly_reference" type="info" variant="tonal" class="ma-4 mb-0">这是平台共享策略的只读引用。你可以使用或停止使用，但不能查看机密参数、复制或修改原策略。</v-alert>
             <v-tabs v-model="strategyDetailTab" color="primary" class="strategy-detail-tabs">
               <v-tab value="overview">概览</v-tab><v-tab value="signals">信号源 <v-chip size="x-small" class="ml-2">{{ signalSourceCount(selectedStrategy) }}</v-chip></v-tab><v-tab value="risk">仓位与风控</v-tab><v-tab value="lifecycle">验证与生命周期</v-tab>
             </v-tabs>
@@ -156,20 +157,27 @@
             <v-window v-model="strategyDetailTab" class="strategy-detail-content">
               <v-window-item value="overview">
                 <div class="detail-section-title"><div><h3>策略基础信息</h3><p>这些信息用于识别策略并控制多信号源如何共同决策。</p></div></div>
-                <v-row><v-col cols="12" md="6"><v-text-field v-model="selectedStrategy.strategy_name" label="策略名称"></v-text-field></v-col><v-col cols="12" md="3"><v-text-field :model-value="selectedStrategy.symbol" label="交易品种" readonly></v-text-field></v-col><v-col cols="12" md="3"><v-text-field v-model.number="selectedStrategy.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col><v-col cols="12" md="6"><v-select v-model="selectedStrategy.consistency_requirement" :items="consistencyOptions" label="一致性要求"></v-select></v-col></v-row>
-                <div class="strategy-setting-card" :class="{ 'is-active': selectedStrategy.is_shared }"><div><v-icon>mdi-share-variant-outline</v-icon><div><strong>共享到平台策略库</strong><p>其他用户只能复制副本，无法修改你的原策略。</p></div></div><v-switch v-model="selectedStrategy.is_shared" color="success" hide-details></v-switch></div>
+                <v-row><v-col cols="12" md="6"><v-text-field v-model="selectedStrategy.strategy_name" label="策略名称" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" md="3"><v-text-field :model-value="selectedStrategy.symbol" label="交易品种" readonly></v-text-field></v-col><v-col cols="12" md="3"><v-text-field v-model.number="selectedStrategy.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" md="6"><v-select v-model="selectedStrategy.consistency_requirement" :items="consistencyOptions" label="一致性要求" :disabled="selectedStrategy.readonly_reference"></v-select></v-col></v-row>
+                <div class="strategy-setting-card" :class="{ 'is-active': selectedStrategy.is_shared }"><div><v-icon>mdi-share-variant-outline</v-icon><div><strong>共享到平台策略库</strong><p>其他用户只能只读使用，无法复制、修改或查看机密参数。</p></div></div><v-switch v-model="selectedStrategy.is_shared" color="success" hide-details :disabled="selectedStrategy.readonly_reference"></v-switch></div>
                 <div class="strategy-setting-card" :class="{ 'is-active': selectedStrategy.enabled }"><div><v-icon>mdi-power</v-icon><div><strong>启用策略</strong><p>{{ selectedStrategy.lifecycle_status === 'production' ? '启用后参与当前账户的信号决策。' : '策略完成验证并进入实盘阶段后才能启用。' }}</p></div></div><v-switch v-model="selectedStrategy.enabled" color="success" hide-details :disabled="selectedStrategy.lifecycle_status !== 'production'"></v-switch></div>
               </v-window-item>
 
               <v-window-item value="signals">
-                <div class="detail-section-title"><div><h3>信号源配置</h3><p>关键点位与 AI/均线互斥；AI 和均线可以按不同周期组合。</p></div><v-btn color="primary" variant="tonal" @click="openSignalSourceDialog(selectedStrategy)"><v-icon start>mdi-plus</v-icon>添加信号源</v-btn></div>
-                <div v-if="strategySignalSources(selectedStrategy).length" class="signal-source-list">
-                  <article v-for="source in strategySignalSources(selectedStrategy)" :key="source.signal_source_id" class="signal-source-card">
-                    <div class="signal-source-card__head"><div class="d-flex align-center flex-wrap ga-2"><v-avatar size="34" color="grey-lighten-4"><v-icon :color="signalSourceMeta[source.source].color" size="19">{{ signalSourceMeta[source.source].icon }}</v-icon></v-avatar><div><strong>{{ signalSourceMeta[source.source].label }}</strong><div class="text-caption text-medium-emphasis">{{ source.source === 'key_level' ? '全周期共用' : source.period }}</div></div></div><div class="d-flex align-center"><v-switch v-model="source.enabled" color="success" density="compact" hide-details></v-switch><v-btn icon="mdi-pencil-outline" size="small" variant="text" color="primary" @click="openSignalSourceDialog(selectedStrategy, source)"></v-btn><v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" @click="removeSignalSource(selectedStrategy, source)"></v-btn></div></div>
+                <div class="detail-section-title"><div><h3>信号源配置</h3><p>关键点位与 AI/均线互斥；AI 和均线可以按不同周期组合。</p></div><v-btn v-if="!selectedStrategy.readonly_reference" color="primary" variant="tonal" @click="openSignalSourceDialog(selectedStrategy)"><v-icon start>mdi-plus</v-icon>添加信号源</v-btn></div>
+                <div v-if="selectedStrategySignalSources.length" class="signal-source-list">
+                  <article v-for="source in selectedStrategySignalSources" :key="source.signal_source_id" class="signal-source-card">
+                    <div class="signal-source-card__head"><div class="d-flex align-center flex-wrap ga-2"><v-avatar size="34" color="grey-lighten-4"><v-icon :color="sourceMetaFor(source.source).color" size="19">{{ sourceMetaFor(source.source).icon }}</v-icon></v-avatar><div><strong>{{ sourceMetaFor(source.source).label }}</strong><div class="text-caption text-medium-emphasis">{{ source.source === 'key_level' ? '全周期共用' : source.period }}</div></div></div><div class="d-flex align-center"><v-switch v-model="source.enabled" color="success" density="compact" hide-details :disabled="selectedStrategy.readonly_reference"></v-switch><v-btn v-if="!selectedStrategy.readonly_reference" icon="mdi-pencil-outline" size="small" variant="text" color="primary" @click="openSignalSourceDialog(selectedStrategy, source)"></v-btn><v-btn v-if="!selectedStrategy.readonly_reference" icon="mdi-delete-outline" size="small" variant="text" color="error" @click="removeSignalSource(selectedStrategy, source)"></v-btn></div></div>
                     <div class="signal-source-summary"><v-chip size="x-small" variant="outlined">权重 {{ source.weight }}</v-chip><span class="text-caption text-medium-emphasis">{{ signalSourceSummary(source) }}</span></div>
                   </article>
                 </div>
-                <div v-else class="strategy-empty compact"><v-icon size="44">mdi-access-point-plus</v-icon><h3>还没有信号源</h3><p>添加关键点位、AI 入场、均线交叉或已验证 Alpha。</p></div>
+                <div v-else class="strategy-empty compact">
+                  <v-icon size="44">mdi-access-point-plus</v-icon>
+                  <h3>还没有信号源</h3>
+                  <p>添加关键点位、AI 入场、均线交叉或已验证 Alpha。</p>
+                  <p v-if="selectedStrategy?.signal_sources?.length" class="text-caption text-error">
+                    检测到原始信号源 {{ selectedStrategy.signal_sources.length }} 条，但当前页面无法识别，请刷新或重新保存策略。
+                  </p>
+                </div>
               </v-window-item>
 
               <v-window-item value="risk">
@@ -208,6 +216,9 @@
                       <v-icon>mdi-account-outline</v-icon>
                     </template>
                   </v-list-item>
+                  <v-list-item title="登录邮箱" :subtitle="currentUser.email || '未绑定邮箱'">
+                    <template #prepend><v-icon>mdi-email-outline</v-icon></template>
+                  </v-list-item>
                   <v-list-item title="用户角色">
                     <template #prepend>
                       <v-icon>mdi-shield-account</v-icon>
@@ -222,58 +233,25 @@
                       </v-chip>
                     </template>
                   </v-list-item>
+                  <v-list-item title="会员等级">
+                    <template #prepend><v-icon>mdi-crown-outline</v-icon></template>
+                    <template #subtitle>
+                      <v-chip size="small" :color="membershipColor(currentUser.membership_level)" variant="tonal">
+                        {{ membershipLabel(currentUser.membership_level) }}
+                      </v-chip>
+                    </template>
+                  </v-list-item>
+                  <v-list-item title="实盘交易" :subtitle="currentUser.role === 'admin' || currentUser.live_trading_enabled ? '已授权' : '未授权'">
+                    <template #prepend><v-icon>mdi-finance</v-icon></template>
+                  </v-list-item>
                 </v-list>
               </v-col>
 
               <v-col cols="12" md="6">
-                <div class="text-subtitle-2 mb-3">修改密码</div>
-                <v-form @submit.prevent="changePassword">
-                  <v-text-field
-                    v-model="passwordForm.current_password"
-                    label="当前密码"
-                    prepend-inner-icon="mdi-lock-outline"
-                    :type="showCurrentPassword ? 'text' : 'password'"
-                    :append-inner-icon="showCurrentPassword ? 'mdi-eye-off' : 'mdi-eye'"
-                    variant="outlined"
-                    density="compact"
-                    :disabled="passwordSaving"
-                    @click:append-inner="showCurrentPassword = !showCurrentPassword"
-                  />
-                  <v-text-field
-                    v-model="passwordForm.new_password"
-                    label="新密码"
-                    prepend-inner-icon="mdi-lock-reset"
-                    :type="showNewPassword ? 'text' : 'password'"
-                    :append-inner-icon="showNewPassword ? 'mdi-eye-off' : 'mdi-eye'"
-                    variant="outlined"
-                    density="compact"
-                    hint="8-128 位，必须同时包含字母和数字"
-                    persistent-hint
-                    :disabled="passwordSaving"
-                    @click:append-inner="showNewPassword = !showNewPassword"
-                  />
-                  <v-text-field
-                    v-model="passwordForm.confirm_password"
-                    label="确认新密码"
-                    prepend-inner-icon="mdi-lock-check-outline"
-                    :type="showConfirmPassword ? 'text' : 'password'"
-                    :append-inner-icon="showConfirmPassword ? 'mdi-eye-off' : 'mdi-eye'"
-                    variant="outlined"
-                    density="compact"
-                    :error-messages="passwordMismatch ? '两次输入的新密码不一致' : ''"
-                    :disabled="passwordSaving"
-                    @click:append-inner="showConfirmPassword = !showConfirmPassword"
-                  />
-                  <v-btn
-                    type="submit"
-                    color="primary"
-                    :loading="passwordSaving"
-                    :disabled="!canChangePassword"
-                  >
-                    <v-icon start>mdi-lock-reset</v-icon>
-                    修改密码
-                  </v-btn>
-                </v-form>
+                <div class="text-subtitle-2 mb-3">登录方式</div>
+                <v-alert type="success" variant="tonal">
+                  所有成员（包括管理员）统一使用注册邮箱接收验证码登录，验证码 3 分钟内有效，无需设置或记忆密码。
+                </v-alert>
               </v-col>
             </v-row>
           </v-card-text>
@@ -286,14 +264,14 @@
       <v-col cols="12">
         <v-card class="user-settings-card admin-service-card" elevation="0">
           <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
-            <div><v-icon class="mr-2">mdi-email-lock-outline</v-icon>注册邮件服务</div>
+            <div><v-icon class="mr-2">mdi-email-lock-outline</v-icon>验证码邮件服务</div>
             <v-chip :color="emailConfig.enabled && emailConfig.password_set ? 'success' : 'warning'" variant="tonal" size="small">
               {{ emailConfig.enabled && emailConfig.password_set ? '已启用' : emailConfig.password_set ? '已停用' : '待配置' }}
             </v-chip>
           </v-card-title>
           <v-card-text>
             <v-alert type="info" variant="tonal" density="compact" class="mb-5">
-              用于发送新用户注册验证码。SMTP 密码加密存储且不会回显；留空表示保留现有密码。
+              用于发送注册及登录验证码。SMTP 密码加密存储且不会回显；留空表示保留现有密码。
             </v-alert>
             <v-row>
               <v-col cols="12" md="4"><v-text-field v-model="emailConfig.smtp_host" label="SMTP 服务器" variant="outlined" density="compact" /></v-col>
@@ -330,31 +308,72 @@
       </v-col>
     </v-row>
 
-    <!-- 管理员用户配额白名单 -->
+    <!-- 管理员用户与会员权益 -->
     <v-row v-if="!isStrategyPage && isAdmin && settingsTab === 'quota'">
       <v-col cols="12">
-        <v-card class="user-settings-card admin-service-card" elevation="0">
-          <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
-            <div><v-icon class="mr-2">mdi-account-star-outline</v-icon>用户配额白名单</div>
-            <v-chip color="success" variant="tonal" size="small">默认：数据集 10 · 策略 5 · 信号源 10</v-chip>
+        <v-card class="user-settings-card admin-service-card mb-5" elevation="0">
+          <v-card-title class="settings-card-title">
+            <div><v-icon>mdi-ticket-account</v-icon><span>私人邀请管理</span></div>
+            <small>注册入口不对公众开放</small>
           </v-card-title>
           <v-card-text>
             <v-alert type="info" variant="tonal" density="compact" class="mb-4">
-              留空即使用普通用户默认配额；填写数值后仅覆盖该用户对应项目。管理员不受配额限制。
+              邀请链接和邀请码使用同一凭证。完整邀请码只在创建成功后显示一次，请及时复制邀请链接。
+            </v-alert>
+            <div class="invitation-form">
+              <v-text-field v-model="invitationForm.label" label="邀请备注" placeholder="例如：测试伙伴张三" variant="outlined" density="compact" hide-details />
+              <v-text-field v-model.number="invitationForm.max_uses" label="可注册人数" type="number" min="1" max="1000" variant="outlined" density="compact" hide-details />
+              <v-text-field v-model.number="invitationForm.expires_days" label="有效天数" type="number" min="1" max="365" variant="outlined" density="compact" hide-details />
+              <v-btn color="primary" height="40" :loading="invitationSaving" @click="createInvitation"><v-icon start>mdi-link-plus</v-icon>生成邀请链接</v-btn>
+            </div>
+            <div v-if="latestInviteLink" class="invite-result mt-4">
+              <div><small>新邀请链接，仅本次显示</small><strong>{{ latestInviteLink }}</strong></div>
+              <v-btn color="success" variant="tonal" @click="copyLatestInvite"><v-icon start>mdi-content-copy</v-icon>复制链接</v-btn>
+            </div>
+            <v-table v-if="invitations.length" density="comfortable" class="quota-table mt-4">
+              <thead><tr><th>邀请码</th><th>备注</th><th>使用情况</th><th>有效期至</th><th>状态</th></tr></thead>
+              <tbody>
+                <tr v-for="item in invitations" :key="item.invitation_id">
+                  <td><strong>{{ item.code_prefix }}********</strong></td>
+                  <td>{{ item.label || '未备注' }}</td>
+                  <td>{{ item.used_count }} / {{ item.max_uses }}</td>
+                  <td>{{ formatInvitationTime(item.expires_at) }}</td>
+                  <td><v-switch :model-value="item.active" color="success" hide-details :loading="invitationSaving === item.invitation_id" @update:model-value="setInvitationActive(item, $event)" /></td>
+                </tr>
+              </tbody>
+            </v-table>
+            <v-empty-state v-else icon="mdi-ticket-outline" title="还没有邀请码" text="创建后即可邀请私人测试成员加入。" />
+          </v-card-text>
+        </v-card>
+        <v-card class="user-settings-card admin-service-card" elevation="0">
+          <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
+            <div><v-icon class="mr-2">mdi-account-star-outline</v-icon>用户等级与配额</div>
+            <v-chip color="success" variant="tonal" size="small">新用户默认白银会员</v-chip>
+          </v-card-title>
+          <v-card-text>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-4">
+              等级决定默认资源额度；留空表示跟随会员等级。实盘必须同时满足黄金/钻石等级和管理员授权，管理员账号不受限制。
             </v-alert>
             <v-table density="comfortable" class="quota-table">
-              <thead><tr><th>用户</th><th>当前用量</th><th>数据集上限</th><th>策略上限</th><th>信号源上限</th><th></th></tr></thead>
+              <thead><tr><th>用户</th><th>会员等级</th><th>实盘授权</th><th>当前用量</th><th>数据集上限</th><th>策略上限</th><th>信号源上限</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="item in quotaUsers" :key="item.user_id">
                   <td><strong>{{ item.username }}</strong><small>{{ item.email || '未绑定邮箱' }}</small></td>
+                  <td>
+                    <v-select v-model="item.membershipDraft.membership_level" :items="membershipOptions" :disabled="item.role === 'admin'" density="compact" hide-details style="min-width: 126px" @update:model-value="!liveEligibleLevel($event) && (item.membershipDraft.live_trading_enabled = false)" />
+                  </td>
+                  <td>
+                    <v-switch v-model="item.membershipDraft.live_trading_enabled" color="success" hide-details :disabled="item.role === 'admin' || !liveEligibleLevel(item.membershipDraft.membership_level)" />
+                    <small>{{ liveEligibleLevel(item.membershipDraft.membership_level) ? '管理员授权后可实盘' : '黄金会员起开放' }}</small>
+                  </td>
                   <td>
                     <v-chip size="x-small" variant="tonal">数据集 {{ item.usage.datasets }}/{{ item.limits.datasets ?? '∞' }}</v-chip>
                     <v-chip size="x-small" variant="tonal" class="ml-1">策略 {{ item.usage.strategies }}/{{ item.limits.strategies ?? '∞' }}</v-chip>
                     <v-chip size="x-small" variant="tonal" class="ml-1">信号 {{ item.usage.signal_sources }}/{{ item.limits.signal_sources ?? '∞' }}</v-chip>
                   </td>
-                  <td><v-text-field v-model="item.quotaDraft.max_datasets" :disabled="item.role === 'admin'" placeholder="默认 10" type="number" min="0" max="1000" density="compact" hide-details /></td>
-                  <td><v-text-field v-model="item.quotaDraft.max_strategies" :disabled="item.role === 'admin'" placeholder="默认 5" type="number" min="0" max="1000" density="compact" hide-details /></td>
-                  <td><v-text-field v-model="item.quotaDraft.max_signal_sources" :disabled="item.role === 'admin'" placeholder="默认 10" type="number" min="0" max="1000" density="compact" hide-details /></td>
+                  <td><v-text-field v-model="item.quotaDraft.max_datasets" :disabled="item.role === 'admin'" placeholder="等级默认" type="number" min="0" max="1000" density="compact" hide-details /></td>
+                  <td><v-text-field v-model="item.quotaDraft.max_strategies" :disabled="item.role === 'admin'" placeholder="等级默认" type="number" min="0" max="1000" density="compact" hide-details /></td>
+                  <td><v-text-field v-model="item.quotaDraft.max_signal_sources" :disabled="item.role === 'admin'" placeholder="等级默认" type="number" min="0" max="1000" density="compact" hide-details /></td>
                   <td><v-btn size="small" color="primary" :disabled="item.role === 'admin'" :loading="quotaSaving === item.user_id" @click="saveUserQuota(item)">保存</v-btn></td>
                 </tr>
               </tbody>
@@ -733,8 +752,23 @@
       <v-card>
         <v-card-title>{{ signalSourceEditMode === 'edit' ? '编辑信号源' : '添加信号源' }}</v-card-title>
         <v-card-text>
+          <v-alert
+            v-if="!newSignalSource.source || !newSignalSource.params"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mb-4"
+          >
+            当前信号源配置结构异常，请关闭弹窗后刷新页面重试。
+          </v-alert>
+          <v-alert v-else type="success" variant="tonal" density="compact" class="mb-4">
+            当前配置：{{ sourceMetaFor(newSignalSource.source).label }} · {{ newSignalSource.source === 'key_level' ? '全周期' : newSignalSource.period || '未选择周期' }}
+          </v-alert>
           <v-alert type="info" variant="tonal" density="compact" class="mb-4">
             关键点位信号与 AI 入场、均线交叉、已验证 Alpha 互斥：策略中一旦存在关键点位，就不能再添加其他信号；存在其他信号时，也不能添加关键点位。
+          </v-alert>
+          <v-alert v-if="aiSignalOptionsLoading" type="info" variant="tonal" density="compact" class="mb-4">
+            正在加载 AI 模型与共享 Alpha 选项，弹窗可先配置基础参数。
           </v-alert>
           <div class="signal-source-type-grid mb-3">
             <button
@@ -749,8 +783,8 @@
               :disabled="option.disabled || signalSourceEditMode === 'edit'"
               @click="onNewSignalSourceTypeChange(option.value)"
             >
-              <v-icon :color="signalSourceMeta[option.value].color">
-                {{ signalSourceMeta[option.value].icon }}
+              <v-icon :color="sourceMetaFor(option.value).color">
+                {{ sourceMetaFor(option.value).icon }}
               </v-icon>
               <span>{{ option.title }}</span>
               <small v-if="option.disabled">{{ signalSourceDisabledReason(option.value) }}</small>
@@ -949,11 +983,7 @@
                     <p>{{ item.strategy_name }} · 共享者 {{ item.owner_username }}</p>
                     <p>参数：{{ formatSharedSignalParams(item.signal_params) }}</p>
                     <p>最近运行：{{ formatTimestamp(item.last_run_at) }}</p>
-                    <details>
-                      <summary>查看共享提示词</summary>
-                      <div class="shared-prompt-preview">{{ item.system_prompt }}</div>
-                      <div class="shared-prompt-preview">{{ item.analysis_prompt_template }}</div>
-                    </details>
+                    <p class="text-caption text-medium-emphasis">提示词与私有参数受共享者保护，不对外展示。</p>
                     <details>
                       <summary>查看最近分析结果</summary>
                       <div class="shared-prompt-preview">{{ formatSharedRuntimeResult(item.result) }}</div>
@@ -1096,6 +1126,10 @@ export default {
     // 管理员用户配额白名单
     const quotaUsers = ref([])
     const quotaSaving = ref(null)
+    const invitations = ref([])
+    const invitationSaving = ref(false)
+    const latestInviteLink = ref('')
+    const invitationForm = ref({ label: '', max_uses: 1, expires_days: 7 })
     const myQuota = ref({
       usage: { datasets: 0, strategies: 0, signal_sources: 0 },
       limits: { datasets: 10, strategies: 5, signal_sources: 10 }
@@ -1131,59 +1165,6 @@ export default {
       if (llmAccess.value.status === 'approved') return '您可以在信号推荐页面使用大模型行情分析。'
       return '开通后可使用 AI 多周期行情分析和交易信号辅助功能。'
     })
-    const passwordForm = ref({
-      current_password: '',
-      new_password: '',
-      confirm_password: ''
-    })
-    const showCurrentPassword = ref(false)
-    const showNewPassword = ref(false)
-    const showConfirmPassword = ref(false)
-    const passwordSaving = ref(false)
-    const passwordMismatch = computed(() =>
-      Boolean(passwordForm.value.confirm_password) &&
-      passwordForm.value.new_password !== passwordForm.value.confirm_password
-    )
-    const newPasswordValid = computed(() => {
-      const password = passwordForm.value.new_password
-      return (
-        password.length >= 8 &&
-        password.length <= 128 &&
-        /[a-z]/i.test(password) &&
-        /\d/.test(password)
-      )
-    })
-    const canChangePassword = computed(() =>
-      Boolean(passwordForm.value.current_password) &&
-      newPasswordValid.value &&
-      !passwordMismatch.value &&
-      passwordForm.value.new_password === passwordForm.value.confirm_password
-    )
-
-    const changePassword = async () => {
-      if (!canChangePassword.value) return
-
-      passwordSaving.value = true
-      try {
-        const data = await authAPI.changePassword({
-          current_password: passwordForm.value.current_password,
-          new_password: passwordForm.value.new_password
-        })
-        successMessage.value = data.message || '密码修改成功'
-        showSuccess.value = true
-        passwordForm.value = {
-          current_password: '',
-          new_password: '',
-          confirm_password: ''
-        }
-      } catch (err) {
-        errorMessage.value = err.response?.data?.detail || '密码修改失败'
-        showError.value = true
-      } finally {
-        passwordSaving.value = false
-      }
-    }
-
     const loadEmailConfig = async () => {
       if (!isAdmin.value) return
       try {
@@ -1233,6 +1214,10 @@ export default {
         const data = await authAPI.getUserQuotas()
         quotaUsers.value = (data.users || []).map(item => ({
           ...item,
+          membershipDraft: {
+            membership_level: item.membership_level || 'silver',
+            live_trading_enabled: Boolean(item.live_trading_enabled)
+          },
           quotaDraft: {
             max_datasets: item.overrides.datasets ?? '',
             max_strategies: item.overrides.strategies ?? '',
@@ -1244,6 +1229,60 @@ export default {
         showError.value = true
       }
     }
+
+    const loadInvitations = async () => {
+      if (!isAdmin.value) return
+      const data = await authAPI.getInvitations()
+      invitations.value = data.invitations || []
+    }
+
+    const createInvitation = async () => {
+      invitationSaving.value = true
+      try {
+        const data = await authAPI.createInvitation(invitationForm.value)
+        const code = data.invitation?.code
+        latestInviteLink.value = code
+          ? `${window.location.origin}/register?invite=${encodeURIComponent(code)}`
+          : ''
+        invitationForm.value = { label: '', max_uses: 1, expires_days: 7 }
+        await loadInvitations()
+        successMessage.value = '邀请链接已生成，请及时复制'
+        showSuccess.value = true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '生成邀请链接失败'
+        showError.value = true
+      } finally {
+        invitationSaving.value = false
+      }
+    }
+
+    const copyLatestInvite = async () => {
+      try {
+        await navigator.clipboard.writeText(latestInviteLink.value)
+        successMessage.value = '邀请链接已复制'
+        showSuccess.value = true
+      } catch {
+        errorMessage.value = '浏览器未允许复制，请手动选择链接'
+        showError.value = true
+      }
+    }
+
+    const setInvitationActive = async (item, active) => {
+      invitationSaving.value = item.invitation_id
+      try {
+        await authAPI.setInvitationActive(item.invitation_id, active)
+        await loadInvitations()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '更新邀请码状态失败'
+        showError.value = true
+      } finally {
+        invitationSaving.value = false
+      }
+    }
+
+    const formatInvitationTime = (value) => value
+      ? new Date(Number(value) * 1000).toLocaleString('zh-CN')
+      : '长期有效'
 
     const loadMyQuota = async () => {
       try {
@@ -1258,7 +1297,7 @@ export default {
       quotaSaving.value = 'loading'
       try {
         await Promise.all([
-          loadUserQuotas(), loadEmailConfig(), loadLLMConfig(), loadLLMAccessRequests()
+          loadUserQuotas(), loadInvitations(), loadEmailConfig(), loadLLMConfig(), loadLLMAccessRequests()
         ])
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
@@ -1273,8 +1312,14 @@ export default {
         const payload = Object.fromEntries(Object.entries(item.quotaDraft).map(([key, value]) => [
           key, value === '' || value === null ? null : Number(value)
         ]))
-        await authAPI.saveUserQuota(item.user_id, payload)
-        successMessage.value = `已更新 ${item.username} 的配额白名单`
+        if (!liveEligibleLevel(item.membershipDraft.membership_level)) {
+          item.membershipDraft.live_trading_enabled = false
+        }
+        await Promise.all([
+          authAPI.saveUserMembership(item.user_id, item.membershipDraft),
+          authAPI.saveUserQuota(item.user_id, payload)
+        ])
+        successMessage.value = `已更新 ${item.username} 的会员等级与配额`
         showSuccess.value = true
         await loadUserQuotas()
       } catch (err) {
@@ -1284,6 +1329,20 @@ export default {
         quotaSaving.value = null
       }
     }
+
+    const membershipOptions = [
+      { title: '普通用户', value: 'normal' },
+      { title: '白银会员', value: 'silver' },
+      { title: '黄金会员', value: 'gold' },
+      { title: '钻石会员', value: 'diamond' }
+    ]
+    const membershipLabel = (level) => membershipOptions.find(
+      item => item.value === level
+    )?.title || '白银会员'
+    const membershipColor = (level) => ({
+      normal: 'grey', silver: 'blue-grey', gold: 'amber-darken-2', diamond: 'cyan-darken-1'
+    }[level] || 'blue-grey')
+    const liveEligibleLevel = (level) => ['gold', 'diamond'].includes(level)
 
     const loadCurrentUser = async () => {
       try {
@@ -1625,9 +1684,22 @@ export default {
       }
     }
 
-    const newPromptProfileId = () => (
-      globalThis.crypto?.randomUUID?.() || `prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    )
+    const buildClientId = (prefix = '', length = 12) => {
+      const cryptoApi = globalThis.crypto
+      const uuid = cryptoApi?.randomUUID?.()
+      if (uuid) return `${prefix}${uuid.replaceAll('-', '').slice(0, length)}`
+      const bytes = cryptoApi?.getRandomValues
+        ? cryptoApi.getRandomValues(new Uint8Array(length))
+        : null
+      const chars = []
+      for (let index = 0; index < length; index += 1) {
+        const value = bytes ? bytes[index] : Math.floor(Math.random() * 36)
+        chars.push(value.toString(36).slice(-1))
+      }
+      return `${prefix}${Date.now().toString(36)}${chars.join('')}`
+    }
+
+    const newPromptProfileId = () => buildClientId('prompt-')
 
     const addAIScenePrompt = (scene) => {
       const profiles = scene.prompt_profiles ||= []
@@ -1706,6 +1778,11 @@ export default {
       moving_average: { label: '均线交叉信号', color: 'orange-darken-2', icon: 'mdi-chart-bell-curve' },
       alpha_factor: { label: '已验证 Alpha', color: 'teal-darken-1', icon: 'mdi-atom-variant' }
     }
+    const sourceMetaFor = (source) => signalSourceMeta[source] || {
+      label: source || '未知信号源',
+      color: 'grey',
+      icon: 'mdi-help-circle-outline'
+    }
     const strategySignalSources = (strategy) => {
       const sources = Array.isArray(strategy?.signal_sources)
         ? strategy.signal_sources.filter(source => source.source !== 'pivot')
@@ -1714,6 +1791,16 @@ export default {
         ? sources.filter(source => source.source === 'key_level')
         : sources
     }
+    const selectedStrategySignalSources = computed(() => {
+      try {
+        return strategySignalSources(selectedStrategy.value).map(source => (
+          normalizeSignalSourceForDisplay(source)
+        ))
+      } catch (error) {
+        console.error('信号源列表渲染失败:', error)
+        return []
+      }
+    })
     const strategySourceBadges = (strategy) => strategySignalSources(strategy).map(source => ({
       key: source.signal_source_id,
       color: signalSourceMeta[source.source]?.color || 'grey',
@@ -1721,7 +1808,7 @@ export default {
         ? '关键点位'
         : source.source === 'ai_entry' && source.params?.analysis_mode === 'shared_reference'
           ? `共享 AI ${source.period}`
-        : `${signalSourceMeta[source.source]?.label.replace('信号', '').trim() || source.source} ${source.period}`
+        : `${sourceMetaFor(source.source).label.replace('信号', '').trim()} ${source.period}`
     }))
     const signalSourceTypeOptions = computed(() => Object.entries(signalSourceMeta).map(([value, item]) => ({
       title: item.label,
@@ -1784,7 +1871,27 @@ export default {
     const formatSharedSignalParams = (params = {}) => (
       `间隔 ${params.analysis_interval_minutes ?? '-'} 分钟，K线 ${params.kline_count ?? '-'} 根，最低置信度 ${params.min_confidence ?? '-'}%`
     )
-    const formatSharedRuntimeResult = (result = {}) => JSON.stringify(result, null, 2)
+    const formatSharedRuntimeResult = (result = {}) => {
+      if (typeof result === 'string') return result
+      try {
+        return JSON.stringify(result || {}, null, 2)
+      } catch (error) {
+        return '共享分析结果暂无法展示'
+      }
+    }
+    const normalizeSignalSourceForDisplay = (source) => {
+      const cloned = cloneSignalSource(source)
+      const sourceType = cloned.source || 'unknown'
+      const fallbackId = `${sourceType}-${cloned.period || 'all'}`
+      cloned.signal_source_id ||= fallbackId
+      cloned.period ||= sourceType === 'key_level' ? 'M1' : 'M1'
+      cloned.weight = Number(cloned.weight ?? 0)
+      cloned.enabled = cloned.enabled !== false
+      cloned.params = cloned.params && typeof cloned.params === 'object'
+        ? cloned.params
+        : {}
+      return cloned
+    }
     const selectedSharedAIRuntimeData = computed(() => {
       const params = newSignalSource.params || {}
       const selected = new Set(params.analysis_mode === 'shared_reference'
@@ -1841,7 +1948,7 @@ export default {
     }
 
     const sourceDefaults = (source, period) => ({
-      signal_source_id: crypto.randomUUID().replaceAll('-', '').slice(0, 12),
+      signal_source_id: buildClientId('', 12),
       source,
       enabled: true,
       period,
@@ -1878,25 +1985,46 @@ export default {
               shared_runtime_id: ''
             }
     })
-    const cloneSignalSource = (source) => JSON.parse(JSON.stringify(source))
-    const setDialogSignalSource = (source) => {
+    const cloneSignalSource = (source) => JSON.parse(JSON.stringify(source || {}))
+    const normalizeSignalSourceForDialog = (source) => {
+      const sourceType = source?.source || 'key_level'
+      const period = source?.period || (sourceType === 'key_level' ? 'M1' : signalPeriods[0])
+      const defaults = sourceDefaults(sourceType, period)
       const cloned = cloneSignalSource(source)
-      Object.keys(newSignalSource).forEach(key => delete newSignalSource[key])
-      Object.assign(newSignalSource, cloned)
-      newSignalSource.params ||= {}
-      if (newSignalSource.source === 'key_level') {
-        newSignalSource.period = 'M1'
-        newSignalSource.params.levels_text ??= (newSignalSource.params.levels || []).join(', ')
+      const params = {
+        ...(defaults.params || {}),
+        ...(cloned.params || {})
       }
-      if (newSignalSource.source === 'ai_entry') {
-        newSignalSource.params.analysis_mode ||= 'self_analysis'
-        newSignalSource.params.model ||= aiSignalOptions.models[0] || ''
-        newSignalSource.params.system_prompt ||= aiSignalOptions.defaultSystemPrompt
-        newSignalSource.params.analysis_prompt_template ||= aiSignalOptions.defaultAnalysisPromptTemplate
-        newSignalSource.params.share_runtime_data ??= false
-        newSignalSource.params.reference_runtime_ids ||= []
-        newSignalSource.params.shared_runtime_id ||= ''
+      if (sourceType === 'ai_entry') {
+        params.analysis_mode ||= 'self_analysis'
+        params.model ||= aiSignalOptions.models[0] || ''
+        params.system_prompt ||= aiSignalOptions.defaultSystemPrompt
+        params.analysis_prompt_template ||= aiSignalOptions.defaultAnalysisPromptTemplate
+        params.share_runtime_data ??= false
+        params.reference_runtime_ids = Array.isArray(params.reference_runtime_ids)
+          ? params.reference_runtime_ids
+          : []
+        params.shared_runtime_id ||= ''
       }
+      if (sourceType === 'key_level') {
+        params.levels = Array.isArray(params.levels) ? params.levels : []
+        params.levels_text ??= params.levels.join(', ')
+        params.order_distance ??= params.proximity_threshold ?? 0.0008
+        params.proximity_threshold = params.order_distance
+      }
+      return {
+        ...defaults,
+        ...cloned,
+        source: sourceType,
+        period: sourceType === 'key_level' ? 'M1' : period,
+        enabled: cloned.enabled ?? defaults.enabled,
+        weight: Number(cloned.weight ?? defaults.weight ?? 30),
+        params
+      }
+    }
+    const setDialogSignalSource = (source) => {
+      const normalized = normalizeSignalSourceForDialog(source)
+      Object.assign(newSignalSource, normalized)
       normalizeAIInterval(newSignalSource)
     }
 
@@ -2042,29 +2170,34 @@ export default {
       Array.isArray(strategy.signal_sources) ? strategy.signal_sources.length : 0
     )
     const signalSourceSummary = (source) => {
-      const params = source.params || {}
-      if (source.source === 'key_level') {
-        const triggers = [
-          params.upward_approach_sell ? '向上接近卖' : '',
-          params.downward_approach_buy ? '向下接近买' : '',
-          params.upward_breakout_buy ? '向上突破买' : '',
-          params.downward_breakout_sell ? '向下突破卖' : ''
-        ].filter(Boolean).join(' / ')
-        return `下单距离 ${params.order_distance ?? params.proximity_threshold ?? 0}，冷却 ${params.cooldown_seconds ?? 0}s，${triggers || '未启用触发'}`
+      try {
+        const params = source.params || {}
+        if (source.source === 'key_level') {
+          const triggers = [
+            params.upward_approach_sell ? '向上接近卖' : '',
+            params.downward_approach_buy ? '向下接近买' : '',
+            params.upward_breakout_buy ? '向上突破买' : '',
+            params.downward_breakout_sell ? '向下突破卖' : ''
+          ].filter(Boolean).join(' / ')
+          return `下单距离 ${params.order_distance ?? params.proximity_threshold ?? 0}，冷却 ${params.cooldown_seconds ?? 0}s，${triggers || '未启用触发'}`
+        }
+        if (source.source === 'moving_average') {
+          return `${params.ma_type || 'sma'} 快线 ${params.fast_period} / 慢线 ${params.slow_period}，最低置信度 ${params.min_confidence ?? 0}%`
+        }
+        if (source.source === 'alpha_factor') {
+          return `${params.alpha_name || '已验证 Alpha'} · ${source.period}，最低置信度 ${params.min_confidence ?? 0}%`
+        }
+        if (params.analysis_mode === 'shared_reference') {
+          const shared = aiSignalOptions.sharedRuntimeData.find(
+            item => item.share_id === params.shared_runtime_id
+          )
+          return `引用 ${shared?.owner_username || '平台用户'} 的 ${shared?.symbol || '共享'} 分析，最低置信度 ${params.min_confidence ?? 0}%`
+        }
+        return `${params.model || '平台默认模型'} · 每 ${params.analysis_interval_minutes ?? 0} 分钟分析 ${params.kline_count ?? 0} 根K线，最低置信度 ${params.min_confidence ?? 0}%${params.share_runtime_data ? ' · 已共享运行数据' : ''}`
+      } catch (error) {
+        console.error('信号源摘要渲染失败:', error)
+        return '配置摘要暂不可用，请点编辑查看详情'
       }
-      if (source.source === 'moving_average') {
-        return `${params.ma_type || 'sma'} 快线 ${params.fast_period} / 慢线 ${params.slow_period}，最低置信度 ${params.min_confidence ?? 0}%`
-      }
-      if (source.source === 'alpha_factor') {
-        return `${params.alpha_name || '已验证 Alpha'} · ${source.period}，最低置信度 ${params.min_confidence ?? 0}%`
-      }
-      if (params.analysis_mode === 'shared_reference') {
-        const shared = aiSignalOptions.sharedRuntimeData.find(
-          item => item.share_id === params.shared_runtime_id
-        )
-        return `引用 ${shared?.owner_username || '平台用户'} 的 ${shared?.symbol || '共享'} 分析，最低置信度 ${params.min_confidence ?? 0}%`
-      }
-      return `${params.model || '平台默认模型'} · 每 ${params.analysis_interval_minutes ?? 0} 分钟分析 ${params.kline_count ?? 0} 根K线，最低置信度 ${params.min_confidence ?? 0}%${params.share_runtime_data ? ' · 已共享运行数据' : ''}`
     }
     const normalizeStrategyVisibility = (strategy) => {
       strategy.visibility = strategy.visibility === 'shared' || strategy.is_shared
@@ -2187,25 +2320,25 @@ export default {
       }
     }
 
-    const copySharedStrategy = async (item) => {
+    const useSharedStrategy = async (item) => {
       const policyId = newStrategyPolicyId.value || positionPolicyOptions.value[0]?.value || ''
       if (!policyId) {
-        errorMessage.value = '请先创建并启用一个持仓管理方案，再复制共享策略'
+        errorMessage.value = '请先创建并启用一个持仓管理方案，再使用共享策略'
         showError.value = true
         return
       }
       const copyKey = `${item.owner_user_id}-${item.strategy_id}`
       sharedStrategyCopying.value = copyKey
       try {
-        const data = await marketAPI.copySharedStrategy(
+        const data = await marketAPI.useSharedStrategy(
           item.owner_user_id,
           item.strategy_id,
           { position_management_policy_id: policyId }
         )
         if (data.status !== 'ok') {
-          throw new Error(data.message || '复制共享策略失败')
+          throw new Error(data.message || '使用共享策略失败')
         }
-        successMessage.value = data.message || '共享策略已复制'
+        successMessage.value = data.message || '平台策略已添加'
         showSuccess.value = true
         await loadStrategies()
         strategyWorkspaceTab.value = 'mine'
@@ -2214,7 +2347,7 @@ export default {
         if (created) openStrategyDetail(created)
       } catch (err) {
         const detail = err.response?.data?.detail || err.message
-        errorMessage.value = `复制共享策略失败: ${detail}`
+        errorMessage.value = `使用共享策略失败: ${detail}`
         showError.value = true
       } finally {
         sharedStrategyCopying.value = null
@@ -2407,14 +2540,23 @@ export default {
       newSignalSource.params.alpha_snapshot = alpha.definition
     }
 
+    const refreshDialogDefaultsAfterOptionsLoaded = () => {
+      if (!signalSourceDialog.value || newSignalSource.source !== 'ai_entry') return
+      newSignalSource.params ||= {}
+      newSignalSource.params.model ||= aiSignalOptions.models[0] || ''
+      newSignalSource.params.system_prompt ||= aiSignalOptions.defaultSystemPrompt
+      newSignalSource.params.analysis_prompt_template ||= aiSignalOptions.defaultAnalysisPromptTemplate
+    }
+
     const openSignalSourceDialog = async (strategy, source = null) => {
       signalSourceTarget.value = strategy
-      await Promise.all([loadAISignalOptions(strategy.symbol), loadAlphaLibrary()])
       if (source) {
         signalSourceEditMode.value = 'edit'
         editingSignalSourceId.value = source.signal_source_id
         setDialogSignalSource(source)
         signalSourceDialog.value = true
+        await Promise.all([loadAISignalOptions(strategy.symbol), loadAlphaLibrary()])
+        refreshDialogDefaultsAfterOptionsLoaded()
         return
       }
       signalSourceEditMode.value = 'add'
@@ -2427,6 +2569,8 @@ export default {
         : availablePeriodsForSource(firstAvailableType)[0] || 'M1'
       setDialogSignalSource(sourceDefaults(firstAvailableType, firstPeriod))
       signalSourceDialog.value = true
+      await Promise.all([loadAISignalOptions(strategy.symbol), loadAlphaLibrary()])
+      refreshDialogDefaultsAfterOptionsLoaded()
     }
 
     const saveSignalSourceFromDialog = () => {
@@ -2565,14 +2709,10 @@ export default {
       currentUser,
       isAdmin,
       roleLabel,
-      passwordForm,
-      showCurrentPassword,
-      showNewPassword,
-      showConfirmPassword,
-      passwordSaving,
-      passwordMismatch,
-      canChangePassword,
-      changePassword,
+      membershipOptions,
+      membershipLabel,
+      membershipColor,
+      liveEligibleLevel,
       emailConfig,
       showEmailPassword,
       emailSaving,
@@ -2582,6 +2722,14 @@ export default {
       quotaUsers,
       quotaSaving,
       saveUserQuota,
+      invitations,
+      invitationForm,
+      invitationSaving,
+      latestInviteLink,
+      createInvitation,
+      copyLatestInvite,
+      setInvitationActive,
+      formatInvitationTime,
       myQuota,
       loadAdminWorkspace,
       saveTradeConfig,
@@ -2665,18 +2813,20 @@ export default {
       signalSourceCount,
       signalSourceSummary,
       strategySignalSources,
+      selectedStrategySignalSources,
       strategySourceBadges,
       getAdmission,
       admissionStages,
       isLifecycleActionDisabled,
       transitionStrategyLifecycle,
       loadSharedStrategies,
-      copySharedStrategy,
+      useSharedStrategy,
       // 信号配置
       signalSourceDialog,
       signalSourceEditMode,
       newSignalSource,
       signalSourceMeta,
+      sourceMetaFor,
       signalSourceTypeOptions,
       signalSourceDisabledReason,
       keyLevelModeOptions,
@@ -2718,6 +2868,7 @@ export default {
 .settings-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 22px 0 10px; }.settings-metrics article { position: relative; min-height: 123px; padding: 19px 21px; overflow: hidden; border: 1px solid var(--settings-line); border-radius: 17px; background: linear-gradient(145deg, #fff, #f7fbf9); }.settings-metrics span,.settings-metrics small { display: block; color: var(--settings-muted); }.settings-metrics span { font-size: .78rem; }.settings-metrics strong { display: block; margin-top: 4px; color: var(--settings-ink); font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(1.25rem, 2.1vw, 1.8rem); line-height: 1.08; }.settings-metrics small { max-width: 85%; margin-top: 7px; font-size: .67rem; line-height: 1.35; }.settings-metrics .v-icon { position: absolute; right: 17px; bottom: 16px; color: #b9d4c8; }
 .settings-main-tabs { margin-top: 22px; border-bottom: 1px solid var(--settings-line); background: rgba(255,255,255,.68); border-radius: 14px 14px 0 0; }.llm-workspace-tabs { margin: -2px -6px 22px; border-bottom: 1px solid var(--settings-line); }
 .user-settings-card { overflow: hidden; border: 1px solid var(--settings-line); border-radius: 19px !important; background: #fff; }.user-settings-card :deep(.v-card-text) { padding: 22px 24px 26px; }.settings-card-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 18px 24px !important; border-bottom: 1px solid var(--settings-line); color: var(--settings-ink); }.settings-card-title>div { display: flex; align-items: center; gap: 10px; font-size: 1rem; font-weight: 700; }.settings-card-title>div .v-icon { color: var(--settings-green); }.settings-card-title>small { color: var(--settings-muted); font-size: .72rem; font-weight: 400; }.admin-service-card { border-color: #c8ddd4; background: linear-gradient(145deg, #fff 0%, #f7fcfa 100%); }.account-summary { padding: 8px; border: 1px solid #e2ece7; border-radius: 13px; background: #f9fcfa; }.quota-table :deep(th) { color: var(--settings-muted); font-size: .72rem; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }.quota-table :deep(td) { padding-top: 12px; padding-bottom: 12px; }.quota-table small { display: block; margin-top: 3px; color: var(--settings-muted); font-size: .7rem; }
+.invitation-form { display: grid; grid-template-columns: minmax(220px, 1fr) 140px 140px auto; gap: 12px; align-items: start; }.invite-result { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border: 1px solid #b9ddca; border-radius: 13px; background: #eef9f3; }.invite-result div { min-width: 0; }.invite-result small,.invite-result strong { display: block; }.invite-result strong { overflow-wrap: anywhere; color: #176b4d; }
 .admission-panel { padding: 16px; border: 1px solid #dbe7e1; border-radius: 14px; background: linear-gradient(135deg, #f5f9f6, #fffaf0); }
 .admission-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .admission-title strong,.admission-title span { display: block; }.admission-title span { margin-top: 2px; color: #7a8982; font-size: .72rem; }
@@ -2807,5 +2958,5 @@ export default {
 .shared-ai-runtime-list summary { margin-top: 9px; color: #176b4d; font-size: .76rem; font-weight: 700; cursor: pointer; }
 .shared-prompt-preview { max-height: 130px; margin-top: 8px; padding: 9px; overflow: auto; border-radius: 8px; background: rgba(255,255,255,.82); color: #53675e; font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .7rem; white-space: pre-wrap; }
 @media (max-width: 960px) { .strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; }.strategy-toolbar { grid-template-columns: 1fr 1fr; }.strategy-toolbar>*:first-child { grid-column: 1 / -1; } }
-@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.settings-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero,.settings-hero { padding: 26px 22px; }.strategy-primary-action,.settings-hero .v-btn { width: 100%; }.strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article,.settings-metrics article { min-height: 104px; padding: 15px; }.settings-metrics strong { font-size: 1.28rem; }.settings-card-title { align-items: flex-start; flex-direction: column; }.user-settings-card :deep(.v-card-text) { padding: 18px 16px 22px; }.quota-table { min-width: 860px; }.quota-table :deep(.v-table__wrapper) { overflow-x: auto; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.settings-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero,.settings-hero { padding: 26px 22px; }.strategy-primary-action,.settings-hero .v-btn { width: 100%; }.strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article,.settings-metrics article { min-height: 104px; padding: 15px; }.settings-metrics strong { font-size: 1.28rem; }.settings-card-title { align-items: flex-start; flex-direction: column; }.user-settings-card :deep(.v-card-text) { padding: 18px 16px 22px; }.quota-table { min-width: 860px; }.quota-table :deep(.v-table__wrapper) { overflow-x: auto; }.invitation-form { grid-template-columns: 1fr; }.invite-result { align-items: flex-start; flex-direction: column; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
 </style>

@@ -34,6 +34,8 @@ class AuthUser:
     username: str
     email: Optional[str] = None
     role: str = "user"
+    membership_level: str = "silver"
+    live_trading_enabled: bool = False
     token_version: int = 1
 
 
@@ -95,6 +97,8 @@ class AuthManager:
             username=record.username,
             email=record.email,
             role=record.role,
+            membership_level=record.membership_level,
+            live_trading_enabled=record.live_trading_enabled,
             token_version=record.token_version,
         )
 
@@ -104,6 +108,15 @@ class AuthManager:
             user = self.user_repo.get_by_username(requested_username)
             if user is None and requested_username != requested_username.lower():
                 user = self.user_repo.get_by_username(requested_username.lower())
+            if user:
+                actual = self._hash_password(password, user.salt)
+                if hmac.compare_digest(user.password_hash, actual):
+                    return self._to_auth_user(user)
+        return None
+
+    def authenticate_email(self, email: str, password: str) -> Optional[AuthUser]:
+        with self._lock:
+            user = self.user_repo.get_by_email(str(email or "").strip().lower())
             if user:
                 actual = self._hash_password(password, user.salt)
                 if hmac.compare_digest(user.password_hash, actual):
@@ -136,6 +149,14 @@ class AuthManager:
                 raise UsernameAlreadyExistsError("用户名或邮箱已被注册") from exc
 
         return self._to_auth_user(record)
+
+    def register_passwordless(self, username: str, email: str) -> AuthUser:
+        """Create an invited user without accepting a reusable password."""
+        return self.register(username, secrets.token_urlsafe(32), email)
+
+    def get_user_by_email(self, email: str) -> Optional[AuthUser]:
+        record = self.user_repo.get_by_email(str(email or "").strip().lower())
+        return self._to_auth_user(record) if record else None
 
     def change_password(
         self,

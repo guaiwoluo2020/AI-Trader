@@ -39,12 +39,13 @@ https://your-domain.example/api/news/flash
 ## 3. 管理员认证
 
 三个写入接口只允许 AI Trader 管理员调用。Hermes Agent 不应保存网页登录后的临时页面状态，
-而应使用管理员账号调用登录接口取得 Bearer Token。
+管理员也统一使用邮箱验证码登录。无人值守 Agent 应由管理员安全提供短期 Bearer Token；
+后续建议为采集服务单独实现可撤销的 API Key，不要保存邮箱验证码。
 
 ### 3.1 登录
 
 ```http
-POST {API_BASE}/auth/login
+POST {API_BASE}/auth/login/email-code
 Content-Type: application/json
 ```
 
@@ -52,8 +53,7 @@ Content-Type: application/json
 
 ```json
 {
-  "username": "admin",
-  "password": "<admin-password>"
+  "email": "175821555@qq.com"
 }
 ```
 
@@ -72,13 +72,18 @@ Content-Type: application/json
 }
 ```
 
-命令示例：
+邮箱收到验证码后，再登录：
+
+```http
+POST {API_BASE}/auth/login/email
+Content-Type: application/json
+```
 
 ```bash
 curl --fail-with-body \
-  -X POST "$API_BASE/auth/login" \
+  -X POST "$API_BASE/auth/login/email" \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"<admin-password>"}'
+  -d '{"email":"175821555@qq.com","verification_code":"<6-digit-code>"}'
 ```
 
 ### 3.2 写入请求头
@@ -402,7 +407,7 @@ WebSocket 地址：
 
 配置：
 - API_BASE 从环境变量读取。
-- 使用管理员账号 POST {API_BASE}/auth/login 获取 Bearer Token。
+- 使用管理员邮箱验证码登录取得短期 Bearer Token，或由管理员安全提供 Token。
 - 所有请求使用 UTF-8 JSON，source 固定为 jin10，时间使用带时区的 ISO 8601。
 
 任务：

@@ -32,23 +32,37 @@ class StatisticData(BaseModel):
     trades: list  # 交易记录
 
 
-class LoginRequest(BaseModel):
-    """登录请求"""
-    username: str
-    password: str
-
-
-class RegisterRequest(BaseModel):
-    """注册请求"""
-    username: str
+class EmailLoginRequest(BaseModel):
+    """用户邮箱验证码登录。"""
     email: str
-    password: str
     verification_code: str
 
 
-class SendEmailCodeRequest(BaseModel):
-    """发送注册邮箱验证码。"""
+class RegisterRequest(BaseModel):
+    """受邀请用户注册。"""
+    username: str
     email: str
+    verification_code: str
+    invitation_code: str
+    accepted_private_use_terms: bool = False
+
+
+class SendEmailCodeRequest(BaseModel):
+    """发送邮箱验证码。"""
+    email: str
+    invitation_code: Optional[str] = None
+
+
+class InvitationCreateRequest(BaseModel):
+    """管理员创建私人邀请。"""
+    label: str = ""
+    max_uses: int = 1
+    expires_days: Optional[int] = 7
+
+
+class InvitationStatusRequest(BaseModel):
+    """管理员启停邀请码。"""
+    active: bool
 
 
 class SystemEmailConfigRequest(BaseModel):
@@ -74,10 +88,10 @@ class UserQuotaOverrideRequest(BaseModel):
     max_signal_sources: Optional[int] = None
 
 
-class ChangePasswordRequest(BaseModel):
-    """修改当前用户密码"""
-    current_password: str
-    new_password: str
+class UserMembershipUpdateRequest(BaseModel):
+    """管理员调整用户会员等级和实盘授权。"""
+    membership_level: str
+    live_trading_enabled: bool = False
 
 
 class AuthUserInfo(BaseModel):
@@ -86,6 +100,8 @@ class AuthUserInfo(BaseModel):
     username: str
     email: Optional[str] = None
     role: str
+    membership_level: str = "silver"
+    live_trading_enabled: bool = False
 
 
 class LoginResponse(BaseModel):
@@ -95,12 +111,3 @@ class LoginResponse(BaseModel):
     expires_in: int
     user: AuthUserInfo
     next_path: str
-
-
-class ChangePasswordResponse(BaseModel):
-    """修改密码响应"""
-    status: str
-    message: str
-    token: str
-    expires_in: int
-    user: AuthUserInfo

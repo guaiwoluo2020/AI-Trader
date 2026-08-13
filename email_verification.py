@@ -21,7 +21,7 @@ from sqlite_storage import MetaRepository, UserRepository, get_storage
 
 ROOT_DIR = Path(__file__).resolve().parent
 BLOCKLIST_PATH = ROOT_DIR / "resources" / "disposable_email_blocklist.conf"
-CODE_TTL_SECONDS = 10 * 60
+CODE_TTL_SECONDS = 3 * 60
 RESEND_INTERVAL_SECONDS = 60
 MAX_ATTEMPTS = 5
 MAX_SENDS_PER_HOUR = 10
@@ -188,22 +188,29 @@ class EmailVerificationRepository:
             "SELECT * FROM email_verification_codes WHERE email = ?", (email,)
         )
 
-    def save(self, email: str, code_hash: str, code_salt: str) -> None:
+    def save(
+        self, email: str, code_hash: str, code_salt: str, purpose: str,
+    ) -> None:
         now = int(time.time())
         self.storage.execute(
             """
             INSERT INTO email_verification_codes(
-                email, code_hash, code_salt, expires_at, sent_at, attempts, created_at
-            ) VALUES(?, ?, ?, ?, ?, 0, ?)
+                email, code_hash, code_salt, purpose, expires_at, sent_at,
+                attempts, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, 0, ?)
             ON CONFLICT(email) DO UPDATE SET
                 code_hash = excluded.code_hash,
                 code_salt = excluded.code_salt,
+                purpose = excluded.purpose,
                 expires_at = excluded.expires_at,
                 sent_at = excluded.sent_at,
                 attempts = 0,
                 created_at = excluded.created_at
             """,
-            (email, code_hash, code_salt, now + CODE_TTL_SECONDS, now, now),
+            (
+                email, code_hash, code_salt, purpose,
+                now + CODE_TTL_SECONDS, now, now,
+            ),
         )
 
     def increment_attempts(self, email: str) -> None:
@@ -249,18 +256,26 @@ class EmailVerificationService:
         self.user_repository = UserRepository()
 
     @staticmethod
-    def _hash_code(email: str, code: str, salt: str) -> str:
+    def _hash_code(email: str, code: str, salt: str, purpose: str) -> str:
         return hashlib.pbkdf2_hmac(
             "sha256",
-            f"{email}:{code}".encode("utf-8"),
+            f"{email}:{purpose}:{code}".encode("utf-8"),
             salt.encode("ascii"),
             120_000,
         ).hex()
 
-    def send_code(self, email: str, requester: str = "unknown") -> Dict:
+    def send_code(
+        self, email: str, requester: str = "unknown",
+        purpose: str = "registration",
+    ) -> Dict:
+        if purpose not in {"registration", "login"}:
+            raise EmailVerificationError("不支持的验证码用途")
         normalized = self.policy.normalize(email)
-        if self.user_repository.get_by_email(normalized):
-            raise EmailVerificationError("该邮箱已被注册")
+        existing_user = self.user_repository.get_by_email(normalized)
+        if purpose == "registration" and existing_user:
+            raise EmailVerificationError("该邮箱已被注册，请直接登录")
+        if purpose == "login" and not existing_user:
+            raise EmailVerificationError("该邮箱尚未加入，请使用邀请链接注册")
         existing = self.repository.get(normalized)
         now = int(time.time())
         if existing and now - int(existing["sent_at"]) < RESEND_INTERVAL_SECONDS:
@@ -272,16 +287,23 @@ class EmailVerificationService:
         if not config["enabled"]:
             raise RuntimeError("注册邮件服务尚未启用，请联系管理员")
         if not config["sender_email"] or not config["password"]:
-            raise RuntimeError("注册邮件服务尚未配置，请联系管理员")
+            raise RuntimeError("验证码邮件服务尚未配置，请联系管理员")
 
         code = f"{secrets.randbelow(1_000_000):06d}"
-        self._send_message(config, normalized, code)
+        self._send_message(config, normalized, code, purpose)
         salt = secrets.token_hex(16)
-        self.repository.save(normalized, self._hash_code(normalized, code, salt), salt)
+        self.repository.save(
+            normalized,
+            self._hash_code(normalized, code, salt, purpose),
+            salt,
+            purpose,
+        )
         self.repository.record_send(requester_hash)
         return {"email": normalized, "expires_in": CODE_TTL_SECONDS, "resend_in": RESEND_INTERVAL_SECONDS}
 
-    def assert_valid_code(self, email: str, code: str) -> str:
+    def assert_valid_code(
+        self, email: str, code: str, purpose: str = "registration",
+    ) -> str:
         normalized = self.policy.normalize(email)
         value = str(code or "").strip()
         if not value.isdigit() or len(value) != 6:
@@ -290,9 +312,13 @@ class EmailVerificationService:
         now = int(time.time())
         if row is None or int(row["expires_at"]) < now:
             raise EmailVerificationError("验证码不存在或已过期，请重新获取")
+        if row["purpose"] != purpose:
+            raise EmailVerificationError("验证码用途不匹配，请重新获取")
         if int(row["attempts"]) >= MAX_ATTEMPTS:
             raise EmailVerificationError("验证码尝试次数过多，请重新获取")
-        expected = self._hash_code(normalized, value, row["code_salt"])
+        expected = self._hash_code(
+            normalized, value, row["code_salt"], purpose
+        )
         if not hmac.compare_digest(row["code_hash"], expected):
             self.repository.increment_attempts(normalized)
             raise EmailVerificationError("邮箱验证码不正确")
@@ -306,26 +332,29 @@ class EmailVerificationService:
         if not config["sender_email"] or not config["password"]:
             raise RuntimeError("请先保存发件邮箱和 SMTP 密码")
         target = self.policy.normalize(target_email or config["sender_email"])
-        self._send_message(config, target, None)
+        self._send_message(config, target, None, "test")
         return {"target_email": target}
 
     @staticmethod
-    def _send_message(config: Dict, target: str, code: Optional[str]) -> None:
+    def _send_message(
+        config: Dict, target: str, code: Optional[str], purpose: str,
+    ) -> None:
         message = EmailMessage()
         message["From"] = f'{config["sender_name"]} <{config["sender_email"]}>'
         message["To"] = target
         if code:
-            message["Subject"] = "AI Trader 注册验证码"
+            action = "登录" if purpose == "login" else "注册"
+            message["Subject"] = f"AI Trader {action}验证码"
             message.set_content(
-                f"你的 AI Trader 注册验证码是：{code}\n\n"
-                "验证码 10 分钟内有效，请勿向任何人泄露。"
+                f"你的 AI Trader {action}验证码是：{code}\n\n"
+                "验证码 3 分钟内有效，请勿向任何人泄露。"
             )
             message.add_alternative(
                 "<div style='font-family:Arial,sans-serif;max-width:560px;margin:auto'>"
-                "<h2 style='color:#176b4d'>AI Trader 邮箱验证</h2>"
-                "<p>你的注册验证码是：</p>"
+                f"<h2 style='color:#176b4d'>AI Trader {action}验证</h2>"
+                f"<p>你的{action}验证码是：</p>"
                 f"<div style='font-size:32px;font-weight:700;letter-spacing:8px'>{html.escape(code)}</div>"
-                "<p style='color:#71827a'>验证码 10 分钟内有效，请勿向任何人泄露。</p>"
+                "<p style='color:#71827a'>验证码 3 分钟内有效，请勿向任何人泄露。</p>"
                 "</div>",
                 subtype="html",
             )
