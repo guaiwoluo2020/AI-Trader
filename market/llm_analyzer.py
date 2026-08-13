@@ -140,7 +140,7 @@ class LLMAnalyzer:
         return status
 
     def check_entry_price_nearby(
-        self, symbol: str, current_price: float, threshold: float = 0.0001,
+        self, symbol: str, current_price: float, threshold: float = 0.0008,
         strategy_id: str = "",
     ) -> list:
         """检查入场价是否接近"""

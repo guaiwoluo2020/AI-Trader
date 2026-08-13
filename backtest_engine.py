@@ -872,6 +872,18 @@ class ReplaySignalEngine:
         self._consumed_ai_recommendations = set()
         self._pending_ma_crosses: Dict[str, Dict] = {}
         self._alpha_executor = AlphaRuntimeExecutor()
+        self._alpha_library = None
+
+    def _alpha_definition(self, params: Dict) -> Dict:
+        if params.get("alpha_snapshot"):
+            return params.get("alpha_snapshot") or {}
+        if self._alpha_library is None:
+            from alpha_research import AlphaLibraryRepository
+            self._alpha_library = AlphaLibraryRepository()
+        alpha = self._alpha_library.get_runtime_definition(
+            params.get("alpha_id", ""), int(params.get("alpha_owner_user_id") or 0)
+        )
+        return (alpha or {}).get("definition") or {}
 
     def generate(
         self,
@@ -971,7 +983,7 @@ class ReplaySignalEngine:
                 current_price,
                 suggestion,
                 replay_datetime(simulated_time),
-                threshold=float(params.get("entry_threshold", 0.0001)),
+                threshold=float(params.get("entry_threshold", 0.0008)),
             )
             if not candidate:
                 continue
@@ -1085,7 +1097,7 @@ class ReplaySignalEngine:
         if simulated_time % PERIOD_SECONDS[period] != 0:
             return None
         params = config.get("params") or {}
-        definition = params.get("alpha_snapshot") or {}
+        definition = self._alpha_definition(params)
         bars = aggregate_period(seen_bars, period, 2000)
         state = self._alpha_executor.evaluate(bars, definition)
         state["is_entry_trigger"] = bool(

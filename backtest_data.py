@@ -87,7 +87,9 @@ class BacktestDatasetRepository:
                    (SELECT COUNT(*) FROM backtest_template_datasets td
                     WHERE td.dataset_id = d.dataset_id) AS template_reference_count,
                    (SELECT COUNT(*) FROM backtest_tasks bt
-                    WHERE bt.dataset_id = d.dataset_id) AS task_reference_count
+                    WHERE bt.dataset_id = d.dataset_id) AS task_reference_count,
+                   (SELECT COUNT(*) FROM alpha_research_runs ar
+                    WHERE ar.dataset_id = d.dataset_id) AS alpha_reference_count
             FROM backtest_datasets d
             JOIN trading_accounts a ON a.id = d.account_id
             LEFT JOIN mt5_account_connections c ON c.account_id = a.id
@@ -110,7 +112,9 @@ class BacktestDatasetRepository:
                    (SELECT COUNT(*) FROM backtest_template_datasets td
                     WHERE td.dataset_id = d.dataset_id) AS template_reference_count,
                    (SELECT COUNT(*) FROM backtest_tasks bt
-                    WHERE bt.dataset_id = d.dataset_id) AS task_reference_count
+                    WHERE bt.dataset_id = d.dataset_id) AS task_reference_count,
+                   (SELECT COUNT(*) FROM alpha_research_runs ar
+                    WHERE ar.dataset_id = d.dataset_id) AS alpha_reference_count
             FROM backtest_datasets d
             JOIN trading_accounts a ON a.id = d.account_id
             LEFT JOIN mt5_account_connections c ON c.account_id = a.id
@@ -132,7 +136,9 @@ class BacktestDatasetRepository:
                    (SELECT COUNT(*) FROM backtest_template_datasets td
                     WHERE td.dataset_id = d.dataset_id) AS template_reference_count,
                    (SELECT COUNT(*) FROM backtest_tasks bt
-                    WHERE bt.dataset_id = d.dataset_id) AS task_reference_count
+                    WHERE bt.dataset_id = d.dataset_id) AS task_reference_count,
+                   (SELECT COUNT(*) FROM alpha_research_runs ar
+                    WHERE ar.dataset_id = d.dataset_id) AS alpha_reference_count
             FROM backtest_datasets d
             JOIN trading_accounts a ON a.id = d.account_id
             LEFT JOIN mt5_account_connections c ON c.account_id = a.id
@@ -151,6 +157,8 @@ class BacktestDatasetRepository:
             raise ValueError("数据集可见性必须是 shared 或 private")
         if self.get_for_user(user_id, dataset_id) is None:
             return None
+        if self.reference_count(dataset_id) > 0:
+            raise ValueError("该共享历史行情数据集已被应用，不能修改共享状态；请复制为新数据集后再调整")
         self.storage.execute(
             """
             UPDATE backtest_datasets
@@ -160,6 +168,59 @@ class BacktestDatasetRepository:
             (visibility, int(time.time()), user_id, dataset_id),
         )
         return self.get_for_user(user_id, dataset_id)
+
+    def reference_count(self, dataset_id: str) -> int:
+        row = self.storage.fetchone(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM backtest_template_datasets WHERE dataset_id = ?) AS template_count,
+              (SELECT COUNT(*) FROM backtest_tasks WHERE dataset_id = ?) AS task_count,
+              (SELECT COUNT(*) FROM alpha_research_runs WHERE dataset_id = ?) AS alpha_count
+            """,
+            (dataset_id, dataset_id, dataset_id),
+        )
+        if row is None:
+            return 0
+        return int(row["template_count"]) + int(row["task_count"]) + int(row["alpha_count"])
+
+    def copy(self, user_id: int, dataset_id: str) -> Optional[Dict]:
+        source = self.get_visible(user_id, dataset_id)
+        if source is None:
+            return None
+        account = self.storage.fetchone(
+            "SELECT id FROM trading_accounts WHERE user_id = ? ORDER BY id LIMIT 1",
+            (int(user_id),),
+        )
+        if account is None:
+            raise ValueError("请先创建或连接一个交易账户，再复制历史行情数据集")
+        new_id = str(uuid.uuid4())[:12]
+        now = int(time.time())
+        self.storage.execute(
+            """
+            INSERT INTO backtest_datasets(
+                dataset_id, user_id, account_id, dataset_name, visibility, symbol,
+                timeframe, requested_start, requested_end, warmup_start,
+                cursor_time, next_chunk_index, status, received_bars,
+                duplicate_count, gap_count, invalid_count, quality_score,
+                data_format, file_path, data_hash, broker_server, ea_version,
+                claimed_at, completed_at, created_at, updated_at
+            )
+            SELECT ?, ?, ?, ? || ' 副本', 'private', symbol,
+                timeframe, requested_start, requested_end, warmup_start,
+                requested_end + 1, next_chunk_index, status, received_bars,
+                duplicate_count, gap_count, invalid_count, quality_score,
+                data_format, file_path, data_hash, broker_server, ea_version,
+                claimed_at, completed_at, ?, ?
+            FROM backtest_datasets
+            WHERE dataset_id = ?
+              AND (user_id = ? OR visibility = 'shared')
+            """,
+            (
+                new_id, int(user_id), int(account["id"]), source["dataset_name"],
+                now, now, dataset_id, int(user_id),
+            ),
+        )
+        return self.get_for_user(user_id, new_id)
 
     def get_for_ea(self, account_id: int, dataset_id: str) -> Optional[Dict]:
         row = self.storage.fetchone(
@@ -471,8 +532,11 @@ class BacktestDatasetRepository:
             data.get("template_reference_count", 0)
         )
         data["task_reference_count"] = int(data.get("task_reference_count", 0))
+        data["alpha_reference_count"] = int(data.get("alpha_reference_count", 0))
         data["is_referenced"] = bool(
-            data["template_reference_count"] or data["task_reference_count"]
+            data["template_reference_count"]
+            or data["task_reference_count"]
+            or data["alpha_reference_count"]
         )
         if viewer_user_id is not None:
             data["is_owner"] = int(data["user_id"]) == int(viewer_user_id)

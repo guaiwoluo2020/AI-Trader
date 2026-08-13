@@ -148,6 +148,18 @@ class AlphaFactorSignalGenerator:
         self.kline_store = kline_store or KlineStore()
         self.executor = AlphaRuntimeExecutor()
         self._last_emitted: Dict[str, datetime] = {}
+        self._library = None
+
+    def _definition(self, params: Dict) -> Dict:
+        if params.get("alpha_snapshot"):
+            return params.get("alpha_snapshot") or {}
+        if self._library is None:
+            from alpha_research import AlphaLibraryRepository
+            self._library = AlphaLibraryRepository()
+        alpha = self._library.get_runtime_definition(
+            params.get("alpha_id", ""), int(params.get("alpha_owner_user_id") or 0)
+        )
+        return (alpha or {}).get("definition") or {}
 
     def generate_signals_for_strategy(
         self, symbol: str, current_price: float, strategy,
@@ -157,7 +169,7 @@ class AlphaFactorSignalGenerator:
             params = config.get("params") or {}
             period = config["period"]
             bars = self.kline_store.get_all_klines(symbol, period)
-            state = self.executor.evaluate(bars, params.get("alpha_snapshot") or {})
+            state = self.executor.evaluate(bars, self._definition(params))
             state["is_entry_trigger"] = bool(
                 state["is_entry_trigger"]
                 and state["confidence"] >= int(params.get("min_confidence", 60))

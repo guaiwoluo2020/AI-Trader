@@ -351,7 +351,7 @@ def build_ai_entry_signal(
     current_price: float,
     suggestion: Dict,
     signal_time: Optional[datetime] = None,
-    threshold: float = 0.0001,
+    threshold: float = 0.0008,
     require_suggested_exits: bool = True,
 ) -> Optional[TradingSignal]:
     period = str(suggestion.get("period", "")).upper()

@@ -169,6 +169,13 @@ export const marketAPI = {
     return response.data
   },
 
+  async copyBacktestDataset(datasetId) {
+    const response = await api.post(
+      `/backtest/datasets/${encodeURIComponent(datasetId)}/copy`
+    )
+    return response.data
+  },
+
   async updateBacktestDatasetVisibility(datasetId, visibility) {
     const response = await api.patch(
       `/backtest/datasets/${encodeURIComponent(datasetId)}/visibility`,
@@ -231,6 +238,11 @@ export const marketAPI = {
 
   async retireAlpha(alphaId) {
     const response = await api.post(`/alpha-library/${encodeURIComponent(alphaId)}/retire`)
+    return response.data
+  },
+
+  async copyAlpha(alphaId) {
+    const response = await api.post(`/alpha-library/${encodeURIComponent(alphaId)}/copy`)
     return response.data
   },
 
@@ -605,6 +617,18 @@ export const marketAPI = {
     return response.data
   },
 
+  async getSharedPositionManagementPolicies() {
+    const response = await api.get('/position-management-policies/shared')
+    return response.data
+  },
+
+  async useSharedPositionManagementPolicy(ownerUserId, policyId) {
+    const response = await api.post(
+      `/position-management-policies/shared/${encodeURIComponent(ownerUserId)}/${encodeURIComponent(policyId)}/use`
+    )
+    return response.data
+  },
+
   async createPositionManagementPolicy(data) {
     const response = await api.post('/position-management-policies', data)
     return response.data
@@ -620,6 +644,13 @@ export const marketAPI = {
   async deletePositionManagementPolicy(policyId) {
     const response = await api.delete(
       `/position-management-policies/${encodeURIComponent(policyId)}`
+    )
+    return response.data
+  },
+
+  async copyPositionManagementPolicy(policyId) {
+    const response = await api.post(
+      `/position-management-policies/${encodeURIComponent(policyId)}/copy`
     )
     return response.data
   },
@@ -660,6 +691,11 @@ export const marketAPI = {
   // 更新品种策略配置
   async updateStrategy(strategyId, data) {
     const response = await api.post(`/strategy/${encodeURIComponent(strategyId)}`, data)
+    return response.data
+  },
+
+  async copyStrategy(strategyId) {
+    const response = await api.post(`/strategy/${encodeURIComponent(strategyId)}/copy`)
     return response.data
   },
 

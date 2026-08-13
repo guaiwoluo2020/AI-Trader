@@ -1115,7 +1115,7 @@ class TradingServer:
         confidence = int(state.get("confidence", 0) or 0)
         minimum = int(params.get("min_confidence", 70) or 0)
         entry_price = float(suggestion.get("entry_price", 0) or 0)
-        threshold = float(params.get("entry_threshold", 0.0001) or 0)
+        threshold = float(params.get("entry_threshold", 0.0008) or 0)
         distance_ratio = (
             abs(current_price - entry_price) / current_price
             if current_price > 0 and entry_price > 0 else None
@@ -1244,7 +1244,7 @@ class TradingServer:
                 )
                 min_confidence = int(params.get("min_confidence", 70) or 0)
                 entry_price = float((suggestion or {}).get("entry_price", 0) or 0)
-                threshold = float(params.get("entry_threshold", 0.0001) or 0)
+                threshold = float(params.get("entry_threshold", 0.0008) or 0)
                 distance_ratio = (
                     abs(current_price - entry_price) / entry_price
                     if current_price > 0 and entry_price > 0 else None

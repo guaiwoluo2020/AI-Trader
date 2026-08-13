@@ -211,11 +211,16 @@ class BacktestTemplateTestCase(unittest.TestCase):
             1,
         )
 
-        self.dataset_repository.update_visibility(
-            self.user.user_id, dataset["dataset_id"], "private"
+        with self.assertRaisesRegex(ValueError, "已被应用"):
+            self.dataset_repository.update_visibility(
+                self.user.user_id, dataset["dataset_id"], "private"
+            )
+        self.assertEqual(
+            other_service.run_template(other.user_id, template["template_id"])[
+                "task_count"
+            ],
+            1,
         )
-        with self.assertRaisesRegex(ValueError, "不可见"):
-            other_service.run_template(other.user_id, template["template_id"])
 
     def test_template_management_is_scoped_to_owner(self):
         dataset = self._ready_dataset("Owned Gold")

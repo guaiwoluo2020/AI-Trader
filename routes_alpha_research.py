@@ -8,11 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from alpha_research import AlphaResearchService
 from auth import AuthUser, require_auth
 from llm_governance import LLMQuotaExceeded
+from sqlite_storage import StrategyConfigRepository
 
 
 def create_alpha_research_routes() -> APIRouter:
     router = APIRouter()
     service = AlphaResearchService()
+    strategy_repo = StrategyConfigRepository()
 
     @router.get("/alpha-research/context")
     async def get_context(user: AuthUser = Depends(require_auth)) -> Dict:
@@ -101,9 +103,24 @@ def create_alpha_research_routes() -> APIRouter:
         alpha_id: str,
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
+        if strategy_repo.list_alpha_references(alpha_id):
+            raise HTTPException(
+                status_code=409,
+                detail="该共享 Alpha 已被策略应用，不能停用；请复制为新 Alpha 后再调整",
+            )
         if not service.library.retire(user.user_id, alpha_id):
             raise HTTPException(status_code=404, detail="Alpha 不存在或无权停用")
         return {"status": "ok", "message": "Alpha 已停用"}
+
+    @router.post("/alpha-library/{alpha_id}/copy")
+    async def copy_alpha(
+        alpha_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        alpha = service.library.copy(user.user_id, alpha_id)
+        if alpha is None:
+            raise HTTPException(status_code=404, detail="Alpha 不存在或未共享")
+        return {"status": "ok", "message": "已复制为新的私有 Alpha", "alpha": alpha}
 
     @router.post("/alpha-research/runs/{run_id}/cancel")
     async def cancel_run(

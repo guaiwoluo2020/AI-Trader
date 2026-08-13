@@ -24,7 +24,7 @@ class AIEntrySignalGenerator:
         self._shared_runtime_repo = shared_runtime_repo
 
         # 阈值（价格距离AI入场价的百分比）
-        self.threshold = 0.0001  # 万分之一
+        self.threshold = 0.0008  # 0.08%
 
         # 信号冷却时间（秒）
         self.cooldown = 300  # 5分钟

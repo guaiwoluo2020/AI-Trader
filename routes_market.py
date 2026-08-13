@@ -38,6 +38,7 @@ from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
 from market.system_log import get_system_log_broadcaster
 from data_retention import DataRetentionService
+from shared_notifications import SharedReferenceNotificationService
 
 
 def create_market_routes(
@@ -60,6 +61,7 @@ def create_market_routes(
     event_logs = SystemEventLogRepository()
     data_retention = DataRetentionService()
     memberships = MembershipService()
+    shared_notifications = SharedReferenceNotificationService()
 
     def strategy_payload(strategy) -> Dict:
         payload = strategy.to_dict()
@@ -84,8 +86,49 @@ def create_market_routes(
             "correlation_id": entity_id,
         })
 
+    def notify_strategy_references(user: AuthUser, strategy, action: str) -> None:
+        recipients = strategy_repo.list_strategy_references(
+            user.user_id, strategy.strategy_id
+        )
+        if not recipients:
+            return
+        for item in recipients:
+            engine_manager.refresh_user_strategies(int(item["user_id"]))
+        shared_notifications.notify(
+            recipients,
+            f"AI Trader 共享策略已{action}",
+            (
+                f"你正在引用的共享策略「{strategy.strategy_name}」已由原作者{action}。\n"
+                "该策略是动态引用，变更会自动同步到你的策略执行、模拟、回测与实盘链路。"
+            ),
+        )
+
+    def assert_strategy_not_locked(user: AuthUser, strategy) -> None:
+        if (
+            strategy.visibility == "shared"
+            and strategy_repo.strategy_application_count(user.user_id, strategy.strategy_id)
+        ):
+            raise ValueError("该共享策略已被应用，不能继续修改；请复制为新策略后再调整")
+
+    def assert_strategy_material_edit_allowed(strategy, data: Dict) -> None:
+        material_fields = {
+            "signal_config", "signal_sources", "signal_weights", "period_weights",
+            "min_confidence", "consistency_requirement",
+            "conflict_resolution", "fixed_volume", "volume_mode",
+            "risk_percent", "max_risk_points", "max_positions",
+            "max_same_direction", "position_management_policy_id",
+            "min_risk_reward", "max_risk_reward",
+            "min_sl_points", "max_sl_points", "trading_hours",
+            "position_conflict", "enabled", "auto_execute",
+        }
+        if (
+            strategy.lifecycle_status in {"paper_trading", "production"}
+            and any(field in data for field in material_fields)
+        ):
+            raise ValueError("策略进入模拟盘或实盘后不能直接修改核心配置；请复制为新策略重新验证")
+
     def bind_alpha_signal_snapshots(user: AuthUser, data: Dict) -> None:
-        """Resolve validated Alpha definitions server-side and pin their version."""
+        """Resolve Alpha metadata but keep execution linked to the live library row."""
         for source in data.get("signal_sources") or []:
             if source.get("source") != "alpha_factor":
                 continue
@@ -101,9 +144,10 @@ def create_market_routes(
             source["period"] = period
             params.update({
                 "alpha_id": alpha["alpha_id"],
+                "alpha_owner_user_id": int(alpha.get("user_id") or user.user_id),
                 "alpha_version": int(alpha.get("version") or 1),
                 "alpha_name": alpha.get("name") or "Validated Alpha",
-                "alpha_snapshot": definition,
+                "alpha_snapshot": {},
             })
 
     def validate_ai_signal_configuration(user: AuthUser, data: Dict) -> None:
@@ -690,6 +734,41 @@ def create_market_routes(
             "policies": [policy.to_dict() for policy in policies],
         }
 
+    @protected_router.get("/position-management-policies/shared")
+    async def list_shared_position_management_policies(
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        policies = position_policy_repo.list_shared(user.user_id)
+        return {"status": "ok", "count": len(policies), "policies": policies}
+
+    @protected_router.post("/position-management-policies/shared/{owner_user_id}/{policy_id}/use")
+    async def use_shared_position_management_policy(
+        owner_user_id: int, policy_id: str, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        policy = position_policy_repo.use_shared_policy(
+            user.user_id, owner_user_id, policy_id
+        )
+        if policy is None:
+            raise HTTPException(status_code=404, detail="共享持仓管理方案不存在或未开放")
+        return {
+            "status": "ok",
+            "message": "已添加共享持仓管理方案引用；源方案被应用后会冻结，后续演进请复制新版本",
+            "policy": policy.to_dict(),
+        }
+
+    @protected_router.post("/position-management-policies/{policy_id}/copy")
+    async def copy_position_management_policy(
+        policy_id: str, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        policy = position_policy_repo.copy_policy(user.user_id, policy_id)
+        if policy is None:
+            raise HTTPException(status_code=404, detail="持仓管理方案不存在")
+        return {
+            "status": "ok",
+            "message": "已复制为新的私有持仓管理方案",
+            "policy": policy.to_dict(),
+        }
+
     @protected_router.post("/position-management-policies")
     async def create_position_management_policy(
         request: Request, user: AuthUser = Depends(require_auth),
@@ -701,6 +780,7 @@ def create_market_routes(
             policy = PositionManagementPolicy(
                 user_id=user.user_id, name=data.get("name", ""),
                 enabled=bool(data.get("enabled", True)),
+                visibility=str(data.get("visibility", "private")),
                 config=data.get("config") or None,
             )
             position_policy_repo.save(policy)
@@ -718,12 +798,32 @@ def create_market_routes(
         policy = position_policy_repo.get(user.user_id, policy_id)
         if policy is None:
             raise HTTPException(status_code=404, detail="持仓管理方案不存在")
+        if policy.source_owner_user_id:
+            raise HTTPException(
+                status_code=400,
+                detail="共享持仓管理方案为只读引用，不能修改；源方案变更会自动同步",
+            )
+        if (
+            policy.visibility == "shared"
+            and position_policy_repo.policy_application_count(user.user_id, policy.policy_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="该共享持仓管理方案已被应用，不能继续修改；请复制为新方案后再调整",
+            )
         try:
             data = await request.json()
+            was_shared = policy.visibility == "shared"
             policy.name = str(data.get("name", policy.name)).strip()
             if not policy.name:
                 raise ValueError("持仓管理方案名称不能为空")
             policy.enabled = bool(data.get("enabled", policy.enabled))
+            if "visibility" in data or "is_shared" in data:
+                policy.visibility = (
+                    "shared"
+                    if data.get("visibility") == "shared" or data.get("is_shared")
+                    else "private"
+                )
             if "config" in data:
                 policy.config = normalize_position_management_config(data["config"])
             policy.version += 1
@@ -741,6 +841,12 @@ def create_market_routes(
         policy_id: str, user: AuthUser = Depends(require_auth),
     ) -> Dict:
         try:
+            policy = position_policy_repo.get(user.user_id, policy_id)
+            if (
+                policy and policy.visibility == "shared"
+                and position_policy_repo.policy_application_count(user.user_id, policy_id)
+            ):
+                raise ValueError("该共享持仓管理方案已被应用，不能删除；请保留原方案并复制新版本")
             if not position_policy_repo.delete(user.user_id, policy_id):
                 raise HTTPException(status_code=404, detail="持仓管理方案不存在")
             return {"status": "ok", "message": "持仓管理方案已删除"}
@@ -890,9 +996,36 @@ def create_market_routes(
         engine_manager.refresh_user_strategies(user.user_id)
         return {
             "status": "ok",
-            "message": "已添加平台策略引用，原作者配置受保护且不可修改",
+            "message": "已添加平台策略引用；共享策略被应用后会冻结，后续演进请复制新版本",
             "strategy": strategy_payload(strategy),
         }
+
+    @protected_router.post("/strategy/{strategy_ref}/copy")
+    async def copy_strategy(
+        strategy_ref: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        strategy = (
+            strategy_repo.get_strategy_by_id(user.user_id, strategy_ref)
+            or strategy_repo.get_strategy(user.user_id, strategy_ref)
+        )
+        if strategy is None:
+            return {"status": "error", "message": "策略配置不存在"}
+        try:
+            with quota_service.guarded():
+                quota_service.assert_can_create(user.user_id, user.role, "strategies")
+                quota_service.assert_strategy_sources(
+                    user.user_id, user.role, "", strategy.signal_sources or [],
+                )
+                copied = strategy_repo.copy_strategy(user.user_id, strategy)
+            engine_manager.refresh_user_strategies(user.user_id)
+            return {
+                "status": "ok",
+                "message": "已复制为新的私有草稿策略",
+                "strategy": strategy_payload(copied),
+            }
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
 
     @protected_router.get("/strategy/{strategy_ref}")
     async def get_strategy(strategy_ref: str, user: AuthUser = Depends(require_auth)) -> Dict:
@@ -930,6 +1063,9 @@ def create_market_routes(
                     "status": "error",
                     "message": "平台共享策略为只读引用，不能修改；如不再使用可以删除引用",
                 }
+            assert_strategy_not_locked(user, strategy)
+            assert_strategy_material_edit_allowed(strategy, data)
+            was_shared = strategy.visibility == "shared"
             if "signal_sources" in data:
                 bind_alpha_signal_snapshots(user, data)
                 validate_ai_signal_configuration(user, data)
@@ -953,6 +1089,9 @@ def create_market_routes(
                 user.user_id, strategy.to_dict()
             )
             engine_manager.refresh_user_strategies(user.user_id)
+            if was_shared or strategy.visibility == "shared":
+                action = "取消共享" if was_shared and strategy.visibility != "shared" else "修改"
+                notify_strategy_references(user, strategy, action)
             add_audit_event(
                 user, "strategy_updated", "修改策略",
                 f"修改策略 {strategy.strategy_name}",
@@ -992,6 +1131,7 @@ def create_market_routes(
                     "status": "error",
                     "message": "平台共享策略为只读引用，不能修改生命周期",
                 }
+            assert_strategy_not_locked(user, current)
             if target_status == "production":
                 memberships.assert_live_trading(user.user_id)
             admission_service.validate_transition(
@@ -1006,6 +1146,8 @@ def create_market_routes(
                 user.user_id, strategy.to_dict()
             )
             engine_manager.refresh_user_strategies(user.user_id)
+            if strategy.visibility == "shared":
+                notify_strategy_references(user, strategy, "变更生命周期")
             add_audit_event(
                 user, "strategy_lifecycle_changed", "策略生命周期变更",
                 f"策略进入 {strategy.lifecycle_status}",
@@ -1043,11 +1185,17 @@ def create_market_routes(
         store = engine.strategy_service.strategy_store
         strategy = store.get_strategy_by_id(strategy_ref)
         if strategy:
+            try:
+                assert_strategy_not_locked(user, strategy)
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
             success = store.delete_strategy(strategy.symbol, strategy.strategy_id)
             if success:
                 shared_ai_runtime_repo.remove_for_strategy(
                     user.user_id, strategy.strategy_id
                 )
+                if strategy.visibility == "shared":
+                    notify_strategy_references(user, strategy, "删除")
         else:
             strategy_ids = [
                 item.strategy_id for item in store.get_strategies(strategy_ref)

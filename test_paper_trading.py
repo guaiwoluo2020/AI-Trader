@@ -3,6 +3,7 @@
 
 import json
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -244,6 +245,57 @@ class PaperTradingServiceTests(unittest.TestCase):
         )
         self.assertEqual(order["status"], "rejected")
         self.assertEqual(order["rejection_reason"], "来源策略已删除")
+
+    def test_daily_order_limit_ignores_rejected_orders(self):
+        now = int(time.time())
+        for index in range(100):
+            self.storage.execute(
+                """
+                INSERT INTO paper_orders(
+                    order_id, user_id, account_id, deployment_id, strategy_id,
+                    decision_id, symbol, direction, status, requested_volume,
+                    requested_price, stop_loss, take_profit, confidence,
+                    rejection_reason, requested_at, created_at, updated_at
+                ) VALUES(?, ?, ?, 'deployment-1', 'strategy-1', ?, 'GOLD_',
+                         'buy', 'rejected', 0.1, 3000, 2990, 3010, 80,
+                         '测试拒单', ?, ?, ?)
+                """,
+                (
+                    f"rejected-{index}", self.user.user_id,
+                    self.account.account_id, f"rejected-decision-{index}",
+                    now, now, now,
+                ),
+            )
+
+        allowed = self.service._paper_risk_check(
+            self.account.account_id, "GOLD_", 0.1, 3000
+        )
+        self.assertTrue(allowed["allowed"])
+
+        for index in range(100):
+            self.storage.execute(
+                """
+                INSERT INTO paper_orders(
+                    order_id, user_id, account_id, deployment_id, strategy_id,
+                    decision_id, symbol, direction, status, requested_volume,
+                    requested_price, stop_loss, take_profit, confidence,
+                    requested_at, created_at, updated_at
+                ) VALUES(?, ?, ?, 'deployment-1', 'strategy-1', ?, 'GOLD_',
+                         'buy', 'pending', 0.1, 3000, 2990, 3010, 80,
+                         ?, ?, ?)
+                """,
+                (
+                    f"pending-{index}", self.user.user_id,
+                    self.account.account_id, f"pending-decision-{index}",
+                    now, now, now,
+                ),
+            )
+
+        blocked = self.service._paper_risk_check(
+            self.account.account_id, "GOLD_", 0.1, 3000
+        )
+        self.assertFalse(blocked["allowed"])
+        self.assertIn("已达到账户每日订单上限", blocked["warnings"])
 
     def test_each_paper_account_has_an_independent_decision_scope(self):
         second = TradingAccountRepository(self.storage).create_paper_account(

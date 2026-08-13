@@ -779,7 +779,12 @@ class PaperTradingService:
                 (account_id, today_start),
             )
             orders = self.storage.fetchone(
-                "SELECT COUNT(*) AS count FROM paper_orders WHERE account_id = ? AND requested_at >= ?",
+                """
+                SELECT COUNT(*) AS count
+                FROM paper_orders
+                WHERE account_id = ? AND requested_at >= ?
+                  AND status IN ('pending', 'filled')
+                """,
                 (account_id, today_start),
             )
             if int(orders["count"]) >= int(account["daily_order_limit"]):

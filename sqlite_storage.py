@@ -120,7 +120,10 @@ class SQLiteStorage:
         self._initialized = False
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_file, check_same_thread=False)
+        conn = sqlite3.connect(
+            self.db_file, check_same_thread=False, timeout=30
+        )
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -423,6 +426,10 @@ class SQLiteStorage:
                         name TEXT NOT NULL,
                         version INTEGER NOT NULL DEFAULT 1,
                         enabled INTEGER NOT NULL DEFAULT 1,
+                        visibility TEXT NOT NULL DEFAULT 'private',
+                        source_policy_id TEXT NOT NULL DEFAULT '',
+                        source_owner_user_id INTEGER NOT NULL DEFAULT 0,
+                        source_owner_username TEXT NOT NULL DEFAULT '',
                         config_json TEXT NOT NULL,
                         created_at INTEGER NOT NULL,
                         updated_at INTEGER NOT NULL,
@@ -1239,6 +1246,22 @@ class SQLiteStorage:
                 self._ensure_column(
                     conn, "position_management_policies", "version",
                     "INTEGER NOT NULL DEFAULT 1",
+                )
+                self._ensure_column(
+                    conn, "position_management_policies", "visibility",
+                    "TEXT NOT NULL DEFAULT 'private'",
+                )
+                self._ensure_column(
+                    conn, "position_management_policies", "source_policy_id",
+                    "TEXT NOT NULL DEFAULT ''",
+                )
+                self._ensure_column(
+                    conn, "position_management_policies", "source_owner_user_id",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn, "position_management_policies", "source_owner_username",
+                    "TEXT NOT NULL DEFAULT ''",
                 )
                 self._ensure_column(
                     conn, "strategy_deployments", "strategy_snapshot_hash",
@@ -3643,50 +3666,163 @@ class PositionManagementPolicyRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
 
-    def list(self, user_id: int, enabled_only: bool = False):
+    @staticmethod
+    def _row_to_policy(row):
         from market.models import PositionManagementPolicy
 
+        return PositionManagementPolicy.from_dict({
+            "policy_id": row["policy_id"], "user_id": row["user_id"],
+            "version": row["version"],
+            "name": row["name"], "enabled": bool(row["enabled"]),
+            "visibility": row["visibility"],
+            "source_policy_id": row["source_policy_id"],
+            "source_owner_user_id": row["source_owner_user_id"],
+            "source_owner_username": row["source_owner_username"],
+            "config": json.loads(row["config_json"]),
+            "created_at": datetime.fromtimestamp(row["created_at"]),
+            "updated_at": datetime.fromtimestamp(row["updated_at"]),
+        })
+
+    def _raw_get(self, user_id: int, policy_id: str):
+        row = self.storage.fetchone(
+            "SELECT * FROM position_management_policies WHERE user_id = ? AND policy_id = ?",
+            (int(user_id), str(policy_id)),
+        )
+        return self._row_to_policy(row) if row else None
+
+    def _invalid_reference(self, reference, reason: str):
+        from market.models import default_position_management_config
+
+        reference.enabled = False
+        reference.visibility = "private"
+        reference.config = default_position_management_config()
+        reference.name = f"{reference.name}（来源已失效）"
+        reference.updated_at = datetime.now()
+        reference.config["_invalid_reference_reason"] = reason
+        return reference
+
+    def _resolve_reference(self, policy):
+        if not policy or not policy.source_owner_user_id or not policy.source_policy_id:
+            return policy
+        source = self._raw_get(policy.source_owner_user_id, policy.source_policy_id)
+        if source is None or source.visibility != "shared" or not source.enabled:
+            return self._invalid_reference(policy, "共享持仓管理方案已停用或取消共享")
+        resolved = source
+        resolved.policy_id = policy.policy_id
+        resolved.user_id = policy.user_id
+        resolved.visibility = "private"
+        resolved.source_policy_id = policy.source_policy_id
+        resolved.source_owner_user_id = policy.source_owner_user_id
+        resolved.source_owner_username = policy.source_owner_username
+        resolved.created_at = policy.created_at
+        return resolved
+
+    def list(self, user_id: int, enabled_only: bool = False):
         sql = "SELECT * FROM position_management_policies WHERE user_id = ?"
         params = [int(user_id)]
         if enabled_only:
             sql += " AND enabled = 1"
         sql += " ORDER BY created_at, policy_id"
-        return [
-            PositionManagementPolicy.from_dict({
-                "policy_id": row["policy_id"], "user_id": row["user_id"],
-                "version": row["version"],
-                "name": row["name"], "enabled": bool(row["enabled"]),
-                "config": json.loads(row["config_json"]),
-                "created_at": datetime.fromtimestamp(row["created_at"]),
-                "updated_at": datetime.fromtimestamp(row["updated_at"]),
-            })
+        policies = [
+            self._resolve_reference(self._row_to_policy(row))
             for row in self.storage.fetchall(sql, tuple(params))
         ]
+        return [item for item in policies if item and (not enabled_only or item.enabled)]
 
     def get(self, user_id: int, policy_id: str):
-        return next((item for item in self.list(user_id)
-                     if item.policy_id == policy_id), None)
+        return self._resolve_reference(self._raw_get(user_id, policy_id))
 
     def save(self, policy):
         now = _now_ts()
         self.storage.execute(
             """
             INSERT INTO position_management_policies(
-                policy_id, user_id, name, version, enabled, config_json,
+                policy_id, user_id, name, version, enabled, visibility,
+                source_policy_id, source_owner_user_id, source_owner_username,
+                config_json,
                 created_at, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(policy_id) DO UPDATE SET
                 name = excluded.name, version = excluded.version,
-                enabled = excluded.enabled,
+                enabled = excluded.enabled, visibility = excluded.visibility,
+                source_policy_id = excluded.source_policy_id,
+                source_owner_user_id = excluded.source_owner_user_id,
+                source_owner_username = excluded.source_owner_username,
                 config_json = excluded.config_json, updated_at = excluded.updated_at
             """,
             (policy.policy_id, policy.user_id, policy.name, policy.version,
-             int(policy.enabled),
+             int(policy.enabled), policy.visibility, policy.source_policy_id,
+             int(policy.source_owner_user_id), policy.source_owner_username,
              json.dumps(policy.config, ensure_ascii=False),
              int(policy.created_at.timestamp()), now),
         )
         policy.updated_at = datetime.fromtimestamp(now)
         return policy
+
+    def list_shared(self, viewer_user_id: int):
+        rows = self.storage.fetchall(
+            """
+            SELECT policy.*, users.username AS owner_username
+            FROM position_management_policies AS policy
+            JOIN users ON users.id = policy.user_id
+            WHERE policy.visibility = 'shared' AND policy.enabled = 1
+              AND policy.user_id != ?
+            ORDER BY policy.updated_at DESC, policy.policy_id
+            """,
+            (int(viewer_user_id),),
+        )
+        items = []
+        for row in rows:
+            policy = self._row_to_policy(row).to_dict()
+            policy.update({
+                "owner_user_id": int(row["user_id"]),
+                "owner_username": row["owner_username"],
+                "usage_notice": "使用后将保持动态引用；原作者后续修改、停用或取消共享会同步影响你的策略。",
+            })
+            items.append(policy)
+        return items
+
+    def use_shared_policy(
+        self, target_user_id: int, owner_user_id: int, policy_id: str,
+    ):
+        from market.models import PositionManagementPolicy
+
+        source = self._raw_get(owner_user_id, policy_id)
+        if source is None or source.visibility != "shared" or not source.enabled:
+            return None
+        owner = UserRepository(self.storage).get_by_id(int(owner_user_id))
+        now = datetime.now()
+        reference = PositionManagementPolicy(
+            user_id=int(target_user_id),
+            name=source.name,
+            enabled=True,
+            config=source.config,
+            visibility="private",
+            source_policy_id=source.policy_id,
+            source_owner_user_id=int(owner_user_id),
+            source_owner_username=owner.username if owner else "",
+            created_at=now,
+            updated_at=now,
+        )
+        return self.save(reference)
+
+    def copy_policy(self, user_id: int, policy_id: str, name_suffix: str = " 副本"):
+        from market.models import PositionManagementPolicy
+
+        source = self.get(user_id, policy_id)
+        if source is None:
+            return None
+        now = datetime.now()
+        copied = PositionManagementPolicy(
+            user_id=int(user_id),
+            name=f"{source.name}{name_suffix}",
+            enabled=False,
+            config=source.config,
+            visibility="private",
+            created_at=now,
+            updated_at=now,
+        )
+        return self.save(copied)
 
     def invalidate_linked_strategies(
         self, user_id: int, policy_id: str,
@@ -3737,6 +3873,34 @@ class PositionManagementPolicyRepository:
             (user_id, policy_id),
         )
         return True
+
+    def list_policy_references(self, owner_user_id: int, policy_id: str) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT policy.policy_id, policy.user_id, policy.name, users.email, users.username
+            FROM position_management_policies AS policy
+            JOIN users ON users.id = policy.user_id
+            WHERE policy.source_owner_user_id = ? AND policy.source_policy_id = ?
+            """,
+            (int(owner_user_id), str(policy_id)),
+        )
+        return [dict(row) for row in rows]
+
+    def policy_reference_count(self, owner_user_id: int, policy_id: str) -> int:
+        return len(self.list_policy_references(owner_user_id, policy_id))
+
+    def policy_application_count(self, user_id: int, policy_id: str) -> int:
+        row = self.storage.fetchone(
+            """
+            SELECT COUNT(*) AS count FROM user_strategy_configs
+            WHERE user_id = ?
+              AND json_extract(config_json, '$.position_management_policy_id') = ?
+            """,
+            (int(user_id), str(policy_id)),
+        )
+        return self.policy_reference_count(user_id, policy_id) + (
+            int(row["count"]) if row else 0
+        )
 
 
 class PositionManagementEventRepository:
@@ -3817,6 +3981,93 @@ class StrategyConfigRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
 
+    def _raw_strategy_by_id(
+        self, user_id: int, strategy_id: str
+    ) -> Optional["TradingStrategy"]:
+        from market.models.trading_strategy import TradingStrategy
+
+        row = self.storage.fetchone(
+            """
+            SELECT config_json
+            FROM user_strategy_configs
+            WHERE user_id = ? AND strategy_id = ?
+            """,
+            (int(user_id), str(strategy_id)),
+        )
+        if not row:
+            return None
+        return TradingStrategy.from_dict(json.loads(row["config_json"]))
+
+    def _invalid_strategy_reference(self, reference: "TradingStrategy", reason: str):
+        now = datetime.now()
+        reference.enabled = False
+        reference.auto_execute = False
+        reference.lifecycle_status = "draft"
+        reference.lifecycle_updated_at = now
+        reference.strategy_name = f"{reference.strategy_name}（来源已失效）"
+        reference.updated_at = now
+        reference.lifecycle_history.append({
+            "from_status": "reference",
+            "to_status": "draft",
+            "changed_at": now.isoformat(),
+            "reason": reason,
+        })
+        return reference
+
+    def _materialize_shared_reference(
+        self, reference: "TradingStrategy"
+    ) -> "TradingStrategy":
+        if not reference.source_owner_user_id or not reference.source_strategy_id:
+            return reference
+        source = self._raw_strategy_by_id(
+            reference.source_owner_user_id, reference.source_strategy_id
+        )
+        if source is None or source.visibility != "shared":
+            return self._invalid_strategy_reference(
+                reference, "共享策略已删除、停用或取消共享"
+            )
+        payload = self._sanitize_shared_strategy(source.to_dict())
+        signal_sources = []
+        for signal_source in payload.get("signal_sources") or []:
+            item = dict(signal_source)
+            params = dict(item.get("params") or {})
+            if item.get("source") == "ai_entry":
+                source_id = str(item.get("signal_source_id") or "")
+                if not params.get("share_runtime_data"):
+                    return self._invalid_strategy_reference(
+                        reference, "共享策略包含未开放运行数据的 AI 信号源"
+                    )
+                params = {
+                    "analysis_mode": "shared_reference",
+                    "shared_runtime_id": (
+                        f"{int(reference.source_owner_user_id)}:"
+                        f"{source.strategy_id}:{source_id}"
+                    ),
+                    "min_confidence": params.get("min_confidence", 70),
+                    "entry_threshold": params.get("entry_threshold", 0.0008),
+                    "share_runtime_data": False,
+                    "reference_runtime_ids": [],
+                }
+            item["params"] = params
+            signal_sources.append(item)
+        payload.update({
+            "strategy_id": reference.strategy_id,
+            "visibility": "private",
+            "is_shared": False,
+            "position_management_policy_id": (
+                reference.position_management_policy_id
+                or source.position_management_policy_id
+            ),
+            "source_strategy_id": source.strategy_id,
+            "source_owner_user_id": int(reference.source_owner_user_id),
+            "source_owner_username": reference.source_owner_username,
+            "created_at": reference.created_at.isoformat(),
+            "updated_at": source.updated_at.isoformat(),
+        })
+        payload["signal_sources"] = signal_sources
+        from market.models.trading_strategy import TradingStrategy
+        return TradingStrategy.from_dict(payload)
+
     def get_all_strategies(self, user_id: int) -> List["TradingStrategy"]:
         from market.models.trading_strategy import TradingStrategy
 
@@ -3831,7 +4082,9 @@ class StrategyConfigRepository:
         )
         if rows:
             strategies = [
-                TradingStrategy.from_dict(json.loads(row["config_json"]))
+                self._materialize_shared_reference(
+                    TradingStrategy.from_dict(json.loads(row["config_json"]))
+                )
                 for row in rows
             ]
             return sorted(
@@ -3857,19 +4110,9 @@ class StrategyConfigRepository:
     def get_strategy_by_id(
         self, user_id: int, strategy_id: str
     ) -> Optional["TradingStrategy"]:
-        from market.models.trading_strategy import TradingStrategy
-
-        row = self.storage.fetchone(
-            """
-            SELECT config_json
-            FROM user_strategy_configs
-            WHERE user_id = ? AND strategy_id = ?
-            """,
-            (user_id, strategy_id),
+        return self._materialize_shared_reference(
+            self._raw_strategy_by_id(user_id, strategy_id)
         )
-        if row:
-            return TradingStrategy.from_dict(json.loads(row["config_json"]))
-        return None
 
     def get_strategies(self, user_id: int, symbol: str) -> List["TradingStrategy"]:
         from market.models.trading_strategy import TradingStrategy
@@ -3883,7 +4126,12 @@ class StrategyConfigRepository:
             """,
             (user_id, symbol),
         )
-        return [TradingStrategy.from_dict(json.loads(row["config_json"])) for row in rows]
+        return [
+            self._materialize_shared_reference(
+                TradingStrategy.from_dict(json.loads(row["config_json"]))
+            )
+            for row in rows
+        ]
 
     def save_strategy(self, user_id: int, strategy: "TradingStrategy") -> "TradingStrategy":
         payload = json.dumps(strategy.to_dict(), ensure_ascii=False)
@@ -3956,41 +4204,22 @@ class StrategyConfigRepository:
     ) -> Optional["TradingStrategy"]:
         from market.models.trading_strategy import TradingStrategy
 
-        source = self.get_strategy_by_id(int(owner_user_id), strategy_id)
+        source = self._raw_strategy_by_id(int(owner_user_id), strategy_id)
         if source is None or source.visibility != "shared":
             return None
 
         owner = UserRepository(self.storage).get_by_id(int(owner_user_id))
         now = datetime.now()
-        payload = self._sanitize_shared_strategy(source.to_dict())
-        signal_sources = []
-        for signal_source in payload.get("signal_sources") or []:
-            item = dict(signal_source)
-            params = dict(item.get("params") or {})
-            if item.get("source") == "ai_entry":
-                source_id = str(item.get("signal_source_id") or "")
-                if not params.get("share_runtime_data"):
-                    raise ValueError(
-                        "共享策略包含未开放运行数据的 AI 信号源，暂不能直接使用"
-                    )
-                params = {
-                    "analysis_mode": "shared_reference",
-                    "shared_runtime_id": (
-                        f"{int(owner_user_id)}:{source.strategy_id}:{source_id}"
-                    ),
-                    "min_confidence": params.get("min_confidence", 70),
-                    "entry_threshold": params.get("entry_threshold", 0.0001),
-                    "share_runtime_data": False,
-                    "reference_runtime_ids": [],
-                }
-            item["params"] = params
-            signal_sources.append(item)
-        payload["signal_sources"] = signal_sources
-        payload.update({
+        payload = {
             "strategy_id": "",
             "strategy_name": source.strategy_name,
+            "symbol": source.symbol,
             "visibility": "private",
             "is_shared": False,
+            "signal_sources": [],
+            "enabled": False,
+            "auto_execute": False,
+            "lifecycle_status": "draft",
             "lifecycle_updated_at": now.isoformat(),
             "position_management_policy_id": position_management_policy_id,
             "source_strategy_id": source.strategy_id,
@@ -3998,9 +4227,98 @@ class StrategyConfigRepository:
             "source_owner_username": owner.username if owner else "",
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
-        })
+        }
         reference = TradingStrategy.from_dict(payload)
-        return self.save_strategy(int(target_user_id), reference)
+        self.save_strategy(int(target_user_id), reference)
+        return self.get_strategy_by_id(int(target_user_id), reference.strategy_id)
+
+    def list_strategy_references(self, owner_user_id: int, strategy_id: str) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT strategy.user_id, strategy.strategy_id, users.email, users.username
+            FROM user_strategy_configs AS strategy
+            JOIN users ON users.id = strategy.user_id
+            WHERE json_extract(strategy.config_json, '$.source_owner_user_id') = ?
+              AND json_extract(strategy.config_json, '$.source_strategy_id') = ?
+            """,
+            (int(owner_user_id), str(strategy_id)),
+        )
+        return [dict(row) for row in rows]
+
+    def strategy_reference_count(self, owner_user_id: int, strategy_id: str) -> int:
+        return len(self.list_strategy_references(owner_user_id, strategy_id))
+
+    def strategy_application_count(self, user_id: int, strategy_id: str) -> int:
+        row = self.storage.fetchone(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM strategy_deployments
+               WHERE user_id = ? AND strategy_id = ?
+                 AND status IN ('active', 'paused', 'pending')) AS deployment_count,
+              (SELECT COUNT(*) FROM backtest_templates
+               WHERE user_id = ? AND strategy_id = ?) AS template_count,
+              (SELECT COUNT(*) FROM backtest_batches
+               WHERE user_id = ? AND strategy_id = ?) AS batch_count
+            """,
+            (
+                int(user_id), str(strategy_id),
+                int(user_id), str(strategy_id),
+                int(user_id), str(strategy_id),
+            ),
+        )
+        if row is None:
+            return 0
+        return (
+            self.strategy_reference_count(user_id, strategy_id)
+            + int(row["deployment_count"])
+            + int(row["template_count"])
+            + int(row["batch_count"])
+        )
+
+    def copy_strategy(
+        self, user_id: int, strategy: "TradingStrategy", name_suffix: str = " 副本",
+    ) -> "TradingStrategy":
+        from market.models.trading_strategy import TradingStrategy
+
+        payload = self._sanitize_shared_strategy(strategy.to_dict())
+        payload.update({
+            "strategy_id": "",
+            "strategy_name": f"{strategy.strategy_name}{name_suffix}",
+            "visibility": "private",
+            "is_shared": False,
+            "enabled": False,
+            "auto_execute": False,
+            "lifecycle_status": "draft",
+            "source_strategy_id": "",
+            "source_owner_user_id": 0,
+            "source_owner_username": "",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "lifecycle_updated_at": datetime.now().isoformat(),
+            "lifecycle_history": [],
+        })
+        copied = TradingStrategy.from_dict(payload)
+        return self.save_strategy(int(user_id), copied)
+
+    def list_alpha_references(self, alpha_id: str) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT strategy.user_id, strategy.strategy_id, users.email, users.username
+            FROM user_strategy_configs AS strategy
+            JOIN users ON users.id = strategy.user_id
+            WHERE strategy.config_json LIKE ?
+            """,
+            (f'%"{str(alpha_id)}"%',),
+        )
+        matches = []
+        for row in rows:
+            data = json.loads(row["config_json"])
+            for source in data.get("signal_sources") or []:
+                params = source.get("params") or {}
+                if source.get("source") == "alpha_factor" and params.get("alpha_id") == alpha_id:
+                    matches.append(dict(row))
+                    break
+        return matches
 
     def delete_strategy(self, user_id: int, symbol: str) -> bool:
         """兼容旧调用，删除该品种的全部策略。"""

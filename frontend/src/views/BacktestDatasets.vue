@@ -262,7 +262,7 @@
                 </div>
 
                 <v-progress-linear
-                  v-if="isActive(dataset.status)"
+                  v-if="dataset.can_manage && isActive(dataset.status)"
                   :model-value="dataset.progress"
                   color="primary"
                   height="8"
@@ -278,8 +278,18 @@
                 </div>
               </div>
 
-              <div v-if="dataset.can_manage" class="dataset-actions">
+              <div class="dataset-actions">
                 <v-btn
+                  size="small"
+                  variant="text"
+                  color="secondary"
+                  prepend-icon="mdi-content-copy"
+                  @click="copyDataset(dataset)"
+                >
+                  复制
+                </v-btn>
+                <v-btn
+                  v-if="dataset.can_manage"
                   size="small"
                   variant="text"
                   color="primary"
@@ -298,6 +308,7 @@
                   取消
                 </v-btn>
                 <v-btn
+                  v-if="dataset.can_manage"
                   size="small"
                   variant="text"
                   color="error"
@@ -525,6 +536,18 @@ async function toggleVisibility(dataset) {
   } catch (error) {
     messageType.value = 'error'
     message.value = error.response?.data?.detail || '修改数据集可见性失败'
+  }
+}
+
+async function copyDataset(dataset) {
+  try {
+    const data = await marketAPI.copyBacktestDataset(dataset.dataset_id)
+    messageType.value = 'success'
+    message.value = data.message || '已复制数据集'
+    await loadAll()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '复制数据集失败'
   }
 }
 

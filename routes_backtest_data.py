@@ -159,6 +159,22 @@ def create_backtest_data_routes(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.post("/backtest/datasets/{dataset_id}/copy")
+    async def copy_dataset(
+        dataset_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        with quota_service.guarded():
+            quota_service.assert_can_create(user.user_id, user.role, "datasets")
+            dataset = repository.copy(user.user_id, dataset_id)
+        if dataset is None:
+            raise HTTPException(status_code=404, detail="历史数据集不存在或未共享")
+        return {
+            "status": "ok",
+            "message": "已复制为新的私有历史行情数据集",
+            "dataset": dataset,
+        }
+
     @router.post("/backtest/datasets/{dataset_id}/cancel")
     async def cancel_dataset(
         dataset_id: str,

@@ -150,6 +150,10 @@ class PositionManagementPolicy:
     policy_id: str = ""
     version: int = 1
     enabled: bool = True
+    visibility: str = "private"
+    source_policy_id: str = ""
+    source_owner_user_id: int = 0
+    source_owner_username: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -158,6 +162,10 @@ class PositionManagementPolicy:
         if not self.name:
             raise ValueError("持仓管理方案名称不能为空")
         self.policy_id = self.policy_id or uuid.uuid4().hex[:12]
+        self.visibility = "shared" if self.visibility == "shared" else "private"
+        self.source_policy_id = str(self.source_policy_id or "")
+        self.source_owner_user_id = int(self.source_owner_user_id or 0)
+        self.source_owner_username = str(self.source_owner_username or "")
         self.config = normalize_position_management_config(self.config)
         self.created_at = self.created_at or datetime.now()
         self.updated_at = self.updated_at or self.created_at
@@ -169,6 +177,12 @@ class PositionManagementPolicy:
             "user_id": self.user_id,
             "name": self.name,
             "enabled": self.enabled,
+            "visibility": self.visibility,
+            "is_shared": self.visibility == "shared",
+            "readonly_reference": bool(self.source_owner_user_id),
+            "source_policy_id": self.source_policy_id,
+            "source_owner_user_id": self.source_owner_user_id,
+            "source_owner_username": self.source_owner_username,
             "config": copy.deepcopy(self.config),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
@@ -184,6 +198,14 @@ class PositionManagementPolicy:
             user_id=int(data.get("user_id", 0)),
             name=data.get("name", ""),
             enabled=bool(data.get("enabled", True)),
+            visibility=(
+                "shared"
+                if data.get("visibility") == "shared" or data.get("is_shared")
+                else "private"
+            ),
+            source_policy_id=str(data.get("source_policy_id", "")),
+            source_owner_user_id=int(data.get("source_owner_user_id") or 0),
+            source_owner_username=str(data.get("source_owner_username") or ""),
             config=data.get("config") or {},
             created_at=parse(data.get("created_at")),
             updated_at=parse(data.get("updated_at")),

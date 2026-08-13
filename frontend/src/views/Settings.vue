@@ -121,7 +121,7 @@
             </v-window-item>
 
             <v-window-item value="shared">
-              <div class="shared-library-head"><div><h3>平台策略库</h3><p>直接使用共享策略；原作者的配置与提示词受保护，引用后不可复制或修改。</p></div><v-btn icon="mdi-refresh" variant="text" :loading="sharedStrategiesLoading" @click="loadSharedStrategies"></v-btn></div>
+              <div class="shared-library-head"><div><h3>平台策略库</h3><p>直接使用共享策略；一旦被应用，源策略会冻结。需要调整时请复制为自己的私有草稿。</p></div><v-btn icon="mdi-refresh" variant="text" :loading="sharedStrategiesLoading" @click="loadSharedStrategies"></v-btn></div>
               <div v-if="sharedStrategiesLoading" class="strategy-empty"><v-progress-circular indeterminate color="primary"></v-progress-circular></div>
               <div v-else-if="sharedStrategies.length" class="shared-strategy-list">
                 <article v-for="item in sharedStrategies" :key="`${item.owner_user_id}-${item.strategy_id}`" class="shared-strategy-card">
@@ -144,12 +144,13 @@
             <div class="d-flex align-center flex-wrap ga-2">
               <v-chip :color="getLifecycleMeta(selectedStrategy).color" variant="tonal">{{ getLifecycleMeta(selectedStrategy).label }}</v-chip>
               <v-chip variant="outlined"><v-icon start size="16">{{ selectedStrategy.is_shared ? 'mdi-earth' : 'mdi-lock-outline' }}</v-icon>{{ selectedStrategy.is_shared ? '已共享' : '私有' }}</v-chip>
+              <v-btn variant="tonal" color="secondary" :loading="strategySaving === `copy-${selectedStrategy.strategy_id}`" @click="copyStrategy(selectedStrategy)"><v-icon start>mdi-content-copy</v-icon>复制新版本</v-btn>
               <v-btn v-if="!selectedStrategy.readonly_reference" color="primary" :loading="strategySaving === selectedStrategy.strategy_id" :disabled="!hasStrategyChanges" @click="saveSelectedStrategy"><v-icon start>mdi-content-save-outline</v-icon>保存修改</v-btn>
             </div>
           </section>
 
           <v-card class="strategy-detail-shell" elevation="0">
-            <v-alert v-if="selectedStrategy.readonly_reference" type="info" variant="tonal" class="ma-4 mb-0">这是平台共享策略的只读引用。你可以使用或停止使用，但不能查看机密参数、复制或修改原策略。</v-alert>
+            <v-alert v-if="selectedStrategy.readonly_reference" type="info" variant="tonal" class="ma-4 mb-0">这是平台共享策略的只读引用。你可以使用或停止使用，也可以复制为自己的私有草稿后再调整。</v-alert>
             <v-tabs v-model="strategyDetailTab" color="primary" class="strategy-detail-tabs">
               <v-tab value="overview">概览</v-tab><v-tab value="signals">信号源 <v-chip size="x-small" class="ml-2">{{ signalSourceCount(selectedStrategy) }}</v-chip></v-tab><v-tab value="risk">仓位与风控</v-tab><v-tab value="lifecycle">验证与生命周期</v-tab>
             </v-tabs>
@@ -158,7 +159,7 @@
               <v-window-item value="overview">
                 <div class="detail-section-title"><div><h3>策略基础信息</h3><p>这些信息用于识别策略并控制多信号源如何共同决策。</p></div></div>
                 <v-row><v-col cols="12" md="6"><v-text-field v-model="selectedStrategy.strategy_name" label="策略名称" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" md="3"><v-text-field :model-value="selectedStrategy.symbol" label="交易品种" readonly></v-text-field></v-col><v-col cols="12" md="3"><v-text-field v-model.number="selectedStrategy.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" md="6"><v-select v-model="selectedStrategy.consistency_requirement" :items="consistencyOptions" label="一致性要求" :disabled="selectedStrategy.readonly_reference"></v-select></v-col></v-row>
-                <div class="strategy-setting-card" :class="{ 'is-active': selectedStrategy.is_shared }"><div><v-icon>mdi-share-variant-outline</v-icon><div><strong>共享到平台策略库</strong><p>其他用户只能只读使用，无法复制、修改或查看机密参数。</p></div></div><v-switch v-model="selectedStrategy.is_shared" color="success" hide-details :disabled="selectedStrategy.readonly_reference"></v-switch></div>
+                <div class="strategy-setting-card" :class="{ 'is-active': selectedStrategy.is_shared }"><div><v-icon>mdi-share-variant-outline</v-icon><div><strong>共享到平台策略库</strong><p>其他用户可只读使用；一旦被应用，源策略会冻结，后续请复制新版本。</p></div></div><v-switch v-model="selectedStrategy.is_shared" color="success" hide-details :disabled="selectedStrategy.readonly_reference"></v-switch></div>
                 <div class="strategy-setting-card" :class="{ 'is-active': selectedStrategy.enabled }"><div><v-icon>mdi-power</v-icon><div><strong>启用策略</strong><p>{{ selectedStrategy.lifecycle_status === 'production' ? '启用后参与当前账户的信号决策。' : '策略完成验证并进入实盘阶段后才能启用。' }}</p></div></div><v-switch v-model="selectedStrategy.enabled" color="success" hide-details :disabled="selectedStrategy.lifecycle_status !== 'production'"></v-switch></div>
               </v-window-item>
 
@@ -914,7 +915,7 @@
               </v-col>
               <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.kline_count" label="分析K线数量" type="number" min="10" max="500"></v-text-field></v-col>
               <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.entry_threshold" label="入场价接近阈值" type="number" step="0.0001" min="0"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.entry_threshold_percent" label="入场价接近阈值" type="number" step="0.01" min="0" max="10" suffix="%" hint="当前价与建议入场价的最大允许偏差，默认 0.08%" persistent-hint></v-text-field></v-col>
               <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12">
                 <v-textarea
                   v-model="newSignalSource.params.system_prompt"
@@ -1840,7 +1841,7 @@ export default {
       { title: '指数移动平均线（EMA）', value: 'ema' }
     ]
     const periodMinuteMap = { M1: 1, M5: 5, M15: 15, H1: 60, H4: 240 }
-    const aiIntervalValues = [1, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
+    const aiIntervalValues = [1, 2, 3, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
     const periodMinutes = (period) => periodMinuteMap[period] || 1
     const aiIntervalOptionsFor = (source) => aiIntervalValues
       .filter(value => value >= periodMinutes(source.period))
@@ -1976,7 +1977,8 @@ export default {
               : {
               analysis_mode: 'self_analysis',
               analysis_interval_minutes: Math.max(5, periodMinutes(period)), kline_count: 100,
-              min_confidence: 70, entry_threshold: 0.0001,
+              min_confidence: 70, entry_threshold: 0.0008,
+              entry_threshold_percent: 0.08,
               model: aiSignalOptions.models[0] || '',
               system_prompt: aiSignalOptions.defaultSystemPrompt,
               analysis_prompt_template: aiSignalOptions.defaultAnalysisPromptTemplate,
@@ -2005,6 +2007,10 @@ export default {
           ? params.reference_runtime_ids
           : []
         params.shared_runtime_id ||= ''
+        const threshold = Number(params.entry_threshold)
+        params.entry_threshold_percent = Number.isFinite(threshold)
+          ? Number((threshold * 100).toFixed(4))
+          : 0.08
       }
       if (sourceType === 'key_level') {
         params.levels = Array.isArray(params.levels) ? params.levels : []
@@ -2403,6 +2409,25 @@ export default {
       if (selectedStrategy.value) updateStrategy(selectedStrategy.value)
     }
 
+    const copyStrategy = async (strategy) => {
+      strategySaving.value = `copy-${strategy.strategy_id}`
+      try {
+        const data = await marketAPI.copyStrategy(strategy.strategy_id)
+        if (data.status !== 'ok') throw new Error(data.message || '复制策略失败')
+        successMessage.value = data.message || '已复制为新策略'
+        showSuccess.value = true
+        await loadStrategies()
+        const copied = strategies.value.find(item => item.strategy_id === data.strategy?.strategy_id)
+        if (copied) openStrategyDetail(copied)
+      } catch (err) {
+        const detail = err.response?.data?.detail || err.message
+        errorMessage.value = `复制策略失败: ${detail}`
+        showError.value = true
+      } finally {
+        strategySaving.value = null
+      }
+    }
+
     function ensureSignalSources (strategy) {
       if (!Array.isArray(strategy.signal_sources)) strategy.signal_sources = []
       strategy.signal_sources = strategy.signal_sources.filter(
@@ -2437,6 +2462,12 @@ export default {
     const serializeSignalSources = (strategy) => ensureSignalSources(strategy).map(source => {
       normalizeAIInterval(source)
       const clean = JSON.parse(JSON.stringify(source))
+      if (clean.source === 'ai_entry' && clean.params.entry_threshold_percent !== undefined) {
+        clean.params.entry_threshold = Math.max(
+          0, Math.min(10, Number(clean.params.entry_threshold_percent ?? 0.08))
+        ) / 100
+        delete clean.params.entry_threshold_percent
+      }
       if (clean.source === 'key_level') {
         clean.period = 'M1'
         clean.params.proximity_threshold = Number(
@@ -2587,6 +2618,12 @@ export default {
         }
       }
       const nextSource = cloneSignalSource(newSignalSource)
+      if (nextSource.source === 'ai_entry') {
+        nextSource.params.entry_threshold = Math.max(
+          0, Math.min(10, Number(nextSource.params.entry_threshold_percent ?? 0.08))
+        ) / 100
+        delete nextSource.params.entry_threshold_percent
+      }
       if (nextSource.source === 'key_level') {
         nextSource.period = 'M1'
         nextSource.params.proximity_threshold = Number(
@@ -2802,6 +2839,7 @@ export default {
       loadStrategies,
       updateStrategy,
       saveSelectedStrategy,
+      copyStrategy,
       openStrategyDetail,
       closeStrategyDetail,
       deleteStrategy,

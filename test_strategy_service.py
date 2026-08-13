@@ -229,6 +229,11 @@ class StrategyServiceTestCase(unittest.TestCase):
             "source": "ai_entry",
             "period": "H4",
             "params": {"analysis_interval_minutes": 60},
+        }, {
+            "signal_source_id": "ai-m1",
+            "source": "ai_entry",
+            "period": "M1",
+            "params": {"analysis_interval_minutes": 2},
         }])
 
         self.assertEqual(
@@ -236,6 +241,12 @@ class StrategyServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(
             strategy.signal_sources[1]["params"]["analysis_interval_minutes"], 240
+        )
+        self.assertEqual(
+            strategy.signal_sources[2]["params"]["analysis_interval_minutes"], 2
+        )
+        self.assertEqual(
+            strategy.signal_sources[2]["params"]["entry_threshold"], 0.0008
         )
 
     def test_signal_source_period_must_be_unique_within_same_type(self):

@@ -123,7 +123,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "analysis_interval_minutes": max(5, SIGNAL_PERIOD_MINUTES[period]),
             "kline_count": 100,
             "min_confidence": 70,
-            "entry_threshold": 0.0001,
+            "entry_threshold": 0.0008,
             "model": "",
             "system_prompt": "",
             "analysis_prompt_template": "",
@@ -142,6 +142,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
     elif source == "alpha_factor":
         params = {
             "alpha_id": "",
+            "alpha_owner_user_id": 0,
             "alpha_version": 1,
             "alpha_name": "",
             "alpha_snapshot": {},
@@ -360,10 +361,14 @@ def normalize_signal_sources(
             params["alpha_id"] = str(params.get("alpha_id") or "").strip()
             if not params["alpha_id"]:
                 raise ValueError("请选择已验证 Alpha")
+            params["alpha_owner_user_id"] = int(params.get("alpha_owner_user_id") or 0)
             params["alpha_version"] = max(1, int(params.get("alpha_version", 1)))
             params["alpha_name"] = str(params.get("alpha_name") or "").strip()[:100]
-            if not isinstance(params.get("alpha_snapshot"), dict) or not params["alpha_snapshot"]:
-                raise ValueError("Alpha 信号源缺少可执行版本快照")
+            params["alpha_snapshot"] = (
+                params.get("alpha_snapshot")
+                if isinstance(params.get("alpha_snapshot"), dict)
+                else {}
+            )
             params["min_confidence"] = max(
                 0, min(100, int(params.get("min_confidence", 60)))
             )

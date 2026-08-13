@@ -1136,7 +1136,7 @@ class LLMService:
     # ==================== 入场价检测 ====================
 
     def check_entry_price_nearby(
-        self, symbol: str, current_price: float, threshold: float = 0.0001,
+        self, symbol: str, current_price: float, threshold: float = 0.0008,
         strategy_id: str = "",
     ) -> List[Dict]:
         """

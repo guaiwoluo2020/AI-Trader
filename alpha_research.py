@@ -516,6 +516,21 @@ class AlphaLibraryRepository:
         )
         return self._row(row, user_id) if row else None
 
+    def get_runtime_definition(
+        self, alpha_id: str, owner_user_id: int = 0,
+    ) -> Optional[Dict]:
+        row = self.storage.fetchone(
+            """
+            SELECT a.*, u.username AS owner_username
+            FROM alpha_library a
+            JOIN users u ON u.id = a.user_id
+            WHERE a.alpha_id = ? AND a.status = 'validated'
+              AND (a.visibility = 'shared' OR a.user_id = ?)
+            """,
+            (str(alpha_id), int(owner_user_id or 0)),
+        )
+        return self._row(row, int(owner_user_id or 0)) if row else None
+
     def publish_run(
         self, user_id: int, run: Dict, visibility: str = "private",
     ) -> Dict:
@@ -584,6 +599,32 @@ class AlphaLibraryRepository:
             (int(time.time()), alpha_id, user_id),
         )
         return True
+
+    def copy(self, user_id: int, alpha_id: str) -> Optional[Dict]:
+        source = self.get_visible(user_id, alpha_id)
+        if source is None:
+            return None
+        new_id = uuid.uuid4().hex[:12]
+        now = int(time.time())
+        self.storage.execute(
+            """
+            INSERT INTO alpha_library(
+                alpha_id, user_id, source_run_id, name, version, status,
+                visibility, timeframe, definition_json, metrics_json,
+                created_at, updated_at
+            ) VALUES(?, ?, ?, ?, 1, 'validated', 'private', ?, ?, ?, ?, ?)
+            """,
+            (
+                new_id, int(user_id),
+                f"{source.get('source_run_id', '')}:copy:{new_id}",
+                f"{source.get('name') or 'Alpha'} 副本",
+                source.get("timeframe") or (source.get("definition") or {}).get("timeframe", ""),
+                json.dumps(source.get("definition") or {}, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(source.get("metrics") or {}, ensure_ascii=False, separators=(",", ":")),
+                now, now,
+            ),
+        )
+        return self.get_visible(user_id, new_id)
 
     @staticmethod
     def admission_report(result: Dict) -> Dict:

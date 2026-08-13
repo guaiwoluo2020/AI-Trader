@@ -27,6 +27,9 @@
               <v-chip :color="policy.enabled ? 'success' : 'grey'" size="small">
                 {{ policy.enabled ? '启用' : '停用' }}
               </v-chip>
+              <v-chip :color="policy.is_shared ? 'teal' : 'grey'" size="small" variant="tonal">
+                {{ policy.readonly_reference ? '共享引用' : (policy.is_shared ? '已共享' : '私有') }}
+              </v-chip>
             </div>
             <div class="rule-summary mt-5">
               <div><span>初始止损</span><strong>{{ ruleNames(policy.config.initial_stop_rules) }}</strong></div>
@@ -35,9 +38,10 @@
             </div>
           </v-card-text>
           <v-card-actions>
-            <v-btn variant="text" prepend-icon="mdi-pencil-outline" @click="openEdit(policy)">编辑</v-btn>
+            <v-btn variant="text" prepend-icon="mdi-content-copy" @click="copyPolicy(policy)">复制</v-btn>
+            <v-btn variant="text" prepend-icon="mdi-pencil-outline" :disabled="policy.readonly_reference" @click="openEdit(policy)">编辑</v-btn>
             <v-spacer />
-            <v-btn color="error" variant="text" icon="mdi-delete-outline" @click="remove(policy)" />
+            <v-btn color="error" variant="text" icon="mdi-delete-outline" :disabled="policy.readonly_reference" @click="remove(policy)" />
           </v-card-actions>
         </v-card>
       </v-col>
@@ -59,6 +63,7 @@
           <v-row>
             <v-col cols="12" md="8"><v-text-field v-model="form.name" label="方案名称" /></v-col>
             <v-col cols="12" md="4"><v-switch v-model="form.enabled" color="success" label="启用方案" /></v-col>
+            <v-col cols="12" md="4"><v-switch v-model="form.is_shared" color="success" label="共享到平台方案库" /></v-col>
           </v-row>
           <RuleChain v-model="form.config.initial_stop_rules" title="初始止损规则链" kind="stop" />
           <RuleChain v-model="form.config.initial_take_profit_rules" title="初始止盈规则链" kind="take" />
@@ -183,10 +188,11 @@ function addPartialLevel() {
 }
 function removePartialLevel(index) { management.partialLevels.splice(index, 1) }
 async function load() { const data = await marketAPI.getPositionManagementPolicies(); policies.value = data.policies || [] }
-function openCreate() { Object.assign(form, { policy_id: '', name: '', enabled: true, config: defaultConfig() }); syncManagement([{ type: 'break_even', activation_r: 1 }, { type: 'pivot_trailing', period: 'M5' }, { type: 'trailing_stop', activation_r: 1, distance_r: 0.8 }, { type: 'partial_take_profit', levels: [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }, { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' }] }]); dialog.value = true }
+function openCreate() { Object.assign(form, { policy_id: '', name: '', enabled: true, is_shared: false, config: defaultConfig() }); syncManagement([{ type: 'break_even', activation_r: 1 }, { type: 'pivot_trailing', period: 'M5' }, { type: 'trailing_stop', activation_r: 1, distance_r: 0.8 }, { type: 'partial_take_profit', levels: [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }, { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' }] }]); dialog.value = true }
 function openEdit(policy) { Object.assign(form, deepClone(policy)); syncManagement(form.config.management_rules); dialog.value = true }
-async function save() { saving.value = true; try { form.config.management_rules = buildManagementRules(); const payload = { name: form.name, enabled: form.enabled, config: form.config }; if (form.policy_id) await marketAPI.updatePositionManagementPolicy(form.policy_id, payload); else await marketAPI.createPositionManagementPolicy(payload); dialog.value = false; messageType.value = 'success'; message.value = '持仓管理方案已保存'; await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } finally { saving.value = false } }
+async function save() { saving.value = true; try { form.config.management_rules = buildManagementRules(); const payload = { name: form.name, enabled: form.enabled, visibility: form.is_shared ? 'shared' : 'private', config: form.config }; if (form.policy_id) await marketAPI.updatePositionManagementPolicy(form.policy_id, payload); else await marketAPI.createPositionManagementPolicy(payload); dialog.value = false; messageType.value = 'success'; message.value = '持仓管理方案已保存'; await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } finally { saving.value = false } }
 async function remove(policy) { if (!confirm(`确定删除“${policy.name}”吗？`)) return; try { await marketAPI.deletePositionManagementPolicy(policy.policy_id); await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } }
+async function copyPolicy(policy) { try { const data = await marketAPI.copyPositionManagementPolicy(policy.policy_id); messageType.value = 'success'; message.value = data.message || '已复制方案'; await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } }
 function ruleNames(rules = []) { return rules.map(rule => labels[rule.type] || rule.type).join(' → ') }
 onMounted(load)
 </script>
