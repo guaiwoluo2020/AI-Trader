@@ -86,10 +86,20 @@
             </dl>
             <div class="bound-strategies">
               <span>已绑定策略</span>
-              <div v-if="account.deployments?.length">
-                <v-chip v-for="deployment in account.deployments" :key="deployment.deployment_id" size="x-small" :color="deployment.status === 'active' ? 'success' : 'grey'" variant="tonal">
-                  {{ deployment.strategy_name || deployment.strategy_id }} · {{ deploymentStatusLabel(deployment.status) }}
-                </v-chip>
+              <div v-if="account.deployments?.length" class="bound-strategy-list">
+                <div v-for="deployment in account.deployments" :key="deployment.deployment_id" class="bound-strategy-item">
+                  <v-chip size="x-small" :color="deploymentHealthMeta(deployment).color" variant="tonal">
+                    {{ deployment.strategy_name || deployment.strategy_id }}
+                  </v-chip>
+                  <span class="bound-strategy-meta" :class="{ 'text-error': deploymentHealthMeta(deployment).alert }">
+                    {{ lifecycleLabel(deployment.lifecycle_status) }} ·
+                    {{ deployment.status === 'active' ? '运行中' : deploymentStatusLabel(deployment.status) }} ·
+                    {{ deployEnabledLabel(deployment) }}
+                  </span>
+                  <span v-if="deploymentHealthMeta(deployment).alert" class="bound-strategy-alert" :title="deploymentHealthMeta(deployment).reason">
+                    {{ deploymentHealthMeta(deployment).reason }}
+                  </span>
+                </div>
               </div>
               <strong v-else>尚未绑定策略</strong>
             </div>
@@ -507,6 +517,48 @@ function togglePaperPosition(positionId) {
 function deploymentStatusLabel(status) {
   return { active: '运行中', paused: '已暂停', completed: '期限已结束' }[status] || status
 }
+function lifecycleLabel(status) {
+  return {
+    draft: '草稿',
+    backtesting: '回测中',
+    backtest_passed: '回测通过',
+    paper_trading: '模拟验证',
+    production: '实盘可用',
+    retired: '已退役',
+  }[status] || status || '未知'
+}
+// 策略是否处于"可用于实盘"的生命周期阶段
+function lifecycleUsable(lifecycle) {
+  return ['backtest_passed', 'paper_trading', 'production'].includes(lifecycle)
+}
+function deployEnabledLabel(deployment) {
+  const enabled = Number(deployment.strategy_enabled) === 1 || deployment.strategy_enabled === true
+  const autoExecute = Number(deployment.strategy_auto_execute) === 1 || deployment.strategy_auto_execute === true
+  return `${enabled ? '已启用' : '未启用'}${autoExecute ? ' · 自动执行' : ''}`
+}
+// 部署健康度:不可用/未启用/未自动执行 → 标红;暂停等 → 警告
+function deploymentHealthMeta(deployment) {
+  const active = deployment.status === 'active'
+  const enabled = Number(deployment.strategy_enabled) === 1 || deployment.strategy_enabled === true
+  const autoExecute = Number(deployment.strategy_auto_execute) === 1 || deployment.strategy_auto_execute === true
+  const usable = lifecycleUsable(deployment.lifecycle_status)
+  if (active && usable && enabled && autoExecute) {
+    return { color: 'success', alert: false, reason: '' }
+  }
+  if (!active) {
+    return { color: 'warning', alert: true, reason: `部署${deploymentStatusLabel(deployment.status)}，策略停止运行` }
+  }
+  if (!usable) {
+    return { color: 'error', alert: true, reason: `策略阶段「${lifecycleLabel(deployment.lifecycle_status)}」不可用于交易` }
+  }
+  if (!enabled) {
+    return { color: 'error', alert: true, reason: '策略未启用，不会产生信号' }
+  }
+  if (!autoExecute) {
+    return { color: 'error', alert: true, reason: '未开启自动执行，仅生成待确认订单' }
+  }
+  return { color: 'grey', alert: false, reason: '' }
+}
 function exitReasonLabel(reason) { return { take_profit: '止盈', stop_loss: '止损' }[reason] || reason }
 function strategyName(strategyId) {
   return paperContext.strategies.find(item => item.strategy_id === strategyId)?.strategy_name || strategyId
@@ -862,7 +914,7 @@ onBeforeUnmount(() => equityChartInstance?.dispose())
 .paper-note { display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 11px; color: #6d684f; background: #faf3e3; font-size: .76rem; }
 .paper-setting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
 .paper-actions { display: flex; justify-content: flex-end; margin-top: 15px; padding-top: 13px; border-top: 1px solid #e7ece9; }
-.bound-strategies { margin-top: 14px; padding: 11px 13px; border-radius: 11px; background: #f5f8f6; }.bound-strategies>span { display:block; margin-bottom:7px; color:#7d8a84; font-size:.65rem; }.bound-strategies>div { display:flex; flex-wrap:wrap; gap:5px; }.bound-strategies>strong { color:#9aa39f; font-size:.7rem; font-weight:500; }.paper-actions { gap:8px; flex-wrap:wrap; }
+.bound-strategies { margin-top: 14px; padding: 11px 13px; border-radius: 11px; background: #f5f8f6; }.bound-strategies>span { display:block; margin-bottom:7px; color:#7d8a84; font-size:.65rem; }.bound-strategies>div { display:flex; flex-wrap:wrap; gap:5px; }.bound-strategies>strong { color:#9aa39f; font-size:.7rem; font-weight:500; }.bound-strategy-list { display:flex; flex-direction:column; gap:6px; width:100%; }.bound-strategy-item { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 8px; border:1px solid #e0e8e3; border-radius:9px; background:#fff; }.bound-strategy-meta { color:#5f6e68; font-size:.66rem; }.bound-strategy-alert { padding:1px 7px; border-radius:6px; color:#c62828; background:#fdecea; font-size:.62rem; font-weight:600; }.paper-actions { gap:8px; flex-wrap:wrap; }
 .binding-dialog { border-radius:18px!important; background:#f5f7f3; }.binding-header { display:flex; align-items:center; justify-content:space-between; padding:22px 24px; }.binding-header h2 { margin:3px 0; }.binding-header span { color:#7d8983; font-size:.7rem; }.binding-form { display:grid; grid-template-columns:1fr auto; gap:9px; }.binding-list { display:grid; gap:8px; margin-top:14px; }.binding-list article { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border:1px solid #dbe5df; border-radius:11px; background:#fff; }.binding-list strong,.binding-list span { display:block; }.binding-list strong { color:#285044; font-size:.8rem; }.binding-list span { color:#89948f; font-size:.65rem; }.binding-controls { display:flex; align-items:center; gap:5px; }
 .runtime-dialog { border-radius: 20px !important; background: #f5f7f3; }
 .runtime-header { display: flex; align-items: center; justify-content: space-between; padding: 22px 26px; }

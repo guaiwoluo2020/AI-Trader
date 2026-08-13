@@ -365,7 +365,8 @@ class PaperTradingService:
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name,
                    json_extract(s.config_json, '$.lifecycle_status') AS lifecycle_status,
-                   json_extract(s.config_json, '$.enabled') AS strategy_enabled
+                   json_extract(s.config_json, '$.enabled') AS strategy_enabled,
+                   json_extract(s.config_json, '$.auto_execute') AS strategy_auto_execute
             FROM strategy_deployments d
             LEFT JOIN user_strategy_configs s
               ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
