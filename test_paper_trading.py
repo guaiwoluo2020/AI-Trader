@@ -621,6 +621,100 @@ class PaperTradingServiceTests(unittest.TestCase):
             for item in detail["runtime_logs"]
         ))
 
+    # ---------- 部署校验：未启用的策略不允许部署到实盘 ----------
+
+    def _create_live_account(self, mt5_login: str) -> dict:
+        """直接插入一个 MT5 实盘账户记录（测试用）。"""
+        # 当前测试用户是 silver，没有实盘权限；改为 admin 以通过 assert_live_trading。
+        self.storage.execute(
+            "UPDATE users SET role = 'admin', live_trading_enabled = 1 "
+            "WHERE id = ?",
+            (self.user.user_id,),
+        )
+        now = int(time.time())
+        with self.storage._lock, self.storage._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO trading_accounts(
+                    user_id, account_key, account_name, account_type,
+                    environment, currency, initial_balance, balance, equity,
+                    free_margin, margin, status, token_hash, enabled,
+                    trading_enabled, auto_trading_enabled,
+                    mt5_login, mt5_server,
+                    daily_order_limit, created_at, updated_at
+                ) VALUES(?, 'mt5-' || ?, ?, 'mt5', 'live', 'USD',
+                         10000, 10000, 10000, 10000, 0, 'active', 'x', 1,
+                         1, 1, ?, 'Server-Test', 100, ?, ?)
+                """,
+                (self.user.user_id, mt5_login, "MT5 Live", mt5_login, now, now),
+            )
+            account_id = int(cursor.lastrowid)
+            conn.commit()
+        return self.storage.fetchone(
+            "SELECT * FROM trading_accounts WHERE id = ?", (account_id,)
+        )
+
+    def test_disabled_strategy_cannot_deploy_to_mt5_live(self):
+        """策略 enabled=false 时禁止部署到 MT5 实盘账户。"""
+        live = self._create_live_account("12345678")
+        self.update_strategy_config({
+            "enabled": False,
+            "auto_execute": True,
+            "lifecycle_status": "production",
+        })
+
+        with self.assertRaisesRegex(ValueError, "尚未启用"):
+            self.service.deploy(self.user.user_id, live["id"], "strategy-1")
+
+    def test_enabled_production_strategy_can_deploy_to_mt5_live(self):
+        """enabled=true 且 production 的策略可以部署到实盘。"""
+        live = self._create_live_account("12345679")
+        self.update_strategy_config({
+            "enabled": True,
+            "auto_execute": True,
+            "lifecycle_status": "production",
+        })
+
+        deployment = self.service.deploy(
+            self.user.user_id, live["id"], "strategy-1"
+        )
+        self.assertEqual(deployment["status"], "active")
+        self.assertEqual(deployment["execution_mode"], "live")
+
+    # ---------- 持仓管理方案部署冻结 ----------
+
+    def _deploy_to_paper_using_policy(self):
+        deployment = self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        self.assertEqual(deployment["status"], "active")
+        repo = PositionManagementPolicyRepository(self.storage)
+        count = repo.active_deployment_count(self.user.user_id, "policy-1")
+        self.assertEqual(count, 1)
+        return deployment
+
+    def test_active_deployment_count_tracks_policy_usage(self):
+        repo = PositionManagementPolicyRepository(self.storage)
+        self.assertEqual(repo.active_deployment_count(self.user.user_id, "policy-1"), 0)
+
+        self._deploy_to_paper_using_policy()
+        self.assertEqual(
+            repo.active_deployment_count(self.user.user_id, "policy-1"), 1
+        )
+
+        # 解除部署后计数归零
+        deployment_id = self.storage.fetchone(
+            "SELECT deployment_id FROM strategy_deployments "
+            "WHERE user_id = ? AND strategy_id = 'strategy-1'",
+            (self.user.user_id,),
+        )["deployment_id"]
+        self.service.remove_deployment(
+            self.user.user_id, self.account.account_id, deployment_id
+        )
+        self.assertEqual(
+            repo.active_deployment_count(self.user.user_id, "policy-1"), 0
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

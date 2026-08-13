@@ -813,6 +813,11 @@ def create_market_routes(
                 status_code=409,
                 detail="该共享持仓管理方案已被应用，不能继续修改；请复制为新方案后再调整",
             )
+        if position_policy_repo.active_deployment_count(user.user_id, policy.policy_id):
+            raise HTTPException(
+                status_code=409,
+                detail="该持仓管理方案正被已部署的策略使用（模拟盘或实盘），修改会导致已部署策略停止运行；请先解除相关策略部署后再修改",
+            )
         try:
             data = await request.json()
             was_shared = policy.visibility == "shared"
@@ -849,6 +854,13 @@ def create_market_routes(
                 and position_policy_repo.policy_application_count(user.user_id, policy_id)
             ):
                 raise ValueError("该共享持仓管理方案已被应用，不能删除；请保留原方案并复制新版本")
+            if policy and position_policy_repo.active_deployment_count(
+                user.user_id, policy.policy_id
+            ):
+                raise ValueError(
+                    "该持仓管理方案正被已部署的策略使用（模拟盘或实盘），"
+                    "不能删除；请先解除相关策略部署后再删除"
+                )
             if not position_policy_repo.delete(user.user_id, policy_id):
                 raise HTTPException(status_code=404, detail="持仓管理方案不存在")
             return {"status": "ok", "message": "持仓管理方案已删除"}

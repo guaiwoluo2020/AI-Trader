@@ -189,6 +189,10 @@ class PaperTradingService:
             self.memberships.assert_live_trading(user_id, account.account_id)
             if lifecycle != "production":
                 raise ValueError("只有已批准用于实盘的策略才能绑定 MT5 账户")
+            if not current_strategy.enabled:
+                raise ValueError(
+                    "策略尚未启用，请先在策略配置中启用（enabled=true）后再部署到实盘账户"
+                )
             execution_mode = "live"
         else:
             raise ValueError("当前账户类型不支持策略部署")

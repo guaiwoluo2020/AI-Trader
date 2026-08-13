@@ -3913,6 +3913,24 @@ class PositionManagementPolicyRepository:
             int(row["count"]) if row else 0
         )
 
+    def active_deployment_count(self, user_id: int, policy_id: str) -> int:
+        """统计仍处于 active 状态的策略部署引用该持仓方案的数量。
+
+        部署快照中记录了部署时刻绑定的持仓方案；只要存在 active 部署
+        引用了该方案，修改方案会导致已部署策略被打回 draft 并停单，
+        因此修改/删除前必须先解除相关部署。
+        """
+        row = self.storage.fetchone(
+            """
+            SELECT COUNT(*) AS count FROM strategy_deployments
+            WHERE user_id = ?
+              AND status = 'active'
+              AND json_extract(strategy_snapshot_json, '$.position_management_policy_id') = ?
+            """,
+            (int(user_id), str(policy_id)),
+        )
+        return int(row["count"]) if row else 0
+
 
 class PositionManagementEventRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
