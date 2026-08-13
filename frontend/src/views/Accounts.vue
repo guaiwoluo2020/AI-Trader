@@ -168,7 +168,7 @@
             <div>
               <div class="section-tag">STRATEGY DEPLOYMENT</div>
               <h3>策略运行实例</h3>
-              <p>部署后仅在该 Paper 账户自动执行；策略的实盘自动下单开关保持独立。</p>
+              <p>部署后仅在该 Paper 账户自动执行；包含 AI 信号源的策略可跳过回测直接模拟观察，实盘准入仍会检查验证证据。</p>
             </div>
             <div class="deployment-form">
               <v-select
@@ -245,11 +245,36 @@
             <div class="runtime-table-card">
               <div class="runtime-section-title"><h3>当前持仓</h3><span>{{ paperDetail.positions.length }} 笔</span></div>
               <div v-if="!paperDetail.positions.length" class="runtime-empty compact">暂无持仓</div>
-              <div v-for="position in paperDetail.positions" :key="position.position_id" class="runtime-row position-row">
-                <b :class="position.direction === 'buy' ? 'positive' : 'negative'">{{ position.direction === 'buy' ? '买入' : '卖出' }}</b>
-                <span>{{ position.symbol }} · {{ position.volume }} 手</span>
-                <span>{{ position.entry_price }} → {{ position.current_price }}</span>
-                <strong :class="position.unrealized_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(position.unrealized_profit) }}</strong>
+              <div v-for="position in paperDetail.positions" :key="position.position_id" class="paper-position-card">
+                <div class="paper-position-head">
+                  <div>
+                    <b :class="position.direction === 'buy' ? 'positive' : 'negative'">{{ position.direction === 'buy' ? '买入' : '卖出' }}</b>
+                    <strong>{{ position.symbol }} · {{ position.remaining_volume || position.volume }} / {{ position.volume }} 手</strong>
+                    <span>{{ strategyName(position.strategy_id) }}</span>
+                  </div>
+                  <div class="paper-position-actions">
+                    <v-chip size="x-small" :color="Number(position.stop_loss) && Number(position.take_profit) ? 'success' : 'warning'" variant="tonal">{{ paperProtectionLabel(position) }}</v-chip>
+                    <v-btn size="x-small" variant="tonal" color="primary" @click="togglePaperPosition(position.position_id)">
+                      {{ expandedPaperPositions.has(position.position_id) ? '收起轨迹' : '查看轨迹' }}
+                    </v-btn>
+                  </div>
+                </div>
+                <div class="paper-position-metrics">
+                  <span>入场 <b>{{ price(position.entry_price) }}</b></span>
+                  <span>当前 <b>{{ price(position.current_price) }}</b></span>
+                  <span>止损 <b class="negative">{{ price(position.stop_loss) }}</b></span>
+                  <span>止盈 <b class="positive">{{ price(position.take_profit) }}</b></span>
+                  <span>浮盈 <b :class="position.unrealized_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(position.unrealized_profit) }}</b></span>
+                </div>
+                <div v-if="expandedPaperPositions.has(position.position_id)" class="paper-position-events">
+                  <div v-if="!position.management_events?.length" class="runtime-empty compact">暂无持仓管理轨迹</div>
+                  <div v-for="event in position.management_events || []" :key="event.event_id" class="paper-event-row">
+                    <span>{{ formatTime(event.event_time) }}</span>
+                    <b>{{ paperEventLabel(event.rule_type) }}</b>
+                    <span>{{ event.message }}</span>
+                    <small>SL {{ price(event.stop_loss) }} · TP {{ price(event.take_profit) }}</small>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="runtime-table-card">
@@ -377,6 +402,7 @@ const reportLoading = ref(false)
 const paperReport = ref(null)
 const reportStrategyId = ref('')
 const equityChart = ref(null)
+const expandedPaperPositions = ref(new Set())
 let equityChartInstance = null
 const message = ref('')
 const messageType = ref('success')
@@ -393,7 +419,7 @@ const strategyOptions = computed(() => paperContext.strategies.filter(
   strategy => strategy.paper_eligible
 ).map(strategy => ({
   value: strategy.strategy_id,
-  label: `${strategy.strategy_name} · ${strategy.symbol}`,
+  label: `${strategy.strategy_name} · ${strategy.symbol}${strategy.paper_eligibility_reason ? ' · AI可直接模拟' : ''}`,
 })))
 const accountStrategyOptions = computed(() => {
   if (!selectedAccount.value) return []
@@ -404,7 +430,7 @@ const accountStrategyOptions = computed(() => {
     return eligible && !existing.has(strategy.strategy_id)
   }).map(strategy => ({
     value: strategy.strategy_id,
-    label: `${strategy.strategy_name} · ${strategy.symbol}`,
+    label: `${strategy.strategy_name} · ${strategy.symbol}${strategy.paper_eligibility_reason ? ' · AI可直接模拟' : ''}`,
   }))
 })
 const reportStrategyOptions = computed(() => [
@@ -443,6 +469,40 @@ function signedMoney(value) {
 function signedDelta(value) {
   const number = Number(value || 0)
   return `${number > 0 ? '+' : ''}${number.toFixed(2)}`
+}
+function price(value) {
+  const number = Number(value || 0)
+  if (!number) return '-'
+  return number.toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 5,
+  })
+}
+function paperProtectionLabel(position) {
+  const hasSl = Number(position.stop_loss || 0) > 0
+  const hasTp = Number(position.take_profit || 0) > 0
+  if (hasSl && hasTp) return 'SL/TP'
+  if (hasSl) return '仅止损'
+  if (hasTp) return '仅止盈'
+  return '未保护'
+}
+function paperEventLabel(type) {
+  return {
+    initial_plan: '初始保护',
+    break_even: '保本止损',
+    trailing_stop: '移动止损',
+    pivot_trailing: '转折跟进',
+    partial_take_profit: '分批止盈',
+    stop_loss_update: '止损更新',
+    reverse_signal: '反向退出',
+    max_holding_bars: '时间退出',
+  }[type] || type || '持仓管理'
+}
+function togglePaperPosition(positionId) {
+  const next = new Set(expandedPaperPositions.value)
+  if (next.has(positionId)) next.delete(positionId)
+  else next.add(positionId)
+  expandedPaperPositions.value = next
 }
 function deploymentStatusLabel(status) {
   return { active: '运行中', paused: '已暂停', completed: '期限已结束' }[status] || status
@@ -662,6 +722,7 @@ async function openPaperRuntime(account) {
   try {
     const data = await accountAPI.getPaperDetail(account.account_id)
     paperDetail.value = data.detail
+    expandedPaperPositions.value = new Set()
     selectedStrategyId.value = ''
     paperReport.value = null
     reportStrategyId.value = ''
@@ -694,6 +755,7 @@ function closePaperRuntime() {
   equityChartInstance?.dispose()
   equityChartInstance = null
   paperDetail.value = null
+  expandedPaperPositions.value = new Set()
 }
 
 async function refreshPaperDetail() {
@@ -828,6 +890,19 @@ onBeforeUnmount(() => equityChartInstance?.dispose())
 .equity-chart { width: 100%; height: 280px; }
 .runtime-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }.runtime-grid .runtime-table-card { margin-top: 13px; }
 .runtime-row { display: grid; align-items: center; gap: 8px; padding: 8px 5px; border-top: 1px solid #edf1ee; color: #6f7d77; font-size: .67rem; }.position-row { grid-template-columns: 45px 1fr 1fr auto; }.trade-row { grid-template-columns: 130px 1fr 80px auto; }.order-row { grid-template-columns: 130px 45px 1fr 90px 65px minmax(100px,1fr); }
+.paper-position-card { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid #edf1ee; }
+.paper-position-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.paper-position-head strong,.paper-position-head span { display: block; }
+.paper-position-head strong { margin-top: 2px; color: #31554b; font-size: .78rem; }
+.paper-position-head span { color: #84908a; font-size: .64rem; }
+.paper-position-actions { display: flex; align-items: center; gap: 7px; }
+.paper-position-metrics { display: grid; grid-template-columns: repeat(5, minmax(88px, 1fr)); gap: 7px; }
+.paper-position-metrics span { display: flex; flex-direction: column; padding: 8px; border-radius: 9px; background: #f2f7f4; color: #7d8b85; font-size: .62rem; }
+.paper-position-metrics b { margin-top: 2px; font-size: .72rem; }
+.paper-position-events { display: grid; gap: 6px; padding: 9px; border-radius: 10px; background: #f8faf7; }
+.paper-event-row { display: grid; grid-template-columns: 92px 72px 1fr auto; gap: 8px; align-items: center; color: #6f7d77; font-size: .63rem; }
+.paper-event-row b { color: #31554b; }
+.paper-event-row small { color: #8c9892; }
 .runtime-dialog .positive { color: #147b59; }.runtime-dialog .negative { color: #bd493c; }.reject-reason { color: #9a6258; }
 .runtime-empty { display: grid; place-items: center; min-height: 130px; color: #919c97; font-size: .72rem; }.runtime-empty.compact { min-height: 62px; }
 .empty-state { padding: 65px 20px; color: #85918b; text-align: center; }

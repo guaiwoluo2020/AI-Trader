@@ -68,6 +68,18 @@ class PaperTradingServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def update_strategy_config(self, updates):
+        row = self.storage.fetchone(
+            "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
+        )
+        config = json.loads(row["config_json"])
+        config.update(updates)
+        self.storage.execute(
+            "UPDATE user_strategy_configs SET config_json = ? WHERE strategy_id = 'strategy-1'",
+            (json.dumps(config),),
+        )
+        return config
+
     @staticmethod
     def decision(decision_id="decision-1"):
         return {
@@ -84,6 +96,62 @@ class PaperTradingServiceTests(unittest.TestCase):
             "volume": 0.1,
             "confidence_score": 80,
         }
+
+    def test_ai_strategy_can_deploy_to_paper_without_backtest(self):
+        self.update_strategy_config({
+            "lifecycle_status": "draft",
+            "signal_sources": [{
+                "signal_source_id": "ai-m1",
+                "source": "ai_entry",
+                "period": "M1",
+                "enabled": True,
+                "weight": 30,
+                "params": {"analysis_mode": "self_analysis"},
+            }],
+        })
+
+        context = self.service.list_context(self.user.user_id)
+        option = next(
+            item for item in context["strategies"]
+            if item["strategy_id"] == "strategy-1"
+        )
+        self.assertTrue(option["paper_eligible"])
+        self.assertTrue(option["paper_direct_allowed"])
+
+        deployment = self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        promoted = json.loads(self.storage.fetchone(
+            "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
+        )["config_json"])
+        self.assertEqual(deployment["status"], "active")
+        self.assertEqual(promoted["lifecycle_status"], "paper_trading")
+        self.assertIn("跳过回测", promoted["lifecycle_history"][-1]["reason"])
+
+    def test_non_ai_draft_strategy_cannot_deploy_to_paper_without_backtest(self):
+        self.update_strategy_config({
+            "lifecycle_status": "draft",
+            "signal_sources": [{
+                "signal_source_id": "ma-m1",
+                "source": "moving_average",
+                "period": "M1",
+                "enabled": True,
+                "weight": 30,
+                "params": {},
+            }],
+        })
+
+        context = self.service.list_context(self.user.user_id)
+        option = next(
+            item for item in context["strategies"]
+            if item["strategy_id"] == "strategy-1"
+        )
+        self.assertFalse(option["paper_eligible"])
+
+        with self.assertRaisesRegex(ValueError, "AI 信号源"):
+            self.service.deploy(
+                self.user.user_id, self.account.account_id, "strategy-1"
+            )
 
     def test_realtime_order_fill_take_profit_and_accounting(self):
         deployment = self.service.deploy(
@@ -365,7 +433,7 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertEqual(report["summary"]["win_rate"], 100.0)
         self.assertEqual(report["by_strategy"][0]["name"], "strategy-1")
 
-    def test_backtest_deployment_keeps_immutable_snapshot_and_expires(self):
+    def test_backtest_deployment_uses_current_strategy_reference_and_expires(self):
         row = self.storage.fetchone(
             "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
         )
@@ -424,7 +492,7 @@ class PaperTradingServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(stored["min_confidence"], 61)
-        self.assertEqual(promoted["lifecycle_status"], "backtest_passed")
+        self.assertEqual(promoted["lifecycle_status"], "paper_trading")
         self.assertEqual(deployment["source_backtest_task_id"], "task-paper")
         self.assertGreater(deployment["scheduled_end_at"], deployment["created_at"])
 
@@ -447,7 +515,7 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.service.process_strategy_signals(
             self.user.user_id, "GOLD_", 3000, runtime
         )
-        self.assertEqual(runtime.seen_strategy.min_confidence, 61)
+        self.assertEqual(runtime.seen_strategy.min_confidence, 95)
 
         report = self.service.build_report(
             self.user.user_id, self.account.account_id, "strategy-1"
@@ -528,7 +596,7 @@ class PaperTradingServiceTests(unittest.TestCase):
             "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
         )["config_json"])
 
-        self.assertEqual(promoted["lifecycle_status"], "backtest_passed")
+        self.assertEqual(promoted["lifecycle_status"], "paper_trading")
         self.assertEqual(deployment["source_backtest_task_id"], "task-ai-paper")
 
     def test_background_maintenance_records_heartbeat_and_runtime_events(self):

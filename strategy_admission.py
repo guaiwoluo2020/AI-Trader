@@ -35,6 +35,7 @@ class StrategyAdmissionService:
         strategy_data = strategy.to_dict()
         backtest = self._backtest_evidence(user_id, strategy_data)
         paper = self._paper_evidence(user_id, strategy.strategy_id, strategy_data)
+        ai_strategy = self._has_enabled_ai_signal(strategy_data)
         return {
             "strategy_id": strategy.strategy_id,
             "strategy_name": strategy.strategy_name,
@@ -48,8 +49,12 @@ class StrategyAdmissionService:
             },
             "backtest": backtest,
             "paper": paper,
+            "ai_strategy": ai_strategy,
             "eligible_for_paper": backtest["passed"],
-            "eligible_for_production": backtest["passed"] and paper["passed"],
+            "eligible_for_production": (
+                paper["passed"] if ai_strategy
+                else backtest["passed"] and paper["passed"]
+            ),
         }
 
     def validate_transition(self, user_id: int, strategy, target_status: str) -> Dict:
@@ -108,10 +113,10 @@ class StrategyAdmissionService:
             SELECT a.id, d.strategy_version_at FROM trading_accounts a
             JOIN strategy_deployments d ON d.account_id = a.id
             WHERE d.user_id = ? AND d.strategy_id = ?
-              AND d.strategy_snapshot_hash = ? AND a.account_type = 'paper'
+              AND a.account_type = 'paper'
             ORDER BY d.updated_at DESC LIMIT 1
             """,
-            (user_id, strategy_id, strategy_fingerprint(strategy_data)),
+            (user_id, strategy_id),
         )
         if account is None:
             return self._empty_evidence("策略尚未部署到模拟账户")
@@ -132,6 +137,14 @@ class StrategyAdmissionService:
             "metrics": metrics,
             "checks": checks,
         }
+
+    @staticmethod
+    def _has_enabled_ai_signal(strategy_data: Dict) -> bool:
+        return any(
+            source.get("source") == "ai_entry"
+            and source.get("enabled", True)
+            for source in (strategy_data.get("signal_sources") or [])
+        )
 
     @staticmethod
     def _is_ai_only_backtest(result: Dict) -> bool:

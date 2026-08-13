@@ -501,6 +501,7 @@ class TradingServer:
             if position_strategy_id != strategy.strategy_id:
                 continue
             ticket = int(position.ticket)
+            is_new_position = ticket not in self._managed_position_state
             state = self._managed_position_state.setdefault(ticket, {
                 "direction": position.direction,
                 "entry_price": float(position.price_open),
@@ -513,6 +514,23 @@ class TradingServer:
                 "holding_bars": 0,
                 "opened_at": position.opened_at or datetime.now(),
             })
+            if is_new_position:
+                self._position_event_repository.record(
+                    int(self.user_id or 0), int(self.account_id or 0), str(ticket),
+                    "initial_plan", "实盘持仓已纳入持仓管理，记录初始止损止盈保护",
+                    symbol=symbol, ticket=ticket, rule_type="initial_plan",
+                    status="triggered", price=float(position.price_open),
+                    stop_loss=float(position.sl or 0),
+                    take_profit=float(position.tp or 0),
+                    volume=float(position.volume),
+                    payload={
+                        "policy_id": policy.policy_id,
+                        "policy_name": policy.name,
+                        "initial_risk": abs(
+                            float(position.price_open) - float(position.sl or 0)
+                        ),
+                    },
+                )
             state["volume"] = float(position.volume)
             state["remaining_volume"] = float(position.volume)
             state["stop_loss"] = float(position.sl or state["stop_loss"])

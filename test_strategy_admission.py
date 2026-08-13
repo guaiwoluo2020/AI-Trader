@@ -16,6 +16,18 @@ class FakePaperTrading:
         raise AssertionError("没有部署时不应读取报告")
 
 
+class PassingPaperTrading:
+    def build_report(self, *args, **kwargs):
+        return {
+            "summary": {
+                "trade_count": 25,
+                "net_profit": 300,
+                "profit_factor": 1.8,
+                "max_drawdown_pct": 6,
+            }
+        }
+
+
 class StrategyAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -126,6 +138,88 @@ class StrategyAdmissionTests(unittest.TestCase):
         admission = self.service.evaluate(self.user.user_id, self.strategy)
         self.assertFalse(admission["backtest"]["passed"])
         self.assertIn("当前策略版本", admission["backtest"]["message"])
+
+    def test_ai_strategy_can_reach_production_with_passing_paper_only(self):
+        self.strategy.lifecycle_status = StrategyLifecycle.PAPER_TRADING
+        self.strategy.signal_sources = [{
+            "signal_source_id": "ai-m1",
+            "source": "ai_entry",
+            "period": "M1",
+            "enabled": True,
+            "weight": 30,
+            "params": {},
+        }]
+        self.storage.execute(
+            """
+            INSERT INTO strategy_deployments(
+                deployment_id, user_id, account_id, strategy_id, symbol,
+                execution_mode, status, created_at, updated_at,
+                strategy_snapshot_hash, strategy_snapshot_json
+            ) VALUES('dep-ai', ?, 1, ?, 'GOLD_', 'paper', 'active', 100, 100, '', '{}')
+            """,
+            (self.user.user_id, self.strategy.strategy_id),
+        )
+        self.storage.execute(
+            """
+            INSERT INTO trading_accounts(
+                id, user_id, account_key, account_name, account_type,
+                token_hash, status, enabled, created_at, updated_at
+            ) VALUES(1, ?, 'paper-test', 'Paper', 'paper', 'h', 'active', 1, 100, 100)
+            """,
+            (self.user.user_id,),
+        )
+        service = StrategyAdmissionService(PassingPaperTrading(), self.storage)
+
+        admission = service.evaluate(self.user.user_id, self.strategy)
+
+        self.assertFalse(admission["backtest"]["passed"])
+        self.assertTrue(admission["paper"]["passed"])
+        self.assertTrue(admission["ai_strategy"])
+        self.assertTrue(admission["eligible_for_production"])
+        service.validate_transition(
+            self.user.user_id, self.strategy, StrategyLifecycle.PRODUCTION
+        )
+
+    def test_non_ai_strategy_still_requires_backtest_for_production(self):
+        self.strategy.lifecycle_status = StrategyLifecycle.PAPER_TRADING
+        self.strategy.signal_sources = [{
+            "signal_source_id": "ma-m1",
+            "source": "moving_average",
+            "period": "M1",
+            "enabled": True,
+            "weight": 30,
+            "params": {},
+        }]
+        self.storage.execute(
+            """
+            INSERT INTO strategy_deployments(
+                deployment_id, user_id, account_id, strategy_id, symbol,
+                execution_mode, status, created_at, updated_at,
+                strategy_snapshot_hash, strategy_snapshot_json
+            ) VALUES('dep-ma', ?, 1, ?, 'GOLD_', 'paper', 'active', 100, 100, '', '{}')
+            """,
+            (self.user.user_id, self.strategy.strategy_id),
+        )
+        self.storage.execute(
+            """
+            INSERT INTO trading_accounts(
+                id, user_id, account_key, account_name, account_type,
+                token_hash, status, enabled, created_at, updated_at
+            ) VALUES(1, ?, 'paper-test', 'Paper', 'paper', 'h', 'active', 1, 100, 100)
+            """,
+            (self.user.user_id,),
+        )
+        service = StrategyAdmissionService(PassingPaperTrading(), self.storage)
+
+        admission = service.evaluate(self.user.user_id, self.strategy)
+
+        self.assertFalse(admission["ai_strategy"])
+        self.assertTrue(admission["paper"]["passed"])
+        self.assertFalse(admission["eligible_for_production"])
+        with self.assertRaisesRegex(ValueError, "模拟盘准入"):
+            service.validate_transition(
+                self.user.user_id, self.strategy, StrategyLifecycle.PRODUCTION
+            )
 
 
 if __name__ == "__main__":

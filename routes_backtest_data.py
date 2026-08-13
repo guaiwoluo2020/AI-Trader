@@ -112,7 +112,7 @@ def create_backtest_data_routes(
                     symbol=payload.get("symbol", ""),
                     requested_start=int(payload.get("requested_start", 0)),
                     requested_end=int(payload.get("requested_end", 0)),
-                    warmup_days=int(payload.get("warmup_days", 30)),
+                    warmup_days=int(payload.get("warmup_days", 1)),
                     visibility=str(payload.get("visibility", "shared")),
                 )
             return {

@@ -167,9 +167,12 @@ class LLMService:
 
             rows = storage.fetchall(
                 """
-                SELECT d.strategy_snapshot_json
+                SELECT DISTINCT COALESCE(s.config_json, d.strategy_snapshot_json)
+                       AS runtime_strategy_json
                 FROM strategy_deployments d
                 JOIN trading_accounts a ON a.id = d.account_id
+                LEFT JOIN user_strategy_configs s
+                  ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
                 WHERE d.user_id = ? AND d.execution_mode = 'paper'
                   AND d.status = 'active' AND d.symbol IN ({})
                   AND a.account_type = 'paper' AND a.status = 'active'
@@ -179,9 +182,9 @@ class LLMService:
                 (self.llm_store.user_id, *list(available_symbols)),
             )
             return [
-                TradingStrategy.from_dict(json.loads(row["strategy_snapshot_json"]))
+                TradingStrategy.from_dict(json.loads(row["runtime_strategy_json"]))
                 for row in rows
-                if row["strategy_snapshot_json"]
+                if row["runtime_strategy_json"]
             ]
         except Exception as exc:
             print(f"[LLMService] 加载模拟部署AI策略失败: {exc}")
@@ -197,6 +200,7 @@ class LLMService:
         source_id = source["signal_source_id"]
         source_key = (strategy.strategy_id, source_id)
         if source_key in seen_sources:
+            self._merge_duplicate_ai_profile(plan, strategy, source, params)
             return
         interval = max(
             1, int(params.get("analysis_interval_minutes", 5))
@@ -248,6 +252,55 @@ class LLMService:
             "symbol": strategy.symbol,
             "strategy_lifecycle": strategy.lifecycle_status,
         })
+
+    def _merge_duplicate_ai_profile(
+        self, plan: Dict[str, Dict], strategy, source: Dict, params: Dict,
+    ) -> None:
+        """Merge repeated snapshots of the same AI source across deployments.
+
+        The same strategy can be deployed to multiple paper/live accounts. Older
+        snapshots should not prevent a newer snapshot from enabling runtime
+        sharing for the same strategy/source pair.
+        """
+        source_id = source.get("signal_source_id", "")
+        for symbol_plan in plan.values():
+            for profile in symbol_plan.get("strategies", []):
+                if (
+                    profile.get("strategy_id") != strategy.strategy_id
+                    or profile.get("signal_source_id") != source_id
+                ):
+                    continue
+                profile["share_runtime_data"] = (
+                    bool(profile.get("share_runtime_data"))
+                    or bool(params.get("share_runtime_data", False))
+                )
+                references = list(profile.get("reference_runtime_ids") or [])
+                for item in params.get("reference_runtime_ids") or []:
+                    if item not in references:
+                        references.append(item)
+                profile["reference_runtime_ids"] = references
+                profile["signal_params"] = {
+                    **dict(profile.get("signal_params") or {}),
+                    **dict(params),
+                    "share_runtime_data": profile["share_runtime_data"],
+                }
+                if not profile.get("model") and params.get("model"):
+                    profile["model"] = str(params.get("model") or "")
+                if (
+                    not profile.get("system_prompt")
+                    and params.get("system_prompt")
+                ):
+                    profile["system_prompt"] = str(
+                        params.get("system_prompt") or ""
+                    )
+                if (
+                    not profile.get("analysis_prompt_template")
+                    and params.get("analysis_prompt_template")
+                ):
+                    profile["analysis_prompt_template"] = str(
+                        params.get("analysis_prompt_template") or ""
+                    )
+                return
 
     def _load_env_config(self):
         """从环境变量加载配置"""

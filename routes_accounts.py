@@ -195,7 +195,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             )
             return {
                 "status": "ok",
-                "message": "回测策略快照已部署到模拟账户",
+                "message": "回测报告已关联到模拟账户，策略开始模拟运行",
                 "deployment": deployment,
             }
         except (TypeError, ValueError) as exc:

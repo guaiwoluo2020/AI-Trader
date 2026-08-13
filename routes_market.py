@@ -29,7 +29,9 @@ from sqlite_storage import (
     StrategyConfigRepository,
     TradeConfigRepository,
     TradingAccountRepository,
+    UserRepository,
 )
+from market.models.trading_strategy import StrategyLifecycle
 from trading_engine_manager import TradingEngineManager
 from strategy_admission import StrategyAdmissionService
 from web_account_context import resolve_web_engine
@@ -1158,6 +1160,117 @@ def create_market_routes(
                 "status": "ok",
                 "message": f"策略已进入“{strategy.to_dict()['lifecycle_label']}”状态",
                 "strategy": strategy_payload(strategy),
+            }
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @protected_router.get("/admin/strategies")
+    async def admin_list_strategies(
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        """管理员查看所有用户策略，便于人工推进验证状态。"""
+        items = strategy_repo.list_admin_strategies()
+        return {
+            "status": "ok",
+            "count": len(items),
+            "strategies": items,
+            "lifecycle_options": [
+                {"value": value, "label": label}
+                for value, label in StrategyLifecycle.LABELS.items()
+            ],
+        }
+
+    @protected_router.post("/admin/strategies/{target_user_id}/{strategy_id}/lifecycle")
+    async def admin_transition_strategy_lifecycle(
+        target_user_id: int,
+        strategy_id: str,
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        """管理员直接推进用户策略状态；共享引用允许推进到实盘。"""
+        try:
+            data = await request.json()
+            target_status = str(data.get("target_status", "")).strip()
+            reason = str(data.get("reason", "")).strip()
+            if not StrategyLifecycle.is_valid(target_status):
+                return {"status": "error", "message": "请选择有效的目标状态"}
+
+            target_user = UserRepository().get_by_id(int(target_user_id))
+            if target_user is None:
+                return {"status": "error", "message": "目标用户不存在"}
+            strategy = strategy_repo.get_strategy_by_id(target_user.user_id, strategy_id)
+            if strategy is None:
+                return {"status": "error", "message": "策略配置不存在"}
+
+            if target_status == StrategyLifecycle.PRODUCTION:
+                memberships.assert_live_trading(target_user.user_id)
+                if not strategy.position_management_policy_id:
+                    return {"status": "error", "message": "策略缺少持仓管理方案"}
+                if not position_policy_repo.get(
+                    target_user.user_id, strategy.position_management_policy_id
+                ):
+                    return {"status": "error", "message": "策略绑定的持仓管理方案不存在"}
+                if not strategy.get_signal_sources(enabled_only=True):
+                    return {"status": "error", "message": "策略至少需要一个已启用信号源"}
+
+            now = datetime.now()
+            previous_status = strategy.lifecycle_status
+            strategy.lifecycle_status = target_status
+            strategy.lifecycle_updated_at = now
+            strategy.updated_at = now
+            if target_status != StrategyLifecycle.PRODUCTION:
+                strategy.enabled = False
+                strategy.auto_execute = False
+            strategy.lifecycle_history.append({
+                "from_status": previous_status,
+                "to_status": target_status,
+                "changed_at": now.isoformat(),
+                "reason": reason or "管理员推进策略状态",
+                "actor": "admin",
+                "actor_user_id": user.user_id,
+            })
+
+            saved = strategy_repo.save_strategy(target_user.user_id, strategy)
+            shared_ai_runtime_repo.sync_strategy_visibility(
+                target_user.user_id, saved.to_dict()
+            )
+            engine_manager.refresh_user_strategies(target_user.user_id)
+            if saved.visibility == "shared":
+                notify_strategy_references(
+                    AuthUser(
+                        user_id=target_user.user_id,
+                        username=target_user.username,
+                        email=target_user.email,
+                        role=target_user.role,
+                        membership_level=target_user.membership_level,
+                        live_trading_enabled=target_user.live_trading_enabled,
+                    ),
+                    saved,
+                    "变更生命周期",
+                )
+            add_audit_event(
+                user,
+                "admin_strategy_lifecycle_changed",
+                "管理员推进策略状态",
+                f"管理员将用户 {target_user.email or target_user.username} 的策略推进到 {target_status}",
+                {
+                    "target_user_id": target_user.user_id,
+                    "target_email": target_user.email,
+                    "strategy_id": saved.strategy_id,
+                    "strategy_name": saved.strategy_name,
+                    "from_status": previous_status,
+                    "target_status": target_status,
+                    "reason": reason,
+                },
+                "strategy",
+                saved.strategy_id,
+            )
+            return {
+                "status": "ok",
+                "message": f"策略已推进到“{saved.to_dict()['lifecycle_label']}”",
+                "strategy": strategy_payload(saved),
             }
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}

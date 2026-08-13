@@ -357,15 +357,15 @@ const form = reactive({
   symbol: '',
   startDate: toDateTimeInput(defaultStart),
   endDate: toDateTimeInput(defaultEnd),
-  warmupDays: 30,
+  warmupDays: 1,
   isShared: true,
 })
 
 const warmupOptions = [
-  { title: '30 天（推荐）', value: 30 },
+  { title: '1 天（默认，M1 策略）', value: 1 },
   { title: '7 天（短周期）', value: 7 },
   { title: '3 天', value: 3 },
-  { title: '1 天（M1 策略）', value: 1 },
+  { title: '30 天', value: 30 },
   { title: '60 天', value: 60 },
   { title: '90 天', value: 90 },
   { title: '不额外预热', value: 0 },

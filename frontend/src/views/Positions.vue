@@ -31,16 +31,19 @@
             <v-btn color="primary" variant="tonal" prepend-icon="mdi-refresh" :loading="loading" @click="loadPositions">刷新</v-btn>
           </div>
           <v-table v-if="positions.length" class="data-table">
-            <thead><tr><th>订单号</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>当前盈亏</th><th>止损距离</th><th>止盈距离</th><th>更新时间</th><th>操作</th></tr></thead>
+            <thead><tr><th>订单号</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>当前盈亏</th><th>止损价</th><th>止盈价</th><th>保护状态</th><th>更新时间</th><th>操作</th></tr></thead>
             <tbody>
               <tr v-for="pos in positions" :key="pos.ticket">
                 <td class="text-medium-emphasis">#{{ pos.ticket }}</td><td><strong>{{ pos.symbol }}</strong></td>
                 <td><v-chip size="small" :color="pos.type === 'BUY' ? 'success' : 'error'" variant="tonal">{{ pos.type === 'BUY' ? '买入' : '卖出' }}</v-chip></td>
                 <td>{{ pos.volume }}</td><td>{{ formatPrice(pos.price_open) }}</td>
                 <td><strong :class="Number(pos.profit) >= 0 ? 'text-success' : 'text-error'">{{ signedMoney(pos.profit) }}</strong></td>
-                <td>{{ pos.distance_sl || '-' }}</td><td>{{ pos.distance_tp || '-' }}</td><td>{{ formatTime(pos.updated_at) }}</td>
+                <td><strong :class="Number(pos.sl) ? 'text-error' : 'text-medium-emphasis'">{{ formatOptionalPrice(pos.sl) }}</strong><small v-if="pos.distance_sl" class="distance-note">距 {{ pos.distance_sl }}</small></td>
+                <td><strong :class="Number(pos.tp) ? 'text-success' : 'text-medium-emphasis'">{{ formatOptionalPrice(pos.tp) }}</strong><small v-if="pos.distance_tp" class="distance-note">距 {{ pos.distance_tp }}</small></td>
+                <td><v-chip size="small" :color="protectionColor(pos)" variant="tonal">{{ protectionLabel(pos) }}</v-chip></td>
+                <td>{{ formatTime(pos.updated_at) }}</td>
                 <td class="action-cell">
-                  <v-btn size="small" color="primary" variant="tonal" @click="openManagementTimeline(pos)">轨迹</v-btn>
+                  <v-btn size="small" color="primary" variant="tonal" prepend-icon="mdi-timeline-clock-outline" @click="openManagementTimeline(pos)">轨迹</v-btn>
                   <v-btn size="small" color="error" variant="tonal" @click="closePosition(pos)">平仓</v-btn>
                 </td>
               </tr>
@@ -121,6 +124,8 @@
               {{ managementPosition.type === 'BUY' ? '买入' : '卖出' }}
             </v-chip>
             <v-chip variant="tonal">开仓 {{ formatPrice(managementPosition.price_open) }}</v-chip>
+            <v-chip color="error" variant="tonal">止损 {{ formatOptionalPrice(managementPosition.sl) }}</v-chip>
+            <v-chip color="success" variant="tonal">止盈 {{ formatOptionalPrice(managementPosition.tp) }}</v-chip>
           </div>
 
           <v-skeleton-loader v-if="managementLoading" type="list-item-three-line@3"></v-skeleton-loader>
@@ -140,7 +145,10 @@
                 <div class="timeline-metrics">
                   <span>价格 {{ formatPrice(event.price) }}</span>
                   <span>止损 {{ formatPrice(event.stop_loss) }}</span>
+                  <span>止盈 {{ formatOptionalPrice(event.take_profit) }}</span>
                   <span v-if="event.payload?.candidate_stop_loss">候选止损 {{ formatPrice(event.payload.candidate_stop_loss) }}</span>
+                  <span v-if="event.payload?.stop_rule">止损规则 {{ ruleLabel(event.payload.stop_rule.type) }}</span>
+                  <span v-if="event.payload?.take_profit_rule">止盈规则 {{ ruleLabel(event.payload.take_profit_rule.type) }}</span>
                   <span v-if="event.payload?.close_volume">平仓手数 {{ Number(event.payload.close_volume).toFixed(2) }}</span>
                   <span v-if="event.payload?.profit_r">浮盈 {{ Number(event.payload.profit_r).toFixed(2) }}R</span>
                 </div>
@@ -337,6 +345,29 @@ export default {
       minimumFractionDigits: 2,
       maximumFractionDigits: 5
     })
+    const formatOptionalPrice = (value) => {
+      const number = Number(value || 0)
+      if (!number) return '-'
+      return number.toLocaleString('zh-CN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 5
+      })
+    }
+    const protectionLabel = (pos) => {
+      const hasSl = Number(pos.sl || 0) > 0
+      const hasTp = Number(pos.tp || 0) > 0
+      if (hasSl && hasTp) return 'SL/TP 已设置'
+      if (hasSl) return '仅止损'
+      if (hasTp) return '仅止盈'
+      return '未保护'
+    }
+    const protectionColor = (pos) => {
+      const hasSl = Number(pos.sl || 0) > 0
+      const hasTp = Number(pos.tp || 0) > 0
+      if (hasSl && hasTp) return 'success'
+      if (hasSl || hasTp) return 'warning'
+      return 'error'
+    }
     const sourceColor = (source) => ({
       '自动': 'primary',
       '止损触发': 'error',
@@ -349,18 +380,29 @@ export default {
       pivot_trailing: '转折跟进',
       partial_take_profit: '分批止盈',
       stop_loss_update: '止损更新',
+      initial_plan: '初始保护',
       reverse_signal: '反向退出',
       max_holding_bars: '时间退出'
     })[type] || type || '持仓管理'
     const eventColor = (type) => ({
       partial_take_profit: 'success',
       stop_loss_update: 'primary',
+      initial_plan: 'indigo',
       trailing_stop: 'primary',
       break_even: 'teal',
       pivot_trailing: 'orange',
       reverse_signal: 'error',
       max_holding_bars: 'warning'
     })[type] || 'grey'
+    const ruleLabel = (type) => ({
+      signal: '信号建议',
+      pivot: '转折点',
+      atr: 'ATR',
+      fixed_points: '固定点数',
+      fixed_percent: '固定比例',
+      risk_reward: '盈亏比',
+      none: '不设固定止盈',
+    })[type] || type || '-'
 
     onMounted(() => {
       if (selectedAccountId.value) {
@@ -418,9 +460,13 @@ export default {
       formatMoney,
       signedMoney,
       formatPrice,
+      formatOptionalPrice,
+      protectionLabel,
+      protectionColor,
       sourceColor,
       eventTypeLabel,
-      eventColor
+      eventColor,
+      ruleLabel
     }
   }
 }

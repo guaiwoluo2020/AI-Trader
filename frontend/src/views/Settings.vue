@@ -127,7 +127,7 @@
                 <article v-for="item in sharedStrategies" :key="`${item.owner_user_id}-${item.strategy_id}`" class="shared-strategy-card">
                   <div class="shared-strategy-card__head"><div><span class="strategy-symbol">{{ item.symbol }}</span><h3>{{ item.strategy_name }}</h3><p>由 {{ item.owner_username }} 分享</p></div><v-chip :color="getLifecycleColor(item.lifecycle_status)" size="small" variant="tonal">{{ item.lifecycle_label || getLifecycleMeta(item).label }}</v-chip></div>
                   <div class="shared-strategy-card__body"><v-chip size="x-small" variant="outlined">{{ signalSourceCount(item) }} 个信号源</v-chip><v-chip size="x-small" variant="outlined">置信度 {{ item.min_confidence }}%</v-chip><v-chip size="x-small" variant="outlined">{{ getConsistencyLabel(item.consistency_requirement) }}</v-chip></div>
-                  <div class="shared-card-footer"><span>更新于 {{ formatStrategyTime(item.updated_at) }}</span><v-btn color="primary" size="small" :loading="sharedStrategyCopying === `${item.owner_user_id}-${item.strategy_id}`" @click="useSharedStrategy(item)"><v-icon start>mdi-link-variant</v-icon>使用策略</v-btn></div>
+                  <div class="shared-card-footer"><span>更新于 {{ formatStrategyTime(item.updated_at) }}</span><v-btn :color="isSharedStrategyUsed(item) ? 'success' : 'primary'" size="small" :loading="sharedStrategyCopying === sharedStrategyKey(item)" :disabled="isSharedStrategyUsed(item)" @click="useSharedStrategy(item)"><v-icon start>{{ isSharedStrategyUsed(item) ? 'mdi-check-circle-outline' : 'mdi-link-variant' }}</v-icon>{{ isSharedStrategyUsed(item) ? '已使用' : '使用策略' }}</v-btn></div>
                 </article>
               </div>
               <div v-else class="strategy-empty"><v-icon size="52">mdi-bookshelf</v-icon><h3>暂无平台共享策略</h3><p>用户共享的策略会出现在这里。</p></div>
@@ -145,6 +145,8 @@
               <v-chip :color="getLifecycleMeta(selectedStrategy).color" variant="tonal">{{ getLifecycleMeta(selectedStrategy).label }}</v-chip>
               <v-chip variant="outlined"><v-icon start size="16">{{ selectedStrategy.is_shared ? 'mdi-earth' : 'mdi-lock-outline' }}</v-icon>{{ selectedStrategy.is_shared ? '已共享' : '私有' }}</v-chip>
               <v-btn variant="tonal" color="secondary" :loading="strategySaving === `copy-${selectedStrategy.strategy_id}`" @click="copyStrategy(selectedStrategy)"><v-icon start>mdi-content-copy</v-icon>复制新版本</v-btn>
+              <v-btn color="warning" variant="tonal" :loading="paperDeployLoading" @click="openPaperDeployDialog(selectedStrategy)"><v-icon start>mdi-flask-outline</v-icon>部署到模拟</v-btn>
+              <v-btn v-if="selectedStrategy.lifecycle_status === 'production'" color="success" variant="tonal" :loading="liveDeployLoading" @click="openLiveDeployDialog(selectedStrategy)"><v-icon start>mdi-rocket-launch-outline</v-icon>部署到实盘</v-btn>
               <v-btn v-if="!selectedStrategy.readonly_reference" color="primary" :loading="strategySaving === selectedStrategy.strategy_id" :disabled="!hasStrategyChanges" @click="saveSelectedStrategy"><v-icon start>mdi-content-save-outline</v-icon>保存修改</v-btn>
             </div>
           </section>
@@ -198,6 +200,72 @@
         </template>
       </v-col>
     </v-row>
+
+    <v-dialog v-model="paperDeployDialog" max-width="560">
+      <v-card>
+        <v-card-title class="d-flex align-center justify-space-between">
+          <span>部署到模拟账户</span>
+          <v-btn icon="mdi-close" variant="text" @click="paperDeployDialog = false"></v-btn>
+        </v-card-title>
+        <v-card-text>
+          <v-alert type="info" variant="tonal" class="mb-4">
+            模拟运行会绑定当前策略配置。包含 AI 信号源的策略可以直接进入模拟观察；非 AI 策略仍需满足回测准入。
+          </v-alert>
+          <v-select
+            v-model="paperDeployAccountId"
+            :items="paperAccountOptions"
+            item-title="label"
+            item-value="value"
+            label="选择 Paper 账户"
+            :loading="paperDeployLoading"
+            :disabled="paperDeployLoading"
+          ></v-select>
+          <v-alert v-if="!paperAccounts.length && !paperDeployLoading" type="warning" variant="tonal">
+            还没有可用的 Paper 模拟账户，请先到交易账户页面创建。
+          </v-alert>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="paperDeployDialog = false">取消</v-btn>
+          <v-btn color="warning" :disabled="!paperDeployAccountId" :loading="paperDeploySubmitting" @click="deploySelectedStrategyToPaper">
+            开始模拟运行
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="liveDeployDialog" max-width="580">
+      <v-card>
+        <v-card-title class="d-flex align-center justify-space-between">
+          <span>部署到实盘账户</span>
+          <v-btn icon="mdi-close" variant="text" @click="liveDeployDialog = false"></v-btn>
+        </v-card-title>
+        <v-card-text>
+          <v-alert type="warning" variant="tonal" class="mb-4">
+            实盘部署会让策略参与 MT5 实盘账户的自动交易决策。请确认账户风控、持仓管理方案和 EA 连接状态都已检查。
+          </v-alert>
+          <v-select
+            v-model="liveDeployAccountId"
+            :items="liveAccountOptions"
+            item-title="label"
+            item-value="value"
+            label="选择 MT5 实盘账户"
+            :loading="liveDeployLoading"
+            :disabled="liveDeployLoading"
+          ></v-select>
+          <v-alert v-if="!liveAccounts.length && !liveDeployLoading" type="warning" variant="tonal">
+            还没有可用的 MT5 实盘账户。请先启动 EA，并确保账户已启用交易。
+          </v-alert>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="liveDeployDialog = false">取消</v-btn>
+          <v-btn color="success" :disabled="!liveDeployAccountId" :loading="liveDeploySubmitting" @click="deploySelectedStrategyToLive">
+            确认部署实盘
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <!-- 账户与安全 -->
     <v-row v-if="!isStrategyPage && settingsTab === 'account'">
@@ -379,6 +447,58 @@
                 </tr>
               </tbody>
             </v-table>
+          </v-card-text>
+        </v-card>
+        <v-card class="user-settings-card admin-service-card mt-5" elevation="0">
+          <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
+            <div><v-icon class="mr-2">mdi-shield-crown-outline</v-icon>用户策略状态治理</div>
+            <v-btn icon="mdi-refresh" variant="text" :loading="adminStrategiesLoading" @click="loadAdminStrategies" />
+          </v-card-title>
+          <v-card-text>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-4">
+              管理员只推进策略生命周期；进入“可用于实盘”后，用户侧才可以启用策略或执行实盘动作。共享引用策略允许推进到实盘。
+            </v-alert>
+            <div class="strategy-governance-toolbar">
+              <v-text-field v-model="adminStrategySearch" label="搜索用户/策略/品种" prepend-inner-icon="mdi-magnify" density="compact" variant="outlined" hide-details />
+              <v-select v-model="adminStrategyLifecycleFilter" :items="lifecycleFilterOptions" label="生命周期" density="compact" variant="outlined" hide-details />
+            </div>
+            <v-table density="comfortable" class="quota-table admin-strategy-table mt-4">
+              <thead><tr><th>用户</th><th>策略</th><th>信号源</th><th>当前状态</th><th>推进到</th><th>备注</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="item in filteredAdminStrategies" :key="`${item.user_id}:${item.strategy_id}`">
+                  <td>
+                    <strong>{{ item.username }}</strong>
+                    <small>{{ item.email || '未绑定邮箱' }} · {{ membershipLabel(item.membership_level) }} · 实盘{{ item.live_trading_enabled ? '已授权' : '未授权' }}</small>
+                  </td>
+                  <td>
+                    <strong>{{ item.strategy_name }}</strong>
+                    <small>{{ item.symbol }} · {{ item.strategy_id }}<span v-if="item.source_owner_user_id"> · 共享引用</span></small>
+                  </td>
+                  <td>
+                    <v-chip v-for="source in item.signal_sources || []" :key="source.signal_source_id" size="x-small" variant="tonal" class="mr-1 mb-1">
+                      {{ signalSourceLabel(source.source) }} {{ source.period }}
+                    </v-chip>
+                  </td>
+                  <td><v-chip :color="getLifecycleColor(item.lifecycle_status)" size="small" variant="tonal">{{ lifecycleLabel(item.lifecycle_status) }}</v-chip></td>
+                  <td>
+                    <v-select v-model="item.adminTargetStatus" :items="adminLifecycleOptions" density="compact" hide-details style="min-width: 132px" />
+                  </td>
+                  <td>
+                    <v-text-field v-model="item.adminReason" placeholder="可选" density="compact" hide-details style="min-width: 150px" />
+                  </td>
+                  <td>
+                    <v-btn
+                      size="small"
+                      color="primary"
+                      :disabled="item.adminTargetStatus === item.lifecycle_status"
+                      :loading="adminStrategySaving === `${item.user_id}:${item.strategy_id}`"
+                      @click="adminPromoteStrategy(item)"
+                    >推进</v-btn>
+                  </td>
+                </tr>
+              </tbody>
+            </v-table>
+            <v-empty-state v-if="!adminStrategiesLoading && !filteredAdminStrategies.length" icon="mdi-shield-search" title="没有符合条件的策略" text="调整筛选条件后再试试。" />
           </v-card-text>
         </v-card>
       </v-col>
@@ -1020,7 +1140,7 @@
 <script>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { marketAPI } from '@/api/market'
-import { authAPI } from '@/api/trading'
+import { accountAPI, authAPI } from '@/api/trading'
 import { authState } from '@/auth'
 
 export default {
@@ -1127,6 +1247,11 @@ export default {
     // 管理员用户配额白名单
     const quotaUsers = ref([])
     const quotaSaving = ref(null)
+    const adminStrategies = ref([])
+    const adminStrategiesLoading = ref(false)
+    const adminStrategySaving = ref(null)
+    const adminStrategySearch = ref('')
+    const adminStrategyLifecycleFilter = ref('all')
     const invitations = ref([])
     const invitationSaving = ref(false)
     const latestInviteLink = ref('')
@@ -1298,7 +1423,8 @@ export default {
       quotaSaving.value = 'loading'
       try {
         await Promise.all([
-          loadUserQuotas(), loadInvitations(), loadEmailConfig(), loadLLMConfig(), loadLLMAccessRequests()
+          loadUserQuotas(), loadInvitations(), loadEmailConfig(),
+          loadLLMConfig(), loadLLMAccessRequests(), loadAdminStrategies()
         ])
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
@@ -1328,6 +1454,45 @@ export default {
         showError.value = true
       } finally {
         quotaSaving.value = null
+      }
+    }
+
+    const loadAdminStrategies = async () => {
+      if (!isAdmin.value) return
+      adminStrategiesLoading.value = true
+      try {
+        const data = await marketAPI.getAdminStrategies()
+        adminStrategies.value = (data.strategies || []).map(item => ({
+          ...item,
+          adminTargetStatus: item.lifecycle_status || 'draft',
+          adminReason: ''
+        }))
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '加载用户策略状态失败'
+        showError.value = true
+      } finally {
+        adminStrategiesLoading.value = false
+      }
+    }
+
+    const adminPromoteStrategy = async (item) => {
+      const key = `${item.user_id}:${item.strategy_id}`
+      adminStrategySaving.value = key
+      try {
+        const data = await marketAPI.adminTransitionStrategyLifecycle(
+          item.user_id, item.strategy_id, item.adminTargetStatus, item.adminReason
+        )
+        if (data.status !== 'ok') {
+          throw new Error(data.message || '策略状态推进失败')
+        }
+        successMessage.value = data.message || '策略状态已更新'
+        showSuccess.value = true
+        await loadAdminStrategies()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || err.message || '策略状态推进失败'
+        showError.value = true
+      } finally {
+        adminStrategySaving.value = null
       }
     }
 
@@ -1750,6 +1915,31 @@ export default {
     const sharedStrategies = ref([])
     const sharedStrategiesLoading = ref(false)
     const sharedStrategyCopying = ref(null)
+    const paperDeployDialog = ref(false)
+    const paperDeployLoading = ref(false)
+    const paperDeploySubmitting = ref(false)
+    const paperDeployStrategy = ref(null)
+    const paperDeployAccountId = ref(null)
+    const paperAccounts = ref([])
+    const liveDeployDialog = ref(false)
+    const liveDeployLoading = ref(false)
+    const liveDeploySubmitting = ref(false)
+    const liveDeployStrategy = ref(null)
+    const liveDeployAccountId = ref(null)
+    const liveAccounts = ref([])
+    const usedSharedStrategyKeys = computed(() => new Set(
+      strategies.value
+        .filter(strategy => strategy.readonly_reference || strategy.source_owner_user_id)
+        .map(strategy => `${strategy.source_owner_user_id}-${strategy.source_strategy_id}`)
+    ))
+    const paperAccountOptions = computed(() => paperAccounts.value.map(account => ({
+      value: account.account_id,
+      label: `${account.account_name} · ${account.currency || 'USD'} · 余额 ${Number(account.balance || 0).toFixed(2)}`,
+    })))
+    const liveAccountOptions = computed(() => liveAccounts.value.map(account => ({
+      value: account.account_id,
+      label: `${account.account_name} · ${account.mt5_login || 'MT5'} · ${account.mt5_server || '未知服务器'} · ${account.status === 'active' ? '活跃' : account.status}`,
+    })))
     const positionPolicyOptions = computed(() => positionPolicies.value
       .filter(policy => policy.enabled)
       .map(policy => ({ title: policy.name, value: policy.policy_id })))
@@ -1784,6 +1974,7 @@ export default {
       color: 'grey',
       icon: 'mdi-help-circle-outline'
     }
+    const signalSourceLabel = (source) => sourceMetaFor(source).label
     const strategySignalSources = (strategy) => {
       const sources = Array.isArray(strategy?.signal_sources)
         ? strategy.signal_sources.filter(source => source.source !== 'pivot')
@@ -2085,6 +2276,21 @@ export default {
       { title: '全部生命周期', value: 'all' },
       ...Object.entries(lifecycleMeta).map(([value, item]) => ({ title: item.label, value }))
     ]
+    const adminLifecycleOptions = Object.entries(lifecycleMeta).map(([value, item]) => ({
+      title: item.label,
+      value
+    }))
+    const filteredAdminStrategies = computed(() => {
+      const keyword = adminStrategySearch.value.trim().toLowerCase()
+      return adminStrategies.value.filter(item => {
+        const matchesLifecycle = adminStrategyLifecycleFilter.value === 'all' ||
+          item.lifecycle_status === adminStrategyLifecycleFilter.value
+        const matchesSearch = !keyword || [
+          item.username, item.email, item.strategy_name, item.strategy_id, item.symbol
+        ].some(value => String(value || '').toLowerCase().includes(keyword))
+        return matchesLifecycle && matchesSearch
+      })
+    })
     const enabledFilterOptions = [
       { title: '全部状态', value: 'all' },
       { title: '已启用', value: 'enabled' },
@@ -2326,14 +2532,123 @@ export default {
       }
     }
 
+    const sharedStrategyKey = (item) => `${item.owner_user_id}-${item.strategy_id}`
+    const isSharedStrategyUsed = (item) => usedSharedStrategyKeys.value.has(
+      sharedStrategyKey(item)
+    )
+
+    const loadPaperAccountsForDeploy = async () => {
+      paperDeployLoading.value = true
+      try {
+        const data = await accountAPI.list()
+        paperAccounts.value = (data.accounts || []).filter(account => (
+          account.account_type === 'paper'
+          && account.status === 'active'
+          && account.enabled
+        ))
+        paperDeployAccountId.value = paperAccounts.value[0]?.account_id || null
+      } catch (err) {
+        const detail = err.response?.data?.detail || err.message
+        errorMessage.value = `加载模拟账户失败: ${detail}`
+        showError.value = true
+      } finally {
+        paperDeployLoading.value = false
+      }
+    }
+
+    const openPaperDeployDialog = async (strategy) => {
+      if (selectedStrategy.value?.strategy_id === strategy.strategy_id && hasStrategyChanges.value) {
+        errorMessage.value = '请先保存当前策略修改，再部署到模拟账户'
+        showError.value = true
+        return
+      }
+      paperDeployStrategy.value = strategy
+      paperDeployDialog.value = true
+      await loadPaperAccountsForDeploy()
+    }
+
+    const deploySelectedStrategyToPaper = async () => {
+      if (!paperDeployStrategy.value || !paperDeployAccountId.value) return
+      paperDeploySubmitting.value = true
+      try {
+        const data = await accountAPI.deployStrategy(
+          paperDeployAccountId.value,
+          paperDeployStrategy.value.strategy_id
+        )
+        paperDeployDialog.value = false
+        successMessage.value = data.message || '策略已部署到模拟账户'
+        showSuccess.value = true
+        await loadStrategies()
+      } catch (err) {
+        const detail = err.response?.data?.detail || err.message
+        errorMessage.value = `部署到模拟账户失败: ${detail}`
+        showError.value = true
+      } finally {
+        paperDeploySubmitting.value = false
+      }
+    }
+
+    const loadLiveAccountsForDeploy = async () => {
+      liveDeployLoading.value = true
+      try {
+        const data = await accountAPI.list()
+        liveAccounts.value = (data.accounts || []).filter(account => (
+          account.account_type === 'mt5'
+          && account.status === 'active'
+          && account.enabled
+          && account.trading_enabled
+        ))
+        liveDeployAccountId.value = liveAccounts.value[0]?.account_id || null
+      } catch (err) {
+        const detail = err.response?.data?.detail || err.message
+        errorMessage.value = `加载实盘账户失败: ${detail}`
+        showError.value = true
+      } finally {
+        liveDeployLoading.value = false
+      }
+    }
+
+    const openLiveDeployDialog = async (strategy) => {
+      if (selectedStrategy.value?.strategy_id === strategy.strategy_id && hasStrategyChanges.value) {
+        errorMessage.value = '请先保存当前策略修改，再部署到实盘账户'
+        showError.value = true
+        return
+      }
+      liveDeployStrategy.value = strategy
+      liveDeployDialog.value = true
+      await loadLiveAccountsForDeploy()
+    }
+
+    const deploySelectedStrategyToLive = async () => {
+      if (!liveDeployStrategy.value || !liveDeployAccountId.value) return
+      liveDeploySubmitting.value = true
+      try {
+        const data = await accountAPI.deployStrategy(
+          liveDeployAccountId.value,
+          liveDeployStrategy.value.strategy_id
+        )
+        liveDeployDialog.value = false
+        successMessage.value = data.message || '策略已部署到实盘账户'
+        showSuccess.value = true
+        await loadStrategies()
+      } catch (err) {
+        const detail = err.response?.data?.detail || err.message
+        errorMessage.value = `部署到实盘账户失败: ${detail}`
+        showError.value = true
+      } finally {
+        liveDeploySubmitting.value = false
+      }
+    }
+
     const useSharedStrategy = async (item) => {
+      if (isSharedStrategyUsed(item) || sharedStrategyCopying.value) return
       const policyId = newStrategyPolicyId.value || positionPolicyOptions.value[0]?.value || ''
       if (!policyId) {
         errorMessage.value = '请先创建并启用一个持仓管理方案，再使用共享策略'
         showError.value = true
         return
       }
-      const copyKey = `${item.owner_user_id}-${item.strategy_id}`
+      const copyKey = sharedStrategyKey(item)
       sharedStrategyCopying.value = copyKey
       try {
         const data = await marketAPI.useSharedStrategy(
@@ -2347,6 +2662,7 @@ export default {
         successMessage.value = data.message || '平台策略已添加'
         showSuccess.value = true
         await loadStrategies()
+        await loadSharedStrategies()
         strategyWorkspaceTab.value = 'mine'
         const createdId = data.strategy?.strategy_id
         const created = strategies.value.find(strategy => strategy.strategy_id === createdId)
@@ -2769,6 +3085,15 @@ export default {
       formatInvitationTime,
       myQuota,
       loadAdminWorkspace,
+      adminStrategies,
+      adminStrategiesLoading,
+      adminStrategySaving,
+      adminStrategySearch,
+      adminStrategyLifecycleFilter,
+      adminLifecycleOptions,
+      filteredAdminStrategies,
+      loadAdminStrategies,
+      adminPromoteStrategy,
       saveTradeConfig,
       addSymbolConfig,
       removeSymbolConfig,
@@ -2829,6 +3154,24 @@ export default {
       sharedStrategies,
       sharedStrategiesLoading,
       sharedStrategyCopying,
+      sharedStrategyKey,
+      isSharedStrategyUsed,
+      paperDeployDialog,
+      paperDeployLoading,
+      paperDeploySubmitting,
+      paperDeployAccountId,
+      paperAccounts,
+      paperAccountOptions,
+      openPaperDeployDialog,
+      deploySelectedStrategyToPaper,
+      liveDeployDialog,
+      liveDeployLoading,
+      liveDeploySubmitting,
+      liveDeployAccountId,
+      liveAccounts,
+      liveAccountOptions,
+      openLiveDeployDialog,
+      deploySelectedStrategyToLive,
       newStrategySymbol,
       newStrategyName,
       consistencyOptions,
@@ -2848,6 +3191,7 @@ export default {
       getLifecycleColor,
       getLifecycleActions,
       getConsistencyLabel,
+      signalSourceLabel,
       signalSourceCount,
       signalSourceSummary,
       strategySignalSources,
@@ -2905,8 +3249,9 @@ export default {
 .settings-hero__identity { display: flex; align-items: center; gap: 9px; margin-top: 17px; color: rgba(255,255,255,.9); font-size: .8rem; font-weight: 700; }.settings-hero .v-btn { z-index: 1; font-weight: 700; }
 .settings-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 22px 0 10px; }.settings-metrics article { position: relative; min-height: 123px; padding: 19px 21px; overflow: hidden; border: 1px solid var(--settings-line); border-radius: 17px; background: linear-gradient(145deg, #fff, #f7fbf9); }.settings-metrics span,.settings-metrics small { display: block; color: var(--settings-muted); }.settings-metrics span { font-size: .78rem; }.settings-metrics strong { display: block; margin-top: 4px; color: var(--settings-ink); font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(1.25rem, 2.1vw, 1.8rem); line-height: 1.08; }.settings-metrics small { max-width: 85%; margin-top: 7px; font-size: .67rem; line-height: 1.35; }.settings-metrics .v-icon { position: absolute; right: 17px; bottom: 16px; color: #b9d4c8; }
 .settings-main-tabs { margin-top: 22px; border-bottom: 1px solid var(--settings-line); background: rgba(255,255,255,.68); border-radius: 14px 14px 0 0; }.llm-workspace-tabs { margin: -2px -6px 22px; border-bottom: 1px solid var(--settings-line); }
-.user-settings-card { overflow: hidden; border: 1px solid var(--settings-line); border-radius: 19px !important; background: #fff; }.user-settings-card :deep(.v-card-text) { padding: 22px 24px 26px; }.settings-card-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 18px 24px !important; border-bottom: 1px solid var(--settings-line); color: var(--settings-ink); }.settings-card-title>div { display: flex; align-items: center; gap: 10px; font-size: 1rem; font-weight: 700; }.settings-card-title>div .v-icon { color: var(--settings-green); }.settings-card-title>small { color: var(--settings-muted); font-size: .72rem; font-weight: 400; }.admin-service-card { border-color: #c8ddd4; background: linear-gradient(145deg, #fff 0%, #f7fcfa 100%); }.account-summary { padding: 8px; border: 1px solid #e2ece7; border-radius: 13px; background: #f9fcfa; }.quota-table :deep(th) { color: var(--settings-muted); font-size: .72rem; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }.quota-table :deep(td) { padding-top: 12px; padding-bottom: 12px; }.quota-table small { display: block; margin-top: 3px; color: var(--settings-muted); font-size: .7rem; }
-.invitation-form { display: grid; grid-template-columns: minmax(220px, 1fr) 140px 140px auto; gap: 12px; align-items: start; }.invite-result { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border: 1px solid #b9ddca; border-radius: 13px; background: #eef9f3; }.invite-result div { min-width: 0; }.invite-result small,.invite-result strong { display: block; }.invite-result strong { overflow-wrap: anywhere; color: #176b4d; }
+	.user-settings-card { overflow: hidden; border: 1px solid var(--settings-line); border-radius: 19px !important; background: #fff; }.user-settings-card :deep(.v-card-text) { padding: 22px 24px 26px; }.settings-card-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 18px 24px !important; border-bottom: 1px solid var(--settings-line); color: var(--settings-ink); }.settings-card-title>div { display: flex; align-items: center; gap: 10px; font-size: 1rem; font-weight: 700; }.settings-card-title>div .v-icon { color: var(--settings-green); }.settings-card-title>small { color: var(--settings-muted); font-size: .72rem; font-weight: 400; }.admin-service-card { border-color: #c8ddd4; background: linear-gradient(145deg, #fff 0%, #f7fcfa 100%); }.account-summary { padding: 8px; border: 1px solid #e2ece7; border-radius: 13px; background: #f9fcfa; }.quota-table :deep(th) { color: var(--settings-muted); font-size: .72rem; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }.quota-table :deep(td) { padding-top: 12px; padding-bottom: 12px; }.quota-table small { display: block; margin-top: 3px; color: var(--settings-muted); font-size: .7rem; }
+	.strategy-governance-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) 220px; gap: 12px; align-items: center; }.admin-strategy-table { min-width: 980px; }.admin-strategy-table :deep(.v-table__wrapper) { overflow-x: auto; }
+	.invitation-form { display: grid; grid-template-columns: minmax(220px, 1fr) 140px 140px auto; gap: 12px; align-items: start; }.invite-result { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border: 1px solid #b9ddca; border-radius: 13px; background: #eef9f3; }.invite-result div { min-width: 0; }.invite-result small,.invite-result strong { display: block; }.invite-result strong { overflow-wrap: anywhere; color: #176b4d; }
 .admission-panel { padding: 16px; border: 1px solid #dbe7e1; border-radius: 14px; background: linear-gradient(135deg, #f5f9f6, #fffaf0); }
 .admission-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .admission-title strong,.admission-title span { display: block; }.admission-title span { margin-top: 2px; color: #7a8982; font-size: .72rem; }
@@ -2996,5 +3341,5 @@ export default {
 .shared-ai-runtime-list summary { margin-top: 9px; color: #176b4d; font-size: .76rem; font-weight: 700; cursor: pointer; }
 .shared-prompt-preview { max-height: 130px; margin-top: 8px; padding: 9px; overflow: auto; border-radius: 8px; background: rgba(255,255,255,.82); color: #53675e; font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .7rem; white-space: pre-wrap; }
 @media (max-width: 960px) { .strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; }.strategy-toolbar { grid-template-columns: 1fr 1fr; }.strategy-toolbar>*:first-child { grid-column: 1 / -1; } }
-@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.settings-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero,.settings-hero { padding: 26px 22px; }.strategy-primary-action,.settings-hero .v-btn { width: 100%; }.strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article,.settings-metrics article { min-height: 104px; padding: 15px; }.settings-metrics strong { font-size: 1.28rem; }.settings-card-title { align-items: flex-start; flex-direction: column; }.user-settings-card :deep(.v-card-text) { padding: 18px 16px 22px; }.quota-table { min-width: 860px; }.quota-table :deep(.v-table__wrapper) { overflow-x: auto; }.invitation-form { grid-template-columns: 1fr; }.invite-result { align-items: flex-start; flex-direction: column; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
+	@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.settings-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero,.settings-hero { padding: 26px 22px; }.strategy-primary-action,.settings-hero .v-btn { width: 100%; }.strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article,.settings-metrics article { min-height: 104px; padding: 15px; }.settings-metrics strong { font-size: 1.28rem; }.settings-card-title { align-items: flex-start; flex-direction: column; }.user-settings-card :deep(.v-card-text) { padding: 18px 16px 22px; }.quota-table { min-width: 860px; }.quota-table :deep(.v-table__wrapper) { overflow-x: auto; }.strategy-governance-toolbar { grid-template-columns: 1fr; }.invitation-form { grid-template-columns: 1fr; }.invite-result { align-items: flex-start; flex-direction: column; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
 </style>

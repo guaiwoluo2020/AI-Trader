@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from backtest_engine import (
     BacktestCanceled,
+    BacktestEngineError,
     BacktestLLMCache,
     BacktestTaskRepository,
     BacktestWorker,
@@ -164,6 +165,25 @@ class M1BacktestEngineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "LLM unavailable"):
             M1BacktestEngine(llm_provider=FailedProvider()).run(self.task())
+
+    def test_shared_reference_ai_backtest_fails_with_clear_message(self):
+        task = self.task()
+        task["strategy_snapshot"]["signal_sources"] = [{
+            "signal_source_id": "shared-ai",
+            "source": "ai_entry",
+            "enabled": True,
+            "period": "M1",
+            "weight": 100,
+            "params": {
+                "analysis_mode": "shared_reference",
+                "shared_runtime_id": "owner:strategy:source",
+                "min_confidence": 70,
+            },
+        }]
+        task["strategy_snapshot"]["signal_config"] = {}
+
+        with self.assertRaisesRegex(BacktestEngineError, "共享AI引用信号源当前不支持历史回测"):
+            M1BacktestEngine(llm_provider=FakeLLMProvider()).run(task)
 
     def test_cancel_callback_stops_replay_cooperatively(self):
         checkpoints = []

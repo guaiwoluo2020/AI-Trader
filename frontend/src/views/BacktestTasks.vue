@@ -686,8 +686,8 @@
         <v-card-title class="deployment-dialog-header">
           <div>
             <div class="section-tag">PAPER VALIDATION</div>
-            <h2>部署回测策略快照</h2>
-            <span>模拟运行会锁定本次回测使用的策略参数</span>
+            <h2>部署到模拟账户</h2>
+            <span>部署前会校验回测快照与当前策略配置是否一致</span>
           </div>
           <v-btn icon="mdi-close" variant="text" @click="deploymentDialog = false" />
         </v-card-title>
@@ -720,7 +720,7 @@
           />
           <div class="snapshot-note">
             <v-icon icon="mdi-lock-check-outline" size="20" />
-            <div><strong>不可变策略快照</strong><span>后续编辑当前策略不会改变这次模拟运行参数；如版本发生变化，需要重新回测后部署。</span></div>
+            <div><strong>一致性校验</strong><span>模拟运行引用当前策略配置；如果当前策略和本次回测快照不一致，系统会拒绝部署并要求重新回测。</span></div>
           </div>
         </v-card-text>
         <v-card-actions class="deployment-dialog-actions">

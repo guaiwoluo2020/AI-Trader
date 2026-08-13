@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-from market.models import PositionManagementPolicy, TradingStrategy
+from market.models import PositionManagementPolicy, StrategyLifecycle, TradingStrategy
 from market.services.position_manager import PositionManager
 from membership import MembershipService
 from sqlite_storage import (
@@ -56,28 +56,88 @@ class PaperTradingService:
             """,
             (user_id,),
         )
-        return {
-            "strategies": [{
+        items = []
+        for row in strategies:
+            config = json.loads(row["config_json"])
+            lifecycle = config.get(
+                "lifecycle_status", StrategyLifecycle.PRODUCTION
+            )
+            ai_direct = self._ai_direct_paper_eligible(config)
+            paper_eligible = (
+                lifecycle in {
+                    StrategyLifecycle.BACKTEST_PASSED,
+                    StrategyLifecycle.PAPER_TRADING,
+                    StrategyLifecycle.PRODUCTION,
+                }
+                or ai_direct
+            )
+            items.append({
                 "strategy_id": row["strategy_id"],
                 "symbol": row["symbol"],
-                "strategy_name": json.loads(row["config_json"]).get(
-                    "strategy_name", row["strategy_id"]
+                "strategy_name": config.get("strategy_name", row["strategy_id"]),
+                "enabled": bool(config.get("enabled", True)),
+                "auto_execute": bool(config.get("auto_execute", False)),
+                "lifecycle_status": lifecycle,
+                "paper_eligible": paper_eligible,
+                "paper_direct_allowed": ai_direct,
+                "paper_eligibility_reason": (
+                    "包含 AI 信号源，可跳过回测直接进入模拟观察"
+                    if ai_direct and lifecycle not in {
+                        StrategyLifecycle.BACKTEST_PASSED,
+                        StrategyLifecycle.PAPER_TRADING,
+                        StrategyLifecycle.PRODUCTION,
+                    }
+                    else ""
                 ),
-                "enabled": bool(json.loads(row["config_json"]).get("enabled", True)),
-                "auto_execute": bool(
-                    json.loads(row["config_json"]).get("auto_execute", False)
-                ),
-                "lifecycle_status": json.loads(row["config_json"]).get(
-                    "lifecycle_status", "production"
-                ),
-                "paper_eligible": json.loads(row["config_json"]).get(
-                    "lifecycle_status", "production"
-                ) in {"backtest_passed", "paper_trading", "production"},
-                "live_eligible": json.loads(row["config_json"]).get(
-                    "lifecycle_status", "production"
-                ) == "production",
-            } for row in strategies],
+                "live_eligible": lifecycle == StrategyLifecycle.PRODUCTION,
+            })
+        return {
+            "strategies": items,
         }
+
+    @staticmethod
+    def _has_enabled_ai_signal(strategy_data: Dict) -> bool:
+        return any(
+            source.get("source") == "ai_entry"
+            and source.get("enabled", True)
+            for source in (strategy_data.get("signal_sources") or [])
+        )
+
+    @classmethod
+    def _ai_direct_paper_eligible(cls, strategy_data: Dict) -> bool:
+        return (
+            cls._has_enabled_ai_signal(strategy_data)
+            and strategy_data.get("lifecycle_status") != StrategyLifecycle.RETIRED
+        )
+
+    def _promote_for_paper_deployment(
+        self, user_id: int, strategy: TradingStrategy, account_name: str,
+        *, direct_ai: bool = False,
+    ) -> TradingStrategy:
+        if strategy.lifecycle_status == StrategyLifecycle.BACKTEST_PASSED:
+            strategy.transition_lifecycle(
+                StrategyLifecycle.PAPER_TRADING,
+                f"部署到模拟账户 {account_name}",
+            )
+        elif direct_ai and strategy.lifecycle_status != StrategyLifecycle.PAPER_TRADING:
+            now = datetime.now()
+            previous = strategy.lifecycle_status
+            strategy.lifecycle_status = StrategyLifecycle.PAPER_TRADING
+            strategy.lifecycle_updated_at = now
+            strategy.updated_at = now
+            strategy.enabled = False
+            strategy.auto_execute = False
+            strategy.lifecycle_history.append({
+                "from_status": previous,
+                "to_status": StrategyLifecycle.PAPER_TRADING,
+                "changed_at": now.isoformat(),
+                "reason": (
+                    f"包含 AI 信号源，跳过回测直接部署到模拟账户 "
+                    f"{account_name} 观察"
+                ),
+            })
+        StrategyConfigRepository(self.storage).save_strategy(user_id, strategy)
+        return strategy
 
     def deploy(
         self, user_id: int, account_id: int, strategy_id: str,
@@ -88,11 +148,13 @@ class PaperTradingService:
         account = self._account(user_id, account_id)
         current_strategy = TradingStrategy.from_dict(
             self._strategy_config(user_id, strategy_id)
-        ).to_dict()
+        )
         strategy = TradingStrategy.from_dict(
-            strategy_snapshot or current_strategy
+            strategy_snapshot or current_strategy.to_dict()
         ).to_dict()
-        if strategy_fingerprint(strategy) != strategy_fingerprint(current_strategy):
+        if strategy_fingerprint(strategy) != strategy_fingerprint(
+            current_strategy.to_dict()
+        ):
             raise ValueError("回测策略快照与当前策略版本不一致，请重新回测")
         policy_id = str(strategy.get("position_management_policy_id", ""))
         policy = self.position_policies.get(user_id, policy_id)
@@ -101,8 +163,27 @@ class PaperTradingService:
         strategy["position_management_policy_snapshot"] = policy.to_dict()
         lifecycle = strategy.get("lifecycle_status", "production")
         if account.account_type == "paper":
-            if lifecycle not in {"backtest_passed", "paper_trading", "production"}:
-                raise ValueError("策略通过回测后才能部署到模拟账户")
+            normal_eligible = lifecycle in {
+                StrategyLifecycle.BACKTEST_PASSED,
+                StrategyLifecycle.PAPER_TRADING,
+                StrategyLifecycle.PRODUCTION,
+            }
+            direct_ai_bypass = (
+                not normal_eligible
+                and self._ai_direct_paper_eligible(current_strategy.to_dict())
+            )
+            if not normal_eligible and not direct_ai_bypass:
+                raise ValueError("策略通过回测后才能部署到模拟账户；包含 AI 信号源的策略可直接模拟观察")
+            if (
+                current_strategy.lifecycle_status == StrategyLifecycle.BACKTEST_PASSED
+                or direct_ai_bypass
+            ):
+                current_strategy = self._promote_for_paper_deployment(
+                    user_id, current_strategy, account.account_name,
+                    direct_ai=direct_ai_bypass,
+                )
+                strategy = current_strategy.to_dict()
+                strategy["position_management_policy_snapshot"] = policy.to_dict()
             execution_mode = "paper"
         elif account.account_type == "mt5":
             self.memberships.assert_live_trading(user_id, account.account_id)
@@ -191,7 +272,7 @@ class PaperTradingService:
             self._strategy_config(user_id, task["strategy_id"])
         ).to_dict()
         if strategy_fingerprint(snapshot) != strategy_fingerprint(current):
-            raise ValueError("回测策略快照与当前策略版本不一致，请重新回测")
+            raise ValueError("回测策略快照与当前策略配置不一致，请重新回测后再部署模拟")
         lifecycle = current.get("lifecycle_status", "draft")
         if lifecycle == "backtesting":
             strategy_model = TradingStrategy.from_dict(current)
@@ -213,9 +294,8 @@ class PaperTradingService:
             lifecycle = "backtest_passed"
         if lifecycle not in {"backtest_passed", "paper_trading", "production"}:
             raise ValueError("策略需要先进入回测中，并通过回测准入门槛")
-        snapshot["lifecycle_status"] = lifecycle
         return self.deploy(
-            user_id, account_id, task["strategy_id"], snapshot,
+            user_id, account_id, task["strategy_id"],
             source_backtest_task_id=task_id, duration_days=duration_days,
         )
 
@@ -510,6 +590,14 @@ class PaperTradingService:
             """,
             (user_id, account_id),
         )]
+        positions = [dict(row) for row in self.storage.fetchall(
+            "SELECT * FROM paper_positions WHERE account_id = ? AND status = 'open' ORDER BY opened_at DESC",
+            (account_id,),
+        )]
+        for position in positions:
+            position["management_events"] = self.position_events.list_for_position(
+                user_id, account_id, position["position_id"]
+            )
         return {
             "account": self._account_dict(account),
             "settings": settings,
@@ -518,10 +606,7 @@ class PaperTradingService:
                 "SELECT * FROM paper_orders WHERE account_id = ? ORDER BY requested_at DESC LIMIT 200",
                 (account_id,),
             )],
-            "positions": [dict(row) for row in self.storage.fetchall(
-                "SELECT * FROM paper_positions WHERE account_id = ? AND status = 'open' ORDER BY opened_at DESC",
-                (account_id,),
-            )],
+            "positions": positions,
             "trades": [dict(row) for row in self.storage.fetchall(
                 "SELECT * FROM paper_trades WHERE account_id = ? ORDER BY closed_at DESC LIMIT 200",
                 (account_id,),
@@ -998,6 +1083,39 @@ class PaperTradingService:
                         now, now, now,
                     ),
                 )
+                policy_snapshot = json.loads(order["position_policy_snapshot_json"] or "{}")
+                conn.execute(
+                    """
+                    INSERT INTO position_management_events(
+                        event_id, user_id, account_id, position_key, position_id,
+                        ticket, symbol, event_time, event_type, rule_type, status,
+                        message, price, stop_loss, take_profit, volume,
+                        payload_json, created_at
+                    ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        uuid.uuid4().hex, user_id, account_id, position_id,
+                        position_id, symbol, now, "initial_plan",
+                        "initial_plan", "triggered",
+                        "模拟成交后建立初始止损止盈保护",
+                        fill_price, float(order["stop_loss"]),
+                        float(order["take_profit"]), volume,
+                        json.dumps({
+                            "policy_id": policy_snapshot.get("policy_id", ""),
+                            "policy_name": policy_snapshot.get("name", ""),
+                            "initial_risk": abs(fill_price - float(order["stop_loss"])),
+                            "stop_rule": (
+                                policy_snapshot.get("config", {})
+                                .get("initial_stop_rules", [{}])[0]
+                            ),
+                            "take_profit_rule": (
+                                policy_snapshot.get("config", {})
+                                .get("initial_take_profit_rules", [{}])[0]
+                            ),
+                        }, ensure_ascii=False),
+                        now,
+                    ),
+                )
                 open_count += 1
                 result["filled"] += 1
 
@@ -1369,13 +1487,21 @@ class PaperTradingService:
         return config
 
     def _deployment_strategy(self, user_id: int, deployment) -> Dict:
-        raw_snapshot = deployment["strategy_snapshot_json"] \
-            if "strategy_snapshot_json" in deployment.keys() else ""
-        if raw_snapshot:
-            snapshot = json.loads(raw_snapshot)
-            if snapshot:
-                return snapshot
-        return self._strategy_config(user_id, deployment["strategy_id"])
+        try:
+            strategy = self._strategy_config(user_id, deployment["strategy_id"])
+        except ValueError:
+            raw_snapshot = deployment["strategy_snapshot_json"] \
+                if "strategy_snapshot_json" in deployment.keys() else ""
+            if not raw_snapshot:
+                raise
+            strategy = json.loads(raw_snapshot)
+        policy_id = str(strategy.get("position_management_policy_id", ""))
+        policy = self.position_policies.get(user_id, policy_id)
+        if policy is not None:
+            strategy["position_management_policy_snapshot"] = policy.to_dict()
+        # A deployment is the runtime enablement switch for paper trading.
+        strategy["enabled"] = True
+        return strategy
 
     def _paper_account(self, user_id: int, account_id: int):
         account = self.accounts.get_by_id(user_id, account_id)

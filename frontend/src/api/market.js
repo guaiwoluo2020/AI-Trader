@@ -708,6 +708,19 @@ export const marketAPI = {
     return response.data
   },
 
+  async getAdminStrategies() {
+    const response = await api.get('/admin/strategies')
+    return response.data
+  },
+
+  async adminTransitionStrategyLifecycle(userId, strategyId, targetStatus, reason = '') {
+    const response = await api.post(
+      `/admin/strategies/${encodeURIComponent(userId)}/${encodeURIComponent(strategyId)}/lifecycle`,
+      { target_status: targetStatus, reason }
+    )
+    return response.data
+  },
+
   async getStrategyAdmission() {
     const response = await api.get('/strategy-admission')
     return response.data

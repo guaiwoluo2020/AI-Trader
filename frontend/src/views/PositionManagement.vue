@@ -15,7 +15,18 @@
       {{ message }}
     </v-alert>
 
-    <v-row v-if="policies.length">
+    <v-card class="policy-workspace" elevation="0">
+      <v-tabs v-model="activeTab" color="primary" class="policy-tabs">
+        <v-tab value="mine"><v-icon start>mdi-shield-account-outline</v-icon>我的方案 <v-chip size="x-small" class="ml-2">{{ policies.length }}</v-chip></v-tab>
+        <v-tab value="shared" @click="loadShared"><v-icon start>mdi-shield-star-outline</v-icon>平台方案库 <v-chip size="x-small" class="ml-2">{{ sharedPolicies.length }}</v-chip></v-tab>
+      </v-tabs>
+
+      <v-window v-model="activeTab">
+        <v-window-item value="mine">
+          <v-alert type="info" variant="tonal" density="compact" class="mx-5 mt-5">
+            共享方案被其他用户应用后会冻结，不能再原地修改；需要演进时请复制新版本。
+          </v-alert>
+          <v-row v-if="policies.length" class="pa-5">
       <v-col v-for="policy in policies" :key="policy.policy_id" cols="12" md="6" xl="4">
         <v-card class="policy-card" elevation="0">
           <v-card-text>
@@ -46,10 +57,64 @@
         </v-card>
       </v-col>
     </v-row>
-    <v-card v-else class="empty-state" elevation="0">
+    <v-card v-else class="empty-state ma-5" elevation="0">
       <v-icon size="56">mdi-shield-plus-outline</v-icon>
       <h2>先建立第一套持仓管理方案</h2>
       <p>策略需要绑定方案后才能进入回测。</p>
+    </v-card>
+        </v-window-item>
+
+        <v-window-item value="shared">
+          <div class="shared-head">
+            <div>
+              <h3>平台共享持仓方案</h3>
+              <p>可以直接引用其他用户共享的方案。引用后显示在“我的方案”，可直接被策略选择；如需修改，请先复制为私有方案。</p>
+            </div>
+            <v-btn icon="mdi-refresh" variant="text" :loading="sharedLoading" @click="loadShared"></v-btn>
+          </div>
+          <div v-if="sharedLoading" class="empty-state compact"><v-progress-circular indeterminate color="primary" /></div>
+          <v-row v-else-if="sharedPolicies.length" class="pa-5 pt-0">
+            <v-col v-for="policy in sharedPolicies" :key="`${policy.owner_user_id}-${policy.policy_id}`" cols="12" md="6" xl="4">
+              <v-card class="policy-card shared-card" elevation="0">
+                <v-card-text>
+                  <div class="d-flex align-start justify-space-between">
+                    <div>
+                      <div class="text-h6 font-weight-bold">{{ policy.name }}</div>
+                      <div class="text-caption text-medium-emphasis">由 {{ policy.owner_username }} 分享 · #{{ policy.policy_id }}</div>
+                    </div>
+                    <v-chip color="teal" size="small" variant="tonal">共享</v-chip>
+                  </div>
+                  <div class="rule-summary mt-5">
+                    <div><span>初始止损</span><strong>{{ ruleNames(policy.config.initial_stop_rules) }}</strong></div>
+                    <div><span>初始止盈</span><strong>{{ ruleNames(policy.config.initial_take_profit_rules) }}</strong></div>
+                    <div><span>持仓动作</span><strong>{{ ruleNames(policy.config.management_rules) || '仅固定保护' }}</strong></div>
+                  </div>
+                  <v-alert :type="isSharedPolicyUsed(policy) ? 'success' : 'info'" variant="tonal" density="compact" class="mt-4">
+                    {{ policy.usage_notice || '使用后会创建只读引用，源方案冻结后通过复制新版本演进。' }}
+                  </v-alert>
+                </v-card-text>
+                <v-card-actions>
+                  <v-btn
+                    :color="isSharedPolicyUsed(policy) ? 'success' : 'primary'"
+                    variant="tonal"
+                    :prepend-icon="isSharedPolicyUsed(policy) ? 'mdi-check-circle-outline' : 'mdi-link-variant'"
+                    :loading="usingSharedId === sharedPolicyKey(policy)"
+                    :disabled="isSharedPolicyUsed(policy)"
+                    @click="useShared(policy)"
+                  >
+                    {{ isSharedPolicyUsed(policy) ? '已使用' : '使用方案' }}
+                  </v-btn>
+                </v-card-actions>
+              </v-card>
+            </v-col>
+          </v-row>
+          <v-card v-else class="empty-state ma-5" elevation="0">
+            <v-icon size="56">mdi-shield-search</v-icon>
+            <h2>暂无平台共享方案</h2>
+            <p>当其他用户共享持仓管理方案后，会出现在这里。</p>
+          </v-card>
+        </v-window-item>
+      </v-window>
     </v-card>
 
     <v-dialog v-model="dialog" max-width="920" persistent>
@@ -117,18 +182,27 @@ const partialMoveOptions = [
   { title: '跟随移动止损', value: 'trail' },
 ]
 const policies = ref([])
+const sharedPolicies = ref([])
+const activeTab = ref('mine')
 const dialog = ref(false)
 const saving = ref(false)
+const sharedLoading = ref(false)
+const usingSharedId = ref('')
 const message = ref('')
 const messageType = ref('success')
 const deepClone = value => JSON.parse(JSON.stringify(value))
+const usedSharedPolicyKeys = computed(() => new Set(
+  policies.value
+    .filter(policy => policy.readonly_reference)
+    .map(policy => `${policy.source_owner_user_id}-${policy.source_policy_id}`)
+))
 
 const defaultConfig = () => ({
   initial_stop_rules: [{ type: 'pivot', period: 'M5', selection: 'nearest', max_age_bars: 100, buffer: { type: 'fixed_points', value: 0 } }, { type: 'fixed_percent', value: 0.003 }],
   initial_take_profit_rules: [{ type: 'risk_reward', value: 2 }],
   management_rules: [], min_risk_reward: 1, min_stop_distance: 0, max_stop_distance: 0,
 })
-const form = reactive({ policy_id: '', name: '', enabled: true, config: defaultConfig() })
+const form = reactive({ policy_id: '', name: '', enabled: true, is_shared: false, config: defaultConfig() })
 const management = reactive({
   breakEven: true, breakEvenR: 1,
   trailing: true, trailingActivationR: 1, trailingR: 0.8,
@@ -188,11 +262,48 @@ function addPartialLevel() {
 }
 function removePartialLevel(index) { management.partialLevels.splice(index, 1) }
 async function load() { const data = await marketAPI.getPositionManagementPolicies(); policies.value = data.policies || [] }
+async function loadShared() {
+  sharedLoading.value = true
+  try {
+    const data = await marketAPI.getSharedPositionManagementPolicies()
+    sharedPolicies.value = data.policies || []
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '加载平台方案库失败'
+  } finally {
+    sharedLoading.value = false
+  }
+}
+function sharedPolicyKey(policy) {
+  return `${policy.owner_user_id}-${policy.policy_id}`
+}
+function isSharedPolicyUsed(policy) {
+  return usedSharedPolicyKeys.value.has(sharedPolicyKey(policy))
+}
 function openCreate() { Object.assign(form, { policy_id: '', name: '', enabled: true, is_shared: false, config: defaultConfig() }); syncManagement([{ type: 'break_even', activation_r: 1 }, { type: 'pivot_trailing', period: 'M5' }, { type: 'trailing_stop', activation_r: 1, distance_r: 0.8 }, { type: 'partial_take_profit', levels: [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }, { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' }] }]); dialog.value = true }
 function openEdit(policy) { Object.assign(form, deepClone(policy)); syncManagement(form.config.management_rules); dialog.value = true }
 async function save() { saving.value = true; try { form.config.management_rules = buildManagementRules(); const payload = { name: form.name, enabled: form.enabled, visibility: form.is_shared ? 'shared' : 'private', config: form.config }; if (form.policy_id) await marketAPI.updatePositionManagementPolicy(form.policy_id, payload); else await marketAPI.createPositionManagementPolicy(payload); dialog.value = false; messageType.value = 'success'; message.value = '持仓管理方案已保存'; await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } finally { saving.value = false } }
 async function remove(policy) { if (!confirm(`确定删除“${policy.name}”吗？`)) return; try { await marketAPI.deletePositionManagementPolicy(policy.policy_id); await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } }
 async function copyPolicy(policy) { try { const data = await marketAPI.copyPositionManagementPolicy(policy.policy_id); messageType.value = 'success'; message.value = data.message || '已复制方案'; await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } }
+async function useShared(policy) {
+  if (isSharedPolicyUsed(policy) || usingSharedId.value) return
+  usingSharedId.value = sharedPolicyKey(policy)
+  try {
+    const data = await marketAPI.useSharedPositionManagementPolicy(
+      policy.owner_user_id, policy.policy_id
+    )
+    messageType.value = 'success'
+    message.value = data.message || '已添加共享方案引用'
+    activeTab.value = 'mine'
+    await load()
+    await loadShared()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '使用共享方案失败'
+  } finally {
+    usingSharedId.value = ''
+  }
+}
 function ruleNames(rules = []) { return rules.map(rule => labels[rule.type] || rule.type).join(' → ') }
 onMounted(load)
 </script>
@@ -202,9 +313,16 @@ onMounted(load)
 .page-hero { display:flex; align-items:end; justify-content:space-between; padding:32px; border-radius:24px; color:#17342d; background:linear-gradient(125deg,#dff3e8,#f4edda 72%,#f4d8b5); }
 .page-hero h1 { font-family:Georgia,serif; font-size:42px; line-height:1; margin:6px 0 10px; }
 .page-hero p { margin:0; color:#52635e; }.eyebrow { font-size:12px; letter-spacing:.22em; font-weight:800; color:#23745c; }
+.policy-workspace { overflow:hidden; border:1px solid #dce5df; border-radius:24px; background:rgba(255,255,255,.76); }
+.policy-tabs { padding:8px 16px 0; border-bottom:1px solid #e2ebe5; background:rgba(248,251,249,.88); }
+.shared-head { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:24px 26px 12px; }
+.shared-head h3 { margin:0; color:#17342d; font-size:20px; }
+.shared-head p { margin:4px 0 0; color:#607269; font-size:13px; }
 .policy-card { height:100%; border:1px solid #dce5df; border-radius:20px; background:linear-gradient(155deg,#fff,#f8faf7); }
+.shared-card { background:linear-gradient(155deg,#fff,#effbf6); }
 .rule-summary { display:grid; gap:12px; }.rule-summary div { display:flex; flex-direction:column; padding:12px; border-radius:12px; background:#edf4ef; }.rule-summary span { font-size:11px; color:#718078; }.rule-summary strong { margin-top:3px; font-size:13px; }
 .empty-state { padding:70px; text-align:center; border:1px dashed #aebdb4; border-radius:22px; color:#607269; }
+.empty-state.compact { min-height:150px; display:grid; place-items:center; padding:34px; }
 .section-title { font-size:14px; font-weight:800; color:#26483d; }.rule-chain { padding:18px; border:1px solid #dce7e0; border-radius:16px; background:#f8fbf9; }
 .rule-row { display:grid; grid-template-columns:32px minmax(160px,1fr) 110px 110px 62px; gap:10px; align-items:center; margin-top:8px; }.rule-row select,.rule-row input { height:40px; border:1px solid #c9d6ce; border-radius:8px; padding:0 10px; background:white; }.rule-index { width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#245d4c;color:white;font-size:12px; }.add-rule,.remove-rule { border:0;background:transparent;color:#23745c;cursor:pointer;font-weight:700; }.remove-rule { color:#b84b43; }
 .partial-levels { display:grid; gap:10px; padding:16px; border:1px solid #dce7e0; border-radius:16px; background:#fbfdfb; }

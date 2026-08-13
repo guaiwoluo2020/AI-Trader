@@ -578,7 +578,7 @@ class BacktestDatasetService:
         symbol: str,
         requested_start: int,
         requested_end: int,
-        warmup_days: int = 30,
+        warmup_days: int = 1,
         visibility: str = "shared",
     ) -> Dict:
         name = str(dataset_name or "").strip()

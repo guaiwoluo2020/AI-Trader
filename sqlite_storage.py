@@ -3790,6 +3790,17 @@ class PositionManagementPolicyRepository:
         source = self._raw_get(owner_user_id, policy_id)
         if source is None or source.visibility != "shared" or not source.enabled:
             return None
+        existing = self.storage.fetchone(
+            """
+            SELECT policy_id FROM position_management_policies
+            WHERE user_id = ? AND source_owner_user_id = ? AND source_policy_id = ?
+            ORDER BY created_at, policy_id
+            LIMIT 1
+            """,
+            (int(target_user_id), int(owner_user_id), str(policy_id)),
+        )
+        if existing:
+            return self.get(int(target_user_id), existing["policy_id"])
         owner = UserRepository(self.storage).get_by_id(int(owner_user_id))
         now = datetime.now()
         reference = PositionManagementPolicy(
@@ -4102,6 +4113,37 @@ class StrategyConfigRepository:
 
         return []
 
+    def list_admin_strategies(self) -> List[Dict]:
+        from market.models.trading_strategy import TradingStrategy
+
+        rows = self.storage.fetchall(
+            """
+            SELECT strategy.user_id, users.username, users.email, users.role,
+                   users.membership_level, users.live_trading_enabled,
+                   strategy.strategy_id, strategy.symbol, strategy.config_json,
+                   strategy.created_at, strategy.updated_at
+            FROM user_strategy_configs AS strategy
+            JOIN users ON users.id = strategy.user_id
+            ORDER BY strategy.updated_at DESC, strategy.created_at DESC
+            """
+        )
+        items = []
+        for row in rows:
+            strategy = self._materialize_shared_reference(
+                TradingStrategy.from_dict(json.loads(row["config_json"]))
+            )
+            payload = strategy.to_dict()
+            payload.update({
+                "user_id": int(row["user_id"]),
+                "username": row["username"],
+                "email": row["email"],
+                "user_role": row["role"],
+                "membership_level": row["membership_level"],
+                "live_trading_enabled": bool(row["live_trading_enabled"]),
+            })
+            items.append(payload)
+        return items
+
     def get_strategy(self, user_id: int, symbol: str) -> Optional["TradingStrategy"]:
         """兼容旧调用，返回该品种创建最早的策略。"""
         strategies = self.get_strategies(user_id, symbol)
@@ -4207,6 +4249,22 @@ class StrategyConfigRepository:
         source = self._raw_strategy_by_id(int(owner_user_id), strategy_id)
         if source is None or source.visibility != "shared":
             return None
+        existing = self.storage.fetchone(
+            """
+            SELECT strategy_id
+            FROM user_strategy_configs
+            WHERE user_id = ?
+              AND json_extract(config_json, '$.source_owner_user_id') = ?
+              AND json_extract(config_json, '$.source_strategy_id') = ?
+            ORDER BY created_at, strategy_id
+            LIMIT 1
+            """,
+            (int(target_user_id), int(owner_user_id), str(strategy_id)),
+        )
+        if existing:
+            return self.get_strategy_by_id(
+                int(target_user_id), existing["strategy_id"]
+            )
 
         owner = UserRepository(self.storage).get_by_id(int(owner_user_id))
         now = datetime.now()

@@ -1391,6 +1391,7 @@ class M1BacktestEngine:
         dataset = task["dataset_snapshot"]
         strategy = task["strategy_snapshot"]
         template = task["template_snapshot"]
+        self._reject_unsupported_ai_reference_backtest(strategy)
         bars = HistoricalBarReader.read(
             task["dataset_file_path"], dataset.get("data_format", "")
         )
@@ -1772,6 +1773,21 @@ class M1BacktestEngine:
             "replay_bars": aggregate_replay_bars(replay_bars),
         }
         return result
+
+    @staticmethod
+    def _reject_unsupported_ai_reference_backtest(strategy: Dict) -> None:
+        shared_sources = [
+            source for source in TradingStrategy.from_dict(strategy).get_signal_sources(
+                "ai_entry", enabled_only=True
+            )
+            if (source.get("params") or {}).get("analysis_mode") == "shared_reference"
+        ]
+        if not shared_sources:
+            return
+        raise BacktestEngineError(
+            "共享AI引用信号源当前不支持历史回测，请改为自有AI分析，"
+            "或先使用支持历史回放的AI运行数据后再回测。"
+        )
 
     @staticmethod
     def _live_ledger(
