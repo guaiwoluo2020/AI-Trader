@@ -487,13 +487,23 @@
                     <v-text-field v-model="item.adminReason" placeholder="可选" density="compact" hide-details style="min-width: 150px" />
                   </td>
                   <td>
-                    <v-btn
-                      size="small"
-                      color="primary"
-                      :disabled="item.adminTargetStatus === item.lifecycle_status"
-                      :loading="adminStrategySaving === `${item.user_id}:${item.strategy_id}`"
-                      @click="adminPromoteStrategy(item)"
-                    >推进</v-btn>
+                    <div class="d-flex ga-1">
+                      <v-btn
+                        size="small"
+                        variant="tonal"
+                        color="info"
+                        prepend-icon="mdi-monitor-eye"
+                        :loading="adminDeploymentsLoading === `${item.user_id}:${item.strategy_id}`"
+                        @click="openAdminDeployments(item)"
+                      >部署</v-btn>
+                      <v-btn
+                        size="small"
+                        color="primary"
+                        :disabled="item.adminTargetStatus === item.lifecycle_status"
+                        :loading="adminStrategySaving === `${item.user_id}:${item.strategy_id}`"
+                        @click="adminPromoteStrategy(item)"
+                      >推进</v-btn>
+                    </div>
                   </td>
                 </tr>
               </tbody>
@@ -503,6 +513,71 @@
         </v-card>
       </v-col>
     </v-row>
+
+    <!-- 管理员: 策略部署详情弹窗 -->
+    <v-dialog v-model="adminDeploymentsDialog" max-width="880">
+      <v-card class="settings-dialog-card" elevation="0">
+        <v-card-title class="settings-card-title d-flex align-center justify-space-between">
+          <div>
+            <div class="font-weight-bold">
+              策略部署 · {{ adminDeploymentsDetail?.strategy?.strategy_name || adminDeploymentsDetail?.strategy?.strategy_id || '' }}
+            </div>
+            <small class="text-medium-emphasis">
+              {{ adminDeploymentsDetail?.strategy?.symbol }} · 生命周期
+              <v-chip size="x-small" variant="tonal" class="ml-1" :color="getLifecycleColor(adminDeploymentsDetail?.strategy?.lifecycle_status)">
+                {{ lifecycleLabel(adminDeploymentsDetail?.strategy?.lifecycle_status) }}
+              </v-chip>
+            </small>
+          </div>
+          <v-btn icon="mdi-close" variant="text" @click="adminDeploymentsDialog = false" />
+        </v-card-title>
+        <v-card-text>
+          <v-alert v-if="adminDeploymentsError" type="error" variant="tonal" density="compact" class="mb-4">{{ adminDeploymentsError }}</v-alert>
+          <v-table density="comfortable" class="quota-table mt-2">
+            <thead>
+              <tr>
+                <th>账户</th>
+                <th>类型 / 环境</th>
+                <th>部署状态</th>
+                <th>余额</th>
+                <th>净值</th>
+                <th>浮动盈亏</th>
+                <th>累计盈亏</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="dep in adminDeploymentsDetail?.deployments || []" :key="dep.deployment_id">
+                <td>
+                  <strong>{{ dep.account_name }}</strong>
+                  <small class="d-block text-medium-emphasis">#{{ dep.account_id }}</small>
+                </td>
+                <td>
+                  <v-chip v-if="dep.account_type === 'mt5'" size="x-small" color="success" variant="tonal">MT5 实盘</v-chip>
+                  <v-chip v-else size="x-small" color="teal" variant="tonal">Paper 模拟</v-chip>
+                  <div class="mt-1"><small>{{ environmentLabel(dep.environment) }}</small></div>
+                  <small v-if="dep.account_type === 'mt5'" :class="dep.connected ? 'text-success' : 'text-grey'">{{ dep.connected ? '终端在线' : '终端离线' }}</small>
+                </td>
+                <td>
+                  <v-chip size="x-small" :color="dep.status === 'active' ? 'success' : 'grey'" variant="tonal">
+                    {{ deploymentStatusLabelForAdmin(dep.status) }}
+                  </v-chip>
+                </td>
+                <td>{{ money(dep.balance, dep.currency) }}</td>
+                <td>{{ money(dep.equity, dep.currency) }}</td>
+                <td :class="pnlClass(dep.unrealized_pnl)">{{ signedMoney(dep.unrealized_pnl) }}</td>
+                <td :class="pnlClass(dep.total_pnl)">
+                  {{ signedMoney(dep.total_pnl) }}
+                  <small class="d-block" :class="pnlClass(dep.total_pnl_pct)">{{ signedDelta(dep.total_pnl_pct) }}%</small>
+                </td>
+              </tr>
+              <tr v-if="!adminDeploymentsDetail?.deployments?.length">
+                <td colspan="7" class="text-center text-medium-emphasis py-6">该策略当前未部署到任何账户</td>
+              </tr>
+            </tbody>
+          </v-table>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
 
     <!-- 大模型功能与管理员配置 -->
     <v-row v-if="!isStrategyPage && settingsTab === 'llm'">
@@ -1252,6 +1327,10 @@ export default {
     const adminStrategySaving = ref(null)
     const adminStrategySearch = ref('')
     const adminStrategyLifecycleFilter = ref('all')
+    const adminDeploymentsDialog = ref(false)
+    const adminDeploymentsLoading = ref(null)
+    const adminDeploymentsDetail = ref(null)
+    const adminDeploymentsError = ref('')
     const invitations = ref([])
     const invitationSaving = ref(false)
     const latestInviteLink = ref('')
@@ -1494,6 +1573,40 @@ export default {
       } finally {
         adminStrategySaving.value = null
       }
+    }
+
+    const openAdminDeployments = async (item) => {
+      const key = `${item.user_id}:${item.strategy_id}`
+      adminDeploymentsLoading.value = key
+      adminDeploymentsError.value = ''
+      adminDeploymentsDetail.value = null
+      try {
+        const data = await marketAPI.getAdminStrategyDeployments(item.user_id, item.strategy_id)
+        if (data.status !== 'ok') {
+          throw new Error(data.message || '加载部署信息失败')
+        }
+        adminDeploymentsDetail.value = {
+          strategy: data.strategy,
+          deployments: data.deployments || [],
+        }
+        adminDeploymentsDialog.value = true
+      } catch (err) {
+        adminDeploymentsError.value = err.response?.data?.detail || err.message || '加载部署信息失败'
+        adminDeploymentsDialog.value = true
+      } finally {
+        adminDeploymentsLoading.value = null
+      }
+    }
+
+    const deploymentStatusLabelForAdmin = (status) => {
+      return { active: '运行中', paused: '已暂停', completed: '期限已结束' }[status] || status || '未知'
+    }
+
+    const pnlClass = (value) => {
+      const number = Number(value || 0)
+      if (number > 0.0001) return 'text-success font-weight-medium'
+      if (number < -0.0001) return 'text-error font-weight-medium'
+      return 'text-medium-emphasis'
     }
 
     const membershipOptions = [

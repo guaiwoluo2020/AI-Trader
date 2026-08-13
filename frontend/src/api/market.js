@@ -713,6 +713,13 @@ export const marketAPI = {
     return response.data
   },
 
+  async getAdminStrategyDeployments(userId, strategyId) {
+    const response = await api.get(
+      `/admin/strategies/${encodeURIComponent(userId)}/${encodeURIComponent(strategyId)}/deployments`
+    )
+    return response.data
+  },
+
   async adminTransitionStrategyLifecycle(userId, strategyId, targetStatus, reason = '') {
     const response = await api.post(
       `/admin/strategies/${encodeURIComponent(userId)}/${encodeURIComponent(strategyId)}/lifecycle`,

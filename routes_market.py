@@ -11,6 +11,7 @@ from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import asyncio
 import json
+import time
 
 from auth import AuthUser, get_auth_manager, require_admin, require_auth
 from ea_auth import EAIdentity, require_ea_auth
@@ -1286,6 +1287,80 @@ def create_market_routes(
             }
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @protected_router.get("/admin/strategies/{target_user_id}/{strategy_id}/deployments")
+    async def admin_strategy_deployments(
+        target_user_id: int,
+        strategy_id: str,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        """管理员查看策略挂载的账户（模拟盘/实盘）及账户盈亏快照。"""
+        try:
+            target_user = UserRepository().get_by_id(int(target_user_id))
+            if target_user is None:
+                return {"status": "error", "message": "目标用户不存在"}
+            strategy = strategy_repo.get_strategy_by_id(target_user.user_id, strategy_id)
+            if strategy is None:
+                return {"status": "error", "message": "策略配置不存在"}
+
+            rows = engine_manager.paper_trading.storage.fetchall(
+                """
+                SELECT d.deployment_id, d.account_id, d.execution_mode, d.status,
+                       d.symbol, d.created_at, d.scheduled_end_at,
+                       a.account_name, a.account_type, a.environment,
+                       a.balance, a.equity, a.free_margin, a.initial_balance,
+                       a.currency, a.status AS account_status,
+                       a.trading_enabled, a.auto_trading_enabled,
+                       a.last_seen_at, a.financial_updated_at
+                FROM strategy_deployments d
+                JOIN trading_accounts a ON a.id = d.account_id
+                WHERE d.user_id = ? AND d.strategy_id = ?
+                ORDER BY d.created_at DESC
+                """,
+                (target_user.user_id, strategy.strategy_id),
+            )
+            now = int(time.time())
+            deployments = []
+            for row in rows:
+                deployment = dict(row)
+                connected = bool(
+                    deployment["account_type"] == "mt5"
+                    and deployment["last_seen_at"]
+                    and now - int(deployment["last_seen_at"] or 0) <= 120
+                )
+                deployment["account_active"] = bool(
+                    deployment["account_status"] == "active"
+                )
+                deployment["connected"] = connected
+                deployment["balance"] = float(deployment["balance"] or 0)
+                deployment["equity"] = float(deployment["equity"] or 0)
+                deployment["free_margin"] = float(deployment["free_margin"] or 0)
+                deployment["initial_balance"] = float(
+                    deployment["initial_balance"] or 0
+                )
+                deployment["unrealized_pnl"] = (
+                    deployment["equity"] - deployment["balance"]
+                )
+                total_pnl = deployment["equity"] - deployment["initial_balance"]
+                deployment["total_pnl"] = total_pnl
+                deployment["total_pnl_pct"] = (
+                    round(total_pnl / deployment["initial_balance"] * 100, 2)
+                    if deployment["initial_balance"] > 0 else 0.0
+                )
+                deployments.append(deployment)
+
+            return {
+                "status": "ok",
+                "strategy": {
+                    "strategy_id": strategy.strategy_id,
+                    "strategy_name": strategy.strategy_name,
+                    "symbol": strategy.symbol,
+                    "lifecycle_status": strategy.lifecycle_status,
+                },
+                "deployments": deployments,
+            }
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
 
