@@ -68,7 +68,7 @@ class AuthRoutesTestCase(unittest.TestCase):
         self.assertGreater(verified.user_id, 0)
         self.assertEqual(verified.username, "admin")
         self.assertEqual(verified.role, "admin")
-        self.assertEqual(verified.email, "175821555@qq.com")
+        self.assertEqual(verified.email, "xingxing.wxx@foxmail.com")
 
     def test_register_creates_login_ready_user(self):
         user = self.auth_manager.register(

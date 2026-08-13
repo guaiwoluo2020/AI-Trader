@@ -53,7 +53,7 @@ Content-Type: application/json
 
 ```json
 {
-  "email": "175821555@qq.com"
+  "email": "xingxing.wxx@foxmail.com"
 }
 ```
 
@@ -83,7 +83,7 @@ Content-Type: application/json
 curl --fail-with-body \
   -X POST "$API_BASE/auth/login/email" \
   -H "Content-Type: application/json" \
-  -d '{"email":"175821555@qq.com","verification_code":"<6-digit-code>"}'
+  -d '{"email":"xingxing.wxx@foxmail.com","verification_code":"<6-digit-code>"}'
 ```
 
 ### 3.2 写入请求头

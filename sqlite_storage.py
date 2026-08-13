@@ -49,7 +49,9 @@ def _get_env_default_admin_password() -> str:
 
 
 def _get_env_default_admin_email() -> str:
-    return os.getenv("AI_TRADER_DEFAULT_ADMIN_EMAIL", "175821555@qq.com").strip().lower()
+    return os.getenv(
+        "AI_TRADER_DEFAULT_ADMIN_EMAIL", "xingxing.wxx@foxmail.com"
+    ).strip().lower()
 
 
 def get_runtime_username() -> str:
