@@ -75,8 +75,8 @@ class PaperTradingService:
                 "strategy_id": row["strategy_id"],
                 "symbol": row["symbol"],
                 "strategy_name": config.get("strategy_name", row["strategy_id"]),
-                "enabled": bool(config.get("enabled", True)),
-                "auto_execute": bool(config.get("auto_execute", False)),
+                "enabled": True,
+                "auto_execute": True,
                 "lifecycle_status": lifecycle,
                 "paper_eligible": paper_eligible,
                 "paper_direct_allowed": ai_direct,
@@ -125,8 +125,6 @@ class PaperTradingService:
             strategy.lifecycle_status = StrategyLifecycle.PAPER_TRADING
             strategy.lifecycle_updated_at = now
             strategy.updated_at = now
-            strategy.enabled = False
-            strategy.auto_execute = False
             strategy.lifecycle_history.append({
                 "from_status": previous,
                 "to_status": StrategyLifecycle.PAPER_TRADING,
@@ -189,10 +187,6 @@ class PaperTradingService:
             self.memberships.assert_live_trading(user_id, account.account_id)
             if lifecycle != "production":
                 raise ValueError("只有已批准用于实盘的策略才能绑定 MT5 账户")
-            if not current_strategy.enabled:
-                raise ValueError(
-                    "策略尚未启用，请先在策略配置中启用（enabled=true）后再部署到实盘账户"
-                )
             execution_mode = "live"
         else:
             raise ValueError("当前账户类型不支持策略部署")
@@ -365,8 +359,8 @@ class PaperTradingService:
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name,
                    json_extract(s.config_json, '$.lifecycle_status') AS lifecycle_status,
-                   json_extract(s.config_json, '$.enabled') AS strategy_enabled,
-                   json_extract(s.config_json, '$.auto_execute') AS strategy_auto_execute
+                   1 AS strategy_enabled,
+                   1 AS strategy_auto_execute
             FROM strategy_deployments d
             LEFT JOIN user_strategy_configs s
               ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
@@ -586,7 +580,7 @@ class PaperTradingService:
         deployments = [dict(row) for row in self.storage.fetchall(
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name,
-                   json_extract(s.config_json, '$.auto_execute') AS auto_execute
+                   1 AS auto_execute
             FROM strategy_deployments d
             LEFT JOIN user_strategy_configs s
               ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
@@ -1506,6 +1500,7 @@ class PaperTradingService:
             strategy["position_management_policy_snapshot"] = policy.to_dict()
         # A deployment is the runtime enablement switch for paper trading.
         strategy["enabled"] = True
+        strategy["auto_execute"] = True
         return strategy
 
     def _paper_account(self, user_id: int, account_id: int):

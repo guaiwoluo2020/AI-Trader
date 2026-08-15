@@ -33,7 +33,7 @@
           <article>
             <span>{{ isAdmin ? '邮件服务' : '信号源额度' }}</span>
             <strong>{{ isAdmin ? (emailConfig.enabled && emailConfig.password_set ? '在线' : '待配置') : `${myQuota.usage.signal_sources} / ${myQuota.limits.signal_sources ?? '∞'}` }}</strong>
-            <small>{{ isAdmin ? '负责注册与登录验证码' : '所有策略下已保存的信号源' }}</small>
+            <small>{{ isAdmin ? '负责注册与登录验证码' : '独立 AI 信号源及策略规则源' }}</small>
             <v-icon>mdi-access-point</v-icon>
           </article>
           <article>
@@ -47,6 +47,7 @@
         <v-tabs v-model="settingsTab" color="primary" class="settings-main-tabs">
           <v-tab value="account"><v-icon start>mdi-account-lock-outline</v-icon>账户与安全</v-tab>
           <v-tab v-if="isAdmin" value="email"><v-icon start>mdi-email-lock-outline</v-icon>邮件服务</v-tab>
+          <v-tab v-if="isAdmin" value="instruments"><v-icon start>mdi-swap-horizontal-bold</v-icon>品种映射</v-tab>
           <v-tab v-if="isAdmin" value="quota"><v-icon start>mdi-account-star-outline</v-icon>用户与会员</v-tab>
           <v-tab value="llm"><v-icon start>mdi-brain</v-icon>{{ isAdmin ? 'AI 服务管理' : 'AI 功能' }}</v-tab>
         </v-tabs>
@@ -78,7 +79,7 @@
               <div class="strategy-metrics">
                 <article><span>全部策略</span><strong>{{ strategies.length }} / {{ strategyQuota.limits.strategies ?? '∞' }}</strong><v-icon>mdi-layers-triple-outline</v-icon></article>
                 <article><span>实盘可用</span><strong>{{ strategyMetrics.production }}</strong><v-icon>mdi-rocket-launch-outline</v-icon></article>
-                <article><span>正在启用</span><strong>{{ strategyMetrics.enabled }}</strong><v-icon>mdi-pulse</v-icon></article>
+                <article><span>已部署运行</span><strong>{{ strategyMetrics.deployed }}</strong><v-icon>mdi-pulse</v-icon></article>
                 <article><span>信号源用量</span><strong>{{ strategyQuota.usage.signal_sources }} / {{ strategyQuota.limits.signal_sources ?? '∞' }}</strong><v-icon>mdi-access-point</v-icon></article>
               </div>
 
@@ -86,19 +87,17 @@
                 <div class="strategy-toolbar">
                   <v-text-field v-model="strategySearch" label="搜索策略或品种" prepend-inner-icon="mdi-magnify" density="compact" hide-details clearable></v-text-field>
                   <v-select v-model="strategyLifecycleFilter" :items="lifecycleFilterOptions" label="生命周期" density="compact" hide-details></v-select>
-                  <v-select v-model="strategyEnabledFilter" :items="enabledFilterOptions" label="启用状态" density="compact" hide-details></v-select>
                   <v-select v-model="strategyVisibilityFilter" :items="visibilityFilterOptions" label="可见性" density="compact" hide-details></v-select>
                   <v-btn icon="mdi-refresh" variant="text" :loading="strategiesLoading" @click="loadStrategies"></v-btn>
                 </div>
 
                 <v-table v-if="filteredStrategies.length" class="strategy-table hidden-sm-and-down">
-                  <thead><tr><th>策略</th><th>信号源</th><th>生命周期</th><th>状态</th><th>可见性</th><th>更新时间</th><th class="text-right">操作</th></tr></thead>
+                  <thead><tr><th>策略</th><th>信号源</th><th>生命周期</th><th>可见性</th><th>更新时间</th><th class="text-right">操作</th></tr></thead>
                   <tbody>
                     <tr v-for="strategy in filteredStrategies" :key="strategy.strategy_id" @click="openStrategyDetail(strategy)">
                       <td><div class="strategy-name-cell"><span class="strategy-symbol">{{ strategy.symbol }}</span><div><strong>{{ strategy.strategy_name }}</strong><small>#{{ strategy.strategy_id }}</small></div></div></td>
                       <td><div class="source-pill-row"><v-chip v-for="source in strategySourceBadges(strategy)" :key="source.key" size="x-small" :color="source.color" variant="tonal">{{ source.label }}</v-chip><span v-if="!signalSourceCount(strategy)" class="text-caption text-medium-emphasis">未配置</span></div></td>
                       <td><v-chip :color="getLifecycleMeta(strategy).color" size="small" variant="tonal">{{ getLifecycleMeta(strategy).label }}</v-chip></td>
-                      <td><span class="status-dot" :class="strategy.enabled ? 'is-active' : ''"></span>{{ strategy.enabled ? '已启用' : '未启用' }}</td>
                       <td><v-icon size="17" class="mr-1">{{ strategy.is_shared ? 'mdi-earth' : 'mdi-lock-outline' }}</v-icon>{{ strategy.is_shared ? '共享' : '私有' }}</td>
                       <td class="text-caption">{{ formatStrategyTime(strategy.updated_at) }}</td>
                       <td class="text-right"><v-btn icon="mdi-pencil-outline" size="small" variant="text" color="primary" @click.stop="openStrategyDetail(strategy)"></v-btn><v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" @click.stop="deleteStrategy(strategy)"></v-btn></td>
@@ -127,6 +126,8 @@
                 <article v-for="item in sharedStrategies" :key="`${item.owner_user_id}-${item.strategy_id}`" class="shared-strategy-card">
                   <div class="shared-strategy-card__head"><div><span class="strategy-symbol">{{ item.symbol }}</span><h3>{{ item.strategy_name }}</h3><p>由 {{ item.owner_username }} 分享</p></div><v-chip :color="getLifecycleColor(item.lifecycle_status)" size="small" variant="tonal">{{ item.lifecycle_label || getLifecycleMeta(item).label }}</v-chip></div>
                   <div class="shared-strategy-card__body"><v-chip size="x-small" variant="outlined">{{ signalSourceCount(item) }} 个信号源</v-chip><v-chip size="x-small" variant="outlined">置信度 {{ item.min_confidence }}%</v-chip><v-chip size="x-small" variant="outlined">{{ getConsistencyLabel(item.consistency_requirement) }}</v-chip></div>
+                  <v-select v-if="item.target_symbol_options?.length > 1" v-model="sharedStrategyTargetSymbols[sharedStrategyKey(item)]" :items="item.target_symbol_options" item-title="label" item-value="symbol" label="使用到我的品种" density="compact" variant="outlined" hide-details class="mt-3"></v-select>
+                  <p v-if="item.mapping_notice" class="text-caption text-medium-emphasis mt-3 mb-0">{{ item.mapping_notice }}</p>
                   <div class="shared-card-footer"><span>更新于 {{ formatStrategyTime(item.updated_at) }}</span><v-btn :color="isSharedStrategyUsed(item) ? 'success' : 'primary'" size="small" :loading="sharedStrategyCopying === sharedStrategyKey(item)" :disabled="isSharedStrategyUsed(item)" @click="useSharedStrategy(item)"><v-icon start>{{ isSharedStrategyUsed(item) ? 'mdi-check-circle-outline' : 'mdi-link-variant' }}</v-icon>{{ isSharedStrategyUsed(item) ? '已使用' : '使用策略' }}</v-btn></div>
                 </article>
               </div>
@@ -162,7 +163,6 @@
                 <div class="detail-section-title"><div><h3>策略基础信息</h3><p>这些信息用于识别策略并控制多信号源如何共同决策。</p></div></div>
                 <v-row><v-col cols="12" md="6"><v-text-field v-model="selectedStrategy.strategy_name" label="策略名称" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" md="3"><v-text-field :model-value="selectedStrategy.symbol" label="交易品种" readonly></v-text-field></v-col><v-col cols="12" md="3"><v-text-field v-model.number="selectedStrategy.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" md="6"><v-select v-model="selectedStrategy.consistency_requirement" :items="consistencyOptions" label="一致性要求" :disabled="selectedStrategy.readonly_reference"></v-select></v-col></v-row>
                 <div class="strategy-setting-card" :class="{ 'is-active': selectedStrategy.is_shared }"><div><v-icon>mdi-share-variant-outline</v-icon><div><strong>共享到平台策略库</strong><p>其他用户可只读使用；一旦被应用，源策略会冻结，后续请复制新版本。</p></div></div><v-switch v-model="selectedStrategy.is_shared" color="success" hide-details :disabled="selectedStrategy.readonly_reference"></v-switch></div>
-                <div class="strategy-setting-card" :class="{ 'is-active': selectedStrategy.enabled }"><div><v-icon>mdi-power</v-icon><div><strong>启用策略</strong><p>{{ selectedStrategy.lifecycle_status === 'production' ? '启用后参与当前账户的信号决策。' : '策略完成验证并进入实盘阶段后才能启用。' }}</p></div></div><v-switch v-model="selectedStrategy.enabled" color="success" hide-details :disabled="selectedStrategy.lifecycle_status !== 'production'"></v-switch></div>
               </v-window-item>
 
               <v-window-item value="signals">
@@ -377,6 +377,27 @@
       </v-col>
     </v-row>
 
+    <!-- 管理员交易商品种映射 -->
+    <v-row v-if="!isStrategyPage && isAdmin && settingsTab === 'instruments'">
+      <v-col cols="12">
+        <v-card class="user-settings-card admin-service-card" elevation="0">
+          <v-card-title class="settings-card-title"><div><v-icon>mdi-swap-horizontal-bold</v-icon><span>交易商品种关联映射</span></div><small>同一关联组内的品种可用于共享策略与共享 AI 数据</small></v-card-title>
+          <v-card-text>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-5">系统会从 MT5 服务器自动提取交易商，例如 <code>XMGlobal-MT5 2 → XMGlobal</code>。这里仅维护“交易商 + 原始品种”关系；把不同交易商的黄金品种放入同一个关联组即可共享。未配置时仅允许完全同名品种共享。</v-alert>
+            <v-row>
+              <v-col cols="12" md="4"><v-text-field v-model="instrumentMappingForm.broker_name" label="交易商" placeholder="XMGlobal" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" md="3"><v-text-field v-model="instrumentMappingForm.native_symbol" label="原始品种" placeholder="GOLD_" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" md="3"><v-text-field v-model="instrumentMappingForm.mapping_group" label="关联组" placeholder="XAUUSD" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" md="2"><v-text-field v-model="instrumentMappingForm.display_name" label="展示名称（可选）" density="compact" variant="outlined" /></v-col>
+            </v-row>
+            <div class="d-flex justify-end mb-5"><v-btn color="primary" :loading="instrumentMappingSaving" @click="saveInstrumentMapping"><v-icon start>mdi-content-save-outline</v-icon>保存映射</v-btn></div>
+            <v-table v-if="instrumentMappings.length" density="comfortable" class="quota-table"><thead><tr><th>关联组</th><th>交易商</th><th>原始品种</th><th>展示名称</th><th>状态</th><th class="text-right">操作</th></tr></thead><tbody><tr v-for="item in instrumentMappings" :key="item.mapping_id"><td><v-chip size="small" color="primary" variant="tonal">{{ item.mapping_group }}</v-chip></td><td>{{ item.effective_broker_name }}</td><td><strong>{{ item.native_symbol }}</strong></td><td>{{ item.display_name || '--' }}</td><td><v-chip size="x-small" :color="item.enabled ? 'success' : 'grey'" variant="tonal">{{ item.enabled ? '启用' : '停用' }}</v-chip></td><td class="text-right"><v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" @click="deleteInstrumentMapping(item)"></v-btn></td></tr></tbody></v-table>
+            <div v-else class="text-medium-emphasis text-center py-8">尚未配置交易商品种映射。</div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+
     <!-- 管理员用户与会员权益 -->
     <v-row v-if="!isStrategyPage && isAdmin && settingsTab === 'quota'">
       <v-col cols="12">
@@ -456,7 +477,7 @@
           </v-card-title>
           <v-card-text>
             <v-alert type="info" variant="tonal" density="compact" class="mb-4">
-              管理员只推进策略生命周期；进入“可用于实盘”后，用户侧才可以启用策略或执行实盘动作。共享引用策略允许推进到实盘。
+              管理员只推进策略生命周期；进入“可用于实盘”后，用户侧可将策略部署到账户运行。共享引用策略允许推进到实盘。
             </v-alert>
             <div class="strategy-governance-toolbar">
               <v-text-field v-model="adminStrategySearch" label="搜索用户/策略/品种" prepend-inner-icon="mdi-magnify" density="compact" variant="outlined" hide-details />
@@ -1073,6 +1094,27 @@
           </template>
 
           <template v-else>
+            <v-row dense class="mt-3">
+              <v-col cols="12">
+                <v-select
+                  v-model="newSignalSource.params.ai_signal_source_id"
+                  :items="managedAISignalSourceOptions"
+                  label="选择独立 AI 信号源"
+                  :loading="aiSignalOptionsLoading"
+                  no-data-text="暂无独立 AI 信号源，请先到 AI 信号源页面创建"
+                  @update:model-value="onManagedAISignalSourceSelected"
+                ></v-select>
+              </v-col>
+              <v-col cols="12" class="d-flex align-center ga-2">
+                <v-alert type="info" variant="tonal" density="compact" class="flex-grow-1">模型、提示词、调用频率和共享配置由独立 AI 信号源统一管理；策略只设置入场门槛。</v-alert>
+                <v-btn to="/ai-signal-sources" variant="outlined" color="primary">管理信号源</v-btn>
+              </v-col>
+              <template v-if="newSignalSource.params.ai_signal_source_id">
+                <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_confidence" label="策略最低置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
+                <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.entry_threshold_percent" label="策略入场价接近阈值" type="number" step="0.01" min="0" max="10" suffix="%"></v-text-field></v-col>
+              </template>
+            </v-row>
+            <template v-if="!newSignalSource.params.ai_signal_source_id">
             <v-btn-toggle
               v-model="newSignalSource.params.analysis_mode"
               mandatory
@@ -1188,6 +1230,7 @@
                 </div>
               </v-col>
             </v-row>
+            </template>
           </template>
         </v-card-text>
         <v-card-actions>
@@ -1318,6 +1361,12 @@ export default {
     const showEmailPassword = ref(false)
     const emailSaving = ref(false)
     const emailTesting = ref(false)
+
+    const instrumentMappings = ref([])
+    const instrumentMappingSaving = ref(false)
+    const instrumentMappingForm = ref({
+      broker_name: '', native_symbol: '', mapping_group: '', display_name: '', enabled: true
+    })
 
     // 管理员用户配额白名单
     const quotaUsers = ref([])
@@ -1503,12 +1552,54 @@ export default {
       try {
         await Promise.all([
           loadUserQuotas(), loadInvitations(), loadEmailConfig(),
-          loadLLMConfig(), loadLLMAccessRequests(), loadAdminStrategies()
+          loadLLMConfig(), loadLLMAccessRequests(), loadAdminStrategies(), loadInstrumentMappings()
         ])
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
       } finally {
         quotaSaving.value = null
+      }
+    }
+
+    const loadInstrumentMappings = async () => {
+      if (!isAdmin.value) return
+      try {
+        const data = await marketAPI.getInstrumentMappings()
+        instrumentMappings.value = data.mappings || []
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '加载品种映射失败'
+        showError.value = true
+      }
+    }
+
+    const saveInstrumentMapping = async () => {
+      instrumentMappingSaving.value = true
+      try {
+        const data = await marketAPI.saveInstrumentMapping(instrumentMappingForm.value)
+        instrumentMappingForm.value = {
+          broker_name: '', native_symbol: '', mapping_group: '', display_name: '', enabled: true
+        }
+        successMessage.value = `已保存 ${data.mapping.native_symbol} 的关联映射`
+        showSuccess.value = true
+        await loadInstrumentMappings()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '保存品种映射失败'
+        showError.value = true
+      } finally {
+        instrumentMappingSaving.value = false
+      }
+    }
+
+    const deleteInstrumentMapping = async (item) => {
+      if (!confirm(`确定删除 ${item.effective_broker_name} / ${item.native_symbol} 的关联映射吗？`)) return
+      try {
+        await marketAPI.deleteInstrumentMapping(item.mapping_id)
+        successMessage.value = '品种映射已删除'
+        showSuccess.value = true
+        await loadInstrumentMappings()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '删除品种映射失败'
+        showError.value = true
       }
     }
 
@@ -2023,11 +2114,11 @@ export default {
     const newStrategyDialog = ref(false)
     const strategySearch = ref('')
     const strategyLifecycleFilter = ref('all')
-    const strategyEnabledFilter = ref('all')
     const strategyVisibilityFilter = ref('all')
     const sharedStrategies = ref([])
     const sharedStrategiesLoading = ref(false)
     const sharedStrategyCopying = ref(null)
+    const sharedStrategyTargetSymbols = reactive({})
     const paperDeployDialog = ref(false)
     const paperDeployLoading = ref(false)
     const paperDeploySubmitting = ref(false)
@@ -2072,6 +2163,7 @@ export default {
       defaultAnalysisPromptTemplate: '',
       sharedRuntimeData: []
     })
+    const managedAISignalSources = ref([])
     const newSignalSource = reactive({
       source: 'key_level', period: 'M1', enabled: true, weight: 30, params: {}
     })
@@ -2154,6 +2246,12 @@ export default {
       value: item.share_id,
       title: `${item.symbol} · 匹配度 ${formatSimilarity(item.symbol_similarity)} · ${item.period} · ${item.model} · ${item.strategy_name} · ${lifecycleLabel(item.strategy_lifecycle)}`
     })))
+    const managedAISignalSourceOptions = computed(() => managedAISignalSources.value
+      .filter(item => item.enabled)
+      .map(item => ({
+        value: item.signal_source_id,
+        title: `${item.name} · ${item.symbol} · ${item.period}${item.locked ? ' · 已冻结' : ''}`
+      })))
     const alphaLibraryOptions = computed(() => {
       const occupied = new Set(strategySignalSources(signalSourceTarget.value)
         .filter(item => item.source === 'alpha_factor')
@@ -2210,10 +2308,7 @@ export default {
         return Boolean(newSignalSource.params?.alpha_id)
       }
       if (newSignalSource.source !== 'ai_entry') return true
-      const params = newSignalSource.params || {}
-      return params.analysis_mode === 'shared_reference'
-        ? Boolean(params.shared_runtime_id)
-        : aiSignalOptions.accessGranted
+      return Boolean(newSignalSource.params?.ai_signal_source_id)
     })
 
     const loadAISignalOptions = async (symbol) => {
@@ -2225,9 +2320,12 @@ export default {
         aiSignalOptions.defaultSystemPrompt = data.default_system_prompt || ''
         aiSignalOptions.defaultAnalysisPromptTemplate = data.default_analysis_prompt_template || ''
         aiSignalOptions.sharedRuntimeData = data.shared_runtime_data || []
+        const sourceData = await marketAPI.getAISignalSources()
+        managedAISignalSources.value = (sourceData.items || []).filter(item => !symbol || item.symbol === symbol)
       } catch (error) {
         aiSignalOptions.accessGranted = Boolean(llmAccess.value.access_granted)
         aiSignalOptions.sharedRuntimeData = []
+        managedAISignalSources.value = []
       } finally {
         aiSignalOptionsLoading.value = false
       }
@@ -2288,7 +2386,8 @@ export default {
               analysis_prompt_template: aiSignalOptions.defaultAnalysisPromptTemplate,
               share_runtime_data: false,
               reference_runtime_ids: [],
-              shared_runtime_id: ''
+              shared_runtime_id: '',
+              ai_signal_source_id: ''
             }
     })
     const cloneSignalSource = (source) => JSON.parse(JSON.stringify(source || {}))
@@ -2311,6 +2410,7 @@ export default {
           ? params.reference_runtime_ids
           : []
         params.shared_runtime_id ||= ''
+        params.ai_signal_source_id ||= ''
         const threshold = Number(params.entry_threshold)
         params.entry_threshold_percent = Number.isFinite(threshold)
           ? Number((threshold * 100).toFixed(4))
@@ -2335,6 +2435,17 @@ export default {
     const setDialogSignalSource = (source) => {
       const normalized = normalizeSignalSourceForDialog(source)
       Object.assign(newSignalSource, normalized)
+      normalizeAIInterval(newSignalSource)
+    }
+    const onManagedAISignalSourceSelected = (sourceId) => {
+      const source = managedAISignalSources.value.find(item => item.signal_source_id === sourceId)
+      if (!source) return
+      newSignalSource.signal_source_id = source.signal_source_id
+      newSignalSource.period = source.period
+      newSignalSource.params.ai_signal_source_id = source.signal_source_id
+      const config = source.config || {}
+      newSignalSource.params.min_confidence = config.min_confidence ?? 70
+      newSignalSource.params.entry_threshold_percent = config.entry_threshold_percent ?? 0.08
       normalizeAIInterval(newSignalSource)
     }
 
@@ -2404,11 +2515,6 @@ export default {
         return matchesLifecycle && matchesSearch
       })
     })
-    const enabledFilterOptions = [
-      { title: '全部状态', value: 'all' },
-      { title: '已启用', value: 'enabled' },
-      { title: '未启用', value: 'disabled' }
-    ]
     const visibilityFilterOptions = [
       { title: '全部可见性', value: 'all' },
       { title: '私有策略', value: 'private' },
@@ -2416,7 +2522,7 @@ export default {
     ]
     const strategyMetrics = computed(() => ({
       production: strategies.value.filter(item => item.lifecycle_status === 'production').length,
-      enabled: strategies.value.filter(item => item.enabled).length,
+      deployed: strategies.value.filter(item => Number(item.deployment_count || 0) > 0).length,
       shared: strategies.value.filter(item => item.is_shared).length
     }))
     const filteredStrategies = computed(() => {
@@ -2427,11 +2533,9 @@ export default {
         ].some(value => String(value || '').toLowerCase().includes(keyword))
         const matchesLifecycle = strategyLifecycleFilter.value === 'all' ||
           strategy.lifecycle_status === strategyLifecycleFilter.value
-        const matchesEnabled = strategyEnabledFilter.value === 'all' ||
-          (strategyEnabledFilter.value === 'enabled' ? strategy.enabled : !strategy.enabled)
         const matchesVisibility = strategyVisibilityFilter.value === 'all' ||
           (strategyVisibilityFilter.value === 'shared' ? strategy.is_shared : !strategy.is_shared)
-        return matchesSearch && matchesLifecycle && matchesEnabled && matchesVisibility
+        return matchesSearch && matchesLifecycle && matchesVisibility
       })
     })
     const comparableStrategy = (strategy) => {
@@ -2633,6 +2737,10 @@ export default {
         const data = await marketAPI.getSharedStrategies()
         if (data.status === 'ok') {
           sharedStrategies.value = data.strategies || []
+          sharedStrategies.value.forEach(item => {
+            const key = sharedStrategyKey(item)
+            sharedStrategyTargetSymbols[key] ||= item.target_symbol_options?.[0]?.symbol || item.symbol
+          })
         } else {
           throw new Error(data.message || '加载共享策略失败')
         }
@@ -2767,7 +2875,10 @@ export default {
         const data = await marketAPI.useSharedStrategy(
           item.owner_user_id,
           item.strategy_id,
-          { position_management_policy_id: policyId }
+          {
+            position_management_policy_id: policyId,
+            target_symbol: sharedStrategyTargetSymbols[sharedStrategyKey(item)] || item.symbol,
+          }
         )
         if (data.status !== 'ok') {
           throw new Error(data.message || '使用共享策略失败')
@@ -2794,7 +2905,6 @@ export default {
       strategySaving.value = strategy.strategy_id
       try {
         const data = await marketAPI.updateStrategy(strategy.strategy_id, {
-          enabled: strategy.enabled,
           strategy_name: strategy.strategy_name,
           visibility: strategy.is_shared ? 'shared' : 'private',
           min_confidence: strategy.min_confidence,
@@ -2896,6 +3006,15 @@ export default {
           0, Math.min(10, Number(clean.params.entry_threshold_percent ?? 0.08))
         ) / 100
         delete clean.params.entry_threshold_percent
+      }
+      if (clean.source === 'ai_entry') {
+        // AI runtime configuration belongs to the independent signal source.
+        clean.params = {
+          ai_signal_source_id: clean.params.ai_signal_source_id || '',
+          min_confidence: Number(clean.params.min_confidence || 0),
+          entry_threshold: Number(clean.params.entry_threshold || 0.0008),
+          cooldown_seconds: Number(clean.params.cooldown_seconds || 0),
+        }
       }
       if (clean.source === 'key_level') {
         clean.period = 'M1'
@@ -3185,6 +3304,11 @@ export default {
       emailTesting,
       saveEmailConfig,
       testEmailConfig,
+      instrumentMappings,
+      instrumentMappingForm,
+      instrumentMappingSaving,
+      saveInstrumentMapping,
+      deleteInstrumentMapping,
       quotaUsers,
       quotaSaving,
       saveUserQuota,
@@ -3256,10 +3380,8 @@ export default {
       newStrategyDialog,
       strategySearch,
       strategyLifecycleFilter,
-      strategyEnabledFilter,
       strategyVisibilityFilter,
       lifecycleFilterOptions,
-      enabledFilterOptions,
       visibilityFilterOptions,
       strategyMetrics,
       filteredStrategies,
@@ -3267,6 +3389,7 @@ export default {
       sharedStrategies,
       sharedStrategiesLoading,
       sharedStrategyCopying,
+      sharedStrategyTargetSymbols,
       sharedStrategyKey,
       isSharedStrategyUsed,
       paperDeployDialog,
@@ -3330,6 +3453,7 @@ export default {
       aiIntervalOptionsFor,
       aiSignalOptions,
       aiSignalOptionsLoading,
+      managedAISignalSourceOptions,
       sharedAIRuntimeOptions,
       alphaLibraryOptions,
       selectedSharedAIRuntimeData,
@@ -3343,6 +3467,7 @@ export default {
       availablePeriodsForNewSource,
       selectFirstAvailablePeriod,
       onNewSignalSourceTypeChange,
+      onManagedAISignalSourceSelected,
       onSharedRuntimeSelected,
       onAlphaSelected,
       openSignalSourceDialog,

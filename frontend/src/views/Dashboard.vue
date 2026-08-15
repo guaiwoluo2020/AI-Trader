@@ -17,7 +17,7 @@
             {{ overview.account.trading_enabled ? '交易已启用' : '交易已暂停' }}
           </v-chip>
           <v-chip :color="overview.account.auto_trading_enabled ? 'success' : 'grey'" variant="tonal" size="small">
-            {{ overview.account.auto_trading_enabled ? '自动交易开启' : '人工确认模式' }}
+            {{ overview.account.auto_trading_enabled ? '自动交易开启' : '账户自动交易关闭' }}
           </v-chip>
         </div>
       </div>
@@ -101,7 +101,7 @@
             <div class="strategy-head"><div><strong>{{ strategy.strategy_name }}</strong><span>{{ strategy.symbol }} · {{ lifecycleLabel(strategy.lifecycle_status) }}</span></div><v-chip :color="directionMeta(strategy.direction).color" size="small" variant="tonal"><v-icon start>{{ directionMeta(strategy.direction).icon }}</v-icon>{{ directionMeta(strategy.direction).label }}</v-chip></div>
             <div class="strategy-confidence"><span>最新置信度</span><strong>{{ Number(strategy.confidence || 0).toFixed(0) }}%</strong></div>
             <v-progress-linear :model-value="strategy.confidence" :color="directionMeta(strategy.direction).color" height="7" rounded />
-            <div class="strategy-foot"><span>{{ strategy.auto_execute ? '自动执行' : '人工确认' }}</span><span>{{ formatTime(strategy.latest_decision?.created_at || strategy.latest_signal_at) }}</span></div>
+            <div class="strategy-foot"><span>账户部署运行</span><span>{{ formatTime(strategy.latest_decision?.created_at || strategy.latest_signal_at) }}</span></div>
           </article>
         </div>
         <div v-else class="empty-state"><v-icon size="46">mdi-access-point-off</v-icon><strong>当前账户尚未部署运行策略</strong><v-btn size="small" color="primary" variant="tonal" @click="go('/accounts')">前往交易账户绑定策略</v-btn></div>

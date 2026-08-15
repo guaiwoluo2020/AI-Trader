@@ -597,7 +597,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         self.assertEqual(instructions[0]["action"], "b")
         manager.close_all()
 
-    def test_account_controls_override_strategy_auto_execution(self):
+    def test_account_controls_block_strategy_auto_execution(self):
         repository = TradingAccountRepository()
         account, _ = repository.create_or_rotate_default(self.admin.user_id)
         repository.update_controls(
@@ -623,8 +623,8 @@ class TradingEngineManagerTestCase(unittest.TestCase):
 
         result = engine.process_price("GOLD#", 3300.0)
 
-        self.assertFalse(result["pending_order"]["confirmed"])
-        self.assertEqual(engine.pending_order_service.get_pending_count("GOLD#"), 1)
+        self.assertIsNone(result["pending_order"])
+        self.assertEqual(engine.pending_order_service.get_pending_count("GOLD#"), 0)
         self.assertEqual(
             engine.trading_instruction_service.get_all_instructions(), []
         )

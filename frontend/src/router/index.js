@@ -6,6 +6,7 @@ import Register from '../views/Register.vue'
 import TradeOrders from '../views/TradeOrders.vue'
 import Market from '../views/Market.vue'
 import AIMarket from '../views/AIMarket.vue'
+import AISignalSources from '../views/AISignalSources.vue'
 import Settings from '../views/Settings.vue'
 import StrategySettings from '../views/StrategySettings.vue'
 import SystemLog from '../views/SystemLog.vue'
@@ -61,6 +62,12 @@ const routes = [
     path: '/ai-market',
     name: 'AIMarket',
     component: AIMarket,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/ai-signal-sources',
+    name: 'AISignalSources',
+    component: AISignalSources,
     meta: { requiresAuth: true }
   },
   {

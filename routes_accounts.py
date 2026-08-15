@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from auth import AuthUser, require_auth
 from membership import MembershipService
-from sqlite_storage import TradingAccountRecord, TradingAccountRepository
+from sqlite_storage import (
+    PositionManagementEventRepository,
+    TradeExecutionRepository,
+    TradingAccountRecord,
+    TradingAccountRepository,
+)
 from trading_engine_manager import TradingEngineManager
 
 
@@ -116,7 +121,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         try:
             account = repository.set_archived(user.user_id, account_id, False)
             return {
-                "status": "ok", "message": "账户已恢复，请按需重新启用策略",
+                "status": "ok", "message": "账户已恢复，请按需检查策略部署状态",
                 "account": _account_payload(account),
             }
         except ValueError as exc:
@@ -143,6 +148,37 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             return {"status": "ok", "detail": detail}
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.get("/accounts/{account_id}/live-monitoring")
+    async def get_live_monitoring(
+        account_id: int,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        account = repository.get_by_id(user.user_id, account_id)
+        if account is None or account.account_type != "mt5":
+            raise HTTPException(status_code=404, detail="MT5 实盘账户不存在")
+
+        engine = engine_manager.get_engine(user.user_id, account_id)
+        positions = engine.position_service.get_positions()
+        events = PositionManagementEventRepository()
+        for position in positions:
+            position["management_events"] = events.list_for_position(
+                user.user_id, account_id, str(position.get("ticket", "")),
+            )
+        return {
+            "status": "ok",
+            "detail": {
+                "account": _account_payload(account),
+                "positions": positions,
+                "trades": engine.trade_history_service.get_deals()[:100],
+                "execution_reports": TradeExecutionRepository().list_for_account(
+                    user.user_id, account_id, 100,
+                ),
+                "equity_curve": repository.list_live_equity_points(
+                    user.user_id, account_id,
+                ),
+            },
+        }
 
     @router.get("/accounts/{account_id}/paper/report")
     async def get_paper_report(

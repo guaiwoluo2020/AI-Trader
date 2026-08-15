@@ -258,6 +258,11 @@ export const accountAPI = {
     return response.data
   },
 
+  async getLiveMonitoring(accountId) {
+    const response = await api.get(`/accounts/${encodeURIComponent(accountId)}/live-monitoring`)
+    return response.data
+  },
+
   async getPaperReport(accountId, strategyId = '') {
     const response = await api.get(
       `/accounts/${encodeURIComponent(accountId)}/paper/report`,

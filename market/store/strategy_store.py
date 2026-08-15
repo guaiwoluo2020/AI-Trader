@@ -103,7 +103,6 @@ class StrategyStore:
             if strategy is None:
                 strategy = TradingStrategy(
                     symbol=symbol,
-                    enabled=False,
                     lifecycle_status=StrategyLifecycle.DRAFT,
                 )
                 self._strategies[strategy.strategy_id] = strategy
@@ -119,8 +118,6 @@ class StrategyStore:
         with self._lock:
             strategy = TradingStrategy(
                 symbol=symbol,
-                enabled=False,
-                auto_execute=False,
                 lifecycle_status=StrategyLifecycle.DRAFT,
                 signal_sources=[],
             )
@@ -201,12 +198,12 @@ class StrategyStore:
             }
 
     def get_enabled_strategies(self) -> List[TradingStrategy]:
-        """获取所有启用的策略"""
+        """获取所有实盘可运行的策略。"""
         with self._lock:
             return [s for s in self._strategies.values() if s.is_runnable()]
 
     def get_enabled_symbols(self) -> List[str]:
-        """获取所有启用策略的品种"""
+        """获取所有实盘可运行策略的品种。"""
         with self._lock:
             return sorted({
                 strategy.symbol

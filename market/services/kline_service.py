@@ -77,12 +77,18 @@ class KlineService:
         kline_time_local = latest_kline_time - timedelta(hours=timezone_offset_hours)
         time_diff = (now_local - kline_time_local).total_seconds()
 
+        # This check is only used for a full historical upload.  A broker's
+        # timestamp may use a different server timezone, so a batch containing
+        # several bars must not be reported as an outage solely by wall time.
+        # Incremental freshness is tracked from the server-side receive time.
+        is_historical_batch = len(klines) > 1
         return {
-            "is_stale": time_diff > period_interval,
+            "is_stale": not is_historical_batch and time_diff > period_interval,
             "latest_kline_time": latest_kline_time,
             "kline_time_local": kline_time_local,
             "time_diff_seconds": int(time_diff),
-            "period_interval": period_interval
+            "period_interval": period_interval,
+            "historical_batch": is_historical_batch,
         }
 
     def check_continuity(self, symbol: str, period: str, new_klines: List[Dict]) -> Dict:

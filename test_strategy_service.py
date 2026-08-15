@@ -477,7 +477,7 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(
             strategy.lifecycle_status, StrategyLifecycle.PRODUCTION
         )
-        self.assertFalse(strategy.enabled)
+        self.assertTrue(strategy.enabled)
         self.assertEqual(len(strategy.lifecycle_history), 4)
         self.assertEqual(
             strategy.lifecycle_history[-1]["to_status"],
@@ -505,8 +505,8 @@ class StrategyServiceTestCase(unittest.TestCase):
         strategy.update({"min_confidence": 80})
 
         self.assertEqual(strategy.lifecycle_status, StrategyLifecycle.DRAFT)
-        self.assertFalse(strategy.enabled)
-        self.assertFalse(strategy.auto_execute)
+        self.assertTrue(strategy.enabled)
+        self.assertTrue(strategy.auto_execute)
         self.assertEqual(
             strategy.lifecycle_history[-1]["reason"],
             "策略参数已修改，需要重新验证",

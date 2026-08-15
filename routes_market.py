@@ -25,8 +25,10 @@ from membership import MembershipService
 from sqlite_storage import (
     LLMAccessRepository,
     LLMConfigRepository,
+    AISignalSourceRepository,
     SharedAIRuntimeRepository,
     PositionManagementPolicyRepository,
+    PlatformInstrumentMappingRepository,
     StrategyConfigRepository,
     TradeConfigRepository,
     TradingAccountRepository,
@@ -57,6 +59,8 @@ def create_market_routes(
     llm_config_repo = LLMConfigRepository()
     llm_access_repo = LLMAccessRepository()
     shared_ai_runtime_repo = SharedAIRuntimeRepository()
+    instrument_mapping_repo = PlatformInstrumentMappingRepository()
+    ai_signal_source_repo = AISignalSourceRepository()
     quota_service = UserQuotaService()
     admission_service = StrategyAdmissionService(engine_manager.paper_trading)
     alpha_library = AlphaLibraryRepository()
@@ -66,13 +70,44 @@ def create_market_routes(
     memberships = MembershipService()
     shared_notifications = SharedReferenceNotificationService()
 
-    def strategy_payload(strategy) -> Dict:
+    def strategy_payload(strategy, user_id: int) -> Dict:
         payload = strategy.to_dict()
         payload["readonly_reference"] = bool(strategy.source_owner_user_id)
+        payload["deployment_count"] = strategy_repo.strategy_deployment_count(
+            int(user_id), strategy.strategy_id,
+        )
         if payload["readonly_reference"]:
             for source in payload.get("signal_sources") or []:
                 source["params"] = {}
         return payload
+
+    def shared_strategy_payload(strategy: Dict, viewer_user_id: int) -> Dict:
+        payload = dict(strategy)
+        options = instrument_mapping_repo.target_options(
+            int(payload["owner_user_id"]), payload.get("symbol", ""), viewer_user_id,
+        )
+        payload["target_symbol_options"] = options
+        payload["mapping_notice"] = (
+            "可选择平台已关联的交易商品种；未配置映射时仅支持同名品种。"
+        )
+        return payload
+
+    def filter_shared_ai_items(items: List[Dict], user_id: int, symbol: Optional[str]) -> List[Dict]:
+        filtered = []
+        for item in items:
+            item = dict(item)
+            source_server = instrument_mapping_repo.source_server(
+                item["owner_user_id"], item.get("symbol", ""),
+            )
+            item["broker_server"] = source_server
+            item["mapping_compatible"] = (
+                not symbol or instrument_mapping_repo.user_can_use_symbol(
+                    item["owner_user_id"], item.get("symbol", ""), user_id, symbol,
+                )
+            )
+            if item["mapping_compatible"]:
+                filtered.append(item)
+        return filtered
 
     def add_audit_event(
         user: AuthUser, event_type: str, event_name: str, message: str,
@@ -122,7 +157,7 @@ def create_market_routes(
             "max_same_direction", "position_management_policy_id",
             "min_risk_reward", "max_risk_reward",
             "min_sl_points", "max_sl_points", "trading_hours",
-            "position_conflict", "enabled", "auto_execute",
+            "position_conflict",
         }
         if (
             strategy.lifecycle_status in {"paper_trading", "production"}
@@ -171,9 +206,18 @@ def create_market_routes(
         }
         for source in ai_sources:
             params = source.get("params") or {}
-            mode = params.get("analysis_mode", "self_analysis")
+            managed_source_id = str(params.get("ai_signal_source_id") or "").strip()
+            if not managed_source_id:
+                raise ValueError("请选择独立管理的 AI 信号源")
+            managed_source = ai_signal_source_repo.get(user.user_id, managed_source_id)
+            if managed_source is None or not managed_source.get("enabled"):
+                raise ValueError("选择的 AI 信号源不存在或已停用")
+            if str(source.get("period", "")).upper() != managed_source["period"]:
+                raise ValueError("策略中的 AI 信号周期必须与独立信号源一致")
+            source["signal_source_id"] = managed_source_id
+            mode = (managed_source.get("config") or {}).get("analysis_mode", "self_analysis")
             if mode == "shared_reference":
-                share_id = str(params.get("shared_runtime_id") or "").strip()
+                share_id = str((managed_source.get("config") or {}).get("shared_runtime_id") or "").strip()
                 shared = shared_ai_runtime_repo.get_shared(share_id)
                 if shared is None or shared["owner_user_id"] == user.user_id:
                     raise ValueError("选择的共享AI运行数据不存在或已取消共享")
@@ -185,9 +229,9 @@ def create_market_routes(
             options = llm_governance.scene_options(
                 user.user_id, AI_SIGNAL_ANALYSIS
             )
-            if str(params.get("model") or "") not in options["models"]:
+            if str((managed_source.get("config") or {}).get("model") or "") not in options["models"]:
                 raise ValueError("AI入场信号选择的模型不在管理员开放列表中")
-            for share_id in params.get("reference_runtime_ids") or []:
+            for share_id in (managed_source.get("config") or {}).get("reference_runtime_ids") or []:
                 shared = shared_ai_runtime_repo.get_shared(str(share_id))
                 if shared is None:
                     raise ValueError("选择的共享AI运行数据不存在或已取消共享")
@@ -875,7 +919,7 @@ def create_market_routes(
         return {
             "status": "ok",
             "count": len(strategies),
-            "strategies": [strategy_payload(s) for s in strategies],
+            "strategies": [strategy_payload(s, user.user_id) for s in strategies],
             "quota": quota_service.get_summary(user.user_id, user.role),
         }
 
@@ -916,7 +960,7 @@ def create_market_routes(
             return {
                 "status": "ok",
                 "message": "策略已创建",
-                "strategy": strategy_payload(strategy),
+                "strategy": strategy_payload(strategy, user.user_id),
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -956,7 +1000,10 @@ def create_market_routes(
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取平台共享策略库；共享内容只允许引用，不暴露机密配置。"""
-        strategies = strategy_repo.list_shared_strategies(user.user_id)
+        strategies = [
+            shared_strategy_payload(item, user.user_id)
+            for item in strategy_repo.list_shared_strategies(user.user_id)
+        ]
         return {
             "status": "ok",
             "count": len(strategies),
@@ -977,6 +1024,7 @@ def create_market_routes(
             data = {}
 
         policy_id = str(data.get("position_management_policy_id", "")).strip()
+        target_symbol = str(data.get("target_symbol", "")).strip()
         if policy_id and not position_policy_repo.get(user.user_id, policy_id):
             return {"status": "error", "message": "请选择有效的持仓管理方案"}
         if not policy_id:
@@ -994,6 +1042,14 @@ def create_market_routes(
         source = strategy_repo.get_strategy_by_id(owner_user_id, strategy_id)
         if source is None or source.visibility != "shared":
             return {"status": "error", "message": "共享策略不存在或未开放使用"}
+        target_symbol = target_symbol or source.symbol
+        if not instrument_mapping_repo.user_can_use_symbol(
+            owner_user_id, source.symbol, user.user_id, target_symbol,
+        ):
+            return {
+                "status": "error",
+                "message": "目标品种未与共享策略品种建立平台关联映射",
+            }
         try:
             with quota_service.guarded():
                 quota_service.assert_can_create(user.user_id, user.role, "strategies")
@@ -1001,7 +1057,7 @@ def create_market_routes(
                     user.user_id, user.role, "", source.signal_sources or [],
                 )
                 strategy = strategy_repo.use_shared_strategy(
-                    user.user_id, owner_user_id, strategy_id, policy_id
+                    user.user_id, owner_user_id, strategy_id, policy_id, target_symbol,
                 )
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
@@ -1012,7 +1068,7 @@ def create_market_routes(
         return {
             "status": "ok",
             "message": "已添加平台策略引用；共享策略被应用后会冻结，后续演进请复制新版本",
-            "strategy": strategy_payload(strategy),
+            "strategy": strategy_payload(strategy, user.user_id),
         }
 
     @protected_router.post("/strategy/{strategy_ref}/copy")
@@ -1037,7 +1093,7 @@ def create_market_routes(
             return {
                 "status": "ok",
                 "message": "已复制为新的私有草稿策略",
-                "strategy": strategy_payload(copied),
+                "strategy": strategy_payload(copied, user.user_id),
             }
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
@@ -1054,7 +1110,7 @@ def create_market_routes(
             return {"status": "error", "message": "策略配置不存在"}
         return {
             "status": "ok",
-            "strategy": strategy_payload(strategy)
+            "strategy": strategy_payload(strategy, user.user_id)
         }
 
     @protected_router.post("/strategy/{strategy_ref}")
@@ -1117,7 +1173,7 @@ def create_market_routes(
             return {
                 "status": "ok",
                 "message": "策略配置已更新",
-                "strategy": strategy_payload(strategy)
+                "strategy": strategy_payload(strategy, user.user_id)
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -1172,7 +1228,7 @@ def create_market_routes(
             return {
                 "status": "ok",
                 "message": f"策略已进入“{strategy.to_dict()['lifecycle_label']}”状态",
-                "strategy": strategy_payload(strategy),
+                "strategy": strategy_payload(strategy, user.user_id),
             }
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
@@ -1233,9 +1289,6 @@ def create_market_routes(
             strategy.lifecycle_status = target_status
             strategy.lifecycle_updated_at = now
             strategy.updated_at = now
-            if target_status != StrategyLifecycle.PRODUCTION:
-                strategy.enabled = False
-                strategy.auto_execute = False
             strategy.lifecycle_history.append({
                 "from_status": previous_status,
                 "to_status": target_status,
@@ -1283,7 +1336,7 @@ def create_market_routes(
             return {
                 "status": "ok",
                 "message": f"策略已推进到“{saved.to_dict()['lifecycle_label']}”",
-                "strategy": strategy_payload(saved),
+                "strategy": strategy_payload(saved, target_user.user_id),
             }
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
@@ -1663,6 +1716,39 @@ def create_market_routes(
             },
         }
 
+    @protected_router.get("/admin/instrument-mappings")
+    async def list_instrument_mappings(
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        return {"status": "ok", "mappings": instrument_mapping_repo.list()}
+
+    @protected_router.put("/admin/instrument-mappings")
+    async def save_instrument_mapping(
+        request: Request, user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        try:
+            mapping = instrument_mapping_repo.save(await request.json())
+            add_audit_event(
+                user, "instrument_mapping_saved", "保存品种关联映射",
+                f"保存 {mapping['effective_broker_name']} / {mapping['native_symbol']} -> {mapping['mapping_group']}",
+                mapping, "instrument_mapping", mapping["mapping_id"],
+            )
+            return {"status": "ok", "mapping": mapping}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @protected_router.delete("/admin/instrument-mappings/{mapping_id}")
+    async def delete_instrument_mapping(
+        mapping_id: str, user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        if not instrument_mapping_repo.delete(mapping_id):
+            raise HTTPException(status_code=404, detail="品种关联映射不存在")
+        add_audit_event(
+            user, "instrument_mapping_deleted", "删除品种关联映射",
+            f"删除品种关联映射 {mapping_id}", {}, "instrument_mapping", mapping_id,
+        )
+        return {"status": "ok"}
+
     @protected_router.get("/llm/signal-options")
     async def get_llm_signal_options(
         symbol: Optional[str] = None,
@@ -1674,10 +1760,10 @@ def create_market_routes(
             user.user_id, AI_SIGNAL_ANALYSIS
         )
         shared = [
-            item for item in shared_ai_runtime_repo.list_shared(
-                user.user_id, symbol
-            )
-            if not item["is_owner"]
+            item for item in filter_shared_ai_items(
+                shared_ai_runtime_repo.list_shared(user.user_id, symbol),
+                user.user_id, symbol,
+            ) if not item["is_owner"]
         ]
         return {
             "status": "ok",
@@ -1693,12 +1779,103 @@ def create_market_routes(
             "shared_runtime_data": shared,
         }
 
+    def ai_signal_source_payload(source: Dict) -> Dict:
+        payload = dict(source)
+        payload["locked"] = ai_signal_source_repo.is_locked(
+            int(source["user_id"]), source["signal_source_id"]
+        )
+        return payload
+
+    def validate_independent_ai_signal_source(user: AuthUser, data: Dict) -> None:
+        if not str(data.get("name") or "").strip():
+            raise ValueError("请填写 AI 信号源名称")
+        symbol = str(data.get("symbol") or "").strip()
+        period = str(data.get("period") or "").upper()
+        config = data.get("config") or {}
+        if not symbol or period not in {"M1", "M5", "M15", "H1", "H4"}:
+            raise ValueError("请填写交易品种并选择有效的分析周期")
+        mode = str(config.get("analysis_mode") or "self_analysis")
+        if mode == "shared_reference":
+            share_id = str(config.get("shared_runtime_id") or "").strip()
+            shared = shared_ai_runtime_repo.get_shared(share_id)
+            if shared is None or shared["owner_user_id"] == user.user_id:
+                raise ValueError("选择的共享 AI 运行数据不存在或不可引用")
+            if period != shared["period"]:
+                raise ValueError("引用型信号源周期必须与共享数据周期一致")
+            return
+        access = llm_access_repo.get_status(user.user_id, user.role)
+        if not access["access_granted"]:
+            raise ValueError("自主 AI 分析仅对已开通大模型功能的用户开放")
+        models = llm_governance.scene_options(
+            user.user_id, AI_SIGNAL_ANALYSIS
+        )["models"]
+        if str(config.get("model") or "") not in models:
+            raise ValueError("请选择管理员为 AI 行情场景开放的模型")
+        interval = int(config.get("analysis_interval_minutes") or 0)
+        minimum = {"M1": 1, "M5": 5, "M15": 15, "H1": 60, "H4": 240}[period]
+        if interval < minimum:
+            raise ValueError(f"{period} 周期的调用间隔不能低于 {minimum} 分钟")
+
+    @protected_router.get("/ai-signal-sources")
+    async def get_ai_signal_sources(user: AuthUser = Depends(require_auth)) -> Dict:
+        return {
+            "status": "ok",
+            "items": [ai_signal_source_payload(item) for item in ai_signal_source_repo.list(user.user_id)],
+        }
+
+    @protected_router.post("/ai-signal-sources")
+    async def create_ai_signal_source(request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
+        try:
+            data = await request.json()
+            validate_independent_ai_signal_source(user, data)
+            with quota_service.guarded():
+                quota_service.assert_can_create(
+                    user.user_id, user.role, "signal_sources"
+                )
+                source = ai_signal_source_repo.create(user.user_id, data)
+            return {"status": "ok", "source": ai_signal_source_payload(source)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @protected_router.put("/ai-signal-sources/{signal_source_id}")
+    async def update_ai_signal_source(signal_source_id: str, request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
+        try:
+            data = await request.json()
+            current = ai_signal_source_repo.get(user.user_id, signal_source_id)
+            if current is None:
+                raise HTTPException(status_code=404, detail="AI 信号源不存在")
+            candidate = {**current, **data}
+            validate_independent_ai_signal_source(user, candidate)
+            source = ai_signal_source_repo.update(user.user_id, signal_source_id, data)
+            return {"status": "ok", "source": ai_signal_source_payload(source)}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @protected_router.post("/ai-signal-sources/{signal_source_id}/copy")
+    async def copy_ai_signal_source(signal_source_id: str, user: AuthUser = Depends(require_auth)) -> Dict:
+        try:
+            source = ai_signal_source_repo.copy(user.user_id, signal_source_id)
+            return {"status": "ok", "source": ai_signal_source_payload(source)}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @protected_router.delete("/ai-signal-sources/{signal_source_id}")
+    async def delete_ai_signal_source(signal_source_id: str, user: AuthUser = Depends(require_auth)) -> Dict:
+        try:
+            ai_signal_source_repo.delete(user.user_id, signal_source_id)
+            return {"status": "ok"}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
     @protected_router.get("/llm/runtime-shares")
     async def get_shared_ai_runtime_data(
         symbol: Optional[str] = None,
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        items = shared_ai_runtime_repo.list_shared(user.user_id, symbol)
+        items = filter_shared_ai_items(
+            shared_ai_runtime_repo.list_shared(user.user_id, symbol),
+            user.user_id, symbol,
+        )
         return {"status": "ok", "count": len(items), "items": items}
 
     @protected_router.get("/llm/market-view")
@@ -1720,7 +1897,10 @@ def create_market_routes(
         }
         own_cards = engine.get_ai_market_cards(symbol)
         shared_cards = []
-        for item in shared_ai_runtime_repo.list_shared(user.user_id, symbol):
+        for item in filter_shared_ai_items(
+            shared_ai_runtime_repo.list_shared(user.user_id, symbol),
+            user.user_id, symbol,
+        ):
             if item["is_owner"]:
                 continue
             result = item.get("result") or {}

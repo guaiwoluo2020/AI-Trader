@@ -621,7 +621,7 @@ class PaperTradingServiceTests(unittest.TestCase):
             for item in detail["runtime_logs"]
         ))
 
-    # ---------- 部署校验：未启用的策略不允许部署到实盘 ----------
+    # ---------- 部署校验：策略运行由账户部署控制 ----------
 
     def _create_live_account(self, mt5_login: str) -> dict:
         """直接插入一个 MT5 实盘账户记录（测试用）。"""
@@ -654,17 +654,17 @@ class PaperTradingServiceTests(unittest.TestCase):
             "SELECT * FROM trading_accounts WHERE id = ?", (account_id,)
         )
 
-    def test_disabled_strategy_cannot_deploy_to_mt5_live(self):
-        """策略 enabled=false 时禁止部署到 MT5 实盘账户。"""
+    def test_strategy_enabled_flag_does_not_block_mt5_live_deploy(self):
+        """策略级 enabled 已废弃，实盘部署由生命周期和账户权限控制。"""
         live = self._create_live_account("12345678")
         self.update_strategy_config({
             "enabled": False,
-            "auto_execute": True,
+            "auto_execute": False,
             "lifecycle_status": "production",
         })
 
-        with self.assertRaisesRegex(ValueError, "尚未启用"):
-            self.service.deploy(self.user.user_id, live["id"], "strategy-1")
+        deployment = self.service.deploy(self.user.user_id, live["id"], "strategy-1")
+        self.assertEqual(deployment["execution_mode"], "live")
 
     def test_enabled_production_strategy_can_deploy_to_mt5_live(self):
         """enabled=true 且 production 的策略可以部署到实盘。"""

@@ -113,13 +113,24 @@ class UserQuotaService:
             SELECT COUNT(*) AS total
             FROM user_strategy_configs, json_each(config_json, '$.signal_sources')
             WHERE user_id = ? AND json_valid(config_json)
+              AND (
+                json_extract(value, '$.source') != 'ai_entry'
+                OR COALESCE(json_extract(value, '$.params.ai_signal_source_id'), '') = ''
+              )
             """,
+            (int(user_id),),
+        )
+        ai_signal_sources = self.storage.fetchone(
+            "SELECT COUNT(*) AS total FROM ai_signal_sources WHERE user_id = ?",
             (int(user_id),),
         )
         return {
             "datasets": int(datasets["total"] if datasets else 0),
             "strategies": int(strategies["total"] if strategies else 0),
-            "signal_sources": int(signal_sources["total"] if signal_sources else 0),
+            "signal_sources": (
+                int(signal_sources["total"] if signal_sources else 0)
+                + int(ai_signal_sources["total"] if ai_signal_sources else 0)
+            ),
         }
 
     def get_summary(self, user_id: int, role: str = "user") -> Dict:
@@ -169,8 +180,24 @@ class UserQuotaService:
             SELECT COUNT(*) AS total
             FROM user_strategy_configs, json_each(config_json, '$.signal_sources')
             WHERE user_id = ? AND strategy_id != ? AND json_valid(config_json)
+              AND (
+                json_extract(value, '$.source') != 'ai_entry'
+                OR COALESCE(json_extract(value, '$.params.ai_signal_source_id'), '') = ''
+              )
             """,
             (int(user_id), str(strategy_id)),
         )
-        requested_total = int(current["total"] if current else 0) + len(sources or [])
+        independent_ai = self.storage.fetchone(
+            "SELECT COUNT(*) AS total FROM ai_signal_sources WHERE user_id = ?",
+            (int(user_id),),
+        )
+        requested_total = (
+            int(current["total"] if current else 0)
+            + sum(
+                1 for source in (sources or [])
+                if source.get("source") != "ai_entry"
+                or not str((source.get("params") or {}).get("ai_signal_source_id") or "")
+            )
+            + int(independent_ai["total"] if independent_ai else 0)
+        )
         self.assert_capacity(user_id, role, "signal_sources", requested_total)

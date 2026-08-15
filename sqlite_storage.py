@@ -420,6 +420,39 @@ class SQLiteStorage:
                     CREATE INDEX IF NOT EXISTS idx_shared_ai_runtime_lookup
                     ON shared_ai_runtime_data(symbol, period, updated_at DESC);
 
+                    CREATE TABLE IF NOT EXISTS platform_instrument_mappings (
+                        mapping_id TEXT PRIMARY KEY,
+                        broker_name TEXT NOT NULL DEFAULT '',
+                        broker_server TEXT NOT NULL,
+                        native_symbol TEXT NOT NULL,
+                        mapping_group TEXT NOT NULL,
+                        display_name TEXT NOT NULL DEFAULT '',
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        UNIQUE(broker_server, native_symbol)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_platform_instrument_group
+                    ON platform_instrument_mappings(mapping_group, enabled);
+
+                    CREATE TABLE IF NOT EXISTS ai_signal_sources (
+                        signal_source_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        name TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        period TEXT NOT NULL,
+                        config_json TEXT NOT NULL DEFAULT '{}',
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        share_runtime_data INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_ai_signal_sources_owner
+                    ON ai_signal_sources(user_id, enabled, updated_at DESC);
+
                     CREATE TABLE IF NOT EXISTS position_management_policies (
                         policy_id TEXT PRIMARY KEY,
                         user_id INTEGER NOT NULL,
@@ -1180,6 +1213,22 @@ class SQLiteStorage:
                         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                     );
 
+                    CREATE TABLE IF NOT EXISTS live_equity_points (
+                        account_id INTEGER NOT NULL,
+                        point_time INTEGER NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        balance REAL NOT NULL,
+                        equity REAL NOT NULL,
+                        free_margin REAL NOT NULL,
+                        margin REAL NOT NULL,
+                        PRIMARY KEY(account_id, point_time),
+                        FOREIGN KEY(account_id) REFERENCES trading_accounts(id) ON DELETE CASCADE,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_live_equity_points_account
+                    ON live_equity_points(account_id, point_time DESC);
+
                     CREATE TABLE IF NOT EXISTS paper_runtime_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         user_id INTEGER NOT NULL,
@@ -1350,6 +1399,10 @@ class SQLiteStorage:
                     conn, "backtest_tasks", "worker_id", "TEXT NOT NULL DEFAULT ''"
                 )
                 self._ensure_column(conn, "backtest_tasks", "heartbeat_at", "INTEGER")
+                self._ensure_column(
+                    conn, "platform_instrument_mappings", "broker_name",
+                    "TEXT NOT NULL DEFAULT ''",
+                )
                 self._ensure_column(
                     conn, "backtest_tasks", "llm_analysis_count",
                     "INTEGER NOT NULL DEFAULT 0",
@@ -2470,8 +2523,38 @@ class TradingAccountRepository:
                 """,
                 (values[0], *values, now, now, account_id),
             )
+            account_row = conn.execute(
+                "SELECT user_id FROM trading_accounts WHERE id = ? AND account_type = 'mt5'",
+                (account_id,),
+            ).fetchone()
+            if account_row is not None:
+                conn.execute(
+                    """
+                    INSERT INTO live_equity_points(
+                        account_id, point_time, user_id, balance, equity, free_margin, margin
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, point_time) DO UPDATE SET
+                        balance = excluded.balance, equity = excluded.equity,
+                        free_margin = excluded.free_margin, margin = excluded.margin
+                    """,
+                    (account_id, now, int(account_row["user_id"]), *values),
+                )
             conn.commit()
             return cursor.rowcount == 1
+
+    def list_live_equity_points(
+        self, user_id: int, account_id: int, count: int = 1440,
+    ) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT point_time AS time, balance, equity, free_margin, margin
+            FROM live_equity_points
+            WHERE user_id = ? AND account_id = ?
+            ORDER BY point_time DESC LIMIT ?
+            """,
+            (user_id, account_id, max(1, min(int(count), 5000))),
+        )
+        return [dict(row) for row in rows][::-1]
 
     @staticmethod
     def infer_mt5_environment(server: str) -> str:
@@ -3440,6 +3523,320 @@ class LLMAccessRepository:
         return self.get_status(int(row["user_id"])) if row else None
 
 
+class AISignalSourceRepository:
+    """Independent, reusable AI analysis sources owned by a user."""
+
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or get_storage()
+
+    @staticmethod
+    def _row_to_dict(row) -> Dict:
+        if row is None:
+            return {}
+        return {
+            "signal_source_id": row["signal_source_id"],
+            "user_id": int(row["user_id"]),
+            "name": row["name"],
+            "symbol": row["symbol"],
+            "period": row["period"],
+            "config": json.loads(row["config_json"] or "{}"),
+            "enabled": bool(row["enabled"]),
+            "share_runtime_data": bool(row["share_runtime_data"]),
+            "created_at": int(row["created_at"]),
+            "updated_at": int(row["updated_at"]),
+        }
+
+    def list(self, user_id: int, enabled_only: bool = False) -> List[Dict]:
+        sql = "SELECT * FROM ai_signal_sources WHERE user_id = ?"
+        params: List = [int(user_id)]
+        if enabled_only:
+            sql += " AND enabled = 1"
+        sql += " ORDER BY created_at ASC, signal_source_id ASC"
+        return [self._row_to_dict(row) for row in self.storage.fetchall(sql, tuple(params))]
+
+    def get(self, user_id: int, signal_source_id: str) -> Optional[Dict]:
+        row = self.storage.fetchone(
+            "SELECT * FROM ai_signal_sources WHERE user_id = ? AND signal_source_id = ?",
+            (int(user_id), str(signal_source_id)),
+        )
+        return self._row_to_dict(row) if row else None
+
+    def create(self, user_id: int, data: Dict) -> Dict:
+        now = _now_ts()
+        source_id = str(data.get("signal_source_id") or uuid.uuid4().hex[:12])
+        self.storage.execute(
+            """
+            INSERT INTO ai_signal_sources(
+                signal_source_id, user_id, name, symbol, period, config_json,
+                enabled, share_runtime_data, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id, int(user_id), str(data.get("name") or "AI 信号源").strip(),
+                str(data.get("symbol") or "").strip(), str(data.get("period") or "M5").upper(),
+                json.dumps(data.get("config") or {}, ensure_ascii=False),
+                int(bool(data.get("enabled", True))),
+                int(bool(data.get("share_runtime_data", False))), now, now,
+            ),
+        )
+        return self.get(user_id, source_id) or {}
+
+    def update(self, user_id: int, signal_source_id: str, data: Dict) -> Dict:
+        current = self.get(user_id, signal_source_id)
+        if current is None:
+            raise ValueError("AI 信号源不存在")
+        if self.is_locked(user_id, signal_source_id):
+            raise ValueError("该 AI 信号源已被引用或用于已部署策略，不能修改；请复制后创建新版本")
+        merged = {**current, **data}
+        self.storage.execute(
+            """
+            UPDATE ai_signal_sources
+            SET name = ?, symbol = ?, period = ?, config_json = ?, enabled = ?,
+                share_runtime_data = ?, updated_at = ?
+            WHERE user_id = ? AND signal_source_id = ?
+            """,
+            (
+                str(merged.get("name") or "AI 信号源").strip(),
+                str(merged.get("symbol") or "").strip(), str(merged.get("period") or "M5").upper(),
+                json.dumps(merged.get("config") or {}, ensure_ascii=False),
+                int(bool(merged.get("enabled", True))), int(bool(merged.get("share_runtime_data", False))),
+                _now_ts(), int(user_id), str(signal_source_id),
+            ),
+        )
+        return self.get(user_id, signal_source_id) or {}
+
+    def copy(self, user_id: int, signal_source_id: str) -> Dict:
+        source = self.get(user_id, signal_source_id)
+        if source is None:
+            raise ValueError("AI 信号源不存在")
+        return self.create(user_id, {
+            **source,
+            "signal_source_id": "",
+            "name": f"{source['name']}（副本）",
+            "enabled": True,
+            "share_runtime_data": False,
+        })
+
+    def delete(self, user_id: int, signal_source_id: str) -> None:
+        if self.is_locked(user_id, signal_source_id):
+            raise ValueError("该 AI 信号源已被引用或用于已部署策略，不能删除；请保留或复制新版本")
+        self.storage.execute(
+            "DELETE FROM ai_signal_sources WHERE user_id = ? AND signal_source_id = ?",
+            (int(user_id), str(signal_source_id)),
+        )
+
+    def is_locked(self, user_id: int, signal_source_id: str) -> bool:
+        # A shared output already consumed by another user must remain available.
+        share_id = f"{int(user_id)}:ai:{signal_source_id}"
+        referenced_source = self.storage.fetchone(
+            """
+            SELECT 1 FROM ai_signal_sources
+            WHERE user_id != ?
+              AND json_extract(config_json, '$.shared_runtime_id') = ?
+            LIMIT 1
+            """, (int(user_id), share_id),
+        )
+        if referenced_source:
+            return True
+        referenced = self.storage.fetchone(
+            """
+            SELECT 1 FROM user_strategy_configs
+            WHERE user_id != ? AND EXISTS (
+                SELECT 1 FROM json_each(config_json, '$.signal_sources')
+                WHERE json_extract(value, '$.params.shared_runtime_id') = ?
+            ) LIMIT 1
+            """, (int(user_id), share_id),
+        )
+        if referenced:
+            return True
+        deployed = self.storage.fetchone(
+            """
+            SELECT 1 FROM strategy_deployments d
+            JOIN user_strategy_configs s ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
+            WHERE s.user_id = ? AND d.status IN ('active', 'paused', 'pending')
+              AND EXISTS (
+                SELECT 1 FROM json_each(s.config_json, '$.signal_sources')
+                WHERE json_extract(value, '$.params.ai_signal_source_id') = ?
+            ) LIMIT 1
+            """, (int(user_id), str(signal_source_id)),
+        )
+        return bool(deployed)
+
+
+class PlatformInstrumentMappingRepository:
+    """Platform-managed relationships between broker-specific symbols."""
+
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or get_storage()
+
+    @staticmethod
+    def _normalize(value: str) -> str:
+        return str(value or "").strip().upper()
+
+    @staticmethod
+    def broker_name_from_server(server: str) -> str:
+        """Use the stable prefix of an MT5 server as the platform broker key."""
+        value = str(server or "").strip()
+        if not value:
+            return ""
+        return value.split("-", 1)[0].strip()
+
+    def list(self, enabled_only: bool = False) -> List[Dict]:
+        sql = """
+            SELECT *, COALESCE(NULLIF(broker_name, ''), broker_server) AS effective_broker_name
+            FROM platform_instrument_mappings
+        """
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY mapping_group, broker_server, native_symbol"
+        return [dict(row) for row in self.storage.fetchall(sql)]
+
+    def save(self, data: Dict) -> Dict:
+        broker_name = str(
+            data.get("broker_name") or data.get("broker_server") or ""
+        ).strip()
+        native_symbol = self._normalize(data.get("native_symbol"))
+        mapping_group = self._normalize(data.get("mapping_group"))
+        display_name = str(data.get("display_name") or "").strip()
+        if not broker_name or not native_symbol or not mapping_group:
+            raise ValueError("交易商、品种和关联组均不能为空")
+        if len(broker_name) > 120 or len(native_symbol) > 40 or len(mapping_group) > 80:
+            raise ValueError("映射字段长度无效")
+        mapping_id = str(data.get("mapping_id") or uuid.uuid4().hex[:16])
+        now = _now_ts()
+        self.storage.execute(
+            """
+            INSERT INTO platform_instrument_mappings(
+                mapping_id, broker_name, broker_server, native_symbol, mapping_group,
+                display_name, enabled, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(broker_server, native_symbol) DO UPDATE SET
+                broker_name = excluded.broker_name,
+                mapping_group = excluded.mapping_group,
+                display_name = excluded.display_name,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at
+            """,
+            (
+                mapping_id, broker_name, broker_name, native_symbol, mapping_group,
+                display_name, int(bool(data.get("enabled", True))), now, now,
+            ),
+        )
+        row = self.storage.fetchone(
+            "SELECT *, COALESCE(NULLIF(broker_name, ''), broker_server) AS effective_broker_name FROM platform_instrument_mappings WHERE broker_server = ? AND native_symbol = ?",
+            (broker_name, native_symbol),
+        )
+        return dict(row) if row else {}
+
+    def delete(self, mapping_id: str) -> bool:
+        row = self.storage.fetchone(
+            "SELECT mapping_id FROM platform_instrument_mappings WHERE mapping_id = ?",
+            (str(mapping_id),),
+        )
+        if not row:
+            return False
+        self.storage.execute(
+            "DELETE FROM platform_instrument_mappings WHERE mapping_id = ?",
+            (str(mapping_id),),
+        )
+        return True
+
+    def source_server(self, user_id: int, symbol: str) -> str:
+        """Best-effort source broker lookup for a shared strategy or AI result."""
+        row = self.storage.fetchone(
+            """
+            SELECT COALESCE(c.mt5_server, a.mt5_server, '') AS mt5_server
+            FROM trading_accounts AS a
+            LEFT JOIN mt5_account_connections AS c ON c.account_id = a.id
+            WHERE a.user_id = ? AND a.account_type = 'mt5'
+              AND COALESCE(c.mt5_server, a.mt5_server, '') != ''
+            ORDER BY COALESCE(c.last_seen_at, a.last_seen_at, 0) DESC, a.id DESC
+            LIMIT 1
+            """,
+            (int(user_id),),
+        )
+        return str(row["mt5_server"] or "") if row else ""
+
+    def compatible(self, source_server: str, source_symbol: str,
+                   target_server: str, target_symbol: str) -> bool:
+        source_symbol = self._normalize(source_symbol)
+        target_symbol = self._normalize(target_symbol)
+        if not source_symbol or not target_symbol:
+            return False
+        if source_symbol == target_symbol:
+            return True
+        source_broker = self.broker_name_from_server(source_server)
+        target_broker = self.broker_name_from_server(target_server)
+        if not source_broker or not target_broker:
+            return False
+        rows = self.storage.fetchall(
+            """
+            SELECT mapping_group FROM platform_instrument_mappings
+            WHERE enabled = 1
+              AND (COALESCE(NULLIF(broker_name, ''), broker_server) = ? AND native_symbol = ?
+                   OR COALESCE(NULLIF(broker_name, ''), broker_server) = ? AND native_symbol = ?)
+            """,
+            (source_broker, source_symbol, target_broker, target_symbol),
+        )
+        return len({str(row["mapping_group"]) for row in rows}) == 1 and len(rows) == 2
+
+    def target_options(self, source_owner_user_id: int, source_symbol: str,
+                       target_user_id: int) -> List[Dict]:
+        source_server = self.source_server(source_owner_user_id, source_symbol)
+        accounts = self.storage.fetchall(
+            """
+            SELECT DISTINCT COALESCE(c.mt5_server, a.mt5_server, '') AS mt5_server
+            FROM trading_accounts AS a
+            LEFT JOIN mt5_account_connections AS c ON c.account_id = a.id
+            WHERE a.user_id = ? AND a.account_type = 'mt5'
+              AND a.status = 'active' AND a.enabled = 1
+              AND COALESCE(c.mt5_server, a.mt5_server, '') != ''
+            """,
+            (int(target_user_id),),
+        )
+        options = [{
+            "symbol": self._normalize(source_symbol), "broker_server": "",
+            "label": f"{self._normalize(source_symbol)}（同名品种）",
+        }]
+        for account in accounts:
+            target_server = str(account["mt5_server"] or "")
+            mappings = self.storage.fetchall(
+                "SELECT native_symbol FROM platform_instrument_mappings WHERE COALESCE(NULLIF(broker_name, ''), broker_server) = ? AND enabled = 1 ORDER BY native_symbol",
+                (self.broker_name_from_server(target_server),),
+            )
+            for mapping in mappings:
+                target_symbol = str(mapping["native_symbol"])
+                if not self.compatible(source_server, source_symbol, target_server, target_symbol):
+                    continue
+                option = {
+                    "symbol": target_symbol, "broker_server": target_server,
+                    "label": f"{target_symbol} · {self.broker_name_from_server(target_server)}",
+                }
+                if option not in options:
+                    options.append(option)
+        return options
+
+    def user_can_use_symbol(self, source_owner_user_id: int, source_symbol: str,
+                            target_user_id: int, target_symbol: str) -> bool:
+        if self._normalize(source_symbol) == self._normalize(target_symbol):
+            return True
+        source_server = self.source_server(source_owner_user_id, source_symbol)
+        accounts = self.storage.fetchall(
+            """
+            SELECT DISTINCT COALESCE(c.mt5_server, a.mt5_server, '') AS mt5_server
+            FROM trading_accounts AS a
+            LEFT JOIN mt5_account_connections AS c ON c.account_id = a.id
+            WHERE a.user_id = ? AND a.account_type = 'mt5'
+              AND a.status = 'active' AND a.enabled = 1
+            """,
+            (int(target_user_id),),
+        )
+        return any(
+            self.compatible(source_server, source_symbol, row["mt5_server"], target_symbol)
+            for row in accounts
+        )
+
+
 class SharedAIRuntimeRepository:
     """Stores opt-in AI analysis snapshots that other users may use as context."""
 
@@ -3530,7 +3927,11 @@ class SharedAIRuntimeRepository:
     ) -> Dict:
         strategy_id = str(strategy.get("strategy_id", ""))
         source_id = str(source.get("signal_source_id", ""))
-        share_id = f"{int(user_id)}:{strategy_id}:{source_id}"
+        share_id = (
+            f"{int(user_id)}:ai:{source_id}"
+            if strategy_id == "__independent__"
+            else f"{int(user_id)}:{strategy_id}:{source_id}"
+        )
         now = _now_ts()
         self.storage.execute(
             """
@@ -3561,7 +3962,7 @@ class SharedAIRuntimeRepository:
                     ensure_ascii=False,
                 ),
                 "", "",
-                str(strategy.get("strategy_name", "")),
+                str(strategy.get("strategy_name", "独立 AI 信号源")),
                 str(strategy.get("lifecycle_status", "draft")),
                 json.dumps(result or {}, ensure_ascii=False), now, now, now,
             ),
@@ -3857,8 +4258,8 @@ class PositionManagementPolicyRepository:
                 })
             data["lifecycle_status"] = "draft"
             data["lifecycle_updated_at"] = now.isoformat()
-            data["enabled"] = False
-            data["auto_execute"] = False
+            data["enabled"] = True
+            data["auto_execute"] = True
             data["updated_at"] = now.isoformat()
             self.storage.execute(
                 "UPDATE user_strategy_configs SET config_json = ?, updated_at = ? WHERE user_id = ? AND strategy_id = ?",
@@ -4029,8 +4430,8 @@ class StrategyConfigRepository:
 
     def _invalid_strategy_reference(self, reference: "TradingStrategy", reason: str):
         now = datetime.now()
-        reference.enabled = False
-        reference.auto_execute = False
+        reference.enabled = True
+        reference.auto_execute = True
         reference.lifecycle_status = "draft"
         reference.lifecycle_updated_at = now
         reference.strategy_name = f"{reference.strategy_name}（来源已失效）"
@@ -4081,6 +4482,9 @@ class StrategyConfigRepository:
             signal_sources.append(item)
         payload.update({
             "strategy_id": reference.strategy_id,
+            # Keep the recipient's broker-native symbol while inheriting the
+            # publisher's strategy definition.
+            "symbol": reference.symbol or source.symbol,
             "visibility": "private",
             "is_shared": False,
             "position_management_policy_id": (
@@ -4261,6 +4665,7 @@ class StrategyConfigRepository:
         owner_user_id: int,
         strategy_id: str,
         position_management_policy_id: str,
+        target_symbol: str = "",
     ) -> Optional["TradingStrategy"]:
         from market.models.trading_strategy import TradingStrategy
 
@@ -4289,12 +4694,12 @@ class StrategyConfigRepository:
         payload = {
             "strategy_id": "",
             "strategy_name": source.strategy_name,
-            "symbol": source.symbol,
+            "symbol": str(target_symbol or source.symbol).strip(),
             "visibility": "private",
             "is_shared": False,
             "signal_sources": [],
-            "enabled": False,
-            "auto_execute": False,
+            "enabled": True,
+            "auto_execute": True,
             "lifecycle_status": "draft",
             "lifecycle_updated_at": now.isoformat(),
             "position_management_policy_id": position_management_policy_id,
@@ -4351,6 +4756,18 @@ class StrategyConfigRepository:
             + int(row["batch_count"])
         )
 
+    def strategy_deployment_count(self, user_id: int, strategy_id: str) -> int:
+        row = self.storage.fetchone(
+            """
+            SELECT COUNT(*) AS count
+            FROM strategy_deployments
+            WHERE user_id = ? AND strategy_id = ?
+              AND status IN ('active', 'paused', 'pending')
+            """,
+            (int(user_id), str(strategy_id)),
+        )
+        return int(row["count"]) if row else 0
+
     def copy_strategy(
         self, user_id: int, strategy: "TradingStrategy", name_suffix: str = " 副本",
     ) -> "TradingStrategy":
@@ -4362,8 +4779,8 @@ class StrategyConfigRepository:
             "strategy_name": f"{strategy.strategy_name}{name_suffix}",
             "visibility": "private",
             "is_shared": False,
-            "enabled": False,
-            "auto_execute": False,
+            "enabled": True,
+            "auto_execute": True,
             "lifecycle_status": "draft",
             "source_strategy_id": "",
             "source_owner_user_id": 0,

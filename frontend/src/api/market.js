@@ -456,6 +456,21 @@ export const marketAPI = {
     return response.data
   },
 
+  async getInstrumentMappings() {
+    const response = await api.get('/admin/instrument-mappings')
+    return response.data
+  },
+
+  async saveInstrumentMapping(payload) {
+    const response = await api.put('/admin/instrument-mappings', payload)
+    return response.data
+  },
+
+  async deleteInstrumentMapping(mappingId) {
+    const response = await api.delete(`/admin/instrument-mappings/${encodeURIComponent(mappingId)}`)
+    return response.data
+  },
+
   async saveLLMScene(sceneCode, payload) {
     const response = await api.put(
       `/admin/llm/scenes/${encodeURIComponent(sceneCode)}`, payload
@@ -474,6 +489,31 @@ export const marketAPI = {
     const response = await api.get('/llm/signal-options', {
       params: symbol ? { symbol } : {}
     })
+    return response.data
+  },
+
+  async getAISignalSources() {
+    const response = await api.get('/ai-signal-sources')
+    return response.data
+  },
+
+  async createAISignalSource(data) {
+    const response = await api.post('/ai-signal-sources', data)
+    return response.data
+  },
+
+  async updateAISignalSource(signalSourceId, data) {
+    const response = await api.put(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}`, data)
+    return response.data
+  },
+
+  async copyAISignalSource(signalSourceId) {
+    const response = await api.post(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}/copy`)
+    return response.data
+  },
+
+  async deleteAISignalSource(signalSourceId) {
+    const response = await api.delete(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}`)
     return response.data
   },
 

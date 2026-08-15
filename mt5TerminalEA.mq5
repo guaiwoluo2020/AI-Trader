@@ -63,6 +63,8 @@ datetime g_lastH1CloseTime = 0;            // 上次H1 K线收盘时间
 datetime g_lastM15CloseTime = 0;           // 上次M15 K线收盘时间
 datetime g_lastM5CloseTime = 0;            // 上次M5 K线收盘时间
 datetime g_lastM1CloseTime = 0;            // 上次M1 K线收盘时间
+datetime g_nextKlineRetryTime = 0;         // K线上传失败后的下次重试时间
+const int KLINE_RETRY_DELAY_SECONDS = 15;  // 避免服务异常时高频重试
 
 // 最后一次Tick时间戳
 datetime g_lastTickTime = 0;
@@ -77,7 +79,10 @@ double g_riskLimitPercent = 30.0;  // 30% 账户风险限制
 
 // 交易历史上报相关
 datetime g_lastTradeHistoryReportTime = 0;  // 上次上报时间
-int g_tradeHistoryReportInterval = 600;      // 上报间隔（秒），10分钟
+int g_tradeHistoryReportInterval = 300;      // 兜底同步间隔（秒），5分钟
+bool g_tradeHistorySyncPending = false;      // 有真实成交等待同步
+datetime g_nextTradeHistoryRetryTime = 0;    // 同步失败后的下次重试时间
+const int TRADE_HISTORY_RETRY_DELAY_SECONDS = 15;
 
 //+------------------------------------------------------------------+
 //| URL编码函数 - 处理特殊字符                                        |
@@ -1189,15 +1194,21 @@ void OnTimer()
 //--- 更新统计数据
    UpdateStatistics();
 
-//--- 交易历史上报（每10分钟，20%概率上报）
-   if(g_lastTradeHistoryReportTime == 0 || (now - g_lastTradeHistoryReportTime) >= g_tradeHistoryReportInterval)
+//--- 新成交在下一次定时器立即同步；定期同步用于补偿网络或终端短暂异常
+   if(g_tradeHistorySyncPending && now >= g_nextTradeHistoryRetryTime)
      {
-      // 20%概率上报 (0-4, 共5个值，等于0时上报)
-      int randomReport = (int)(MathRand() % 5);
-      if(randomReport == 0)
+      if(ReportTradeHistory())
         {
-         ReportTradeHistory();
+         g_tradeHistorySyncPending = false;
+         g_nextTradeHistoryRetryTime = 0;
         }
+      else
+         g_nextTradeHistoryRetryTime = now + TRADE_HISTORY_RETRY_DELAY_SECONDS;
+      g_lastTradeHistoryReportTime = now;
+     }
+   else if(g_lastTradeHistoryReportTime == 0 || (now - g_lastTradeHistoryReportTime) >= g_tradeHistoryReportInterval)
+     {
+      ReportTradeHistory();
       g_lastTradeHistoryReportTime = now;
      }
 
@@ -1298,6 +1309,7 @@ string BuildKlineJson(ENUM_TIMEFRAMES period, MqlRates &rates[], int count)
   {
    string json = "{\"symbol\":\"" + _Symbol + "\",";
    json += "\"is_full\":" + (g_klineInitialized ? "false" : "true") + ",";
+   json += "\"reported_at\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\",";
    json += "\"klines\":[";
 
    for(int i = count - 1; i >= 0; i--)  // 从旧到新排序
@@ -1362,15 +1374,16 @@ bool SendKlineToServer(string url, string jsonData)
 
       if(StringFind(responseText, "8888") >= 0)
         {
-         Print("Server needs full K-line data, resending...");
+         Print("Server needs full K-line data, scheduling a retry...");
          g_klineInitialized = false;
-         PushAllKlineData(true);
+         g_nextKlineRetryTime = TimeCurrent();
         }
       return false;
      }
    else
      {
-      Print("Failed to push K-line data. Response code: ", responseCode);
+      Print("Failed to push K-line data. Response code: ", responseCode,
+            ", error: ", GetLastError());
       return false;
      }
   }
@@ -1562,46 +1575,88 @@ bool UploadHistoricalDataChunk(
 void CheckAndPushIncrementalKlines()
   {
    datetime now = TimeCurrent();
+   if(now < g_nextKlineRetryTime)
+      return;
+
+   // A failed initial upload used to leave the EA permanently uninitialized.
+   // Retry the complete bootstrap with backoff until all periods are accepted.
+   if(!g_klineInitialized)
+     {
+      if(PushAllKlineData(true))
+         g_nextKlineRetryTime = 0;
+      else
+        {
+         g_nextKlineRetryTime = now + KLINE_RETRY_DELAY_SECONDS;
+         Print("K-line bootstrap failed; retrying in ", KLINE_RETRY_DELAY_SECONDS, " seconds");
+        }
+      return;
+     }
+
    datetime barTime;
 
    // 检查H4 K线是否有新周期
    barTime = iTime(_Symbol, PERIOD_H4, 0);
    if(barTime != 0 && barTime != g_lastH4CloseTime)
      {
-      g_lastH4CloseTime = barTime;
-      if(g_klineInitialized) PushKlineData(PERIOD_H4, 1);
+      if(PushKlineData(PERIOD_H4, 1))
+         g_lastH4CloseTime = barTime;
+      else
+        {
+         g_nextKlineRetryTime = now + KLINE_RETRY_DELAY_SECONDS;
+         return;
+        }
      }
 
    // 检查H1 K线
    barTime = iTime(_Symbol, PERIOD_H1, 0);
    if(barTime != 0 && barTime != g_lastH1CloseTime)
      {
-      g_lastH1CloseTime = barTime;
-      if(g_klineInitialized) PushKlineData(PERIOD_H1, 1);
+      if(PushKlineData(PERIOD_H1, 1))
+         g_lastH1CloseTime = barTime;
+      else
+        {
+         g_nextKlineRetryTime = now + KLINE_RETRY_DELAY_SECONDS;
+         return;
+        }
      }
 
    // 检查M15 K线
    barTime = iTime(_Symbol, PERIOD_M15, 0);
    if(barTime != 0 && barTime != g_lastM15CloseTime)
      {
-      g_lastM15CloseTime = barTime;
-      if(g_klineInitialized) PushKlineData(PERIOD_M15, 1);
+      if(PushKlineData(PERIOD_M15, 1))
+         g_lastM15CloseTime = barTime;
+      else
+        {
+         g_nextKlineRetryTime = now + KLINE_RETRY_DELAY_SECONDS;
+         return;
+        }
      }
 
    // 检查M5 K线
    barTime = iTime(_Symbol, PERIOD_M5, 0);
    if(barTime != 0 && barTime != g_lastM5CloseTime)
      {
-      g_lastM5CloseTime = barTime;
-      if(g_klineInitialized) PushKlineData(PERIOD_M5, 1);
+      if(PushKlineData(PERIOD_M5, 1))
+         g_lastM5CloseTime = barTime;
+      else
+        {
+         g_nextKlineRetryTime = now + KLINE_RETRY_DELAY_SECONDS;
+         return;
+        }
      }
 
    // 检查M1 K线
    barTime = iTime(_Symbol, PERIOD_M1, 0);
    if(barTime != 0 && barTime != g_lastM1CloseTime)
      {
-      g_lastM1CloseTime = barTime;
-      if(g_klineInitialized) PushKlineData(PERIOD_M1, 1);
+      if(PushKlineData(PERIOD_M1, 1))
+         g_lastM1CloseTime = barTime;
+      else
+        {
+         g_nextKlineRetryTime = now + KLINE_RETRY_DELAY_SECONDS;
+         return;
+        }
      }
   }
 
@@ -1624,7 +1679,7 @@ string PeriodToString(ENUM_TIMEFRAMES period)
 //+------------------------------------------------------------------+
 //| 获取并上报交易历史                                                |
 //+------------------------------------------------------------------+
-void ReportTradeHistory()
+bool ReportTradeHistory()
   {
    datetime now = TimeCurrent();
    datetime from = now - 24 * 3600;  // 最近24小时
@@ -1633,7 +1688,7 @@ void ReportTradeHistory()
    if(!HistorySelect(from, now))
      {
       Print("[交易历史] 获取交易历史失败");
-      return;
+      return false;
      }
 
    // 获取成交数量
@@ -1641,7 +1696,7 @@ void ReportTradeHistory()
    if(deals_total == 0)
      {
       Print("[交易历史] 最近24小时无成交记录");
-      return;
+      return true;
      }
 
    Print("[交易历史] 最近24小时成交数: ", deals_total);
@@ -1700,7 +1755,7 @@ void ReportTradeHistory()
    if(validDeals == 0)
      {
       Print("[交易历史] 无有效成交记录");
-      return;
+      return true;
      }
 
    // 发送到Python服务端
@@ -1723,9 +1778,32 @@ void ReportTradeHistory()
    if(responseCode == 200)
      {
       Print("[交易历史] 上报成功，共 ", validDeals, " 条成交记录");
+      return true;
      }
    else
      {
       Print("[交易历史] 上报失败，Response code: ", responseCode);
+      return false;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| MT5 成交事件：只标记同步，网络请求由 OnTimer 安全执行             |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(
+   const MqlTradeTransaction &transaction,
+   const MqlTradeRequest &request,
+   const MqlTradeResult &result
+)
+  {
+   if(transaction.type != TRADE_TRANSACTION_DEAL_ADD || transaction.deal == 0)
+      return;
+
+   long dealType = HistoryDealGetInteger(transaction.deal, DEAL_TYPE);
+   if(dealType == DEAL_TYPE_BUY || dealType == DEAL_TYPE_SELL)
+     {
+      g_tradeHistorySyncPending = true;
+      g_nextTradeHistoryRetryTime = 0;
+      Print("[交易历史] 检测到新成交，等待立即同步: deal=", transaction.deal);
      }
   }

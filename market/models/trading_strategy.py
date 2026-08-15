@@ -388,9 +388,9 @@ class TradingStrategy:
     strategy_name: str = ""           # 策略名称
     visibility: str = "private"       # private/shared，共享后其他用户只能复制
 
-    # ==================== 启用状态 ====================
-    enabled: bool = True              # 是否启用
-    auto_execute: bool = False        # 信号通过风控后是否自动下单
+    # 策略不再承担运行开关；是否运行由账户部署关系和账户交易开关控制。
+    enabled: bool = True
+    auto_execute: bool = True
 
     # 直接构造策略保持历史兼容；通过 StrategyStore 创建的新策略会显式设为草稿。
     lifecycle_status: str = StrategyLifecycle.PRODUCTION
@@ -496,9 +496,8 @@ class TradingStrategy:
             self.lifecycle_status = StrategyLifecycle.DRAFT
         if not self.lifecycle_updated_at:
             self.lifecycle_updated_at = self.created_at
-        if self.lifecycle_status != StrategyLifecycle.PRODUCTION:
-            self.enabled = False
-            self.auto_execute = False
+        self.enabled = True
+        self.auto_execute = True
         if not self.strategy_name:
             self.strategy_name = f"Strategy_{self.symbol}"
         self.signal_sources = normalize_signal_sources(self.signal_sources)
@@ -508,11 +507,8 @@ class TradingStrategy:
             )
 
     def is_runnable(self) -> bool:
-        """只有已发布且启用的策略可以生成实盘决策。"""
-        return (
-            self.lifecycle_status == StrategyLifecycle.PRODUCTION
-            and self.enabled
-        )
+        """只有已发布的策略可以生成实盘决策；部署状态负责运行开关。"""
+        return self.lifecycle_status == StrategyLifecycle.PRODUCTION
 
     def is_runnable_for(self, execution_mode: str = "live") -> bool:
         """按执行环境判断策略是否可运行，模拟盘不依赖实盘启用开关。"""
@@ -544,9 +540,6 @@ class TradingStrategy:
         self.lifecycle_status = target_status
         self.lifecycle_updated_at = now
         self.updated_at = now
-        if target_status != StrategyLifecycle.PRODUCTION:
-            self.enabled = False
-            self.auto_execute = False
         self.lifecycle_history.append({
             "from_status": previous_status,
             "to_status": target_status,
@@ -562,15 +555,6 @@ class TradingStrategy:
 
     def update(self, data: Dict) -> None:
         """更新配置"""
-        if data.get("enabled") and (
-            self.lifecycle_status != StrategyLifecycle.PRODUCTION
-        ):
-            raise ValueError("策略通过回测和模拟盘验证后才能启用")
-        if data.get("auto_execute") and (
-            self.lifecycle_status != StrategyLifecycle.PRODUCTION
-        ):
-            raise ValueError("策略达到“可用于实盘”状态后才能自动下单")
-
         material_fields = {
             "signal_config", "signal_sources", "signal_weights", "period_weights",
             "min_confidence", "consistency_requirement",
@@ -601,10 +585,9 @@ class TradingStrategy:
             if visibility is None:
                 visibility = "shared" if data.get("is_shared") else "private"
             self.visibility = "shared" if visibility == "shared" else "private"
-        if "enabled" in data:
-            self.enabled = bool(data["enabled"])
-        if "auto_execute" in data:
-            self.auto_execute = bool(data["auto_execute"])
+        # 策略级 enabled/auto_execute 已废弃，统一由账户部署关系控制。
+        self.enabled = True
+        self.auto_execute = True
         if "signal_config" in data:
             self.signal_config = data["signal_config"]
             if "signal_sources" not in data:
@@ -661,8 +644,6 @@ class TradingStrategy:
             previous_status = self.lifecycle_status
             self.lifecycle_status = StrategyLifecycle.DRAFT
             self.lifecycle_updated_at = now
-            self.enabled = False
-            self.auto_execute = False
             self.lifecycle_history.append({
                 "from_status": previous_status,
                 "to_status": StrategyLifecycle.DRAFT,
@@ -782,8 +763,8 @@ class TradingStrategy:
             "symbol": self.symbol,
             "visibility": self.visibility,
             "is_shared": self.visibility == "shared",
-            "enabled": self.enabled,
-            "auto_execute": self.auto_execute,
+            "enabled": True,
+            "auto_execute": True,
             "lifecycle_status": self.lifecycle_status,
             "lifecycle_label": StrategyLifecycle.LABELS[self.lifecycle_status],
             "lifecycle_updated_at": (
@@ -866,8 +847,8 @@ class TradingStrategy:
                 if data.get('is_shared') and not data.get('visibility')
                 else data.get('visibility', 'private')
             ),
-            enabled=data.get('enabled', True),
-            auto_execute=data.get('auto_execute', False),
+            enabled=True,
+            auto_execute=True,
             lifecycle_status=lifecycle_status,
             lifecycle_updated_at=lifecycle_updated_at,
             lifecycle_history=data.get('lifecycle_history', []),

@@ -113,6 +113,9 @@
               <v-btn v-if="account.account_type === 'mt5'" color="primary" variant="tonal" prepend-icon="mdi-link-variant" @click="openStrategyManager(account)">
                 管理绑定策略
               </v-btn>
+              <v-btn v-if="account.account_type === 'mt5'" color="success" variant="tonal" prepend-icon="mdi-chart-timeline-variant" @click="openLiveRuntime(account)">
+                打开实盘运行台
+              </v-btn>
               <v-btn v-if="account.account_type === 'paper'" color="primary" variant="tonal" prepend-icon="mdi-monitor-dashboard" @click="openPaperRuntime(account)">
                 打开模拟运行台
               </v-btn>
@@ -325,6 +328,79 @@
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="liveDialog" max-width="1160" scrollable persistent @after-enter="renderLiveEquityChart">
+      <v-card v-if="liveDetail" class="runtime-dialog live-runtime-dialog" elevation="0">
+        <v-card-title class="runtime-header">
+          <div>
+            <div class="section-tag">LIVE MT5 MONITORING</div>
+            <h2>{{ liveDetail.account.account_name }}</h2>
+            <span>只读实时监控 · 由 EA 上报账户、仓位和成交数据</span>
+          </div>
+          <div class="d-flex align-center ga-2">
+            <v-chip size="small" :color="liveDetail.account.connected ? 'success' : 'warning'" variant="tonal">{{ liveDetail.account.connected ? '终端在线' : '终端离线' }}</v-chip>
+            <v-btn icon="mdi-close" variant="text" @click="closeLiveRuntime" />
+          </div>
+        </v-card-title>
+        <v-divider />
+        <v-card-text class="runtime-body">
+          <section class="runtime-metrics">
+            <article><span>余额</span><strong>{{ money(liveDetail.account.balance, liveDetail.account.currency) }}</strong></article>
+            <article><span>净值</span><strong>{{ money(liveDetail.account.equity, liveDetail.account.currency) }}</strong></article>
+            <article><span>可用资金</span><strong>{{ money(liveDetail.account.free_margin, liveDetail.account.currency) }}</strong></article>
+            <article><span>持仓 / 最近成交</span><strong>{{ liveDetail.positions.length }} / {{ liveDetail.trades.length }}</strong></article>
+          </section>
+
+          <section class="runtime-chart-card">
+            <div class="runtime-section-title"><h3>实盘账户净值</h3><span>每 6 秒自动刷新</span></div>
+            <div v-if="liveDetail.equity_curve.length" ref="liveEquityChart" class="equity-chart" />
+            <div v-else class="runtime-empty">等待 EA 上报第一条账户资金快照</div>
+          </section>
+
+          <section class="runtime-grid">
+            <div class="runtime-table-card">
+              <div class="runtime-section-title"><h3>当前实盘持仓</h3><span>{{ liveDetail.positions.length }} 笔</span></div>
+              <div v-if="!liveDetail.positions.length" class="runtime-empty compact">暂无持仓</div>
+              <div v-for="position in liveDetail.positions" :key="position.ticket" class="paper-position-card">
+                <div class="paper-position-head">
+                  <div>
+                    <b :class="position.direction === 'buy' ? 'positive' : 'negative'">{{ position.direction === 'buy' ? '买入' : '卖出' }}</b>
+                    <strong>{{ position.symbol }} · {{ position.volume }} 手 · #{{ position.ticket }}</strong>
+                    <span>{{ position.comment || 'MT5 持仓' }}</span>
+                  </div>
+                  <div class="paper-position-actions">
+                    <v-chip size="x-small" :color="Number(position.sl) || Number(position.tp) ? 'success' : 'warning'" variant="tonal">{{ paperProtectionLabel({ stop_loss: position.sl, take_profit: position.tp }) }}</v-chip>
+                    <v-btn size="x-small" variant="tonal" color="primary" @click="toggleLivePosition(position.ticket)">{{ expandedLivePositions.has(position.ticket) ? '收起轨迹' : '查看轨迹' }}</v-btn>
+                  </div>
+                </div>
+                <div class="paper-position-metrics">
+                  <span>入场 <b>{{ price(position.price_open) }}</b></span>
+                  <span>止损 <b class="negative">{{ price(position.sl) }}</b></span>
+                  <span>止盈 <b class="positive">{{ price(position.tp) }}</b></span>
+                  <span>距 SL <b>{{ price(position.distance_sl) }}</b></span>
+                  <span>浮盈 <b :class="Number(position.profit) >= 0 ? 'positive' : 'negative'">{{ signedMoney(position.profit) }}</b></span>
+                </div>
+                <div v-if="expandedLivePositions.has(position.ticket)" class="paper-position-events">
+                  <div v-if="!position.management_events?.length" class="runtime-empty compact">暂无服务端持仓治理轨迹</div>
+                  <div v-for="event in position.management_events || []" :key="event.event_id" class="paper-event-row"><span>{{ formatTime(event.event_time) }}</span><b>{{ paperEventLabel(event.rule_type) }}</b><span>{{ event.message }}</span><small>SL {{ price(event.stop_loss) }} · TP {{ price(event.take_profit) }}</small></div>
+                </div>
+              </div>
+            </div>
+            <div class="runtime-table-card">
+              <div class="runtime-section-title"><h3>最近 MT5 成交</h3><span>最多 100 笔</span></div>
+              <div v-if="!liveDetail.trades.length" class="runtime-empty compact">暂无成交上报</div>
+              <div v-for="trade in liveDetail.trades" :key="trade.ticket" class="runtime-row trade-row"><span>{{ trade.time || '--' }}</span><b :class="trade.type === 0 ? 'positive' : 'negative'">{{ trade.type_text }} · {{ trade.symbol }}</b><span>{{ trade.entry_text }} · {{ trade.order_source }}</span><strong :class="Number(trade.profit) >= 0 ? 'positive' : 'negative'">{{ signedMoney(trade.profit) }}</strong></div>
+            </div>
+          </section>
+
+          <section class="runtime-table-card orders-card">
+            <div class="runtime-section-title"><h3>策略下单与执行回报</h3><span>服务端指令在 MT5 的实际成交情况</span></div>
+            <div v-if="!liveDetail.execution_reports.length" class="runtime-empty compact">暂无策略指令执行回报</div>
+            <div v-for="report in liveDetail.execution_reports" :key="report.id" class="runtime-row order-row"><span>{{ formatTime(report.reported_at) }}</span><b :class="['b', 'buy'].includes(report.action) ? 'positive' : 'negative'">{{ ['b', 'buy'].includes(report.action) ? '买入' : '卖出' }}</b><span>{{ report.symbol }} · {{ report.executed_volume || report.requested_volume }} 手</span><span>{{ price(report.executed_price || report.requested_price) }}</span><v-chip size="x-small" :color="report.success ? 'success' : 'error'" variant="tonal">{{ report.success ? '已成交' : '失败' }}</v-chip><span class="reject-reason">{{ report.error_message || `滑点 ${Number(report.slippage || 0).toFixed(5)}` }}</span></div>
+          </section>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="accountDialog" max-width="680">
       <v-card v-if="managedAccount" class="binding-dialog" elevation="0">
         <v-card-title class="binding-header">
@@ -404,6 +480,8 @@ const accountStrategyId = ref('')
 const bindingStrategy = ref(false)
 const paperDialog = ref(false)
 const paperDetail = ref(null)
+const liveDialog = ref(false)
+const liveDetail = ref(null)
 const paperContext = reactive({ strategies: [] })
 const selectedStrategyId = ref('')
 const deploying = ref(false)
@@ -412,8 +490,12 @@ const reportLoading = ref(false)
 const paperReport = ref(null)
 const reportStrategyId = ref('')
 const equityChart = ref(null)
+const liveEquityChart = ref(null)
 const expandedPaperPositions = ref(new Set())
+const expandedLivePositions = ref(new Set())
 let equityChartInstance = null
+let liveEquityChartInstance = null
+let liveRefreshTimer = null
 const message = ref('')
 const messageType = ref('success')
 const currencies = ['USD', 'CNY', 'EUR', 'GBP', 'JPY']
@@ -514,6 +596,12 @@ function togglePaperPosition(positionId) {
   else next.add(positionId)
   expandedPaperPositions.value = next
 }
+function toggleLivePosition(ticket) {
+  const next = new Set(expandedLivePositions.value)
+  if (next.has(ticket)) next.delete(ticket)
+  else next.add(ticket)
+  expandedLivePositions.value = next
+}
 function deploymentStatusLabel(status) {
   return { active: '运行中', paused: '已暂停', completed: '期限已结束' }[status] || status
 }
@@ -532,17 +620,13 @@ function lifecycleUsable(lifecycle) {
   return ['backtest_passed', 'paper_trading', 'production'].includes(lifecycle)
 }
 function deployEnabledLabel(deployment) {
-  const enabled = Number(deployment.strategy_enabled) === 1 || deployment.strategy_enabled === true
-  const autoExecute = Number(deployment.strategy_auto_execute) === 1 || deployment.strategy_auto_execute === true
-  return `${enabled ? '已启用' : '未启用'}${autoExecute ? ' · 自动执行' : ''}`
+  return deployment.status === 'active' ? '部署运行中 · 自动执行' : `部署${deploymentStatusLabel(deployment.status)}`
 }
-// 部署健康度:不可用/未启用/未自动执行 → 标红;暂停等 → 警告
+// 部署健康度由部署状态、生命周期和账户开关决定。
 function deploymentHealthMeta(deployment) {
   const active = deployment.status === 'active'
-  const enabled = Number(deployment.strategy_enabled) === 1 || deployment.strategy_enabled === true
-  const autoExecute = Number(deployment.strategy_auto_execute) === 1 || deployment.strategy_auto_execute === true
   const usable = lifecycleUsable(deployment.lifecycle_status)
-  if (active && usable && enabled && autoExecute) {
+  if (active && usable) {
     return { color: 'success', alert: false, reason: '' }
   }
   if (!active) {
@@ -551,13 +635,7 @@ function deploymentHealthMeta(deployment) {
   if (!usable) {
     return { color: 'error', alert: true, reason: `策略阶段「${lifecycleLabel(deployment.lifecycle_status)}」不可用于交易` }
   }
-  if (!enabled) {
-    return { color: 'error', alert: true, reason: '策略未启用，不会产生信号' }
-  }
-  if (!autoExecute) {
-    return { color: 'error', alert: true, reason: '未开启自动执行，仅生成待确认订单' }
-  }
-  return { color: 'grey', alert: false, reason: '' }
+  return { color: 'success', alert: false, reason: '' }
 }
 function exitReasonLabel(reason) { return { take_profit: '止盈', stop_loss: '止损' }[reason] || reason }
 function strategyName(strategyId) {
@@ -786,6 +864,45 @@ async function openPaperRuntime(account) {
   }
 }
 
+async function openLiveRuntime(account) {
+  try {
+    const data = await accountAPI.getLiveMonitoring(account.account_id)
+    liveDetail.value = data.detail
+    expandedLivePositions.value = new Set()
+    liveDialog.value = true
+    clearInterval(liveRefreshTimer)
+    liveRefreshTimer = setInterval(refreshLiveDetail, 6000)
+    await nextTick()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '加载实盘运行台失败'
+  }
+}
+
+async function refreshLiveDetail() {
+  if (!liveDetail.value) return
+  try {
+    const data = await accountAPI.getLiveMonitoring(liveDetail.value.account.account_id)
+    liveDetail.value = data.detail
+    await nextTick()
+    renderLiveEquityChart()
+    await loadAccounts()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '刷新实盘运行数据失败'
+  }
+}
+
+function closeLiveRuntime() {
+  liveDialog.value = false
+  clearInterval(liveRefreshTimer)
+  liveRefreshTimer = null
+  liveEquityChartInstance?.dispose()
+  liveEquityChartInstance = null
+  liveDetail.value = null
+  expandedLivePositions.value = new Set()
+}
+
 async function loadPaperReport() {
   if (!paperDetail.value) return
   reportLoading.value = true
@@ -874,8 +991,27 @@ function renderEquityChart() {
   })
 }
 
+function renderLiveEquityChart() {
+  if (!liveEquityChart.value || !liveDetail.value?.equity_curve?.length) return
+  liveEquityChartInstance?.dispose()
+  liveEquityChartInstance = echarts.init(liveEquityChart.value)
+  const curve = liveDetail.value.equity_curve
+  liveEquityChartInstance.setOption({
+    animationDuration: 300,
+    tooltip: { trigger: 'axis' },
+    grid: { left: 18, right: 18, top: 18, bottom: 8, containLabel: true },
+    xAxis: { type: 'category', boundaryGap: false, data: curve.map(item => new Date(item.time * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })), axisLabel: { color: '#81908a', hideOverlap: true } },
+    yAxis: { type: 'value', scale: true },
+    series: [{ type: 'line', name: '净值', symbol: 'none', smooth: 0.12, data: curve.map(item => item.equity), lineStyle: { color: '#13795b', width: 2 }, areaStyle: { color: 'rgba(19,121,91,.16)' } }],
+  })
+}
+
 loadAccounts()
-onBeforeUnmount(() => equityChartInstance?.dispose())
+onBeforeUnmount(() => {
+  clearInterval(liveRefreshTimer)
+  equityChartInstance?.dispose()
+  liveEquityChartInstance?.dispose()
+})
 </script>
 
 <style scoped>

@@ -20,7 +20,11 @@ if ! id ai-trader >/dev/null 2>&1; then
 fi
 
 install -d -o ai-trader -g ai-trader -m 0750 "$DATA_DIR"
-python3 -m venv "$APP_DIR/venv"
+# Do not recreate an existing virtual environment during an update.  Rebuilding
+# it while systemd is running leaves the API unavailable until pip completes.
+if [[ ! -x "$APP_DIR/venv/bin/python" ]]; then
+  python3 -m venv "$APP_DIR/venv"
+fi
 "$APP_DIR/venv/bin/pip" install --upgrade pip
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 

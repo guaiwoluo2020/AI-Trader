@@ -222,7 +222,9 @@ class TradingServer:
         self._signal_service.register_generator("key_level", key_level_generator)
 
         # AI入场信号生成器
-        ai_entry_generator = AIEntrySignalGenerator(SharedAIRuntimeRepository())
+        ai_entry_generator = AIEntrySignalGenerator(
+            SharedAIRuntimeRepository(), self.user_id
+        )
         ai_entry_generator.set_llm_analyzer(self.llm_analyzer)
         self._ai_entry_generator = ai_entry_generator
         self._signal_service.register_generator("ai_entry", ai_entry_generator)
@@ -391,7 +393,11 @@ class TradingServer:
             else None
         )
         if account is not None:
-            if account.status != "active" or not account.trading_enabled:
+            if (
+                account.status != "active"
+                or not account.trading_enabled
+                or not account.auto_trading_enabled
+            ):
                 return result
             self._risk_manager.set_account_limits(
                 max_positions=account.max_total_positions,
@@ -435,9 +441,7 @@ class TradingServer:
                 decisions.append(decision)
 
         for decision in decisions:
-            if account is not None and not account.auto_trading_enabled:
-                decision.auto_execute = False
-            # 3. 自动执行决策（如果允许）
+            # 3. 自动执行决策
             if decision.action != "none" and decision.status != "rejected":
                 order_id = self.strategy_service.execute_decision(decision)
                 if order_id:
@@ -934,8 +938,8 @@ class TradingServer:
                 "strategy_name": strategy.strategy_name,
                 "symbol": strategy.symbol,
                 "lifecycle_status": strategy.lifecycle_status,
-                "enabled": strategy.enabled,
-                "auto_execute": strategy.auto_execute,
+                "enabled": True,
+                "auto_execute": True,
                 "direction": direction,
                 "confidence": round(float(confidence or 0), 2),
                 "latest_decision": decision,
@@ -1138,8 +1142,8 @@ class TradingServer:
             abs(current_price - entry_price) / current_price
             if current_price > 0 and entry_price > 0 else None
         )
-        if not strategy.enabled or not source.get("enabled", True):
-            status, reason = "strategy_inactive", "策略或信号源尚未启用"
+        if not source.get("enabled", True):
+            status, reason = "strategy_inactive", "信号源尚未启用"
         elif not shared:
             status, reason = "expired", state["reason"]
         elif state.get("stale"):
@@ -1166,7 +1170,7 @@ class TradingServer:
             "strategy_id": strategy.strategy_id,
             "strategy_name": strategy.strategy_name,
             "strategy_lifecycle": strategy.lifecycle_status,
-            "strategy_enabled": strategy.enabled,
+            "strategy_enabled": True,
             "signal_source_id": source_id,
             "source_enabled": source.get("enabled", True),
             "symbol": strategy.symbol,
@@ -1268,8 +1272,8 @@ class TradingServer:
                     if current_price > 0 and entry_price > 0 else None
                 )
 
-                if not strategy.enabled or not source.get("enabled", True):
-                    status, status_reason = "strategy_inactive", "策略或信号源尚未启用"
+                if not source.get("enabled", True):
+                    status, status_reason = "strategy_inactive", "信号源尚未启用"
                 elif not analysis:
                     status, status_reason = "waiting_analysis", "等待首次 AI 分析"
                 elif analysis.get("data_stale") or analysis.get("market_status") in {"stale", "closed"}:
@@ -1304,7 +1308,7 @@ class TradingServer:
                     "strategy_id": strategy.strategy_id,
                     "strategy_name": strategy.strategy_name,
                     "strategy_lifecycle": strategy.lifecycle_status,
-                    "strategy_enabled": strategy.enabled,
+                    "strategy_enabled": True,
                     "signal_source_id": source_id,
                     "source_enabled": source.get("enabled", True),
                     "symbol": strategy.symbol,

@@ -13,15 +13,18 @@ from ...models import SignalSource, TradingSignal
 from .signal_rules import (
     build_ai_entry_signal, direction_action, extract_ai_trend_state,
 )
+from sqlite_storage import AISignalSourceRepository
 
 
 class AIEntrySignalGenerator:
     """AI入场信号生成器"""
 
-    def __init__(self, shared_runtime_repo=None):
+    def __init__(self, shared_runtime_repo=None, user_id: int = 0):
         # LLM分析器引用
         self._llm_analyzer = None
         self._shared_runtime_repo = shared_runtime_repo
+        self._ai_signal_source_repo = AISignalSourceRepository()
+        self._user_id = int(user_id or 0)
 
         # 阈值（价格距离AI入场价的百分比）
         self.threshold = 0.0008  # 0.08%
@@ -88,7 +91,9 @@ class AIEntrySignalGenerator:
         try:
             matches = self._llm_analyzer.check_entry_price_nearby(
                 symbol, current_price, threshold=threshold,
-                strategy_id=strategy_id,
+                # Independent sources publish one result shared by every
+                # bound strategy; source ID below performs the actual match.
+                strategy_id="",
             )
         except TypeError as exc:
             # Keep legacy analyzers usable while strategy-aware matching rolls out.
@@ -158,11 +163,24 @@ class AIEntrySignalGenerator:
         """Return one persistent AI direction state per configured source."""
         signals = []
         for config in strategy.get_signal_sources("ai_entry", enabled_only=True):
-            params = config.get("params") or {}
+            local_params = config.get("params") or {}
+            managed_source_id = str(local_params.get("ai_signal_source_id") or "")
+            managed_source = self._ai_signal_source_repo.get(
+                self._user_id, managed_source_id
+            ) if managed_source_id else None
+            if managed_source_id and (not managed_source or not managed_source.get("enabled")):
+                continue
+            params = {
+                **dict((managed_source or {}).get("config") or {}),
+                **{key: value for key, value in local_params.items() if key in {
+                    "ai_signal_source_id", "min_confidence", "entry_threshold",
+                    "entry_threshold_percent", "cooldown_seconds",
+                }},
+            }
             source_id = config["signal_source_id"]
             if params.get("analysis_mode", "self_analysis") == "shared_reference":
                 signals.append(self._shared_reference_signal(
-                    symbol, current_price, strategy, config
+                    symbol, current_price, strategy, {**config, "params": params}
                 ))
                 continue
             triggers = [

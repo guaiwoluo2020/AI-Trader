@@ -58,6 +58,12 @@ class TradingEngineManager:
             max_workers=int(os.getenv("AI_TRADER_TASK_WORKERS", "4")),
         )
         self._scheduler_started = False
+        self._paper_maintenance_enabled = os.getenv(
+            "AI_TRADER_ENABLE_PAPER_MAINTENANCE", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._data_retention_enabled = os.getenv(
+            "AI_TRADER_ENABLE_DATA_RETENTION", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._next_paper_maintenance_at = time.monotonic() + 10
         self._next_data_retention_at = time.monotonic() + 60
 
@@ -198,12 +204,12 @@ class TradingEngineManager:
         now: float,
         scheduler: SharedTaskScheduler,
     ) -> None:
-        if now >= self._next_paper_maintenance_at:
+        if self._paper_maintenance_enabled and now >= self._next_paper_maintenance_at:
             self._next_paper_maintenance_at = now + 10
             scheduler.submit(
                 ("paper", "maintenance"), self.paper_trading.run_maintenance
             )
-        if now >= self._next_data_retention_at:
+        if self._data_retention_enabled and now >= self._next_data_retention_at:
             self._next_data_retention_at = now + 86400
             scheduler.submit(
                 ("system", "data_retention"),

@@ -33,6 +33,11 @@ from backtest_engine import BacktestWorker
 from trading_engine_manager import TradingEngineManager
 
 
+def background_worker_enabled(name: str) -> bool:
+    """Allow production to pause expensive SQLite-writing workers safely."""
+    return os.getenv(name, "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def create_app():
     """创建并配置 FastAPI 应用"""
 
@@ -110,13 +115,19 @@ def create_app():
         system_log.add_log("system_startup", message="服务已启动")
 
         app.state.backtest_worker = backtest_worker
-        backtest_worker.start()
         app.state.alpha_research_worker = alpha_research_worker
-        alpha_research_worker.start()
+        if background_worker_enabled("AI_TRADER_ENABLE_BACKTEST_WORKER"):
+            backtest_worker.start()
+            print("[Startup] 回测任务 Worker 已启动")
+        else:
+            print("[Startup] 回测任务 Worker 已停用")
+        if background_worker_enabled("AI_TRADER_ENABLE_ALPHA_RESEARCH_WORKER"):
+            alpha_research_worker.start()
+            print("[Startup] Alpha 研究 Worker 已启动")
+        else:
+            print("[Startup] Alpha 研究 Worker 已停用")
 
         print("[Startup] 事件循环已设置")
-        print("[Startup] 回测任务 Worker 已启动")
-        print("[Startup] Alpha 研究 Worker 已启动")
 
     @app.on_event("shutdown")
     async def shutdown_event():

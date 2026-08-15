@@ -20,7 +20,7 @@ from ..models.llm_config import (
 )
 from ..store import LLMStore
 from .kline_service import KlineService
-from sqlite_storage import SharedAIRuntimeRepository
+from sqlite_storage import AISignalSourceRepository, SharedAIRuntimeRepository
 from llm_governance import AI_SIGNAL_ANALYSIS, LLMGovernanceService
 
 
@@ -95,6 +95,7 @@ class LLMService:
         self._allowed_strategy_ids = None
         self._source_last_analysis_at = {}
         self._shared_runtime_repo = SharedAIRuntimeRepository()
+        self._ai_signal_source_repo = AISignalSourceRepository()
         repo = getattr(self.llm_store, "_repo", None)
         self._llm_governance = (
             LLMGovernanceService(repo.storage) if repo is not None else None
@@ -132,8 +133,16 @@ class LLMService:
         available = set(available_symbols)
         plan: Dict[str, Dict] = {}
         seen_sources = set()
+        # Build source-owned profiles first so one source is analyzed only once
+        # even when several strategies or accounts bind to it.
+        for source in self._ai_signal_source_repo.list(
+            self.llm_store.user_id, enabled_only=True
+        ):
+            self._append_independent_ai_source_to_plan(
+                plan, source, due_only, seen_sources, available
+            )
         for strategy in self._strategy_store.get_all_strategies():
-            if not strategy.enabled or strategy.symbol not in available:
+            if strategy.symbol not in available:
                 continue
             if (
                 self._allowed_strategy_ids is not None
@@ -156,6 +165,51 @@ class LLMService:
                     plan, strategy, source, due_only, seen_sources
                 )
         return plan
+
+    def _append_independent_ai_source_to_plan(
+        self, plan: Dict[str, Dict], source: Dict, due_only: bool,
+        seen_sources: set, available_symbols: set,
+    ) -> None:
+        if source.get("symbol") not in available_symbols:
+            return
+        params = dict(source.get("config") or {})
+        if params.get("analysis_mode", "self_analysis") == "shared_reference":
+            return
+        source_id = str(source["signal_source_id"])
+        source_key = ("independent", source_id)
+        if source_key in seen_sources:
+            return
+        interval = max(1, int(params.get("analysis_interval_minutes", 5))) * 60
+        if due_only and (
+            time.monotonic() - self._source_last_analysis_at.get(source_id, -interval)
+            < interval
+        ):
+            return
+        seen_sources.add(source_key)
+        symbol_plan = plan.setdefault(source["symbol"], {"periods": {}, "strategies": []})
+        period = str(source.get("period") or "M5").upper()
+        current = symbol_plan["periods"].get(period, {"weight": 0, "kline_count": 0})
+        current["weight"] = max(current["weight"], 100)
+        current["kline_count"] = max(current["kline_count"], max(10, min(500, int(params.get("kline_count", 100)))))
+        symbol_plan["periods"][period] = current
+        symbol_plan["strategies"].append({
+            "strategy_id": "__independent__",
+            "strategy_name": source.get("name") or "独立 AI 信号源",
+            "signal_source_id": source_id,
+            "periods": {period: 100},
+            "min_confidence": int(params.get("min_confidence", 70)),
+            "min_risk_reward": 1.0,
+            "analysis_interval_minutes": interval // 60,
+            "kline_count": int(params.get("kline_count", 100)),
+            "model": str(params.get("model") or ""),
+            "system_prompt": str(params.get("system_prompt") or ""),
+            "analysis_prompt_template": str(params.get("analysis_prompt_template") or ""),
+            "share_runtime_data": bool(source.get("share_runtime_data")),
+            "reference_runtime_ids": list(params.get("reference_runtime_ids") or []),
+            "signal_params": params,
+            "symbol": source["symbol"],
+            "strategy_lifecycle": "independent",
+        })
 
     def _paper_deployed_strategies(self, available_symbols) -> List:
         repo = getattr(self.llm_store, "_repo", None)
@@ -194,11 +248,29 @@ class LLMService:
         self, plan: Dict[str, Dict], strategy, source: Dict,
         due_only: bool, seen_sources: set,
     ) -> None:
-        params = source.get("params") or {}
+        params = dict(source.get("params") or {})
+        managed_source_id = str(params.get("ai_signal_source_id") or "").strip()
+        if not managed_source_id:
+            # AI configuration now belongs to the independent source library.
+            return
+        managed_source = self._ai_signal_source_repo.get(
+            self.llm_store.user_id, managed_source_id
+        )
+        if managed_source is None or not managed_source.get("enabled"):
+            return
+        params = {
+            **dict(managed_source.get("config") or {}),
+            **{key: value for key, value in params.items() if key in {
+                "ai_signal_source_id", "min_confidence", "entry_threshold",
+                "entry_threshold_percent", "cooldown_seconds",
+            }},
+            "ai_signal_source_id": managed_source_id,
+            "share_runtime_data": bool(managed_source.get("share_runtime_data")),
+        }
         if params.get("analysis_mode", "self_analysis") == "shared_reference":
             return
-        source_id = source["signal_source_id"]
-        source_key = (strategy.strategy_id, source_id)
+        source_id = managed_source_id
+        source_key = ("ai_source", managed_source_id)
         if source_key in seen_sources:
             self._merge_duplicate_ai_profile(plan, strategy, source, params)
             return

@@ -5,7 +5,7 @@
         <div class="section-kicker">LIVE STRATEGY OPERATIONS</div>
         <h1>策略执行中心</h1>
         <p>
-          {{ selectedAccount?.account_name || '当前账户' }} · 实时跟踪策略决策、人工确认与自动执行
+          {{ selectedAccount?.account_name || '当前账户' }} · 实时跟踪策略决策与账户自动执行
         </p>
       </div>
       <v-chip :color="wsConnected ? 'success' : 'error'" variant="flat">
