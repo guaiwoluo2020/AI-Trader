@@ -92,22 +92,80 @@ def create_market_routes(
         )
         return payload
 
-    def filter_shared_ai_items(items: List[Dict], user_id: int, symbol: Optional[str]) -> List[Dict]:
-        filtered = []
+    def enrich_shared_ai_items(
+        items: List[Dict], user_id: int,
+        target_symbols: Optional[List[str]] = None,
+        target_server: str = "",
+    ) -> List[Dict]:
+        """Keep every shared result and rank its fit for the viewer's symbols."""
+        targets = list(dict.fromkeys(
+            str(value or "").strip()
+            for value in (target_symbols or [])
+            if str(value or "").strip()
+        ))
+        enriched = []
         for item in items:
             item = dict(item)
             source_server = instrument_mapping_repo.source_server(
                 item["owner_user_id"], item.get("symbol", ""),
             )
             item["broker_server"] = source_server
-            item["mapping_compatible"] = (
-                not symbol or instrument_mapping_repo.user_can_use_symbol(
-                    item["owner_user_id"], item.get("symbol", ""), user_id, symbol,
+            recommendations = []
+            for target_symbol in targets:
+                similarity = shared_ai_runtime_repo.symbol_similarity(
+                    item.get("symbol", ""), target_symbol,
                 )
+                compatible = (
+                    instrument_mapping_repo.compatible(
+                        source_server, item.get("symbol", ""),
+                        target_server, target_symbol,
+                    )
+                    if target_server else
+                    instrument_mapping_repo.user_can_use_symbol(
+                        item["owner_user_id"], item.get("symbol", ""),
+                        user_id, target_symbol,
+                    )
+                )
+                exact = (
+                    instrument_mapping_repo._normalize(item.get("symbol", ""))
+                    == instrument_mapping_repo._normalize(target_symbol)
+                )
+                recommendations.append({
+                    "target_symbol": target_symbol,
+                    "applicable": bool(compatible),
+                    "match_type": (
+                        "exact" if exact else
+                        "platform_mapping" if compatible else
+                        "similar" if similarity >= 0.85 else "unmatched"
+                    ),
+                    "similarity": similarity,
+                })
+            recommendations.sort(key=lambda value: (
+                -int(value["applicable"]), -float(value["similarity"]),
+                value["target_symbol"],
+            ))
+            item["symbol_recommendations"] = recommendations
+            item["recommended_symbols"] = [
+                value["target_symbol"] for value in recommendations
+                if value["applicable"]
+            ]
+            item["similar_symbols"] = [
+                value["target_symbol"] for value in recommendations
+                if not value["applicable"] and value["match_type"] == "similar"
+            ]
+            item["mapping_compatible"] = bool(item["recommended_symbols"])
+            item["symbol_similarity"] = max(
+                (float(value["similarity"]) for value in recommendations),
+                default=0.0,
             )
-            if item["mapping_compatible"]:
-                filtered.append(item)
-        return filtered
+            enriched.append(item)
+        enriched.sort(key=lambda item: (
+            -int(item["mapping_compatible"]),
+            -float(item["symbol_similarity"]),
+            -int(item.get("updated_at") or 0),
+            item.get("share_id", ""),
+        ))
+        return enriched
 
     def add_audit_event(
         user: AuthUser, event_type: str, event_name: str, message: str,
@@ -1760,15 +1818,31 @@ def create_market_routes(
             user.user_id, AI_SIGNAL_ANALYSIS
         )
         shared = [
-            item for item in filter_shared_ai_items(
-                shared_ai_runtime_repo.list_shared(user.user_id, symbol),
-                user.user_id, symbol,
+            item for item in enrich_shared_ai_items(
+                shared_ai_runtime_repo.list_shared(user.user_id),
+                user.user_id, [symbol] if symbol else [],
             ) if not item["is_owner"]
         ]
+        # 获取用户可用的品种列表（来自账户、策略、配置）
+        try:
+            _, engine = resolve_web_engine(engine_manager, user, None)
+            market_symbols = engine.kline_service.get_symbols()
+            config = trade_config_repo.get_config(user.user_id)
+            configured_symbols = list(config.get("symbol_config", {}).keys())
+            strategy_symbols = [
+                strategy.symbol
+                for strategy in strategy_repo.get_all_strategies(user.user_id)
+            ]
+            available_symbols = sorted(set(
+                market_symbols + configured_symbols + strategy_symbols
+            ))
+        except Exception:
+            available_symbols = []
         return {
             "status": "ok",
             "access_granted": access["access_granted"],
             "models": scene_options["models"],
+            "symbols": available_symbols,
             "default_system_prompt": (
                 scene_options.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
             ),
@@ -1872,9 +1946,9 @@ def create_market_routes(
         symbol: Optional[str] = None,
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        items = filter_shared_ai_items(
-            shared_ai_runtime_repo.list_shared(user.user_id, symbol),
-            user.user_id, symbol,
+        items = enrich_shared_ai_items(
+            shared_ai_runtime_repo.list_shared(user.user_id),
+            user.user_id, [symbol] if symbol else [],
         )
         return {"status": "ok", "count": len(items), "items": items}
 
@@ -1896,10 +1970,11 @@ def create_market_routes(
             ),
         }
         own_cards = engine.get_ai_market_cards(symbol)
+        reported_symbols = engine.kline_service.get_symbols()
         shared_cards = []
-        for item in filter_shared_ai_items(
-            shared_ai_runtime_repo.list_shared(user.user_id, symbol),
-            user.user_id, symbol,
+        for item in enrich_shared_ai_items(
+            shared_ai_runtime_repo.list_shared(user.user_id),
+            user.user_id, reported_symbols, account.mt5_server,
         ):
             if item["is_owner"]:
                 continue
@@ -1918,13 +1993,19 @@ def create_market_routes(
                 or trend.get("confidence")
                 or 0
             )
+            if item["recommended_symbols"]:
+                applicability = "推荐适用于 " + "、".join(item["recommended_symbols"])
+            elif item["similar_symbols"]:
+                applicability = "相似候选 " + "、".join(item["similar_symbols"])
+            else:
+                applicability = "暂未匹配当前账户上报品种"
             shared_cards.append({
                 **item,
                 "card_id": item["share_id"],
                 "direction": direction,
                 "confidence": confidence,
                 "status": "shared_reference",
-                "status_reason": "由平台用户主动共享，仅作为行情分析参考",
+                "status_reason": f"由平台用户主动共享；{applicability}",
                 "trend": trend,
                 "overall_trend": result.get("overall_trend"),
                 "key_levels": result.get("key_levels"),
@@ -1939,6 +2020,7 @@ def create_market_routes(
             "account": {
                 "account_id": account.account_id if account else 0,
                 "account_name": account.account_name if account else "",
+                "reported_symbols": reported_symbols,
             },
             "access": access,
             "own": own_cards,
