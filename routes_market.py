@@ -1823,18 +1823,20 @@ def create_market_routes(
                 user.user_id, [symbol] if symbol else [],
             ) if not item["is_owner"]
         ]
-        # 获取用户可用的品种列表（来自账户、策略、配置）
+        # 获取用户可用的品种列表（来自策略、交易配置、已有信号源）
         try:
-            _, engine = resolve_web_engine(engine_manager, user, None)
-            market_symbols = engine.kline_service.get_symbols()
             config = trade_config_repo.get_config(user.user_id)
             configured_symbols = list(config.get("symbol_config", {}).keys())
             strategy_symbols = [
                 strategy.symbol
                 for strategy in strategy_repo.get_all_strategies(user.user_id)
             ]
+            signal_source_symbols = [
+                s["symbol"] for s in ai_signal_source_repo.list(user.user_id)
+                if s.get("symbol")
+            ]
             available_symbols = sorted(set(
-                market_symbols + configured_symbols + strategy_symbols
+                configured_symbols + strategy_symbols + signal_source_symbols
             ))
         except Exception:
             available_symbols = []
