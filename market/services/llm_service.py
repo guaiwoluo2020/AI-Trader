@@ -85,8 +85,9 @@ class LLMService:
         'M1': 60
     }
 
-    # 数据过期阈值（秒）
-    STALE_THRESHOLD = 180  # 3分钟
+    # EA 默认约每 5 分钟同步一次完整 K 线；窗口略高于该节奏，避免
+    # 两次同步之间把仍在线的行情误判为过期。
+    STALE_THRESHOLD = 360  # 6分钟
 
     def __init__(self, llm_store: LLMStore, kline_service: KlineService):
         self.llm_store = llm_store
@@ -1440,10 +1441,17 @@ class LLMService:
             self.llm_store.update_market_status(symbol, "closed", data_stale=True)
 
         if not active_symbols:
-            report("stale", "所有品种行情均超过 3 分钟未更新，暂不发起 AI 分析")
+            stale_minutes = self.STALE_THRESHOLD // 60
+            report(
+                "stale",
+                f"所有品种行情均超过 {stale_minutes} 分钟未更新，暂不发起 AI 分析",
+            )
             return {
                 "status": "stale",
-                "message": "所有品种行情均超过 3 分钟未更新，暂不发起 AI 分析",
+                "message": (
+                    f"所有品种行情均超过 {stale_minutes} 分钟未更新，"
+                    "暂不发起 AI 分析"
+                ),
             }
 
         groups = self._group_analysis_plans(analysis_plan)

@@ -107,6 +107,40 @@ class PositionManagerTests(unittest.TestCase):
         }, {"price": 108})
         self.assertEqual(no_change.action, "none")
 
+    def test_pivot_trailing_records_only_an_effective_stop_update(self):
+        manager = PositionManager()
+        config = {"management_rules": [{
+            "type": "pivot_trailing", "period": "M5",
+        }]}
+        position = {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5,
+        }
+
+        no_change = manager.evaluate(config, position, {"price": 102}, pivots=[{
+            "period": "M5", "direction": "low", "price": 94,
+        }])
+        self.assertEqual(no_change.action, "none")
+        self.assertFalse(any(
+            event["status"] == "triggered" for event in no_change.events
+        ))
+
+        update = manager.evaluate(config, position, {"price": 102}, pivots=[{
+            "period": "M5", "direction": "low", "price": 98,
+        }])
+        self.assertEqual(update.action, "modify_sl")
+        self.assertEqual(update.stop_loss, 98)
+        self.assertFalse(any(
+            event["rule_type"] == "pivot_trailing"
+            and event["status"] == "triggered"
+            for event in update.events
+        ))
+        self.assertTrue(any(
+            event["rule_type"] == "stop_loss_update"
+            and event["new_stop_loss"] == 98
+            for event in update.events
+        ))
+
     def test_no_fixed_take_profit_can_use_trailing_stop(self):
         manager = PositionManager()
         plan = manager.create_plan(

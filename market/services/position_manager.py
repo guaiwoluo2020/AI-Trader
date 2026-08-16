@@ -338,8 +338,8 @@ class PositionManager:
                 if candidate is not None:
                     candidates.append(candidate)
                     add_event(
-                        kind, "triggered",
-                        "转折点跟进给出新的止损候选",
+                        kind, "checked",
+                        "转折点跟进评估了止损候选",
                         candidate_stop_loss=candidate,
                     )
                 else:

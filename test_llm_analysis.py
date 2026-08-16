@@ -104,6 +104,9 @@ class _RepoBackedStore(_Store):
 
 
 class LLMAnalysisTestCase(unittest.TestCase):
+    def test_stale_threshold_allows_the_ea_kline_sync_window(self):
+        self.assertEqual(LLMService.STALE_THRESHOLD, 360)
+
     def test_analysis_run_retains_periods_and_sources_that_were_not_due(self):
         previous = LLMAnalysisResult(
             symbol="BTCUSD",

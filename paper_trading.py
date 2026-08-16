@@ -1045,13 +1045,14 @@ class PaperTradingService:
                     INSERT INTO paper_positions(
                         position_id, user_id, account_id, order_id, deployment_id,
                         strategy_id, symbol, direction, status, volume,
+                        close_reason,
                         entry_price, stop_loss, take_profit, open_commission,
                         current_price, remaining_volume,
                         partial_levels_done_json, signal_source_id, exit_mode,
                         trailing_activation_r, trailing_distance_r, initial_risk,
                         favorable_price, position_policy_snapshot_json,
                         opened_at, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         position_id, user_id, account_id, order["order_id"],
@@ -1190,6 +1191,11 @@ class PaperTradingService:
                     )
                     for event in action.events:
                         if event.get("status") == "triggered":
+                            # Persist the effective value so the timeline shows
+                            # the new protection level rather than the old one.
+                            event_stop_loss = event.get(
+                                "new_stop_loss", position["stop_loss"]
+                            )
                             self.position_events.record(
                                 user_id, account_id, position["position_id"],
                                 event.get("rule_type", "position_management"),
@@ -1199,7 +1205,7 @@ class PaperTradingService:
                                 rule_type=event.get("rule_type", ""),
                                 status=event.get("status", ""),
                                 price=event.get("price", mark),
-                                stop_loss=position["stop_loss"],
+                                stop_loss=event_stop_loss,
                                 take_profit=position["take_profit"],
                                 volume=position_state["remaining_volume"],
                                 payload=event,
