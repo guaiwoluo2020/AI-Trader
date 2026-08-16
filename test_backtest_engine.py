@@ -417,7 +417,7 @@ class M1BacktestEngineTests(unittest.TestCase):
                 },
                 "trade_suggestions": [{
                     "signal_source_id": "source-ai",
-                    "period": "M5", "direction": "buy", "confidence": 88,
+                    "period": "M5", "action": "buy", "confidence": 88,
                     "entry_price": 3000.0, "stop_loss": 0,
                     "take_profit": 0, "reason": "共享机会",
                 }],

@@ -193,7 +193,7 @@
               <v-window-item value="lifecycle">
                 <div class="lifecycle-banner"><div><span>当前阶段</span><h3>{{ getLifecycleMeta(selectedStrategy).label }}</h3><p>{{ getLifecycleMeta(selectedStrategy).description }}</p></div><div class="d-flex flex-wrap ga-2"><v-btn v-for="action in getLifecycleActions(selectedStrategy)" :key="action.target" :color="action.color" variant="outlined" :disabled="isLifecycleActionDisabled(selectedStrategy, action)" :loading="strategyLifecycleSaving === selectedStrategy.strategy_id" @click="transitionStrategyLifecycle(selectedStrategy, action)"><v-icon start>{{ action.icon }}</v-icon>{{ action.label }}</v-btn></div></div>
                 <div v-if="getAdmission(selectedStrategy)" class="admission-panel mt-5"><div class="admission-title"><div><strong>策略准入证据</strong><span>只认可当前参数版本产生的验证结果</span></div><v-chip size="small" :color="getAdmission(selectedStrategy).eligible_for_production ? 'success' : 'warning'" variant="tonal">{{ getAdmission(selectedStrategy).eligible_for_production ? '满足实盘准入' : '验证进行中' }}</v-chip></div><div class="admission-stages"><article v-for="stage in admissionStages(selectedStrategy)" :key="stage.key"><div><v-icon size="18" :color="stage.data.passed ? 'success' : 'grey'">{{ stage.data.passed ? 'mdi-check-decagram' : 'mdi-progress-clock' }}</v-icon><strong>{{ stage.label }}</strong></div><p>{{ stage.data.message }}</p><div v-if="stage.data.checks?.length" class="admission-checks"><v-chip v-for="check in stage.data.checks" :key="check.key" size="x-small" :color="check.passed ? 'success' : 'error'" variant="tonal">{{ check.label }}</v-chip></div></article></div></div>
-                <div class="danger-zone"><div><strong>删除策略</strong><p>删除后无法恢复；被回测任务引用时后端会阻止删除。</p></div><v-btn color="error" variant="outlined" @click="deleteStrategy(selectedStrategy)"><v-icon start>mdi-delete-outline</v-icon>删除策略</v-btn></div>
+                <div class="danger-zone"><div><strong>{{ selectedStrategy.readonly_reference ? '移除共享策略引用' : '删除策略' }}</strong><p>{{ selectedStrategy.readonly_reference ? '需先结束该策略在所有账户上的部署；移除不会影响原作者或其他使用者。' : '删除后无法恢复；被回测任务引用时后端会阻止删除。' }}</p></div><v-btn color="error" variant="outlined" @click="deleteStrategy(selectedStrategy)"><v-icon start>mdi-delete-outline</v-icon>{{ selectedStrategy.readonly_reference ? '移除使用' : '删除策略' }}</v-btn></div>
               </v-window-item>
             </v-window>
           </v-card>
@@ -384,6 +384,9 @@
           <v-card-title class="settings-card-title"><div><v-icon>mdi-swap-horizontal-bold</v-icon><span>交易商品种关联映射</span></div><small>同一关联组内的品种可用于共享策略与共享 AI 数据</small></v-card-title>
           <v-card-text>
             <v-alert type="info" variant="tonal" density="compact" class="mb-5">系统会从 MT5 服务器自动提取交易商，例如 <code>XMGlobal-MT5 2 → XMGlobal</code>。这里仅维护“交易商 + 原始品种”关系；把不同交易商的黄金品种放入同一个关联组即可共享。未配置时仅允许完全同名品种共享。</v-alert>
+            <div class="d-flex align-center justify-space-between mb-3"><div><strong>已上报行情的交易商与品种</strong><p class="text-caption text-medium-emphasis mb-0">仅统计 EA 实际上传过 K 线的组合，可点击直接建立关联。</p></div><v-btn size="small" variant="text" prepend-icon="mdi-refresh" @click="loadInstrumentObservations">刷新</v-btn></div>
+            <v-table v-if="instrumentObservations.length" density="compact" class="quota-table mb-5"><thead><tr><th>交易商</th><th>MT5 服务器</th><th>上报品种</th><th>账户数</th><th>最近上报</th><th></th></tr></thead><tbody><tr v-for="item in instrumentObservations" :key="`${item.broker_server}-${item.symbol}`"><td><strong>{{ item.broker_name || '未识别' }}</strong></td><td>{{ item.broker_server || '--' }}</td><td><v-chip size="small" color="success" variant="tonal">{{ item.symbol }}</v-chip></td><td>{{ item.account_count }}</td><td>{{ formatInvitationTime(item.last_reported_at) }}</td><td class="text-right"><v-btn size="small" color="primary" variant="tonal" @click="useInstrumentObservation(item)">建立关联</v-btn></td></tr></tbody></v-table>
+            <v-alert v-else type="info" variant="tonal" density="compact" class="mb-5">暂未收到 EA 上报的 K 线行情。</v-alert>
             <v-row>
               <v-col cols="12" md="4"><v-text-field v-model="instrumentMappingForm.broker_name" label="交易商" placeholder="XMGlobal" density="compact" variant="outlined" /></v-col>
               <v-col cols="12" md="3"><v-text-field v-model="instrumentMappingForm.native_symbol" label="原始品种" placeholder="GOLD_" density="compact" variant="outlined" /></v-col>
@@ -437,7 +440,7 @@
         </v-card>
         <v-card class="user-settings-card admin-service-card" elevation="0">
           <v-card-title class="settings-card-title d-flex align-center justify-space-between flex-wrap ga-2">
-            <div><v-icon class="mr-2">mdi-account-star-outline</v-icon>用户等级与配额</div>
+            <div><v-icon class="mr-2">mdi-account-star-outline</v-icon>已注册用户、会员与配额</div>
             <v-chip color="success" variant="tonal" size="small">新用户默认白银会员</v-chip>
           </v-card-title>
           <v-card-text>
@@ -1174,16 +1177,6 @@
                 ></v-textarea>
               </v-col>
               <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12">
-                <v-switch
-                  v-model="newSignalSource.params.share_runtime_data"
-                  color="success"
-                  inset
-                  label="共享本信号源的 AI 运行数据到平台"
-                  hint="仅共享品种、信号参数、提示词、关联策略阶段和分析结果，不共享 API Key"
-                  persistent-hint
-                ></v-switch>
-              </v-col>
-              <v-col v-if="newSignalSource.params.analysis_mode === 'self_analysis'" cols="12">
                 <v-select
                   v-model="newSignalSource.params.reference_runtime_ids"
                   :items="sharedAIRuntimeOptions"
@@ -1363,6 +1356,7 @@ export default {
     const emailTesting = ref(false)
 
     const instrumentMappings = ref([])
+    const instrumentObservations = ref([])
     const instrumentMappingSaving = ref(false)
     const instrumentMappingForm = ref({
       broker_name: '', native_symbol: '', mapping_group: '', display_name: '', enabled: true
@@ -1552,7 +1546,8 @@ export default {
       try {
         await Promise.all([
           loadUserQuotas(), loadInvitations(), loadEmailConfig(),
-          loadLLMConfig(), loadLLMAccessRequests(), loadAdminStrategies(), loadInstrumentMappings()
+          loadLLMConfig(), loadLLMAccessRequests(), loadAdminStrategies(),
+          loadInstrumentMappings(), loadInstrumentObservations()
         ])
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
@@ -1570,6 +1565,26 @@ export default {
         errorMessage.value = err.response?.data?.detail || '加载品种映射失败'
         showError.value = true
       }
+    }
+
+    const loadInstrumentObservations = async () => {
+      if (!isAdmin.value) return
+      try {
+        const data = await marketAPI.getInstrumentObservations()
+        instrumentObservations.value = data.items || []
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '加载已上报品种失败'
+        showError.value = true
+      }
+    }
+
+    const useInstrumentObservation = (item) => {
+      instrumentMappingForm.value = {
+        broker_name: item.broker_name || item.broker_server || '',
+        native_symbol: item.symbol || '', mapping_group: '', display_name: '', enabled: true
+      }
+      successMessage.value = '已带入上报的交易商与品种，请填写关联组后保存'
+      showSuccess.value = true
     }
 
     const saveInstrumentMapping = async () => {
@@ -2564,6 +2579,7 @@ export default {
         { target: 'backtest_passed', label: '结束模拟盘', color: 'grey', icon: 'mdi-stop-circle-outline' }
       ],
       production: [
+        { target: 'paper_trading', label: '结束实盘并回到模拟验证', color: 'warning', icon: 'mdi-undo-variant', confirm: true },
         { target: 'retired', label: '停用并归档', color: 'error', icon: 'mdi-archive-outline', confirm: true }
       ],
       retired: []
@@ -2609,7 +2625,7 @@ export default {
           )
           return `引用 ${shared?.owner_username || '平台用户'} 的 ${shared?.symbol || '共享'} 分析，最低置信度 ${params.min_confidence ?? 0}%`
         }
-        return `${params.model || '平台默认模型'} · 每 ${params.analysis_interval_minutes ?? 0} 分钟分析 ${params.kline_count ?? 0} 根K线，最低置信度 ${params.min_confidence ?? 0}%${params.share_runtime_data ? ' · 已共享运行数据' : ''}`
+        return `${params.model || '平台默认模型'} · 每 ${params.analysis_interval_minutes ?? 0} 分钟分析 ${params.kline_count ?? 0} 根K线，最低置信度 ${params.min_confidence ?? 0}%`
       } catch (error) {
         console.error('信号源摘要渲染失败:', error)
         return '配置摘要暂不可用，请点编辑查看详情'
@@ -2850,12 +2866,6 @@ export default {
 
     const useSharedStrategy = async (item) => {
       if (isSharedStrategyUsed(item) || sharedStrategyCopying.value) return
-      const policyId = newStrategyPolicyId.value || positionPolicyOptions.value[0]?.value || ''
-      if (!policyId) {
-        errorMessage.value = '请先创建并启用一个持仓管理方案，再使用共享策略'
-        showError.value = true
-        return
-      }
       const copyKey = sharedStrategyKey(item)
       sharedStrategyCopying.value = copyKey
       try {
@@ -2863,7 +2873,6 @@ export default {
           item.owner_user_id,
           item.strategy_id,
           {
-            position_management_policy_id: policyId,
             target_symbol: sharedStrategyTargetSymbols[sharedStrategyKey(item)] || item.symbol,
           }
         )
@@ -3276,8 +3285,11 @@ export default {
       saveEmailConfig,
       testEmailConfig,
       instrumentMappings,
+      instrumentObservations,
       instrumentMappingForm,
       instrumentMappingSaving,
+      loadInstrumentObservations,
+      useInstrumentObservation,
       saveInstrumentMapping,
       deleteInstrumentMapping,
       quotaUsers,

@@ -270,6 +270,7 @@ class SQLiteStorage:
                         completion_tokens INTEGER,
                         total_tokens INTEGER,
                         error_message TEXT NOT NULL DEFAULT '',
+                        result_summary VARCHAR(4096) NOT NULL DEFAULT '',
                         created_at INTEGER NOT NULL,
                         completed_at INTEGER,
                         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -1061,6 +1062,7 @@ class SQLiteStorage:
                         account_id INTEGER NOT NULL,
                         strategy_id TEXT NOT NULL,
                         symbol TEXT NOT NULL,
+                        strategy_snapshot_hash TEXT NOT NULL DEFAULT '',
                         source_backtest_task_id TEXT NOT NULL DEFAULT '',
                         strategy_version_at INTEGER NOT NULL DEFAULT 0,
                         scheduled_end_at INTEGER,
@@ -1291,6 +1293,9 @@ class SQLiteStorage:
                 )
                 self._ensure_column(
                     conn, "backtest_tasks", "engine_version", "TEXT NOT NULL DEFAULT ''"
+                )
+                self._ensure_column(
+                    conn, "llm_call_logs", "result_summary", "VARCHAR(4096) NOT NULL DEFAULT ''"
                 )
                 self._ensure_column(
                     conn, "position_management_policies", "version",
@@ -4045,12 +4050,19 @@ class SharedAIRuntimeRepository:
                 _now_ts(), int(user_id), str(strategy.get("strategy_id", "")),
             ),
         )
-        shared_source_ids = {
-            str(source.get("signal_source_id", ""))
-            for source in (strategy.get("signal_sources") or [])
-            if source.get("source") == "ai_entry"
-            and (source.get("params") or {}).get("share_runtime_data")
-        }
+        ai_sources = AISignalSourceRepository(self.storage)
+        shared_source_ids = set()
+        for source in strategy.get("signal_sources") or []:
+            if source.get("source") != "ai_entry":
+                continue
+            params = source.get("params") or {}
+            source_id = str(
+                source.get("signal_source_id")
+                or params.get("ai_signal_source_id") or ""
+            )
+            managed_source = ai_sources.get(int(user_id), source_id)
+            if managed_source and managed_source.get("share_runtime_data"):
+                shared_source_ids.add(source_id)
         rows = self.storage.fetchall(
             """
             SELECT signal_source_id FROM shared_ai_runtime_data
@@ -4085,7 +4097,7 @@ class SharedAIRuntimeRepository:
         return {
             key: value
             for key, value in dict(params or {}).items()
-            if key not in cls.CONFIDENTIAL_PARAM_KEYS
+            if key not in cls.CONFIDENTIAL_PARAM_KEYS | {"share_runtime_data"}
         }
 
     @classmethod
@@ -4183,6 +4195,34 @@ class PositionManagementPolicyRepository:
 
     def get(self, user_id: int, policy_id: str):
         return self._resolve_reference(self._raw_get(user_id, policy_id))
+
+    def get_for_strategy(self, user_id: int, strategy):
+        """Resolve the policy from the strategy publisher when it is shared.
+
+        Shared strategies are lightweight references.  Their position policy is
+        part of the published strategy definition and must not be copied into
+        the recipient's policy library.
+        """
+        source_owner_id = int(
+            getattr(strategy, "source_owner_user_id", 0)
+            if not isinstance(strategy, dict)
+            else strategy.get("source_owner_user_id", 0)
+            or 0
+        )
+        source_strategy_id = str(
+            getattr(strategy, "source_strategy_id", "")
+            if not isinstance(strategy, dict)
+            else strategy.get("source_strategy_id", "")
+            or ""
+        )
+        policy_id = str(
+            getattr(strategy, "position_management_policy_id", "")
+            if not isinstance(strategy, dict)
+            else strategy.get("position_management_policy_id", "")
+            or ""
+        )
+        policy_owner_id = source_owner_id if source_owner_id and source_strategy_id else int(user_id)
+        return self.get(policy_owner_id, policy_id)
 
     def save(self, policy):
         now = _now_ts()
@@ -4485,11 +4525,22 @@ class StrategyConfigRepository:
 
     def _invalid_strategy_reference(self, reference: "TradingStrategy", reason: str):
         now = datetime.now()
+        # Materialized references can later be persisted by a strategy store.
+        # Normalize an existing marker first so repeated reloads never keep
+        # appending the same suffix to the recipient-visible strategy name.
+        markers = ("（来源已失效）", "（AI运行数据未共享）")
+        base_name = str(reference.strategy_name or "").strip()
+        for marker in markers:
+            base_name = base_name.replace(marker, "")
+        marker = (
+            "（AI运行数据未共享）"
+            if "AI 信号源" in reason else "（来源已失效）"
+        )
         reference.enabled = True
         reference.auto_execute = True
         reference.lifecycle_status = "draft"
         reference.lifecycle_updated_at = now
-        reference.strategy_name = f"{reference.strategy_name}（来源已失效）"
+        reference.strategy_name = f"{base_name}{marker}"
         reference.updated_at = now
         reference.lifecycle_history.append({
             "from_status": "reference",
@@ -4500,8 +4551,10 @@ class StrategyConfigRepository:
         return reference
 
     def _materialize_shared_reference(
-        self, reference: "TradingStrategy"
-    ) -> "TradingStrategy":
+        self, reference: Optional["TradingStrategy"]
+    ) -> Optional["TradingStrategy"]:
+        if reference is None:
+            return None
         if not reference.source_owner_user_id or not reference.source_strategy_id:
             return reference
         source = self._raw_strategy_by_id(
@@ -4512,13 +4565,23 @@ class StrategyConfigRepository:
                 reference, "共享策略已删除、停用或取消共享"
             )
         payload = self._sanitize_shared_strategy(source.to_dict())
+        ai_signal_sources = AISignalSourceRepository(self.storage)
         signal_sources = []
         for signal_source in payload.get("signal_sources") or []:
             item = dict(signal_source)
             params = dict(item.get("params") or {})
             if item.get("source") == "ai_entry":
-                source_id = str(item.get("signal_source_id") or "")
-                if not params.get("share_runtime_data"):
+                source_id = str(
+                    item.get("signal_source_id")
+                    or params.get("ai_signal_source_id") or ""
+                )
+                managed_source = ai_signal_sources.get(
+                    int(reference.source_owner_user_id), source_id
+                ) if source_id else None
+                # Runtime sharing is owned by the standalone AI source.  The
+                # strategy JSON only holds a historical binding and may carry
+                # an old share_runtime_data value.
+                if not managed_source or not managed_source.get("share_runtime_data"):
                     return self._invalid_strategy_reference(
                         reference, "共享策略包含未开放运行数据的 AI 信号源"
                     )
@@ -4530,7 +4593,6 @@ class StrategyConfigRepository:
                     ),
                     "min_confidence": params.get("min_confidence", 70),
                     "entry_threshold": params.get("entry_threshold", 0.0008),
-                    "share_runtime_data": False,
                     "reference_runtime_ids": [],
                 }
             item["params"] = params
@@ -4542,10 +4604,9 @@ class StrategyConfigRepository:
             "symbol": reference.symbol or source.symbol,
             "visibility": "private",
             "is_shared": False,
-            "position_management_policy_id": (
-                reference.position_management_policy_id
-                or source.position_management_policy_id
-            ),
+            # The management policy belongs to the publisher along with the
+            # shared strategy.  Do not retain a recipient-local policy ID.
+            "position_management_policy_id": source.position_management_policy_id,
             "source_strategy_id": source.strategy_id,
             "source_owner_user_id": int(reference.source_owner_user_id),
             "source_owner_username": reference.source_owner_username,
@@ -4653,6 +4714,8 @@ class StrategyConfigRepository:
         ]
 
     def save_strategy(self, user_id: int, strategy: "TradingStrategy") -> "TradingStrategy":
+        if strategy.visibility == "shared":
+            self._enable_runtime_sharing_for_strategy(user_id, strategy)
         payload = json.dumps(strategy.to_dict(), ensure_ascii=False)
         now = _now_ts()
         self.storage.execute(
@@ -4669,6 +4732,60 @@ class StrategyConfigRepository:
             (user_id, strategy.strategy_id, strategy.symbol, payload, now, now),
         )
         return strategy
+
+    def _enable_runtime_sharing_for_strategy(
+        self, user_id: int, strategy: "TradingStrategy"
+    ) -> None:
+        """Publish runtime output for AI sources bound to a shared strategy.
+
+        Only generated runtime results become visible; prompts, models and
+        provider credentials remain protected by the signal-source API.
+        """
+        source_ids = {
+            str(item.get("signal_source_id") or (item.get("params") or {}).get(
+                "ai_signal_source_id", ""
+            )).strip()
+            for item in strategy.signal_sources or []
+            if item.get("source") == "ai_entry"
+        }
+        source_ids.discard("")
+        if not source_ids:
+            return
+        now = _now_ts()
+        for source_id in source_ids:
+            self.storage.execute(
+                "UPDATE ai_signal_sources SET share_runtime_data = 1, updated_at = ? "
+                "WHERE user_id = ? AND signal_source_id = ?",
+                (now, int(user_id), source_id),
+            )
+
+    def cleanup_legacy_ai_share_runtime_flags(self) -> int:
+        """Remove retired per-strategy sharing flags from persisted JSON."""
+        rows = self.storage.fetchall(
+            "SELECT user_id, strategy_id, config_json FROM user_strategy_configs"
+        )
+        changed = 0
+        for row in rows:
+            try:
+                payload = json.loads(row["config_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            dirty = False
+            for source in payload.get("signal_sources") or []:
+                params = source.get("params")
+                if isinstance(params, dict) and "share_runtime_data" in params:
+                    params.pop("share_runtime_data", None)
+                    dirty = True
+            if not dirty:
+                continue
+            self.storage.execute(
+                "UPDATE user_strategy_configs SET config_json = ?, updated_at = ? "
+                "WHERE user_id = ? AND strategy_id = ?",
+                (json.dumps(payload, ensure_ascii=False), _now_ts(),
+                 int(row["user_id"]), str(row["strategy_id"])),
+            )
+            changed += 1
+        return changed
 
     def list_shared_strategies(
         self, viewer_user_id: int, include_own: bool = False
@@ -4719,7 +4836,6 @@ class StrategyConfigRepository:
         target_user_id: int,
         owner_user_id: int,
         strategy_id: str,
-        position_management_policy_id: str,
         target_symbol: str = "",
     ) -> Optional["TradingStrategy"]:
         from market.models.trading_strategy import TradingStrategy
@@ -4757,7 +4873,9 @@ class StrategyConfigRepository:
             "auto_execute": True,
             "lifecycle_status": "draft",
             "lifecycle_updated_at": now.isoformat(),
-            "position_management_policy_id": position_management_policy_id,
+            # Store the source policy ID only.  Runtime resolution uses the
+            # source owner ID below, so no local policy reference is created.
+            "position_management_policy_id": source.position_management_policy_id,
             "source_strategy_id": source.strategy_id,
             "source_owner_user_id": int(owner_user_id),
             "source_owner_username": owner.username if owner else "",

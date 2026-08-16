@@ -265,14 +265,16 @@ class LLMService:
                 "entry_threshold_percent", "cooldown_seconds",
             }},
             "ai_signal_source_id": managed_source_id,
-            "share_runtime_data": bool(managed_source.get("share_runtime_data")),
         }
         if params.get("analysis_mode", "self_analysis") == "shared_reference":
             return
         source_id = managed_source_id
         source_key = ("ai_source", managed_source_id)
         if source_key in seen_sources:
-            self._merge_duplicate_ai_profile(plan, strategy, source, params)
+            self._merge_duplicate_ai_profile(
+                plan, strategy, source, params,
+                bool(managed_source.get("share_runtime_data")),
+            )
             return
         interval = max(
             1, int(params.get("analysis_interval_minutes", 5))
@@ -298,6 +300,7 @@ class LLMService:
             max(10, min(500, int(params.get("kline_count", 100)))),
         )
         symbol_plan["periods"][period] = current
+        runtime_shared = bool(managed_source.get("share_runtime_data"))
         symbol_plan["strategies"].append({
             "strategy_id": strategy.strategy_id,
             "strategy_name": strategy.strategy_name,
@@ -314,9 +317,7 @@ class LLMService:
             "analysis_prompt_template": str(
                 params.get("analysis_prompt_template") or ""
             ),
-            "share_runtime_data": bool(
-                params.get("share_runtime_data", False)
-            ),
+            "share_runtime_data": runtime_shared,
             "reference_runtime_ids": list(
                 params.get("reference_runtime_ids") or []
             ),
@@ -327,6 +328,7 @@ class LLMService:
 
     def _merge_duplicate_ai_profile(
         self, plan: Dict[str, Dict], strategy, source: Dict, params: Dict,
+        runtime_shared: bool = False,
     ) -> None:
         """Merge repeated snapshots of the same AI source across deployments.
 
@@ -344,7 +346,7 @@ class LLMService:
                     continue
                 profile["share_runtime_data"] = (
                     bool(profile.get("share_runtime_data"))
-                    or bool(params.get("share_runtime_data", False))
+                    or bool(runtime_shared)
                 )
                 references = list(profile.get("reference_runtime_ids") or [])
                 for item in params.get("reference_runtime_ids") or []:
@@ -354,7 +356,6 @@ class LLMService:
                 profile["signal_params"] = {
                     **dict(profile.get("signal_params") or {}),
                     **dict(params),
-                    "share_runtime_data": profile["share_runtime_data"],
                 }
                 if not profile.get("model") and params.get("model"):
                     profile["model"] = str(params.get("model") or "")
@@ -797,7 +798,10 @@ class LLMService:
             if response_validator:
                 response_validator(parsed)
             if governance:
-                governance.finish_call(reservation, "completed")
+                governance.finish_call(
+                    reservation, "completed",
+                    result_summary=json.dumps(parsed, ensure_ascii=False),
+                )
             return parsed
 
         except LLMRequestError as exc:
@@ -1487,6 +1491,12 @@ class LLMService:
                     group["reference_runtime_ids"]
                 ),
             )
+            source_ids = sorted({
+                str(profile.get("signal_source_id") or "")
+                for item in group_plan.values()
+                for profile in item.get("strategies", [])
+                if profile.get("signal_source_id")
+            })
             try:
                 group_response = self.call_llm_stream(
                     prompt,
@@ -1496,6 +1506,8 @@ class LLMService:
                     response_validator=lambda payload, plan=group_plan: (
                         self._validate_analysis_response(payload, plan)
                     ),
+                    object_type="ai_market_analysis",
+                    object_id=",".join(source_ids),
                 )
             except LLMRequestError as exc:
                 message = str(exc)

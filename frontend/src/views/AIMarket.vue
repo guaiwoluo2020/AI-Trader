@@ -58,7 +58,7 @@
                 <div><span>当前价</span><strong>{{ price(card.current_price) }}</strong></div><div><span>建议入场</span><strong>{{ price(card.entry_price) }}</strong></div><div><span>止损</span><strong>{{ price(card.stop_loss) }}</strong></div><div><span>止盈</span><strong>{{ price(card.take_profit) }}</strong></div>
               </div>
               <div class="status-box"><v-chip :color="statusMeta(card.status).color" size="small" variant="flat">{{ statusMeta(card.status).label }}</v-chip><p>{{ card.status_reason }}</p></div>
-              <div class="card-footer"><span>{{ card.derived_from_shared ? `${card.source_owner_username} · ${card.source_symbol}` : (card.model || '平台默认模型') }} · {{ formatTime(card.analyzed_at) }}</span><v-btn size="small" variant="text" @click="openDetail(card, false)">查看分析</v-btn></div>
+              <div class="card-footer"><span>{{ card.derived_from_shared ? `${card.source_owner_username} · ${card.source_symbol}` : (card.model || '平台默认模型') }} · {{ formatTime(card.analyzed_at) }}</span><div><v-btn size="small" variant="text" @click="openHistory(card)">查看历史</v-btn><v-btn size="small" variant="text" @click="openDetail(card, false)">查看分析</v-btn></div></div>
             </article>
           </div>
           <div v-if="access.access_granted && !filteredOwn.length" class="empty-state"><v-icon size="56">mdi-brain</v-icon><h2>暂无 AI 分析</h2><p>请先创建并启用 AI 信号源。自主分析无需绑定策略，产生结果后会显示在这里。</p><v-btn color="primary" prepend-icon="mdi-access-point-plus" @click="router.push('/ai-signal-sources')">创建 AI 信号源</v-btn></div>
@@ -94,6 +94,7 @@
       <v-card v-if="detailCard">
         <v-card-title class="d-flex align-center"><v-icon class="mr-2">mdi-brain</v-icon>{{ detailCard.symbol }} · {{ detailCard.period }} AI 分析<v-spacer /><v-btn icon="mdi-close" variant="text" @click="detailDialog = false" /></v-card-title>
         <v-card-text class="detail-body">
+          <div class="analysis-time"><v-icon size="16">mdi-clock-outline</v-icon><span>分析生成时间：{{ formatTime(detailCard.analyzed_at) }}</span></div>
           <v-alert :type="detailShared ? 'info' : 'success'" variant="tonal" class="mb-4">{{ detailCard.status_reason }}</v-alert>
           <h3>周期判断</h3><p>{{ detailCard.trend?.reason || '模型未返回周期判断说明' }}</p>
           <h3>整体判断</h3><p>{{ detailCard.overall_trend?.summary || '模型未返回整体行情总结' }}</p>
@@ -103,6 +104,17 @@
         </v-card-text>
         <v-card-actions v-if="detailShared" class="pa-4"><v-spacer /><v-btn color="primary" prepend-icon="mdi-tune-variant" @click="goToStrategySettings">前往策略配置引用</v-btn></v-card-actions>
       </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="historyDialog" max-width="900" scrollable>
+      <v-card><v-card-title>最近 5 次 AI 调用</v-card-title><v-card-text>
+        <v-progress-linear v-if="historyLoading" indeterminate color="primary" />
+        <v-alert v-else-if="!historyItems.length" type="info" variant="tonal">尚无可追溯的调用记录，新版本开始的调用会在这里展示。</v-alert>
+        <v-list v-else lines="two"><v-list-item v-for="item in historyItems" :key="item.call_id">
+          <template #prepend><v-icon :color="item.status === 'completed' ? 'success' : 'error'">{{ item.status === 'completed' ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline' }}</v-icon></template>
+          <v-list-item-title>{{ formatTime(item.created_at) }} · {{ item.status === 'completed' ? '分析完成' : '分析失败' }} · {{ item.duration_ms ? `${(item.duration_ms / 1000).toFixed(1)} 秒` : '执行中' }}</v-list-item-title>
+          <v-list-item-subtitle>{{ historySummary(item) }}</v-list-item-subtitle>
+        </v-list-item></v-list></v-card-text><v-card-actions><v-spacer /><v-btn @click="historyDialog = false">关闭</v-btn></v-card-actions></v-card>
     </v-dialog>
 
     <v-snackbar v-model="showMessage" :color="messageColor">{{ message }}</v-snackbar>
@@ -129,6 +141,9 @@ const filters = reactive({ symbol: null, direction: null, status: null })
 const detailDialog = ref(false)
 const detailCard = ref(null)
 const detailShared = ref(false)
+const historyDialog = ref(false)
+const historyLoading = ref(false)
+const historyItems = ref([])
 const showMessage = ref(false)
 const message = ref('')
 const messageColor = ref('success')
@@ -177,6 +192,17 @@ const formatTime = value => { if (!value) return '尚未分析'; const date = ty
 const shortTime = value => value ? formatTime(value).replace(/^.*?\s/, '') : '--'
 const levels = values => Array.isArray(values) && values.length ? values.map(price).join('、') : '暂无'
 function openDetail(card, shared) { detailCard.value = card; detailShared.value = shared; detailDialog.value = true }
+async function openHistory(card) {
+  historyDialog.value = true; historyLoading.value = true; historyItems.value = []
+  try { historyItems.value = (await marketAPI.getAIMarketHistory(card.signal_source_id)).items || [] }
+  catch (error) { messageColor.value = 'error'; message.value = error.response?.data?.detail || '加载调用历史失败'; showMessage.value = true }
+  finally { historyLoading.value = false }
+}
+const historySummary = item => {
+  if (item.status !== 'completed') return item.error_message || '模型调用未完成'
+  const result = item.result || {}; const trend = result.overall_trend || {}
+  return trend.summary || `模型 ${item.model_id || '默认模型'} 已返回有效分析结果`
+}
 function goToStrategySettings() { detailDialog.value = false; router.push('/strategy-settings') }
 
 onMounted(() => { loadData(); refreshTimer = setInterval(loadData, 30000) })
@@ -186,5 +212,6 @@ onUnmounted(() => clearInterval(refreshTimer))
 
 <style scoped>
 .ai-market-page{max-width:1600px;padding:28px}.ai-hero{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:26px 30px;color:#f4fbf8;border-radius:22px;background:radial-gradient(circle at 86% 18%,rgba(247,186,67,.28),transparent 28%),linear-gradient(125deg,#123c35 0%,#176b56 58%,#0d8f70 100%);box-shadow:0 18px 40px rgba(20,82,68,.18)}.ai-hero h1{margin:2px 0 6px;font-size:clamp(1.8rem,3vw,2.7rem);line-height:1.05}.ai-hero p{margin:0;color:rgba(244,251,248,.76)}.section-kicker{color:#f4c96b;font-size:.72rem;font-weight:800;letter-spacing:.16em}.hero-status{display:flex;align-items:center;gap:10px}.metric-card .v-card-text{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.metric-card strong{font-size:1.8rem}.time-metric strong{font-size:1rem}.filter-card,.content-card{border:1px solid #dce7e0;border-radius:18px;background:linear-gradient(155deg,#fff,#f8fbf9)}.filters{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:14px}.content-card{overflow:hidden}.page-tabs{padding:8px 14px 0;border-bottom:1px solid #e2ebe5}.analysis-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(350px,1fr));gap:18px}.analysis-card{display:flex;flex-direction:column;gap:16px;padding:20px;border:1px solid #dce7e0;border-radius:18px;background:#fff;box-shadow:0 10px 24px rgba(34,78,64,.06)}.analysis-card.status-ready_to_signal,.analysis-card.status-signal_formed,.analysis-card.status-decision_created{border-color:#64a98f;box-shadow:0 12px 28px rgba(29,130,98,.13)}.shared-card{border-color:#cfe0e7}.card-head,.card-footer,.confidence-row{display:flex;align-items:center;justify-content:space-between;gap:12px}.symbol-line{display:flex;align-items:center;gap:8px}.symbol-line strong{font-size:1.25rem}.card-head span,.card-footer span{color:#718078;font-size:.76rem}.confidence-row strong{font-size:1.25rem}.price-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.price-grid.compact{grid-template-columns:1fr 1.5fr}.price-grid div{display:flex;flex-direction:column;padding:10px;border-radius:10px;background:#f1f6f3}.price-grid span{color:#718078;font-size:.68rem}.price-grid strong{margin-top:2px;font-size:.85rem}.status-box{display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;background:#f0f6f3}.status-box.shared{background:#eff6f8}.status-box p{margin:2px 0 0;color:#52635e;font-size:.8rem;line-height:1.45}.shared-meta,.recommendation-row{display:flex;align-items:center;flex-wrap:wrap;gap:7px}.recommendation-row{padding:10px 12px;border-radius:11px;background:#f4f8f5;color:#52635e;font-size:.75rem}.recommendation-row>span:first-child{font-weight:700}.unmatched-note{font-weight:400!important;color:#7a8882}.access-state,.empty-state{padding:72px 20px;text-align:center;color:#607269}.access-state h2,.empty-state h2{margin:14px 0 6px;color:#29493e}.access-state p,.empty-state p{margin:0 auto 20px;max-width:600px}.detail-body h3{margin:18px 0 6px;color:#29493e}.detail-body p{color:#52635e}.level-row{display:flex;flex-direction:column;gap:7px;padding:14px;border-radius:12px;background:#f1f6f3}.prompt-label{margin:12px 0 5px;font-weight:800}.detail-body pre{overflow:auto;max-height:230px;padding:14px;white-space:pre-wrap;border-radius:10px;background:#132b25;color:#dcece6;font-size:.75rem}
+.analysis-time{display:flex;align-items:center;gap:6px;margin:0 0 14px;color:#587066;font-size:.82rem}
 @media(max-width:800px){.ai-market-page{padding:16px}.ai-hero{align-items:stretch;flex-direction:column;padding:22px}.hero-status{align-items:stretch;flex-direction:column}.hero-status .v-chip{align-self:flex-start}.filters{grid-template-columns:1fr}.analysis-grid{grid-template-columns:1fr;padding:16px!important}.price-grid{grid-template-columns:repeat(2,1fr)}.card-footer{align-items:flex-start;flex-direction:column}}
 </style>

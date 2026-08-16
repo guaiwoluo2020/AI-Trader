@@ -846,7 +846,6 @@ def build_analysis_plan(
             "analysis_prompt_template": str(
                 params.get("analysis_prompt_template") or ""
             ),
-            "share_runtime_data": bool(params.get("share_runtime_data", False)),
             "reference_runtime_ids": list(
                 params.get("reference_runtime_ids") or []
             ),

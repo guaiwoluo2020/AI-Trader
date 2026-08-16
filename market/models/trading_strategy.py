@@ -78,7 +78,7 @@ class StrategyLifecycle:
         BACKTESTING: {DRAFT, BACKTEST_PASSED},
         BACKTEST_PASSED: {BACKTESTING, PAPER_TRADING},
         PAPER_TRADING: {BACKTEST_PASSED, PRODUCTION},
-        PRODUCTION: {RETIRED},
+        PRODUCTION: {PAPER_TRADING, RETIRED},
         RETIRED: set(),
     }
 
@@ -127,7 +127,6 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "model": "",
             "system_prompt": "",
             "analysis_prompt_template": "",
-            "share_runtime_data": False,
             "reference_runtime_ids": [],
             "shared_runtime_id": "",
         }
@@ -320,9 +319,9 @@ def normalize_signal_sources(
                 for placeholder in ("{{strategy_context}}", "{{market_data}}"):
                     if placeholder not in params["analysis_prompt_template"]:
                         raise ValueError(f"AI分析提示词必须包含 {placeholder}")
-            params["share_runtime_data"] = bool(
-                params.get("share_runtime_data", False)
-            )
+            # Runtime-data sharing belongs to the standalone AI signal source,
+            # not to a strategy's serialised source binding.
+            params.pop("share_runtime_data", None)
             references = params.get("reference_runtime_ids") or []
             if not isinstance(references, list):
                 raise ValueError("共享AI运行数据引用格式无效")
@@ -335,7 +334,6 @@ def normalize_signal_sources(
             if params["analysis_mode"] == "shared_reference":
                 if not params["shared_runtime_id"]:
                     raise ValueError("共享引用模式必须选择一条共享AI运行数据")
-                params["share_runtime_data"] = False
                 params["reference_runtime_ids"] = []
         elif source == "moving_average":
             params["fast_period"] = max(1, min(500, int(params["fast_period"])))

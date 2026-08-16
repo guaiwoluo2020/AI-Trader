@@ -295,6 +295,13 @@ export const accountAPI = {
     return response.data
   },
 
+  async endDeployment(accountId, deploymentId) {
+    const response = await api.post(
+      `/accounts/${encodeURIComponent(accountId)}/deployments/${encodeURIComponent(deploymentId)}/end`
+    )
+    return response.data
+  },
+
   async removeDeployment(accountId, deploymentId) {
     const response = await api.delete(
       `/accounts/${encodeURIComponent(accountId)}/deployments/${encodeURIComponent(deploymentId)}`

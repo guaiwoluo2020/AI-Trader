@@ -11,8 +11,9 @@ from pathlib import Path
 from paper_trading import PaperTradingService, market_spec
 from market.models import PositionManagementPolicy
 from sqlite_storage import (
-    PositionManagementPolicyRepository, SQLiteStorage,
-    TradingAccountRepository, UserRepository,
+    AISignalSourceRepository, PositionManagementPolicyRepository,
+    SQLiteStorage, StrategyConfigRepository, TradingAccountRepository,
+    UserRepository,
 )
 
 
@@ -138,6 +139,78 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertEqual(deployment["status"], "active")
         self.assertEqual(promoted["lifecycle_status"], "paper_trading")
         self.assertIn("跳过回测", promoted["lifecycle_history"][-1]["reason"])
+
+    def test_shared_ai_strategy_can_deploy_to_paper_without_backtest(self):
+        owner = UserRepository(self.storage).create_user(
+            "strategy-owner", "hash", "salt"
+        )
+        PositionManagementPolicyRepository(self.storage).save(
+            PositionManagementPolicy(
+                policy_id="owner-policy", user_id=owner.user_id,
+                name="Owner exits", config={
+                    "initial_stop_rules": [{"type": "signal"}],
+                    "initial_take_profit_rules": [{"type": "signal"}],
+                    "management_rules": [], "min_risk_reward": 0,
+                },
+            )
+        )
+        AISignalSourceRepository(self.storage).create(owner.user_id, {
+            "signal_source_id": "shared-ai", "name": "Shared BTC AI",
+            "symbol": "GOLD_", "period": "M5", "enabled": True,
+            "share_runtime_data": True,
+        })
+        source_config = {
+            "strategy_id": "owner-ai-strategy", "strategy_name": "Shared AI",
+            "symbol": "GOLD_", "visibility": "shared",
+            "lifecycle_status": "draft",
+            "position_management_policy_id": "owner-policy",
+            "signal_sources": [{
+                "signal_source_id": "shared-ai", "source": "ai_entry",
+                "period": "M5", "enabled": True, "weight": 100,
+                "params": {"analysis_mode": "self_analysis"},
+            }],
+        }
+        self.storage.execute(
+            """
+            INSERT INTO user_strategy_configs(
+                user_id, strategy_id, symbol, config_json, created_at, updated_at
+            ) VALUES(?, ?, 'GOLD_', ?, ?, ?)
+            """,
+            (owner.user_id, "owner-ai-strategy", json.dumps(source_config), 100, 100),
+        )
+        reference = StrategyConfigRepository(self.storage).use_shared_strategy(
+            self.user.user_id, owner.user_id, "owner-ai-strategy", "GOLD_"
+        )
+        self.assertIsNotNone(reference)
+
+        context = self.service.list_context(self.user.user_id)
+        option = next(
+            item for item in context["strategies"]
+            if item["strategy_id"] == reference.strategy_id
+        )
+        self.assertTrue(option["paper_eligible"])
+        self.assertTrue(option["paper_direct_allowed"])
+
+        deployment = self.service.deploy(
+            self.user.user_id, self.account.account_id, reference.strategy_id
+        )
+        raw_reference = json.loads(self.storage.fetchone(
+            "SELECT config_json FROM user_strategy_configs WHERE strategy_id = ?",
+            (reference.strategy_id,),
+        )["config_json"])
+        self.assertEqual(deployment["status"], "active")
+        self.assertEqual(raw_reference["signal_sources"], [])
+        self.assertEqual(raw_reference["lifecycle_status"], "draft")
+        runtime = self.service._deployment_strategy(
+            self.user.user_id, deployment
+        )
+        self.assertEqual(runtime["lifecycle_status"], "paper_trading")
+        listed = self.service.list_deployments(
+            self.user.user_id, self.account.account_id
+        )
+        self.assertEqual(listed[0]["configured_lifecycle_status"], "draft")
+        self.assertEqual(listed[0]["runtime_lifecycle_status"], "paper_trading")
+        self.assertEqual(listed[0]["lifecycle_status"], "paper_trading")
 
     def test_non_ai_draft_strategy_cannot_deploy_to_paper_without_backtest(self):
         self.update_strategy_config({

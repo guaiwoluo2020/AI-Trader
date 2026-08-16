@@ -11,12 +11,15 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-from market.models import StrategyLifecycle, TradingStrategy
+from market.models import (
+    PositionManagementPolicy, StrategyLifecycle, TradingStrategy,
+)
 from market.models.trading_strategy import signal_source_defaults
 from market.store.llm_store import LLMStore
 from sqlite_storage import (
     LLMAccessRepository,
     LLMConfigRepository,
+    PositionManagementPolicyRepository,
     SharedAIRuntimeRepository,
     StrategyConfigRepository,
     SQLiteStorage,
@@ -41,6 +44,7 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.llm_access_repo = LLMAccessRepository(self.storage)
         self.shared_ai_runtime_repo = SharedAIRuntimeRepository(self.storage)
         self.strategy_repo = StrategyConfigRepository(self.storage)
+        self.position_policy_repo = PositionManagementPolicyRepository(self.storage)
 
         self.user_a = self.user_repo.create_user("alice", "hash-a", "salt-a")
         self.user_b = self.user_repo.create_user("bob", "hash-b", "salt-b")
@@ -86,7 +90,6 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
             "analysis_prompt_template": (
                 "策略={{strategy_context}}\n行情={{market_data}}"
             ),
-            "share_runtime_data": True,
             "reference_runtime_ids": ["share-a", "share-a", "share-b"],
         })
         strategy = TradingStrategy(symbol="GOLD#", signal_sources=[source])
@@ -112,7 +115,6 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
             "analysis_mode": "shared_reference",
             "shared_runtime_id": "2:strategy:source",
             "reference_runtime_ids": ["context-is-not-used"],
-            "share_runtime_data": True,
         })
         shared_strategy = TradingStrategy(
             symbol="GOLD#", signal_sources=[shared_source]
@@ -121,7 +123,7 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.assertEqual(shared_params["analysis_mode"], "shared_reference")
         self.assertEqual(shared_params["shared_runtime_id"], "2:strategy:source")
         self.assertEqual(shared_params["reference_runtime_ids"], [])
-        self.assertFalse(shared_params["share_runtime_data"])
+        self.assertNotIn("share_runtime_data", shared_params)
 
     def test_shared_ai_runtime_data_is_listed_by_symbol(self):
         source = signal_source_defaults("ai_entry", "M5")
@@ -286,7 +288,6 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
     def test_use_shared_strategy_creates_readonly_prompt_safe_reference(self):
         ai_source = signal_source_defaults("ai_entry", "M5")
         ai_source["params"].update({
-            "share_runtime_data": True,
             "system_prompt": "保密系统提示词",
             "analysis_prompt_template": (
                 "保密分析提示词 {{strategy_context}} {{market_data}}"
@@ -303,12 +304,15 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
             signal_sources=[ai_source],
         )
         self.strategy_repo.save_strategy(self.user_a.user_id, source)
+        self.position_policy_repo.save(PositionManagementPolicy(
+            policy_id="alice-policy", user_id=self.user_a.user_id,
+            name="Alice exits",
+        ))
 
         copied = self.strategy_repo.use_shared_strategy(
             self.user_b.user_id,
             self.user_a.user_id,
             source.strategy_id,
-            "bob-policy",
         )
 
         self.assertIsNotNone(copied)
@@ -317,9 +321,14 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.assertTrue(copied.enabled)
         self.assertTrue(copied.auto_execute)
         self.assertEqual(copied.lifecycle_status, StrategyLifecycle.PRODUCTION)
-        self.assertEqual(copied.position_management_policy_id, "bob-policy")
+        self.assertEqual(copied.position_management_policy_id, "alice-policy")
         self.assertEqual(copied.source_strategy_id, source.strategy_id)
         self.assertEqual(copied.source_owner_user_id, self.user_a.user_id)
+        resolved_policy = self.position_policy_repo.get_for_strategy(
+            self.user_b.user_id, copied
+        )
+        self.assertIsNotNone(resolved_policy)
+        self.assertEqual(resolved_policy.user_id, self.user_a.user_id)
 
         bob_strategies = self.strategy_repo.get_all_strategies(
             self.user_b.user_id

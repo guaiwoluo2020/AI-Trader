@@ -109,7 +109,8 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         paper_orders_created = 0
         try:
             paper_orders_created = engine_manager.paper_trading.process_strategy_signals(
-                identity.user_id, symbol, price, server.strategy_service
+                identity.user_id, symbol, price, server.strategy_service,
+                quote_account_id=identity.account_id,
             )
         except Exception as exc:
             # 模拟账户故障不能阻断 EA 获取真实交易指令。

@@ -245,8 +245,9 @@ class TradingEngineManager:
                     runtime.next_llm_analysis_at = now + 10
                     continue
 
-                # 每分钟检查到期的 AI 信号源，各实例自行控制调用间隔。
-                runtime.next_llm_analysis_at = now + 60
+                # 缩短检查粒度，减少 2/3/5 分钟信号源的调度抖动；
+                # 具体调用频率仍由信号源自身的间隔配置控制。
+                runtime.next_llm_analysis_at = now + 15
                 callback = getattr(engine, "run_scheduled_llm_analysis", None)
                 if callback:
                     scheduler.submit((key, "llm_analysis"), callback)

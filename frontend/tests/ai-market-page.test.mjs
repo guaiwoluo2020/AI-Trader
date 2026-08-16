@@ -23,11 +23,12 @@ test('AI market separates analysis from executable signals', () => {
   assert.match(page, /等待价格/)
   assert.match(page, /已形成信号/)
   assert.doesNotMatch(page, /确认执行|立即下单/)
+  assert.match(page, /分析生成时间：\{\{ formatTime\(detailCard\.analyzed_at\) \}\}/)
 })
 
 test('shared AI data can be derived into the current user analysis', () => {
   assert.match(page, /共享派生/)
-  assert.match(page, /只有你在自己的策略中明确引用并配置阈值后/)
+  assert.match(page, /只有明确引用后，它才会参与你的策略决策/)
   assert.match(page, /!access\.access_granted && !filteredOwn\.length/)
   assert.match(page, /v-if="filteredOwn\.length"/)
 })

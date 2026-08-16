@@ -240,6 +240,7 @@
                 :loading="deploymentLoadingId === deployment.deployment_id"
                 @update:model-value="value => toggleDeployment(deployment, value)"
               />
+              <v-btn icon="mdi-stop-circle-outline" size="small" variant="text" color="error" title="结束部署" :loading="deploymentLoadingId === deployment.deployment_id" @click="endDeployment(deployment, paperDetail.account.account_id)" />
             </article>
           </div>
 
@@ -496,6 +497,7 @@
               <div><strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong><span>{{ deployment.symbol }} · {{ deployment.execution_mode === 'live' ? 'MT5 实盘' : 'Paper 模拟' }}</span></div>
               <div class="binding-controls">
                 <v-switch :model-value="deployment.status === 'active'" color="success" inset hide-details :loading="deploymentLoadingId === deployment.deployment_id" @update:model-value="value => toggleAccountDeployment(deployment, value)" />
+                <v-btn icon="mdi-stop-circle-outline" size="small" variant="text" color="error" title="结束部署" :loading="deploymentLoadingId === deployment.deployment_id" @click="endDeployment(deployment, selectedAccount.account_id)" />
                 <v-btn v-if="selectedAccount.account_type === 'mt5'" icon="mdi-link-variant-off" size="small" variant="text" color="error" @click="removeAccountDeployment(deployment)" />
               </div>
             </article>
@@ -662,7 +664,7 @@ function toggleLivePosition(ticket) {
   expandedLivePositions.value = next
 }
 function deploymentStatusLabel(status) {
-  return { active: '运行中', paused: '已暂停', completed: '期限已结束' }[status] || status
+  return { active: '运行中', paused: '已暂停', completed: '已结束' }[status] || status
 }
 function deploymentStatusColor(status) {
   return { active: 'success', paused: 'warning', completed: 'grey' }[status] || 'grey'
@@ -1025,6 +1027,23 @@ async function toggleDeployment(deployment, active) {
   } catch (error) {
     messageType.value = 'error'
     message.value = error.response?.data?.detail || '更新策略运行状态失败'
+  } finally {
+    deploymentLoadingId.value = ''
+  }
+}
+
+async function endDeployment(deployment, accountId) {
+  if (!confirm(`结束“${deployment.strategy_name || deployment.strategy_id}”在此账户上的部署吗？不会自动平仓，历史记录会保留。`)) return
+  deploymentLoadingId.value = deployment.deployment_id
+  try {
+    const data = await accountAPI.endDeployment(accountId, deployment.deployment_id)
+    messageType.value = 'success'
+    message.value = data.message
+    if (paperDetail.value?.account.account_id === accountId) await refreshPaperDetail()
+    if (selectedAccount.value?.account_id === accountId) await refreshSelectedAccount()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || '结束部署失败'
   } finally {
     deploymentLoadingId.value = ''
   }

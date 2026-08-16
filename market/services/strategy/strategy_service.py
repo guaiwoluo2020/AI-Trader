@@ -373,8 +373,14 @@ class StrategyService:
         entry_price = current_price
         if position_policy is None and strategy.position_management_policy_id:
             user_id = int(getattr(self.strategy_store, "_user_id", 0) or 0)
-            position_policy = self.position_policy_repository.get(
-                user_id, strategy.position_management_policy_id
+            resolve_policy = getattr(
+                self.position_policy_repository, "get_for_strategy", None
+            )
+            position_policy = (
+                resolve_policy(user_id, strategy)
+                if resolve_policy else self.position_policy_repository.get(
+                    user_id, strategy.position_management_policy_id
+                )
             )
         # Directly constructed strategies are used by isolated engines/tests.
         if position_policy is None:

@@ -10,6 +10,7 @@ from auth import AuthUser, require_auth
 from membership import MembershipService
 from sqlite_storage import (
     PositionManagementEventRepository,
+    StrategyConfigRepository,
     TradeExecutionRepository,
     TradingAccountRecord,
     TradingAccountRepository,
@@ -20,6 +21,7 @@ from trading_engine_manager import TradingEngineManager
 def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     router = APIRouter()
     repository = TradingAccountRepository()
+    strategy_repository = StrategyConfigRepository()
     memberships = MembershipService()
 
     @router.get("/accounts")
@@ -274,6 +276,40 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             return {"status": "ok", "deployments": deployments}
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.post("/accounts/{account_id}/deployments/{deployment_id}/end")
+    async def end_account_deployment(
+        account_id: int,
+        deployment_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        try:
+            account = repository.get_by_id(user.user_id, account_id)
+            if account is None:
+                raise ValueError("交易账户不存在")
+            deployment = next((item for item in engine_manager.paper_trading.list_deployments(
+                user.user_id, account_id
+            ) if item["deployment_id"] == deployment_id), None)
+            if deployment is None:
+                raise HTTPException(status_code=404, detail="策略部署不存在")
+            if account.account_type == "paper":
+                strategy = strategy_repository.get_strategy_by_id(
+                    user.user_id, deployment["strategy_id"]
+                )
+                if strategy and strategy.lifecycle_status == "production":
+                    raise ValueError(
+                        "策略仍处于实盘阶段，请先结束实盘部署并在生命周期中回退到模拟盘验证"
+                    )
+            ended = engine_manager.paper_trading.end_deployment(
+                user.user_id, account_id, deployment_id
+            )
+            return {
+                "status": "ok",
+                "message": "策略部署已结束，历史订单和报告已保留",
+                "deployment": ended,
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.delete("/accounts/{account_id}/deployments/{deployment_id}")
     async def remove_account_deployment(

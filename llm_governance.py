@@ -640,18 +640,22 @@ class LLMGovernanceService:
             "user_prompt_template": scene.get("user_prompt_template") or "",
         }
 
-    def finish_call(self, reservation: Dict, status: str, usage: Optional[Dict] = None, error: str = "") -> None:
+    def finish_call(
+        self, reservation: Dict, status: str, usage: Optional[Dict] = None,
+        error: str = "", result_summary: str = "",
+    ) -> None:
         usage = usage or {}
         duration_ms = int((time.monotonic() - reservation["started_at"]) * 1000)
         self.storage.execute(
             """
             UPDATE llm_call_logs SET status = ?, duration_ms = ?, prompt_tokens = ?,
-                completion_tokens = ?, total_tokens = ?, error_message = ?, completed_at = ?
+                completion_tokens = ?, total_tokens = ?, error_message = ?,
+                result_summary = ?, completed_at = ?
             WHERE call_id = ?
             """,
             (status, duration_ms,
              usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens"),
-             str(error)[:500], int(time.time()), reservation["call_id"]),
+             str(error)[:500], str(result_summary)[:4000], int(time.time()), reservation["call_id"]),
         )
         SystemEventLogRepository(self.storage).add({
             "user_id": reservation["user_id"],

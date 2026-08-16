@@ -36,6 +36,7 @@ from sqlite_storage import (
     AISignalSourceRepository,
     PositionManagementEventRepository,
     PositionManagementPolicyRepository,
+    PlatformInstrumentMappingRepository,
     RuntimeStateRepository,
     SharedAIRuntimeRepository,
     StrategyDeploymentRepository,
@@ -57,6 +58,7 @@ class TradingServer:
         self.account_id = account_id
         self.strategy_deployments = StrategyDeploymentRepository()
         self.account_repository = TradingAccountRepository()
+        self.instrument_mappings = PlatformInstrumentMappingRepository()
         self._ai_signal_source_repository = AISignalSourceRepository()
         self.memberships = MembershipService()
 
@@ -415,7 +417,7 @@ class TradingServer:
         self.strategy_service.set_allowed_strategy_ids(strategy_ids)
         allowed_ids = set(strategy_ids)
         decisions = []
-        for strategy in self.strategy_service.get_strategies(symbol):
+        for strategy in self._strategies_for_quote(symbol):
             if strategy.strategy_id not in allowed_ids:
                 continue
             signals = self._signal_service.generate_signals_for_strategy(
@@ -440,6 +442,10 @@ class TradingServer:
                 symbol, current_price, force_signals=signals, strategy=strategy
             )
             if decision is not None:
+                # Strategy matching may use a platform canonical symbol (for
+                # example BTCUSD), but the EA can only execute its native
+                # broker symbol (for example BTCUSDm).
+                decision.symbol = symbol
                 decisions.append(decision)
 
         for decision in decisions:
@@ -477,14 +483,45 @@ class TradingServer:
 
         return result
 
+    def _strategies_for_quote(self, quote_symbol: str):
+        """Match strategy symbols to the EA's native quote symbol."""
+        account = (
+            self.account_repository.get_by_id(self.user_id, self.account_id)
+            if self.user_id is not None and self.account_id else None
+        )
+        target_server = str(getattr(account, "mt5_server", "") or "")
+        candidates = self._strategy_store.get_all_strategies()
+        matched = []
+        for strategy in candidates:
+            if str(strategy.symbol).upper() == str(quote_symbol).upper():
+                matched.append(strategy)
+                continue
+            source_user_id = int(
+                getattr(strategy, "source_owner_user_id", 0) or self.user_id or 0
+            )
+            source_server = self.instrument_mappings.source_server(
+                source_user_id, strategy.symbol
+            )
+            if self.instrument_mappings.compatible(
+                source_server, strategy.symbol, target_server, quote_symbol
+            ):
+                matched.append(strategy)
+        return matched
+
     def _manage_strategy_positions(
         self, strategy, symbol: str, current_price: float, signals: List[TradingSignal],
     ) -> None:
         """Evaluate EA positions with the strategy's independent manager."""
         from market.services import PositionManager
 
-        policy = self._position_policy_repository.get(
-            int(self.user_id or 0), strategy.position_management_policy_id
+        resolve_policy = getattr(
+            self._position_policy_repository, "get_for_strategy", None
+        )
+        policy = (
+            resolve_policy(int(self.user_id or 0), strategy)
+            if resolve_policy else self._position_policy_repository.get(
+                int(self.user_id or 0), strategy.position_management_policy_id
+            )
         )
         if policy is None:
             return
@@ -1326,6 +1363,9 @@ class TradingServer:
                 ).strip()
                 if managed_source_id:
                     bound_source_ids.add(managed_source_id)
+                managed_source = self._ai_signal_source_repository.get(
+                    int(self.user_id or 0), managed_source_id
+                ) if managed_source_id else None
                 current_price = self._latest_market_price(strategy.symbol)
                 if params.get("analysis_mode", "self_analysis") == "shared_reference":
                     cards.append(self._shared_ai_market_card(
@@ -1451,7 +1491,9 @@ class TradingServer:
                         params.get("analysis_interval_minutes", 5) or 5
                     ),
                     "kline_count": int(params.get("kline_count", 100) or 100),
-                    "share_runtime_data": bool(params.get("share_runtime_data", False)),
+                    "share_runtime_data": bool(
+                        (managed_source or {}).get("share_runtime_data", False)
+                    ),
                     "system_prompt": params.get("system_prompt", ""),
                     "analysis_prompt_template": params.get(
                         "analysis_prompt_template", ""

@@ -1085,22 +1085,7 @@ def create_market_routes(
         except Exception:
             data = {}
 
-        policy_id = str(data.get("position_management_policy_id", "")).strip()
         target_symbol = str(data.get("target_symbol", "")).strip()
-        if policy_id and not position_policy_repo.get(user.user_id, policy_id):
-            return {"status": "error", "message": "请选择有效的持仓管理方案"}
-        if not policy_id:
-            policy = next(
-                iter(position_policy_repo.list(user.user_id, enabled_only=True)),
-                None,
-            )
-            if policy is None:
-                return {
-                    "status": "error",
-                    "message": "请先创建并启用一个持仓管理方案",
-                }
-            policy_id = policy.policy_id
-
         source = strategy_repo.get_strategy_by_id(owner_user_id, strategy_id)
         if source is None or source.visibility != "shared":
             return {"status": "error", "message": "共享策略不存在或未开放使用"}
@@ -1119,7 +1104,7 @@ def create_market_routes(
                     user.user_id, user.role, "", source.signal_sources or [],
                 )
                 strategy = strategy_repo.use_shared_strategy(
-                    user.user_id, owner_user_id, strategy_id, policy_id, target_symbol,
+                    user.user_id, owner_user_id, strategy_id, target_symbol,
                 )
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
@@ -1265,6 +1250,21 @@ def create_market_routes(
                     "message": "平台共享策略为只读引用，不能修改生命周期",
                 }
             assert_strategy_not_locked(user, current)
+            if (
+                current.lifecycle_status == StrategyLifecycle.PRODUCTION
+                and target_status == StrategyLifecycle.PAPER_TRADING
+            ):
+                active_live = engine_manager.paper_trading.storage.fetchone(
+                    "SELECT COUNT(*) AS count FROM strategy_deployments "
+                    "WHERE user_id = ? AND strategy_id = ? AND execution_mode = 'live' "
+                    "AND status IN ('active', 'paused')",
+                    (user.user_id, current.strategy_id),
+                )
+                if active_live and int(active_live["count"]):
+                    return {
+                        "status": "error",
+                        "message": "请先结束全部实盘部署，再回退到模拟盘验证",
+                    }
             if target_status == "production":
                 memberships.assert_live_trading(user.user_id)
             admission_service.validate_transition(
@@ -1339,8 +1339,8 @@ def create_market_routes(
                 memberships.assert_live_trading(target_user.user_id)
                 if not strategy.position_management_policy_id:
                     return {"status": "error", "message": "策略缺少持仓管理方案"}
-                if not position_policy_repo.get(
-                    target_user.user_id, strategy.position_management_policy_id
+                if not position_policy_repo.get_for_strategy(
+                    target_user.user_id, strategy
                 ):
                     return {"status": "error", "message": "策略绑定的持仓管理方案不存在"}
                 if not strategy.get_signal_sources(enabled_only=True):
@@ -1500,6 +1500,18 @@ def create_market_routes(
         store = engine.strategy_service.strategy_store
         strategy = store.get_strategy_by_id(strategy_ref)
         if strategy:
+            if strategy.source_owner_user_id:
+                active = engine_manager.paper_trading.storage.fetchone(
+                    "SELECT COUNT(*) AS count FROM strategy_deployments "
+                    "WHERE user_id = ? AND strategy_id = ? "
+                    "AND status IN ('active', 'paused')",
+                    (user.user_id, strategy.strategy_id),
+                )
+                if active and int(active["count"]):
+                    return {
+                        "status": "error",
+                        "message": "该共享策略仍有运行中的部署，请先结束全部部署后再移除引用",
+                    }
             try:
                 assert_strategy_not_locked(user, strategy)
             except ValueError as exc:
@@ -1784,6 +1796,35 @@ def create_market_routes(
     ) -> Dict:
         return {"status": "ok", "mappings": instrument_mapping_repo.list()}
 
+    @protected_router.get("/admin/instrument-observations")
+    async def list_instrument_observations(
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        """汇总 EA 实际上报过行情的交易商与品种，供管理员建立映射。"""
+        rows = llm_governance.storage.fetchall(
+            """
+            SELECT COALESCE(c.mt5_server, a.mt5_server, '') AS broker_server,
+                   e.symbol, COUNT(*) AS report_count,
+                   MAX(e.created_at) AS last_reported_at,
+                   COUNT(DISTINCT e.account_id) AS account_count
+            FROM system_event_logs e
+            LEFT JOIN trading_accounts a ON a.id = e.account_id
+            LEFT JOIN mt5_account_connections c ON c.account_id = a.id
+            WHERE e.event_type IN ('ea_kline_full', 'ea_kline_incremental')
+              AND COALESCE(e.symbol, '') != ''
+            GROUP BY COALESCE(c.mt5_server, a.mt5_server, ''), e.symbol
+            ORDER BY last_reported_at DESC, report_count DESC
+            """
+        )
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["broker_name"] = instrument_mapping_repo.broker_name_from_server(
+                item.get("broker_server", "")
+            )
+            items.append(item)
+        return {"status": "ok", "items": items}
+
     @protected_router.put("/admin/instrument-mappings")
     async def save_instrument_mapping(
         request: Request, user: AuthUser = Depends(require_admin),
@@ -2064,6 +2105,38 @@ def create_market_routes(
                 ),
             },
         }
+
+    @protected_router.get("/llm/market-history/{signal_source_id}")
+    async def get_ai_market_history(
+        signal_source_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """返回当前用户某个 AI 信号源最近的模型调用记录。"""
+        source = ai_signal_source_repo.get(user.user_id, signal_source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="AI 信号源不存在")
+        rows = llm_governance.storage.fetchall(
+            """
+            SELECT call_id, model_id, status, duration_ms, error_message,
+                   result_summary, created_at, completed_at
+            FROM llm_call_logs
+            WHERE user_id = ? AND scene_code = ?
+              AND object_type = 'ai_market_analysis'
+              AND FIND_IN_SET(?, object_id) > 0
+            ORDER BY created_at DESC LIMIT 5
+            """,
+            (user.user_id, AI_SIGNAL_ANALYSIS, signal_source_id),
+        )
+        items = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["result"] = json.loads(item.pop("result_summary") or "")
+            except (TypeError, json.JSONDecodeError):
+                item["result"] = None
+                item.pop("result_summary", None)
+            items.append(item)
+        return {"status": "ok", "items": items}
 
     @protected_router.post("/llm/access/request")
     async def request_llm_access(user: AuthUser = Depends(require_auth)) -> Dict:

@@ -91,9 +91,10 @@ class AIEntrySignalGenerator:
         try:
             matches = self._llm_analyzer.check_entry_price_nearby(
                 symbol, current_price, threshold=threshold,
-                # Independent sources publish one result shared by every
-                # bound strategy; source ID below performs the actual match.
-                strategy_id="",
+                # Cooldown and entry alerts must remain strategy-scoped. Using
+                # an empty ID here let one runtime consume another strategy's
+                # recommendation before its paper/live decision was evaluated.
+                strategy_id=strategy_id,
             )
         except TypeError as exc:
             # Keep legacy analyzers usable while strategy-aware matching rolls out.
@@ -200,7 +201,8 @@ class AIEntrySignalGenerator:
             params = {
                 **dict((managed_source or {}).get("config") or {}),
                 **{key: value for key, value in local_params.items() if key in {
-                    "ai_signal_source_id", "min_confidence", "entry_threshold",
+                    "analysis_mode", "shared_runtime_id", "ai_signal_source_id",
+                    "min_confidence", "entry_threshold",
                     "entry_threshold_percent", "cooldown_seconds",
                     "allow_exit_fallback",
                 }},
@@ -289,9 +291,13 @@ class AIEntrySignalGenerator:
             default=None,
         )
         trend = extract_ai_trend_state(result, source_period)
+        suggestion_action = str(
+            (suggestion or {}).get("direction")
+            or (suggestion or {}).get("action") or ""
+        ).lower()
         direction = (
-            "up" if (suggestion or {}).get("direction") == "buy"
-            else "down" if (suggestion or {}).get("direction") == "sell"
+            "up" if suggestion_action == "buy"
+            else "down" if suggestion_action == "sell"
             else trend["direction"]
         )
         confidence = int(
@@ -318,6 +324,9 @@ class AIEntrySignalGenerator:
         if ready and suggestion and confidence >= min_confidence:
             local_suggestion = dict(suggestion)
             local_suggestion["period"] = config.get("period", source_period)
+            # Normalize the provider's `action` alias before building the
+            # executable entry signal.
+            local_suggestion.setdefault("direction", suggestion_action)
             trigger = build_ai_entry_signal(
                 symbol, current_price, local_suggestion,
                 threshold=float(params.get("entry_threshold", self.threshold)),

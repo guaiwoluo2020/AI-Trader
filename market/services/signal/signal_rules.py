@@ -355,7 +355,11 @@ def build_ai_entry_signal(
     require_suggested_exits: bool = True,
 ) -> Optional[TradingSignal]:
     period = str(suggestion.get("period", "")).upper()
-    direction = str(suggestion.get("direction", "")).lower()
+    # Providers occasionally use `action` instead of `direction`. Both are
+    # part of our accepted AI response contract and carry buy/sell values.
+    direction = str(
+        suggestion.get("direction") or suggestion.get("action") or ""
+    ).lower()
     entry = float(suggestion.get("entry_price") or 0)
     sl = float(suggestion.get("stop_loss") or 0)
     tp = float(suggestion.get("take_profit") or 0)

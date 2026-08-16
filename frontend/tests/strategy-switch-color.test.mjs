@@ -7,17 +7,10 @@ const settingsSource = fs.readFileSync(
   'utf8'
 )
 
-test('strategy configuration switches use green when enabled', () => {
+test('strategy bindings do not retain AI runtime sharing state', () => {
   assert.match(
     settingsSource,
     /v-model="selectedStrategy\.is_shared" color="success"/
   )
-  assert.match(
-    settingsSource,
-    /v-model="selectedStrategy\.enabled" color="success"/
-  )
-  assert.match(
-    settingsSource,
-    /v-model="newSignalSource\.params\.share_runtime_data"[\s\S]*?color="success"/
-  )
+  assert.doesNotMatch(settingsSource, /params\.share_runtime_data/)
 })

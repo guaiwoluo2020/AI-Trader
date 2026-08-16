@@ -18,7 +18,8 @@ from membership import MembershipService
 from sqlite_storage import (
     PositionManagementEventRepository,
     PositionManagementPolicyRepository, SQLiteStorage,
-    StrategyConfigRepository, TradingAccountRepository, get_storage,
+    PlatformInstrumentMappingRepository, StrategyConfigRepository,
+    TradingAccountRepository, get_storage,
 )
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 
@@ -46,6 +47,7 @@ class PaperTradingService:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
         self.accounts = TradingAccountRepository(self.storage)
+        self.instrument_mappings = PlatformInstrumentMappingRepository(self.storage)
         self.position_policies = PositionManagementPolicyRepository(self.storage)
         self.position_manager = PositionManager()
         self.position_events = PositionManagementEventRepository(self.storage)
@@ -63,8 +65,17 @@ class PaperTradingService:
             (user_id,),
         )
         items = []
+        strategy_repository = StrategyConfigRepository(self.storage)
         for row in strategies:
-            config = json.loads(row["config_json"])
+            # A shared strategy reference stores only its source pointer.  Use
+            # the repository to materialize the publisher's current signals
+            # before determining whether it may enter paper trading directly.
+            strategy = strategy_repository.get_strategy_by_id(
+                user_id, row["strategy_id"]
+            )
+            if strategy is None:
+                continue
+            config = strategy.to_dict()
             lifecycle = config.get(
                 "lifecycle_status", StrategyLifecycle.PRODUCTION
             )
@@ -140,7 +151,11 @@ class PaperTradingService:
                     f"{account_name} 观察"
                 ),
             })
-        StrategyConfigRepository(self.storage).save_strategy(user_id, strategy)
+        # Shared references follow the publisher's strategy in real time.  Do
+        # not persist the materialized publisher configuration into the
+        # recipient's reference merely because it is deployed to paper.
+        if not strategy.source_owner_user_id:
+            StrategyConfigRepository(self.storage).save_strategy(user_id, strategy)
         return strategy
 
     def deploy(
@@ -161,7 +176,7 @@ class PaperTradingService:
         ):
             raise ValueError("回测策略快照与当前策略版本不一致，请重新回测")
         policy_id = str(strategy.get("position_management_policy_id", ""))
-        policy = self.position_policies.get(user_id, policy_id)
+        policy = self.position_policies.get_for_strategy(user_id, current_strategy)
         if policy is None or not policy.enabled:
             raise ValueError("策略必须绑定一个已启用的持仓管理方案")
         lifecycle = strategy.get("lifecycle_status", "production")
@@ -195,6 +210,7 @@ class PaperTradingService:
         else:
             raise ValueError("当前账户类型不支持策略部署")
         now = int(time.time())
+        strategy_version_hash = strategy_fingerprint(strategy)
         scheduled_end_at = None
         if duration_days is not None:
             duration_days = int(duration_days)
@@ -208,12 +224,14 @@ class PaperTradingService:
                 """
                 INSERT INTO strategy_deployments(
                     deployment_id, user_id, account_id, strategy_id, symbol,
-                    source_backtest_task_id, strategy_version_at, scheduled_end_at,
+                    strategy_snapshot_hash, source_backtest_task_id,
+                    strategy_version_at, scheduled_end_at,
                     execution_mode, status, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                 ON CONFLICT(account_id, strategy_id) DO UPDATE SET
                     symbol = excluded.symbol, status = 'active',
                     execution_mode = excluded.execution_mode,
+                    strategy_snapshot_hash = excluded.strategy_snapshot_hash,
                     strategy_version_at = excluded.strategy_version_at,
                     source_backtest_task_id = excluded.source_backtest_task_id,
                     scheduled_end_at = excluded.scheduled_end_at,
@@ -221,7 +239,8 @@ class PaperTradingService:
                 """,
                 (
                     deployment_id, user_id, account.account_id, strategy_id,
-                    strategy["symbol"], source_backtest_task_id, now, scheduled_end_at,
+                    strategy["symbol"], strategy_version_hash,
+                    source_backtest_task_id, now, scheduled_end_at,
                     execution_mode, now, now,
                 ),
             )
@@ -329,6 +348,38 @@ class PaperTradingService:
         )
         return dict(row) if row else None
 
+    def end_deployment(
+        self, user_id: int, account_id: int, deployment_id: str,
+    ) -> Optional[Dict]:
+        """Finish a deployment while retaining its orders and audit history."""
+        self._account(user_id, account_id)
+        now = int(time.time())
+        with self.storage._lock, self.storage._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM strategy_deployments WHERE deployment_id = ? "
+                "AND user_id = ? AND account_id = ?",
+                (deployment_id, user_id, account_id),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE strategy_deployments SET status = 'completed', updated_at = ? "
+                "WHERE deployment_id = ?",
+                (now, deployment_id),
+            )
+            conn.execute(
+                "UPDATE paper_orders SET status = 'canceled', canceled_at = ?, "
+                "updated_at = ?, rejection_reason = '策略部署已结束' "
+                "WHERE deployment_id = ? AND status = 'pending'",
+                (now, now, deployment_id),
+            )
+            conn.commit()
+        result = self.storage.fetchone(
+            "SELECT * FROM strategy_deployments WHERE deployment_id = ?",
+            (deployment_id,),
+        )
+        return dict(result) if result else None
+
     def remove_deployment(
         self, user_id: int, account_id: int, deployment_id: str
     ) -> bool:
@@ -345,9 +396,9 @@ class PaperTradingService:
         return cursor.rowcount == 1
 
     def list_deployments(self, user_id: int, account_id: int) -> List[Dict]:
-        self._account(user_id, account_id)
+        account = self._account(user_id, account_id)
         self._expire_deployments(user_id, account_id)
-        return [dict(row) for row in self.storage.fetchall(
+        rows = self.storage.fetchall(
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name,
                    json_extract(s.config_json, '$.lifecycle_status') AS lifecycle_status,
@@ -360,7 +411,34 @@ class PaperTradingService:
             ORDER BY d.created_at DESC
             """,
             (user_id, account_id),
-        )]
+        )
+        strategy_repository = StrategyConfigRepository(self.storage)
+        deployments = []
+        for row in rows:
+            item = dict(row)
+            strategy = strategy_repository.get_strategy_by_id(
+                user_id, item["strategy_id"]
+            )
+            configured_lifecycle = item.get("lifecycle_status") or "draft"
+            if strategy is not None:
+                item["strategy_name"] = strategy.strategy_name
+                configured_lifecycle = strategy.lifecycle_status
+            item["configured_lifecycle_status"] = configured_lifecycle
+
+            # The account page describes a deployment, not merely its source
+            # configuration. An active paper deployment is in paper validation
+            # even when a shared AI strategy's publisher still keeps its source
+            # strategy in draft for reuse by other users.
+            runtime_lifecycle = configured_lifecycle
+            if item["status"] in {"active", "paused"}:
+                if account.account_type == "paper":
+                    runtime_lifecycle = StrategyLifecycle.PAPER_TRADING
+                elif account.account_type == "mt5":
+                    runtime_lifecycle = StrategyLifecycle.PRODUCTION
+            item["runtime_lifecycle_status"] = runtime_lifecycle
+            item["lifecycle_status"] = runtime_lifecycle
+            deployments.append(item)
+        return deployments
 
     def _expire_deployments(self, user_id: int, account_id: Optional[int] = None) -> None:
         now = int(time.time())
@@ -418,7 +496,8 @@ class PaperTradingService:
         return created
 
     def process_strategy_signals(
-        self, user_id: int, symbol: str, current_price: float, strategy_service
+        self, user_id: int, symbol: str, current_price: float, strategy_service,
+        quote_account_id: Optional[int] = None,
     ) -> int:
         """按每个模拟部署独立生成决策，不复用实盘风控或实盘冷却。"""
         self._expire_deployments(user_id)
@@ -426,12 +505,12 @@ class PaperTradingService:
             """
             SELECT d.* FROM strategy_deployments d
             JOIN trading_accounts a ON a.id = d.account_id
-            WHERE d.user_id = ? AND d.symbol = ? AND d.status = 'active'
+            WHERE d.user_id = ? AND d.status = 'active'
               AND d.execution_mode = 'paper' AND a.account_type = 'paper'
               AND a.status = 'active' AND a.enabled = 1
               AND a.trading_enabled = 1 AND a.auto_trading_enabled = 1
             """,
-            (user_id, symbol),
+            (user_id,),
         )
         if not deployments:
             return 0
@@ -442,6 +521,10 @@ class PaperTradingService:
                 runtime_strategy = self._deployment_strategy(user_id, deployment)
                 strategy = TradingStrategy.from_dict(runtime_strategy)
             except ValueError:
+                continue
+            if not self._strategy_matches_quote(
+                user_id, strategy, symbol, quote_account_id
+            ):
                 continue
             signals = [
                 signal for signal in
@@ -508,11 +591,35 @@ class PaperTradingService:
                 ),
                 position_policy=PositionManagementPolicy.from_dict(policy_snapshot),
             )
+            if decision is not None:
+                # Keep the simulated order on the EA's native broker symbol
+                # after the strategy was matched through a platform mapping.
+                decision.symbol = symbol
             if decision and self._create_order(
                 user_id, deployment, decision.to_dict(), now
             ):
                 created += 1
         return created
+
+    def _strategy_matches_quote(
+        self, user_id: int, strategy: TradingStrategy, quote_symbol: str,
+        quote_account_id: Optional[int],
+    ) -> bool:
+        if str(strategy.symbol).upper() == str(quote_symbol).upper():
+            return True
+        if not quote_account_id:
+            return False
+        quote_account = self.accounts.get_by_id(user_id, int(quote_account_id))
+        if quote_account is None:
+            return False
+        source_user_id = int(strategy.source_owner_user_id or user_id)
+        source_server = self.instrument_mappings.source_server(
+            source_user_id, strategy.symbol
+        )
+        return self.instrument_mappings.compatible(
+            source_server, strategy.symbol,
+            str(quote_account.mt5_server or ""), quote_symbol,
+        )
 
     def process_tick(
         self,
@@ -1463,25 +1570,26 @@ class PaperTradingService:
         }
 
     def _strategy_config(self, user_id: int, strategy_id: str) -> Dict:
-        row = self.storage.fetchone(
-            """
-            SELECT symbol, config_json FROM user_strategy_configs
-            WHERE user_id = ? AND strategy_id = ?
-            """,
-            (user_id, strategy_id),
+        strategy = StrategyConfigRepository(self.storage).get_strategy_by_id(
+            user_id, strategy_id
         )
-        if row is None:
+        if strategy is None:
             raise ValueError("策略不存在")
-        config = json.loads(row["config_json"])
-        config["symbol"] = row["symbol"]
-        return config
+        return strategy.to_dict()
 
     def _deployment_strategy(self, user_id: int, deployment) -> Dict:
-        # Paper/live deployments reference the frozen source configuration.
-        # Backtest snapshots are the sole snapshots used to reproduce execution.
+        # Deployments resolve the current source configuration. A shared AI
+        # strategy may intentionally remain draft at its publisher, but an
+        # active paper deployment must still be runnable for its recipient.
         strategy = self._strategy_config(user_id, deployment["strategy_id"])
+        if (
+            deployment["execution_mode"] == "paper"
+            and deployment["status"] in {"active", "paused"}
+            and strategy.get("lifecycle_status") == StrategyLifecycle.DRAFT
+        ):
+            strategy["lifecycle_status"] = StrategyLifecycle.PAPER_TRADING
         policy_id = str(strategy.get("position_management_policy_id", ""))
-        policy = self.position_policies.get(user_id, policy_id)
+        policy = self.position_policies.get_for_strategy(user_id, strategy)
         if policy is not None:
             strategy["position_management_policy_snapshot"] = policy.to_dict()
         # A deployment is the runtime enablement switch for paper trading.

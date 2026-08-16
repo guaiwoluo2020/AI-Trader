@@ -532,6 +532,16 @@ export const marketAPI = {
     return response.data
   },
 
+  async getAIMarketHistory(signalSourceId) {
+    const response = await api.get(`/llm/market-history/${encodeURIComponent(signalSourceId)}`)
+    return response.data
+  },
+
+  async getInstrumentObservations() {
+    const response = await api.get('/admin/instrument-observations')
+    return response.data
+  },
+
   // 申请开通大模型行情分析
   async requestLLMAccess() {
     const response = await api.post('/llm/access/request')
