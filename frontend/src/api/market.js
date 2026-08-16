@@ -492,8 +492,8 @@ export const marketAPI = {
     return response.data
   },
 
-  async getAISignalSources() {
-    const response = await api.get('/ai-signal-sources')
+  async getAISignalSources(params = {}) {
+    const response = await api.get('/ai-signal-sources', { params })
     return response.data
   },
 

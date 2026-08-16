@@ -8,7 +8,7 @@ import unittest
 import uuid
 from pathlib import Path
 
-from paper_trading import PaperTradingService
+from paper_trading import PaperTradingService, market_spec
 from market.models import PositionManagementPolicy
 from sqlite_storage import (
     PositionManagementPolicyRepository, SQLiteStorage,
@@ -96,6 +96,17 @@ class PaperTradingServiceTests(unittest.TestCase):
             "volume": 0.1,
             "confidence_score": 80,
         }
+
+    def test_btcusd_uses_crypto_contract_size_for_margin_check(self):
+        _, contract_size = market_spec("BTCUSD")
+        self.assertEqual(1.0, contract_size)
+
+        result = self.service._paper_risk_check(
+            self.account.account_id, "BTCUSD", 0.01, 63147.45
+        )
+
+        self.assertTrue(result["allowed"])
+        self.assertNotIn("模拟账户可用保证金不足", result["warnings"])
 
     def test_ai_strategy_can_deploy_to_paper_without_backtest(self):
         self.update_strategy_config({
@@ -484,14 +495,12 @@ class PaperTradingServiceTests(unittest.TestCase):
         promoted = json.loads(self.storage.fetchone(
             "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
         )["config_json"])
-        stored = json.loads(deployment["strategy_snapshot_json"])
         current["min_confidence"] = 95
         self.storage.execute(
             "UPDATE user_strategy_configs SET config_json = ? WHERE strategy_id = 'strategy-1'",
             (json.dumps(current),),
         )
 
-        self.assertEqual(stored["min_confidence"], 61)
         self.assertEqual(promoted["lifecycle_status"], "paper_trading")
         self.assertEqual(deployment["source_backtest_task_id"], "task-paper")
         self.assertGreater(deployment["scheduled_end_at"], deployment["created_at"])

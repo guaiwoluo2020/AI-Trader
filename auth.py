@@ -13,7 +13,6 @@ import json
 import os
 import re
 import secrets
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, status
+from pymysql.err import IntegrityError
 from sqlite_storage import MetaRepository, UserRepository, bootstrap_runtime_storage
 
 
@@ -44,7 +44,7 @@ class UsernameAlreadyExistsError(ValueError):
 
 
 class AuthManager:
-    """SQLite 认证管理器"""
+    """MySQL-backed authentication manager."""
 
     def __init__(self, auth_file: Optional[str] = None):
         self.legacy_auth_file = Path(
@@ -145,7 +145,7 @@ class AuthManager:
                     role="user",
                     email=normalized_email,
                 )
-            except sqlite3.IntegrityError as exc:
+            except IntegrityError as exc:
                 raise UsernameAlreadyExistsError("用户名或邮箱已被注册") from exc
 
         return self._to_auth_user(record)

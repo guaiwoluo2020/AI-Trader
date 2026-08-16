@@ -5,7 +5,7 @@ APP_DIR=/opt/ai-trader
 DATA_DIR=/var/lib/ai-trader
 ENV_FILE=/etc/ai-trader.env
 CREDENTIAL_FILE=/root/ai-trader-admin-credentials
-PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://182.92.119.121/api}
+PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://127.0.0.1/api}
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "This script must run as root." >&2
@@ -29,11 +29,19 @@ fi
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
 if [[ ! -f "$ENV_FILE" ]]; then
+  : "${AI_TRADER_MYSQL_HOST:?AI_TRADER_MYSQL_HOST is required}"
+  : "${AI_TRADER_MYSQL_USER:?AI_TRADER_MYSQL_USER is required}"
+  : "${AI_TRADER_MYSQL_PASSWORD:?AI_TRADER_MYSQL_PASSWORD is required}"
+  : "${AI_TRADER_MYSQL_DATABASE:?AI_TRADER_MYSQL_DATABASE is required}"
   admin_password=$(openssl rand -hex 12)
   cat >"$ENV_FILE" <<EOF
 PYTHONUNBUFFERED=1
-AI_TRADER_DB_FILE=$DATA_DIR/ai_trader.db
 AI_TRADER_DATA_DIR=$DATA_DIR
+AI_TRADER_MYSQL_HOST=$AI_TRADER_MYSQL_HOST
+AI_TRADER_MYSQL_PORT=${AI_TRADER_MYSQL_PORT:-3306}
+AI_TRADER_MYSQL_USER=$AI_TRADER_MYSQL_USER
+AI_TRADER_MYSQL_PASSWORD=$AI_TRADER_MYSQL_PASSWORD
+AI_TRADER_MYSQL_DATABASE=$AI_TRADER_MYSQL_DATABASE
 AI_TRADER_DEFAULT_ADMIN_USERNAME=admin
 AI_TRADER_DEFAULT_ADMIN_PASSWORD=$admin_password
 AI_TRADER_PUBLIC_BASE_URL=$PUBLIC_BASE_URL
@@ -43,6 +51,13 @@ EOF
   printf 'username=admin\npassword=%s\n' "$admin_password" >"$CREDENTIAL_FILE"
   chmod 0600 "$CREDENTIAL_FILE"
 fi
+
+for key in AI_TRADER_MYSQL_HOST AI_TRADER_MYSQL_USER AI_TRADER_MYSQL_PASSWORD AI_TRADER_MYSQL_DATABASE; do
+  if ! grep -q "^${key}=" "$ENV_FILE"; then
+    echo "Missing ${key} in ${ENV_FILE}" >&2
+    exit 1
+  fi
+done
 
 if ! grep -q '^AI_TRADER_DATA_DIR=' "$ENV_FILE"; then
   printf '\nAI_TRADER_DATA_DIR=%s\n' "$DATA_DIR" >>"$ENV_FILE"

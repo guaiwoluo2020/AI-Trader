@@ -11,6 +11,7 @@ import smtplib
 import ssl
 import time
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -342,9 +343,13 @@ class EmailVerificationService:
         message = EmailMessage()
         message["From"] = f'{config["sender_name"]} <{config["sender_email"]}>'
         message["To"] = target
+        message["Date"] = formatdate(localtime=False, usegmt=True)
+        message["Message-ID"] = make_msgid(domain=config["sender_email"].split("@", 1)[-1])
+        message["Auto-Submitted"] = "auto-generated"
+        message["X-Auto-Response-Suppress"] = "All"
         if code:
             action = "登录" if purpose == "login" else "注册"
-            message["Subject"] = f"AI Trader {action}验证码"
+            message["Subject"] = f"AI Trader {action}验证码 · {time.strftime('%H:%M:%S')}"
             message.set_content(
                 f"你的 AI Trader {action}验证码是：{code}\n\n"
                 "验证码 3 分钟内有效，请勿向任何人泄露。"
@@ -369,9 +374,13 @@ class EmailVerificationService:
         try:
             with smtp_class(**kwargs) as smtp:
                 smtp.login(config["sender_email"], config["password"])
-                smtp.send_message(message)
+                refused = smtp.send_message(message)
+                if refused:
+                    raise RuntimeError(f"SMTP 拒绝收件地址: {', '.join(refused)}")
         except smtplib.SMTPAuthenticationError as exc:
             raise RuntimeError(
                 "SMTP 认证失败，请检查邮箱密码；若启用了三方客户端安全密码，"
                 "请使用该安全密码"
             ) from exc
+        except smtplib.SMTPException as exc:
+            raise RuntimeError(f"SMTP 发送失败: {exc}") from exc

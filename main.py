@@ -34,7 +34,7 @@ from trading_engine_manager import TradingEngineManager
 
 
 def background_worker_enabled(name: str) -> bool:
-    """Allow production to pause expensive SQLite-writing workers safely."""
+    """Allow production to pause expensive background workers safely."""
     return os.getenv(name, "1").strip().lower() in {"1", "true", "yes", "on"}
 
 

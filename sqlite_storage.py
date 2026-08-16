@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
+from mysql_storage import MySQLStorage
+
 if TYPE_CHECKING:
     from market.models import LLMConfig, TradingStrategy
 
@@ -1059,8 +1061,6 @@ class SQLiteStorage:
                         account_id INTEGER NOT NULL,
                         strategy_id TEXT NOT NULL,
                         symbol TEXT NOT NULL,
-                        strategy_snapshot_hash TEXT NOT NULL DEFAULT '',
-                        strategy_snapshot_json TEXT NOT NULL DEFAULT '{}',
                         source_backtest_task_id TEXT NOT NULL DEFAULT '',
                         strategy_version_at INTEGER NOT NULL DEFAULT 0,
                         scheduled_end_at INTEGER,
@@ -1313,16 +1313,8 @@ class SQLiteStorage:
                     "TEXT NOT NULL DEFAULT ''",
                 )
                 self._ensure_column(
-                    conn, "strategy_deployments", "strategy_snapshot_hash",
-                    "TEXT NOT NULL DEFAULT ''",
-                )
-                self._ensure_column(
                     conn, "strategy_deployments", "strategy_version_at",
                     "INTEGER NOT NULL DEFAULT 0",
-                )
-                self._ensure_column(
-                    conn, "strategy_deployments", "strategy_snapshot_json",
-                    "TEXT NOT NULL DEFAULT '{}'",
                 )
                 self._ensure_column(
                     conn, "strategy_deployments", "source_backtest_task_id",
@@ -1933,13 +1925,13 @@ class SQLiteStorage:
             return conn.execute(sql, params).fetchall()
 
 
-_STORAGE: Optional[SQLiteStorage] = None
+_STORAGE: Optional[MySQLStorage] = None
 
 
-def get_storage() -> SQLiteStorage:
+def get_storage() -> MySQLStorage:
     global _STORAGE
     if _STORAGE is None:
-        _STORAGE = SQLiteStorage()
+        _STORAGE = MySQLStorage()
     return _STORAGE
 
 
@@ -3554,12 +3546,68 @@ class AISignalSourceRepository:
         sql += " ORDER BY created_at ASC, signal_source_id ASC"
         return [self._row_to_dict(row) for row in self.storage.fetchall(sql, tuple(params))]
 
+    def list_visible(self, viewer_user_id: int) -> List[Dict]:
+        """Return owned sources plus opt-in shared sources without private prompts."""
+        rows = self.storage.fetchall(
+            """
+            SELECT source.*, users.username AS owner_username
+            FROM ai_signal_sources AS source
+            JOIN users ON users.id = source.user_id
+            WHERE source.user_id = ?
+               OR (source.user_id != ? AND source.enabled = 1
+                   AND source.share_runtime_data = 1)
+            ORDER BY source.user_id = ? DESC, source.created_at ASC, source.signal_source_id ASC
+            """,
+            (int(viewer_user_id), int(viewer_user_id), int(viewer_user_id)),
+        )
+        items = []
+        for row in rows:
+            item = self._row_to_dict(row)
+            item["owner_username"] = row["owner_username"]
+            item["is_owner"] = item["user_id"] == int(viewer_user_id)
+            if not item["is_owner"]:
+                # Shared sources are executable references, not prompt templates.
+                item["config"].pop("system_prompt", None)
+                item["config"].pop("analysis_prompt_template", None)
+            items.append(item)
+        return items
+
     def get(self, user_id: int, signal_source_id: str) -> Optional[Dict]:
         row = self.storage.fetchone(
             "SELECT * FROM ai_signal_sources WHERE user_id = ? AND signal_source_id = ?",
             (int(user_id), str(signal_source_id)),
         )
         return self._row_to_dict(row) if row else None
+
+    def get_visible(
+        self, viewer_user_id: int, signal_source_id: str,
+        owner_user_id: Optional[int] = None,
+    ) -> Optional[Dict]:
+        """Resolve a source the viewer owns or an enabled source shared by its owner."""
+        clauses = ["source.signal_source_id = ?"]
+        params: List = [str(signal_source_id)]
+        if owner_user_id is not None:
+            clauses.append("source.user_id = ?")
+            params.append(int(owner_user_id))
+        clauses.append(
+            "(source.user_id = ? OR (source.enabled = 1 AND source.share_runtime_data = 1))"
+        )
+        params.append(int(viewer_user_id))
+        row = self.storage.fetchone(
+            """
+            SELECT source.*, users.username AS owner_username
+            FROM ai_signal_sources AS source
+            JOIN users ON users.id = source.user_id
+            WHERE %s
+            """ % " AND ".join(clauses),
+            tuple(params),
+        )
+        if row is None:
+            return None
+        item = self._row_to_dict(row)
+        item["owner_username"] = row["owner_username"]
+        item["is_owner"] = item["user_id"] == int(viewer_user_id)
+        return item
 
     def create(self, user_id: int, data: Dict) -> Dict:
         now = _now_ts()
@@ -3641,10 +3689,12 @@ class AISignalSourceRepository:
         referenced = self.storage.fetchone(
             """
             SELECT 1 FROM user_strategy_configs
-            WHERE user_id != ? AND EXISTS (
-                SELECT 1 FROM json_each(config_json, '$.signal_sources')
-                WHERE json_extract(value, '$.params.shared_runtime_id') = ?
-            ) LIMIT 1
+            WHERE user_id != ?
+              AND JSON_SEARCH(
+                  config_json, 'one', ?, NULL,
+                  '$.signal_sources[*].params.shared_runtime_id'
+              ) IS NOT NULL
+            LIMIT 1
             """, (int(user_id), share_id),
         )
         if referenced:
@@ -3654,10 +3704,11 @@ class AISignalSourceRepository:
             SELECT 1 FROM strategy_deployments d
             JOIN user_strategy_configs s ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
             WHERE s.user_id = ? AND d.status IN ('active', 'paused', 'pending')
-              AND EXISTS (
-                SELECT 1 FROM json_each(s.config_json, '$.signal_sources')
-                WHERE json_extract(value, '$.params.ai_signal_source_id') = ?
-            ) LIMIT 1
+              AND JSON_SEARCH(
+                  s.config_json, 'one', ?, NULL,
+                  '$.signal_sources[*].params.ai_signal_source_id'
+              ) IS NOT NULL
+            LIMIT 1
             """, (int(user_id), str(signal_source_id)),
         )
         return bool(deployed)
@@ -4317,16 +4368,20 @@ class PositionManagementPolicyRepository:
     def active_deployment_count(self, user_id: int, policy_id: str) -> int:
         """统计仍处于 active 状态的策略部署引用该持仓方案的数量。
 
-        部署快照中记录了部署时刻绑定的持仓方案；只要存在 active 部署
-        引用了该方案，修改方案会导致已部署策略被打回 draft 并停单，
-        因此修改/删除前必须先解除相关部署。
+        模拟/实盘部署直接引用已冻结的策略配置；部署快照仅用于审计。
+        因此修改/删除前必须以当前策略绑定关系判断，避免快照和运行配置
+        不一致而遗漏活动部署。
         """
         row = self.storage.fetchone(
             """
             SELECT COUNT(*) AS count FROM strategy_deployments
-            WHERE user_id = ?
-              AND status = 'active'
-              AND json_extract(strategy_snapshot_json, '$.position_management_policy_id') = ?
+            JOIN user_strategy_configs
+              ON user_strategy_configs.user_id = strategy_deployments.user_id
+             AND user_strategy_configs.strategy_id = strategy_deployments.strategy_id
+            WHERE strategy_deployments.user_id = ?
+              AND strategy_deployments.status = 'active'
+              AND json_extract(user_strategy_configs.config_json,
+                               '$.position_management_policy_id') = ?
             """,
             (int(user_id), str(policy_id)),
         )
@@ -4958,16 +5013,22 @@ class RuntimeStateRepository:
         """只保留账户范围内指定类型最近更新的记录。"""
         self.storage.execute(
             """
-            DELETE FROM runtime_entities
-            WHERE rowid IN (
-                SELECT rowid
-                FROM runtime_entities
-                WHERE user_id = ? AND account_id = ? AND entity_type = ?
-                ORDER BY created_at DESC, updated_at DESC, entity_id DESC
-                LIMIT -1 OFFSET ?
-            )
+            DELETE target FROM runtime_entities AS target
+            JOIN (
+                SELECT entity_id FROM (
+                    SELECT entity_id
+                    FROM runtime_entities
+                    WHERE user_id = ? AND account_id = ? AND entity_type = ?
+                    ORDER BY created_at DESC, updated_at DESC, entity_id DESC
+                    LIMIT 18446744073709551615 OFFSET ?
+                ) AS overflow_rows
+            ) AS obsolete ON obsolete.entity_id = target.entity_id
+            WHERE target.user_id = ? AND target.account_id = ? AND target.entity_type = ?
             """,
-            (self.user_id, self.account_id, entity_type, max(0, int(max_count))),
+            (
+                self.user_id, self.account_id, entity_type, max(0, int(max_count)),
+                self.user_id, self.account_id, entity_type,
+            ),
         )
 
     def migrate_scope(self, account_id: int) -> None:

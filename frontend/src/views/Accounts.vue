@@ -193,8 +193,39 @@
                 variant="outlined"
                 density="compact"
                 hide-details
-              />
+              >
+                <template #selection="{ item }">
+                  <div class="strategy-select-value">
+                    <span>{{ item.raw.strategy_name }}</span>
+                    <small>{{ item.raw.symbol }}</small>
+                    <v-chip v-if="item.raw.deployment" size="x-small" color="success">已部署</v-chip>
+                  </div>
+                </template>
+                <template #item="{ props, item }">
+                  <v-list-item v-bind="props" class="strategy-select-item">
+                    <template #title>
+                      <div class="strategy-option-title">
+                        <strong>{{ item.raw.strategy_name }}</strong>
+                        <v-chip v-if="item.raw.deployment" size="x-small" :color="deploymentStatusColor(item.raw.deployment.status)">{{ deploymentStatusLabel(item.raw.deployment.status) }}</v-chip>
+                        <v-chip v-else size="x-small" variant="tonal">待部署</v-chip>
+                      </div>
+                    </template>
+                    <template #subtitle>{{ item.raw.symbol }} · {{ item.raw.lifecycleLabel }}{{ item.raw.paper_eligibility_reason ? ` · ${item.raw.paper_eligibility_reason}` : '' }}</template>
+                  </v-list-item>
+                </template>
+              </v-select>
               <v-btn color="primary" :disabled="!selectedStrategyId" :loading="deploying" @click="deploySelectedStrategy">部署策略</v-btn>
+            </div>
+          </section>
+          <section v-if="paperDetail.deployments.length" class="active-deployment-strip">
+            <span>当前运行实例</span>
+            <div>
+              <article v-for="deployment in paperDetail.deployments" :key="deployment.deployment_id">
+                <v-icon :color="deploymentStatusColor(deployment.status)" size="16">mdi-play-circle</v-icon>
+                <strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong>
+                <small>{{ deployment.symbol }} · Paper</small>
+                <v-chip size="x-small" :color="deploymentStatusColor(deployment.status)">{{ deploymentStatusLabel(deployment.status) }}</v-chip>
+              </article>
             </div>
           </section>
           <div v-if="!paperDetail.deployments.length" class="runtime-empty compact">还没有部署策略</div>
@@ -437,8 +468,26 @@
         </v-card-title>
         <v-card-text>
           <v-alert type="info" variant="tonal" density="compact" class="mb-4">该账户只会执行这里处于“运行中”的策略，其他账户的绑定不会影响本账户。</v-alert>
+          <section v-if="selectedAccount.deployments?.length" class="active-deployment-strip live">
+            <span>当前运行实例</span>
+            <div>
+              <article v-for="deployment in selectedAccount.deployments" :key="deployment.deployment_id">
+                <v-icon :color="deploymentStatusColor(deployment.status)" size="16">mdi-server-network</v-icon>
+                <strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong>
+                <small>{{ deployment.symbol }} · MT5 实盘</small>
+                <v-chip size="x-small" :color="deploymentStatusColor(deployment.status)">{{ deploymentStatusLabel(deployment.status) }}</v-chip>
+              </article>
+            </div>
+          </section>
           <div class="binding-form">
-            <v-select v-model="accountStrategyId" :items="accountStrategyOptions" item-title="label" item-value="value" label="选择可绑定策略" variant="outlined" density="compact" hide-details />
+            <v-select v-model="accountStrategyId" :items="accountStrategyOptions" item-title="label" item-value="value" label="选择可绑定策略" variant="outlined" density="compact" hide-details>
+              <template #item="{ props, item }">
+                <v-list-item v-bind="props" class="strategy-select-item">
+                  <template #title><div class="strategy-option-title"><strong>{{ item.raw.strategy_name }}</strong><v-chip size="x-small" variant="tonal">待绑定</v-chip></div></template>
+                  <template #subtitle>{{ item.raw.symbol }} · {{ item.raw.lifecycleLabel }}{{ item.raw.paper_eligibility_reason ? ` · ${item.raw.paper_eligibility_reason}` : '' }}</template>
+                </v-list-item>
+              </template>
+            </v-select>
             <v-btn color="primary" :disabled="!accountStrategyId" :loading="bindingStrategy" @click="bindAccountStrategy">绑定策略</v-btn>
           </div>
           <div v-if="!selectedAccount.deployments?.length" class="runtime-empty compact">当前账户尚未绑定策略</div>
@@ -509,10 +558,18 @@ const paperAccounts = computed(() => accounts.value.filter(item => item.account_
 const connectedCount = computed(() => mt5Accounts.value.filter(item => item.connected).length)
 const strategyOptions = computed(() => paperContext.strategies.filter(
   strategy => strategy.paper_eligible
-).map(strategy => ({
-  value: strategy.strategy_id,
-  label: `${strategy.strategy_name} · ${strategy.symbol}${strategy.paper_eligibility_reason ? ' · AI可直接模拟' : ''}`,
-})))
+).map(strategy => {
+  const deployment = (paperDetail.value?.deployments || []).find(
+    item => item.strategy_id === strategy.strategy_id,
+  )
+  return {
+    value: strategy.strategy_id,
+    label: `${deployment ? '运行中 · ' : ''}${strategy.strategy_name} · ${strategy.symbol}`,
+    ...strategy,
+    deployment,
+    lifecycleLabel: lifecycleLabel(strategy.lifecycle_status),
+  }
+}).sort((left, right) => Number(Boolean(right.deployment)) - Number(Boolean(left.deployment))))
 const accountStrategyOptions = computed(() => {
   if (!selectedAccount.value) return []
   const existing = new Set((selectedAccount.value.deployments || []).map(item => item.strategy_id))
@@ -523,6 +580,8 @@ const accountStrategyOptions = computed(() => {
   }).map(strategy => ({
     value: strategy.strategy_id,
     label: `${strategy.strategy_name} · ${strategy.symbol}${strategy.paper_eligibility_reason ? ' · AI可直接模拟' : ''}`,
+    ...strategy,
+    lifecycleLabel: lifecycleLabel(strategy.lifecycle_status),
   }))
 })
 const reportStrategyOptions = computed(() => [
@@ -604,6 +663,9 @@ function toggleLivePosition(ticket) {
 }
 function deploymentStatusLabel(status) {
   return { active: '运行中', paused: '已暂停', completed: '期限已结束' }[status] || status
+}
+function deploymentStatusColor(status) {
+  return { active: 'success', paused: 'warning', completed: 'grey' }[status] || 'grey'
 }
 function lifecycleLabel(status) {
   return {
@@ -1065,6 +1127,7 @@ onBeforeUnmount(() => {
 .deployment-workbench h3 { margin: 3px 0; }.deployment-workbench p { margin: 0; color: rgba(255,255,255,.68); font-size: .7rem; }
 .deployment-form { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
 .deployment-form :deep(.v-field) { background: #fff; }
+.strategy-select-value,.strategy-option-title { display:flex; align-items:center; gap:7px; min-width:0; }.strategy-select-value span,.strategy-option-title strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.strategy-select-value small { color:#7a8781; font-size:.66rem; }.strategy-select-item :deep(.v-list-item-subtitle) { margin-top:3px; color:#7d8984; font-size:.7rem; }.active-deployment-strip { display:grid; grid-template-columns:112px 1fr; gap:12px; align-items:start; margin-top:10px; padding:11px 13px; border:1px solid #cfe3d9; border-radius:11px; background:linear-gradient(110deg,#f1faf5,#fff); }.active-deployment-strip>span { padding-top:5px; color:#477164; font-size:.68rem; font-weight:800; letter-spacing:.08em; }.active-deployment-strip>div { display:flex; flex-wrap:wrap; gap:7px; }.active-deployment-strip article { display:flex; align-items:center; gap:6px; padding:6px 8px; border:1px solid #dbeae1; border-radius:8px; background:#fff; }.active-deployment-strip strong { color:#295145; font-size:.73rem; }.active-deployment-strip small { color:#77857e; font-size:.63rem; }.active-deployment-strip.live { margin:0 0 14px; background:linear-gradient(110deg,#eef6f4,#fff); }
 .deployment-list { display: grid; gap: 7px; margin-top: 9px; }
 .deployment-list article { display: flex; align-items: center; justify-content: space-between; padding: 10px 13px; border: 1px solid #dce6e0; border-radius: 10px; background: #fff; }
 .deployment-list strong,.deployment-list span { display: block; }.deployment-list strong { color: #31554b; font-size: .78rem; }.deployment-list span { color: #87928d; font-size: .64rem; }
@@ -1096,5 +1159,5 @@ onBeforeUnmount(() => {
 .empty-state { padding: 65px 20px; color: #85918b; text-align: center; }
 .empty-state h3 { margin: 12px 0 5px; color: #4a625b; }.empty-state p { margin: 0; }
 @media(max-width:1000px){.content-grid{grid-template-columns:1fr}.paper-card{position:static}.account-details{grid-template-columns:1fr 1fr}.deployment-workbench{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}.report-metrics{grid-template-columns:repeat(3,1fr)}.report-breakdowns{grid-template-columns:1fr}.benchmark-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:650px){.accounts-page{padding:15px}.account-hero{align-items:flex-start;flex-direction:column;padding:25px}.metric-grid,.runtime-metrics{grid-template-columns:1fr 1fr}.account-topline{align-items:flex-start;flex-direction:column}.balance-row,.account-details,.paper-setting-grid{grid-template-columns:1fr}.account-chips{flex-wrap:wrap}.runtime-body{padding:14px!important}.deployment-form{grid-template-columns:1fr}.order-row{grid-template-columns:1fr 45px 70px}.order-row>*:nth-child(n+4):not(:last-child){display:none}.trade-row{grid-template-columns:1fr auto}.trade-row>*:nth-child(2),.trade-row>*:nth-child(3){display:none}}
+@media(max-width:650px){.accounts-page{padding:15px}.account-hero{align-items:flex-start;flex-direction:column;padding:25px}.metric-grid,.runtime-metrics{grid-template-columns:1fr 1fr}.account-topline{align-items:flex-start;flex-direction:column}.balance-row,.account-details,.paper-setting-grid{grid-template-columns:1fr}.account-chips{flex-wrap:wrap}.runtime-body{padding:14px!important}.deployment-form,.active-deployment-strip{grid-template-columns:1fr}.order-row{grid-template-columns:1fr 45px 70px}.order-row>*:nth-child(n+4):not(:last-child){display:none}.trade-row{grid-template-columns:1fr auto}.trade-row>*:nth-child(2),.trade-row>*:nth-child(3){display:none}}
 </style>

@@ -10,3 +10,4 @@ numpy>=2.0.0,<3
 pandas>=2.0.0,<3
 optuna>=3.6,<5
 pandas-ta-classic>=0.3.59,<0.4
+PyMySQL>=1.1,<2

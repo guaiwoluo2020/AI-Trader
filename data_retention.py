@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Short-lived operational data retention for the SQLite deployment."""
+"""Short-lived operational data retention for the MySQL deployment."""
 
 import json
-import shutil
 import time
 import uuid
 from pathlib import Path
@@ -17,9 +16,6 @@ class DataRetentionService:
     BACKTEST_DETAIL_DAYS = 7
     ALPHA_SIGNAL_DAYS = 7
     BATCH_SIZE = 5000
-    VACUUM_INTERVAL_SECONDS = 7 * 86400
-    VACUUM_FREE_RATIO = 0.20
-    VACUUM_MIN_RECLAIM_BYTES = 20 * 1024 * 1024
 
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
@@ -60,27 +56,22 @@ class DataRetentionService:
         before = self.get_space_status()
         self.storage.execute(
             """INSERT INTO data_maintenance_runs(
-                run_id, trigger_type, started_at, db_size_before
-            ) VALUES(?, ?, ?, ?)""",
-            (run_id, trigger_type, current, before["db_size_bytes"]),
+                run_id, trigger_type, status, started_at, db_size_before,
+                checkpoint_status, vacuum_status, vacuum_reason, error_message
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id, trigger_type, "running", current, before["db_size_bytes"],
+                "not_required", "managed_by_rds", "MySQL InnoDB 空间维护由 RDS 管理", "",
+            ),
         )
         cleanup_result = {}
-        checkpoint_status = ""
-        vacuum_status = "not_due"
-        vacuum_reason = "距离上次每周检查不足 7 天"
+        checkpoint_status = "not_required"
+        vacuum_status = "managed_by_rds"
+        vacuum_reason = "MySQL InnoDB 空间维护由 RDS 管理"
         error_message = ""
         status = "completed"
         try:
             cleanup_result = self.cleanup(current)
-            checkpoint_status = self._checkpoint()
-            checked_at = self._last_vacuum_check_at()
-            if (
-                trigger_type == "manual"
-                or current - checked_at >= self.VACUUM_INTERVAL_SECONDS
-            ):
-                inspected = self.get_space_status()
-                vacuum_status, vacuum_reason = self._maybe_vacuum(inspected)
-                self._set_last_vacuum_check_at(current)
         except Exception as exc:
             status = "failed"
             error_message = str(exc)[:1000]
@@ -114,27 +105,27 @@ class DataRetentionService:
                 "paper_heartbeat_days": self.PAPER_HEARTBEAT_DAYS,
                 "backtest_detail_days": self.BACKTEST_DETAIL_DAYS,
                 "alpha_signal_days": self.ALPHA_SIGNAL_DAYS,
-                "vacuum_interval_days": self.VACUUM_INTERVAL_SECONDS // 86400,
-                "vacuum_free_ratio": self.VACUUM_FREE_RATIO,
-                "vacuum_min_reclaim_bytes": self.VACUUM_MIN_RECLAIM_BYTES,
+                "vacuum_interval_days": None,
+                "vacuum_free_ratio": None,
+                "vacuum_min_reclaim_bytes": None,
             },
             "latest": runs[0] if runs else None,
             "runs": runs,
         }
 
     def get_space_status(self) -> Dict:
-        db_file = Path(self.storage.db_file)
-        with self.storage._lock, self.storage._connect() as conn:
-            page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
-            free_pages = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
-            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        row = self.storage.fetchone(
+            """SELECT COALESCE(SUM(data_length + index_length), 0) AS db_size_bytes
+               FROM information_schema.tables
+               WHERE table_schema = DATABASE()"""
+        ) or {}
         return {
-            "db_size_bytes": db_file.stat().st_size if db_file.exists() else 0,
-            "page_count": page_count,
-            "free_page_count": free_pages,
-            "page_size": page_size,
-            "reclaimable_bytes": free_pages * page_size,
-            "free_ratio": round(free_pages / max(page_count, 1), 6),
+            "db_size_bytes": int(row.get("db_size_bytes") or 0),
+            "page_count": 0,
+            "free_page_count": 0,
+            "page_size": 0,
+            "reclaimable_bytes": 0,
+            "free_ratio": 0,
         }
 
     def list_runs(self, limit: int = 30) -> list:
@@ -151,28 +142,6 @@ class DataRetentionService:
         )
         return self._run_to_dict(row) if row else None
 
-    def _checkpoint(self) -> str:
-        with self.storage._lock, self.storage._connect() as conn:
-            conn.execute("PRAGMA busy_timeout=5000")
-            result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        return f"busy={int(result[0])}, log={int(result[1])}, checkpointed={int(result[2])}"
-
-    def _maybe_vacuum(self, space: Dict) -> tuple:
-        active = self._active_heavy_workloads()
-        if active:
-            return "skipped", f"当前有 {active} 个回测或 Alpha 任务运行，已跳过"
-        if space["free_ratio"] < self.VACUUM_FREE_RATIO:
-            return "skipped", "空闲页比例未达到 20%"
-        if space["reclaimable_bytes"] < self.VACUUM_MIN_RECLAIM_BYTES:
-            return "skipped", "预计可回收空间不足 20 MB"
-        disk_free = shutil.disk_usage(Path(self.storage.db_file).parent).free
-        if disk_free < max(space["db_size_bytes"] * 2, 64 * 1024 * 1024):
-            return "skipped", "磁盘可用空间不足，无法安全重建数据库"
-        with self.storage._lock, self.storage._connect() as conn:
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("VACUUM")
-        return "executed", "达到空间回收阈值，VACUUM 执行完成"
-
     def _active_heavy_workloads(self) -> int:
         row = self.storage.fetchone(
             """SELECT
@@ -181,19 +150,6 @@ class DataRetentionService:
                 AS total"""
         )
         return int(row["total"] if row else 0)
-
-    def _last_vacuum_check_at(self) -> int:
-        row = self.storage.fetchone(
-            "SELECT value FROM app_meta WHERE key = 'data_vacuum_checked_at'"
-        )
-        return int(row["value"]) if row else 0
-
-    def _set_last_vacuum_check_at(self, checked_at: int) -> None:
-        self.storage.execute(
-            """INSERT INTO app_meta(key, value) VALUES('data_vacuum_checked_at', ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
-            (str(checked_at),),
-        )
 
     @staticmethod
     def _run_to_dict(row) -> Dict:
@@ -236,9 +192,7 @@ class DataRetentionService:
         while True:
             with self.storage._lock, self.storage._connect() as conn:
                 cursor = conn.execute(
-                    f"""DELETE FROM {table} WHERE rowid IN (
-                        SELECT rowid FROM {table} WHERE {where} LIMIT ?
-                    )""",
+                    f"DELETE FROM {table} WHERE {where} LIMIT ?",
                     (*params, self.BATCH_SIZE),
                 )
                 conn.commit()

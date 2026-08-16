@@ -111,11 +111,17 @@ class UserQuotaService:
         signal_sources = self.storage.fetchone(
             """
             SELECT COUNT(*) AS total
-            FROM user_strategy_configs, json_each(config_json, '$.signal_sources')
-            WHERE user_id = ? AND json_valid(config_json)
+            FROM user_strategy_configs AS strategy
+            JOIN JSON_TABLE(strategy.config_json, '$.signal_sources[*]'
+                COLUMNS(
+                    source_type VARCHAR(64) PATH '$.source',
+                    ai_signal_source_id VARCHAR(128) PATH '$.params.ai_signal_source_id'
+                )
+            ) AS source
+            WHERE strategy.user_id = ? AND JSON_VALID(strategy.config_json)
               AND (
-                json_extract(value, '$.source') != 'ai_entry'
-                OR COALESCE(json_extract(value, '$.params.ai_signal_source_id'), '') = ''
+                source.source_type != 'ai_entry'
+                OR COALESCE(source.ai_signal_source_id, '') = ''
               )
             """,
             (int(user_id),),
@@ -178,11 +184,18 @@ class UserQuotaService:
         current = self.storage.fetchone(
             """
             SELECT COUNT(*) AS total
-            FROM user_strategy_configs, json_each(config_json, '$.signal_sources')
-            WHERE user_id = ? AND strategy_id != ? AND json_valid(config_json)
+            FROM user_strategy_configs AS strategy
+            JOIN JSON_TABLE(strategy.config_json, '$.signal_sources[*]'
+                COLUMNS(
+                    source_type VARCHAR(64) PATH '$.source',
+                    ai_signal_source_id VARCHAR(128) PATH '$.params.ai_signal_source_id'
+                )
+            ) AS source
+            WHERE strategy.user_id = ? AND strategy.strategy_id != ?
+              AND JSON_VALID(strategy.config_json)
               AND (
-                json_extract(value, '$.source') != 'ai_entry'
-                OR COALESCE(json_extract(value, '$.params.ai_signal_source_id'), '') = ''
+                source.source_type != 'ai_entry'
+                OR COALESCE(source.ai_signal_source_id, '') = ''
               )
             """,
             (int(user_id), str(strategy_id)),

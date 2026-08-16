@@ -27,6 +27,12 @@ def market_spec(symbol: str) -> Tuple[float, float]:
     upper = str(symbol or "").upper()
     if "GOLD" in upper or "XAU" in upper:
         return 0.01, 100.0
+    # BTCUSD 形式与外汇六码品种相同，但不能套用外汇的 100,000 合约规模。
+    if any(upper.startswith(asset) for asset in (
+        "BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "BNB", "LTC",
+        "AVAX", "TRX", "DOT", "LINK",
+    )):
+        return 0.01, 1.0
     if "JPY" in upper:
         return 0.001, 100000.0
     if len(upper.rstrip("#._")) == 6:
@@ -158,7 +164,6 @@ class PaperTradingService:
         policy = self.position_policies.get(user_id, policy_id)
         if policy is None or not policy.enabled:
             raise ValueError("策略必须绑定一个已启用的持仓管理方案")
-        strategy["position_management_policy_snapshot"] = policy.to_dict()
         lifecycle = strategy.get("lifecycle_status", "production")
         if account.account_type == "paper":
             normal_eligible = lifecycle in {
@@ -181,7 +186,6 @@ class PaperTradingService:
                     direct_ai=direct_ai_bypass,
                 )
                 strategy = current_strategy.to_dict()
-                strategy["position_management_policy_snapshot"] = policy.to_dict()
             execution_mode = "paper"
         elif account.account_type == "mt5":
             self.memberships.assert_live_trading(user_id, account.account_id)
@@ -198,38 +202,26 @@ class PaperTradingService:
                 raise ValueError("模拟运行期限必须在 1 至 365 天之间")
             scheduled_end_at = now + duration_days * 86400
         deployment_id = uuid.uuid4().hex[:12]
-        snapshot_json = json.dumps(
-            strategy, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
         with self.storage._lock, self.storage._connect() as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute(
                 """
                 INSERT INTO strategy_deployments(
                     deployment_id, user_id, account_id, strategy_id, symbol,
-                    strategy_snapshot_hash, strategy_snapshot_json,
                     source_backtest_task_id, strategy_version_at, scheduled_end_at,
                     execution_mode, status, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                 ON CONFLICT(account_id, strategy_id) DO UPDATE SET
                     symbol = excluded.symbol, status = 'active',
                     execution_mode = excluded.execution_mode,
-                    strategy_version_at = CASE
-                        WHEN strategy_deployments.strategy_snapshot_hash
-                             != excluded.strategy_snapshot_hash
-                        THEN excluded.strategy_version_at
-                        ELSE strategy_deployments.strategy_version_at
-                    END,
-                    strategy_snapshot_hash = excluded.strategy_snapshot_hash,
-                    strategy_snapshot_json = excluded.strategy_snapshot_json,
+                    strategy_version_at = excluded.strategy_version_at,
                     source_backtest_task_id = excluded.source_backtest_task_id,
                     scheduled_end_at = excluded.scheduled_end_at,
                     updated_at = excluded.updated_at
                 """,
                 (
                     deployment_id, user_id, account.account_id, strategy_id,
-                    strategy["symbol"], strategy_fingerprint(strategy), snapshot_json,
-                    source_backtest_task_id, now, scheduled_end_at,
+                    strategy["symbol"], source_backtest_task_id, now, scheduled_end_at,
                     execution_mode, now, now,
                 ),
             )
@@ -447,9 +439,8 @@ class PaperTradingService:
         now = int(time.time())
         for deployment in deployments:
             try:
-                strategy = TradingStrategy.from_dict(
-                    self._deployment_strategy(user_id, deployment)
-                )
+                runtime_strategy = self._deployment_strategy(user_id, deployment)
+                strategy = TradingStrategy.from_dict(runtime_strategy)
             except ValueError:
                 continue
             signals = [
@@ -476,9 +467,7 @@ class PaperTradingService:
             ):
                 signals = generator(symbol, current_price, strategy)
             account_id = int(deployment["account_id"])
-            policy_snapshot = self._deployment_strategy(user_id, deployment)[
-                "position_management_policy_snapshot"
-            ]
+            policy_snapshot = runtime_strategy["position_management_policy_snapshot"]
             reverse_enabled = any(
                 rule.get("type") == "reverse_signal"
                 for rule in policy_snapshot["config"].get("management_rules", [])
@@ -517,11 +506,7 @@ class PaperTradingService:
                 risk_checker=lambda s, volume, risk, st, aid=account_id, px=current_price: (
                     self._paper_risk_check(aid, s, volume, px)
                 ),
-                position_policy=PositionManagementPolicy.from_dict(
-                    self._deployment_strategy(user_id, deployment)[
-                        "position_management_policy_snapshot"
-                    ]
-                ),
+                position_policy=PositionManagementPolicy.from_dict(policy_snapshot),
             )
             if decision and self._create_order(
                 user_id, deployment, decision.to_dict(), now
@@ -1486,14 +1471,9 @@ class PaperTradingService:
         return config
 
     def _deployment_strategy(self, user_id: int, deployment) -> Dict:
-        try:
-            strategy = self._strategy_config(user_id, deployment["strategy_id"])
-        except ValueError:
-            raw_snapshot = deployment["strategy_snapshot_json"] \
-                if "strategy_snapshot_json" in deployment.keys() else ""
-            if not raw_snapshot:
-                raise
-            strategy = json.loads(raw_snapshot)
+        # Paper/live deployments reference the frozen source configuration.
+        # Backtest snapshots are the sole snapshots used to reproduce execution.
+        strategy = self._strategy_config(user_id, deployment["strategy_id"])
         policy_id = str(strategy.get("position_management_policy_id", ""))
         policy = self.position_policies.get(user_id, policy_id)
         if policy is not None:

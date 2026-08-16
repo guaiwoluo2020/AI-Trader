@@ -373,6 +373,35 @@ class M1BacktestEngineTests(unittest.TestCase):
         match["analyzed_at"] = "2026-08-02T10:05:00"
         self.assertEqual(len(generator.generate_signals("GOLD_", 3000.05)), 1)
 
+    def test_live_ai_signal_allows_policy_exit_fallback_after_price_drift(self):
+        match = {
+            "analyzed_at": "2026-08-02T10:00:00",
+            "period": "M1",
+            "direction": "buy",
+            "confidence": 88,
+            "entry_price": 3000,
+            "stop_loss": 2990,
+            # Valid at the suggested entry, but not after this price drift.
+            "take_profit": 3011,
+        }
+
+        class Analyzer:
+            @staticmethod
+            def check_entry_price_nearby(*_args, **_kwargs):
+                return [match]
+
+        generator = AIEntrySignalGenerator()
+        generator.set_llm_analyzer(Analyzer())
+
+        signals = generator.generate_signals(
+            "GOLD_", 3005, threshold=0.002, allow_exit_fallback=True,
+        )
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].action, "buy")
+        self.assertEqual(signals[0].suggested_sl, 0)
+        self.assertEqual(signals[0].suggested_tp, 0)
+
     def test_shared_ai_runtime_becomes_current_strategy_signal_source(self):
         shared = {
             "share_id": "2:source-strategy:source-ai",

@@ -91,6 +91,13 @@ class _StrategySignalGenerator:
 
 
 class StrategyServiceTestCase(unittest.TestCase):
+    def test_query_does_not_create_default_strategy(self):
+        service = StrategyService(
+            strategy_store=_StrategyStore([]), risk_manager=_RiskManager()
+        )
+
+        self.assertEqual([], service.get_strategies("BTCUSD"))
+
     @staticmethod
     def _consensus_strategy(requirement="majority"):
         return TradingStrategy(

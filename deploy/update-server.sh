@@ -12,7 +12,11 @@ fi
 # before restarting the API so a code update cannot create an extended 502 gap.
 test -x "$APP_DIR/venv/bin/python"
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
-"$APP_DIR/venv/bin/python" -c 'import fastapi, uvicorn'
+"$APP_DIR/venv/bin/python" -c 'import fastapi, uvicorn, pymysql'
+set -a
+source /etc/ai-trader.env
+set +a
+"$APP_DIR/venv/bin/python" -c 'from sqlite_storage import get_storage; get_storage().initialize()'
 
 chown -R root:root "$APP_DIR"
 chmod -R a+rX "$APP_DIR"

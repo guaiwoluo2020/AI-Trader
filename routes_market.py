@@ -267,20 +267,24 @@ def create_market_routes(
             managed_source_id = str(params.get("ai_signal_source_id") or "").strip()
             if not managed_source_id:
                 raise ValueError("请选择独立管理的 AI 信号源")
-            managed_source = ai_signal_source_repo.get(user.user_id, managed_source_id)
+            owner_user_id = int(
+                params.get("ai_signal_source_owner_id") or user.user_id
+            )
+            managed_source = ai_signal_source_repo.get_visible(
+                user.user_id, managed_source_id, owner_user_id,
+            )
             if managed_source is None or not managed_source.get("enabled"):
-                raise ValueError("选择的 AI 信号源不存在或已停用")
+                raise ValueError("选择的 AI 信号源不存在、未共享或已停用")
             if str(source.get("period", "")).upper() != managed_source["period"]:
                 raise ValueError("策略中的 AI 信号周期必须与独立信号源一致")
             source["signal_source_id"] = managed_source_id
-            mode = (managed_source.get("config") or {}).get("analysis_mode", "self_analysis")
-            if mode == "shared_reference":
-                share_id = str((managed_source.get("config") or {}).get("shared_runtime_id") or "").strip()
-                shared = shared_ai_runtime_repo.get_shared(share_id)
-                if shared is None or shared["owner_user_id"] == user.user_id:
-                    raise ValueError("选择的共享AI运行数据不存在或已取消共享")
-                if str(source.get("period", "")).upper() != shared["period"]:
-                    raise ValueError("共享引用信号的周期必须与共享数据周期一致")
+            params["ai_signal_source_owner_id"] = int(managed_source["user_id"])
+            if int(managed_source["user_id"]) != user.user_id:
+                if not instrument_mapping_repo.user_can_use_symbol(
+                    int(managed_source["user_id"]), managed_source["symbol"],
+                    user.user_id, data.get("symbol", ""),
+                ):
+                    raise ValueError("该共享 AI 信号源与当前策略品种不兼容")
                 continue
             if not access["access_granted"]:
                 raise ValueError("自主AI分析仅对已开通大模型分析的付费用户开放")
@@ -1871,14 +1875,8 @@ def create_market_routes(
         if not symbol or period not in {"M1", "M5", "M15", "H1", "H4"}:
             raise ValueError("请填写交易品种并选择有效的分析周期")
         mode = str(config.get("analysis_mode") or "self_analysis")
-        if mode == "shared_reference":
-            share_id = str(config.get("shared_runtime_id") or "").strip()
-            shared = shared_ai_runtime_repo.get_shared(share_id)
-            if shared is None or shared["owner_user_id"] == user.user_id:
-                raise ValueError("选择的共享 AI 运行数据不存在或不可引用")
-            if period != shared["period"]:
-                raise ValueError("引用型信号源周期必须与共享数据周期一致")
-            return
+        if mode != "self_analysis":
+            raise ValueError("AI 信号源仅支持自主 AI 分析")
         access = llm_access_repo.get_status(user.user_id, user.role)
         if not access["access_granted"]:
             raise ValueError("自主 AI 分析仅对已开通大模型功能的用户开放")
@@ -1893,10 +1891,31 @@ def create_market_routes(
             raise ValueError(f"{period} 周期的调用间隔不能低于 {minimum} 分钟")
 
     @protected_router.get("/ai-signal-sources")
-    async def get_ai_signal_sources(user: AuthUser = Depends(require_auth)) -> Dict:
+    async def get_ai_signal_sources(
+        symbol: Optional[str] = None,
+        include_shared: bool = False,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        items = (
+            ai_signal_source_repo.list_visible(user.user_id)
+            if include_shared else ai_signal_source_repo.list(user.user_id)
+        )
+        target_symbol = str(symbol or "").strip()
+        visible_items = []
+        for item in items:
+            is_owner = int(item["user_id"]) == user.user_id
+            if target_symbol and not is_owner and not instrument_mapping_repo.user_can_use_symbol(
+                int(item["user_id"]), item.get("symbol", ""),
+                user.user_id, target_symbol,
+            ):
+                continue
+            if target_symbol and is_owner and item.get("symbol") != target_symbol:
+                continue
+            item["is_owner"] = is_owner
+            visible_items.append(ai_signal_source_payload(item))
         return {
             "status": "ok",
-            "items": [ai_signal_source_payload(item) for item in ai_signal_source_repo.list(user.user_id)],
+            "items": visible_items,
         }
 
     @protected_router.post("/ai-signal-sources")

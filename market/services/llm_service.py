@@ -221,11 +221,10 @@ class LLMService:
 
             rows = storage.fetchall(
                 """
-                SELECT DISTINCT COALESCE(s.config_json, d.strategy_snapshot_json)
-                       AS runtime_strategy_json
+                SELECT DISTINCT s.config_json AS runtime_strategy_json
                 FROM strategy_deployments d
                 JOIN trading_accounts a ON a.id = d.account_id
-                LEFT JOIN user_strategy_configs s
+                JOIN user_strategy_configs s
                   ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
                 WHERE d.user_id = ? AND d.execution_mode = 'paper'
                   AND d.status = 'active' AND d.symbol IN ({})
@@ -666,6 +665,7 @@ class LLMService:
         model: Optional[str] = None, system_prompt: Optional[str] = None,
         scene_code: str = AI_SIGNAL_ANALYSIS,
         object_type: str = "", object_id: str = "",
+        response_validator: callable = None,
     ) -> Optional[Dict]:
         """调用 LLM API（流式）；响应格式错误时最多尝试三次。
 
@@ -678,7 +678,7 @@ class LLMService:
             try:
                 return self._call_llm_stream_once(
                     attempt_prompt, on_chunk, model, system_prompt,
-                    scene_code, object_type, object_id,
+                    scene_code, object_type, object_id, response_validator,
                 )
             except LLMResponseFormatError as exc:
                 if attempt >= self.MAX_RESPONSE_ATTEMPTS:
@@ -695,6 +695,7 @@ class LLMService:
         self, prompt: str, on_chunk: callable,
         model: Optional[str], system_prompt: Optional[str],
         scene_code: str, object_type: str, object_id: str,
+        response_validator: callable = None,
     ) -> Optional[Dict]:
         governance = self._llm_governance
         if governance is None:
@@ -792,6 +793,8 @@ class LLMService:
                     "大模型返回内容为空或不是有效 JSON，"
                     f"响应摘要: {preview}"
                 )
+            if response_validator:
+                response_validator(parsed)
             if governance:
                 governance.finish_call(reservation, "completed")
             return parsed
@@ -1120,6 +1123,29 @@ class LLMService:
             analysis["trade_suggestions"] = normalized
         return response
 
+    def _validate_analysis_response(
+        self, response: Dict, analysis_plan: Dict[str, Dict],
+    ) -> None:
+        """Require a trend result for every period requested in this LLM call."""
+        response = self._coerce_analysis_response(response, analysis_plan)
+        missing = []
+        for symbol, symbol_plan in analysis_plan.items():
+            analysis = response.get(symbol)
+            trends = (
+                analysis.get("trend_analysis")
+                if isinstance(analysis, dict)
+                else None
+            )
+            trends = trends if isinstance(trends, dict) else {}
+            for period in symbol_plan.get("periods", {}):
+                canonical = str(period).upper()
+                if not isinstance(trends.get(canonical), dict):
+                    missing.append(f"{symbol}/{canonical}")
+        if missing:
+            raise LLMResponseFormatError(
+                "大模型响应缺少必需的趋势分析：" + "、".join(missing)
+            )
+
     def _group_analysis_plans(self, analysis_plan: Dict[str, Dict]) -> List[Dict]:
         """Group sources only when model, prompts, and references are identical."""
         config = self.llm_store.get_config()
@@ -1215,6 +1241,29 @@ class LLMService:
             for key in ("overall_trend", "key_levels", "analyzed_at"):
                 if analysis.get(key) is not None:
                     current[key] = analysis[key]
+
+    @staticmethod
+    def _retain_previous_source_results(
+        analysis: Dict, previous: LLMAnalysisResult,
+        analyzed_source_ids: set, analyzed_periods: set,
+    ) -> None:
+        """Keep results for independent sources that were not due this run."""
+        retained_trends = {
+            period: value
+            for period, value in (previous.trend_analysis or {}).items()
+            if period not in analyzed_periods
+        }
+        analysis["trend_analysis"] = {
+            **retained_trends,
+            **(analysis.get("trend_analysis") or {}),
+        }
+        retained_suggestions = [
+            item for item in (previous.trade_suggestions or [])
+            if item.get("signal_source_id") not in analyzed_source_ids
+        ]
+        analysis["trade_suggestions"] = (
+            retained_suggestions + analysis.get("trade_suggestions", [])
+        )
 
     def _publish_runtime_results(self, plan: Dict, response: Dict) -> None:
         config = self.llm_store.get_config()
@@ -1409,6 +1458,7 @@ class LLMService:
 
         response: Dict = {}
         analyzed_source_ids = set()
+        analyzed_periods_by_symbol: Dict[str, set] = {}
         for group in groups:
             group_plan = {
                 symbol: item for symbol, item in group["plan"].items()
@@ -1435,6 +1485,9 @@ class LLMService:
                     on_chunk,
                     model=group["model"],
                     system_prompt=group["system_prompt"],
+                    response_validator=lambda payload, plan=group_plan: (
+                        self._validate_analysis_response(payload, plan)
+                    ),
                 )
             except LLMRequestError as exc:
                 message = str(exc)
@@ -1450,6 +1503,11 @@ class LLMService:
                 for item in group_plan.values()
                 for profile in item.get("strategies", [])
             )
+            for symbol, item in group_plan.items():
+                analyzed_periods_by_symbol.setdefault(symbol, set()).update(
+                    str(period).upper()
+                    for period in item.get("periods", {})
+                )
 
         if not response:
             report("error", "无K线数据可分析或模型未返回有效结果")
@@ -1461,12 +1519,11 @@ class LLMService:
                 if isinstance(analysis, dict):
                     previous = self.llm_store.get_analysis_result(symbol)
                     if previous:
-                        retained = [
-                            item for item in previous.trade_suggestions
-                            if item.get("signal_source_id") not in analyzed_source_ids
-                        ]
-                        analysis["trade_suggestions"] = (
-                            retained + analysis.get("trade_suggestions", [])
+                        self._retain_previous_source_results(
+                            analysis,
+                            previous,
+                            analyzed_source_ids,
+                            analyzed_periods_by_symbol.get(symbol, set()),
                         )
                     self.llm_store.save_analysis_dict(symbol, analysis)
             analyzed_at = time.monotonic()

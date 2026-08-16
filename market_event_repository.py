@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite-backed public market event data repository."""
+"""MySQL-backed public market event data repository."""
 
 from __future__ import annotations
 

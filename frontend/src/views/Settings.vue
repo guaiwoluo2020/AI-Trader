@@ -1099,14 +1099,14 @@
                 <v-select
                   v-model="newSignalSource.params.ai_signal_source_id"
                   :items="managedAISignalSourceOptions"
-                  label="选择独立 AI 信号源"
+                  label="选择 AI 信号源"
                   :loading="aiSignalOptionsLoading"
-                  no-data-text="暂无独立 AI 信号源，请先到 AI 信号源页面创建"
+                  no-data-text="暂无可用于当前品种的 AI 信号源，请先创建或等待其他用户共享"
                   @update:model-value="onManagedAISignalSourceSelected"
                 ></v-select>
               </v-col>
               <v-col cols="12" class="d-flex align-center ga-2">
-                <v-alert type="info" variant="tonal" density="compact" class="flex-grow-1">模型、提示词、调用频率和共享配置由独立 AI 信号源统一管理；策略只设置入场门槛。</v-alert>
+                <v-alert type="info" variant="tonal" density="compact" class="flex-grow-1">选择自己的或适配当前品种的共享 AI 信号源。模型、提示词与运行频率均由信号源统一管理，策略只设置入场门槛。</v-alert>
                 <v-btn to="/ai-signal-sources" variant="outlined" color="primary">管理信号源</v-btn>
               </v-col>
               <template v-if="newSignalSource.params.ai_signal_source_id">
@@ -1114,7 +1114,7 @@
                 <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.entry_threshold_percent" label="策略入场价接近阈值" type="number" step="0.01" min="0" max="10" suffix="%"></v-text-field></v-col>
               </template>
             </v-row>
-            <template v-if="!newSignalSource.params.ai_signal_source_id">
+            <template v-if="false">
             <v-btn-toggle
               v-model="newSignalSource.params.analysis_mode"
               mandatory
@@ -2250,7 +2250,7 @@ export default {
       .filter(item => item.enabled)
       .map(item => ({
         value: item.signal_source_id,
-        title: `${item.name} · ${item.symbol} · ${item.period}${item.locked ? ' · 已冻结' : ''}`
+        title: `${item.is_owner ? '我的' : `共享自 ${item.owner_username || '平台用户'}`} · ${item.name} · ${item.symbol} · ${item.period}${item.locked ? ' · 已冻结' : ''}`
       })))
     const alphaLibraryOptions = computed(() => {
       const occupied = new Set(strategySignalSources(signalSourceTarget.value)
@@ -2320,8 +2320,11 @@ export default {
         aiSignalOptions.defaultSystemPrompt = data.default_system_prompt || ''
         aiSignalOptions.defaultAnalysisPromptTemplate = data.default_analysis_prompt_template || ''
         aiSignalOptions.sharedRuntimeData = data.shared_runtime_data || []
-        const sourceData = await marketAPI.getAISignalSources()
-        managedAISignalSources.value = (sourceData.items || []).filter(item => !symbol || item.symbol === symbol)
+        const sourceData = await marketAPI.getAISignalSources({
+          symbol: symbol || undefined,
+          include_shared: true
+        })
+        managedAISignalSources.value = sourceData.items || []
       } catch (error) {
         aiSignalOptions.accessGranted = Boolean(llmAccess.value.access_granted)
         aiSignalOptions.sharedRuntimeData = []
@@ -2377,17 +2380,8 @@ export default {
                   alpha_snapshot: {}, min_confidence: 60, cooldown_seconds: 180
                 }
               : {
-              analysis_mode: 'self_analysis',
-              analysis_interval_minutes: Math.max(5, periodMinutes(period)), kline_count: 100,
-              min_confidence: 70, entry_threshold: 0.0008,
-              entry_threshold_percent: 0.08,
-              model: aiSignalOptions.models[0] || '',
-              system_prompt: aiSignalOptions.defaultSystemPrompt,
-              analysis_prompt_template: aiSignalOptions.defaultAnalysisPromptTemplate,
-              share_runtime_data: false,
-              reference_runtime_ids: [],
-              shared_runtime_id: '',
-              ai_signal_source_id: ''
+              ai_signal_source_id: '', ai_signal_source_owner_id: '',
+              min_confidence: 70, entry_threshold_percent: 0.08
             }
     })
     const cloneSignalSource = (source) => JSON.parse(JSON.stringify(source || {}))
@@ -2401,16 +2395,8 @@ export default {
         ...(cloned.params || {})
       }
       if (sourceType === 'ai_entry') {
-        params.analysis_mode ||= 'self_analysis'
-        params.model ||= aiSignalOptions.models[0] || ''
-        params.system_prompt ||= aiSignalOptions.defaultSystemPrompt
-        params.analysis_prompt_template ||= aiSignalOptions.defaultAnalysisPromptTemplate
-        params.share_runtime_data ??= false
-        params.reference_runtime_ids = Array.isArray(params.reference_runtime_ids)
-          ? params.reference_runtime_ids
-          : []
-        params.shared_runtime_id ||= ''
         params.ai_signal_source_id ||= ''
+        params.ai_signal_source_owner_id ||= ''
         const threshold = Number(params.entry_threshold)
         params.entry_threshold_percent = Number.isFinite(threshold)
           ? Number((threshold * 100).toFixed(4))
@@ -2443,6 +2429,7 @@ export default {
       newSignalSource.signal_source_id = source.signal_source_id
       newSignalSource.period = source.period
       newSignalSource.params.ai_signal_source_id = source.signal_source_id
+      newSignalSource.params.ai_signal_source_owner_id = source.user_id
       const config = source.config || {}
       newSignalSource.params.min_confidence = config.min_confidence ?? 70
       newSignalSource.params.entry_threshold_percent = config.entry_threshold_percent ?? 0.08
@@ -3119,13 +3106,7 @@ export default {
       newSignalSource.params.alpha_snapshot = alpha.definition
     }
 
-    const refreshDialogDefaultsAfterOptionsLoaded = () => {
-      if (!signalSourceDialog.value || newSignalSource.source !== 'ai_entry') return
-      newSignalSource.params ||= {}
-      newSignalSource.params.model ||= aiSignalOptions.models[0] || ''
-      newSignalSource.params.system_prompt ||= aiSignalOptions.defaultSystemPrompt
-      newSignalSource.params.analysis_prompt_template ||= aiSignalOptions.defaultAnalysisPromptTemplate
-    }
+    const refreshDialogDefaultsAfterOptionsLoaded = () => {}
 
     const openSignalSourceDialog = async (strategy, source = null) => {
       signalSourceTarget.value = strategy
@@ -3154,19 +3135,9 @@ export default {
 
     const saveSignalSourceFromDialog = () => {
       if (!signalSourceTarget.value || !canSaveSignalSource.value) return
-      if (
-        newSignalSource.source === 'ai_entry' &&
-        newSignalSource.params.analysis_mode === 'self_analysis'
-      ) {
-        const template = String(newSignalSource.params.analysis_prompt_template || '')
-        if (!template.includes('{{strategy_context}}') || !template.includes('{{market_data}}')) {
-          errorMessage.value = 'AI分析提示词必须包含 {{strategy_context}} 和 {{market_data}}'
-          showError.value = true
-          return
-        }
-      }
       const nextSource = cloneSignalSource(newSignalSource)
       if (nextSource.source === 'ai_entry') {
+        nextSource.params.analysis_mode = 'managed_source'
         nextSource.params.entry_threshold = Math.max(
           0, Math.min(10, Number(nextSource.params.entry_threshold_percent ?? 0.08))
         ) / 100

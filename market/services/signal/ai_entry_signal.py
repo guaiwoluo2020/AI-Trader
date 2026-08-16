@@ -80,7 +80,7 @@ class AIEntrySignalGenerator:
     def generate_signals(
         self, symbol: str, current_price: float, strategy_id: str = "",
         signal_source_id: str = "", threshold: float = None,
-        min_confidence: int = 0,
+        min_confidence: int = 0, allow_exit_fallback: bool = False,
     ) -> List[TradingSignal]:
         """生成所有匹配的信号"""
         if not self._llm_analyzer:
@@ -134,7 +134,15 @@ class AIEntrySignalGenerator:
                 continue
 
             signal = build_ai_entry_signal(
-                symbol, current_price, match, threshold=threshold
+                symbol,
+                current_price,
+                match,
+                threshold=threshold,
+                # Position policies decide whether AI exits are mandatory.
+                # This keeps a valid near-entry AI direction usable by a
+                # fixed-stop/dynamic-exit policy when price drift invalidates
+                # the model's original target.
+                require_suggested_exits=not allow_exit_fallback,
             )
             if signal:
                 if analysis_id:
@@ -165,16 +173,36 @@ class AIEntrySignalGenerator:
         for config in strategy.get_signal_sources("ai_entry", enabled_only=True):
             local_params = config.get("params") or {}
             managed_source_id = str(local_params.get("ai_signal_source_id") or "")
-            managed_source = self._ai_signal_source_repo.get(
-                self._user_id, managed_source_id
+            managed_source_owner_id = int(
+                local_params.get("ai_signal_source_owner_id") or self._user_id
+            )
+            managed_source = self._ai_signal_source_repo.get_visible(
+                self._user_id, managed_source_id, managed_source_owner_id,
             ) if managed_source_id else None
             if managed_source_id and (not managed_source or not managed_source.get("enabled")):
+                continue
+            if managed_source_id and int(managed_source["user_id"]) != self._user_id:
+                # A shared source is executed by its owner. Consumers only use
+                # the published runtime result, never the owner's prompt/config.
+                signals.append(self._shared_reference_signal(
+                    symbol, current_price, strategy, {
+                        **config,
+                        "params": {
+                            **local_params,
+                            "analysis_mode": "shared_reference",
+                            "shared_runtime_id": (
+                                f"{managed_source['user_id']}:ai:{managed_source_id}"
+                            ),
+                        },
+                    },
+                ))
                 continue
             params = {
                 **dict((managed_source or {}).get("config") or {}),
                 **{key: value for key, value in local_params.items() if key in {
                     "ai_signal_source_id", "min_confidence", "entry_threshold",
                     "entry_threshold_percent", "cooldown_seconds",
+                    "allow_exit_fallback",
                 }},
             }
             source_id = config["signal_source_id"]
@@ -188,6 +216,7 @@ class AIEntrySignalGenerator:
                     symbol, current_price, strategy.strategy_id, source_id,
                     float(params.get("entry_threshold", self.threshold)),
                     int(params.get("min_confidence", strategy.min_confidence)),
+                    bool(params.get("allow_exit_fallback", False)),
                 ) if signal.source_period == config["period"]
             ]
             trigger = max(triggers, key=lambda item: item.confidence) if triggers else None

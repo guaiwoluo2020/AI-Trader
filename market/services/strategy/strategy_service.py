@@ -75,10 +75,9 @@ class StrategyService:
         """获取品种的全部策略配置。"""
         getter = getattr(self.strategy_store, "get_strategies", None)
         if getter:
-            strategies = getter(symbol)
-            if strategies:
-                return strategies
-        return [self.get_strategy(symbol)]
+            return getter(symbol)
+        strategy = self.strategy_store.get_strategy(symbol)
+        return [strategy] if strategy is not None else []
 
     def update_strategy(
         self, symbol: str, data: Dict, strategy_id: str = None

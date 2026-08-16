@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from market.llm_analyzer import LLMAnalyzer
-from market.models import TradingStrategy
+from market.models import LLMAnalysisResult, TradingStrategy
 from market.services.llm_service import LLMRequestError, LLMService
 from sqlite_storage import SQLiteStorage, TradingAccountRepository, UserRepository
 
@@ -104,6 +104,36 @@ class _RepoBackedStore(_Store):
 
 
 class LLMAnalysisTestCase(unittest.TestCase):
+    def test_analysis_run_retains_periods_and_sources_that_were_not_due(self):
+        previous = LLMAnalysisResult(
+            symbol="BTCUSD",
+            trend_analysis={
+                "M1": {"trend": "震荡"},
+                "M5": {"trend": "单边上涨", "confidence": 82},
+            },
+            trade_suggestions=[
+                {"signal_source_id": "m1-source", "period": "M1"},
+                {"signal_source_id": "m5-source", "period": "M5"},
+            ],
+        )
+        incoming = {
+            "trend_analysis": {"M1": {"trend": "单边下跌"}},
+            "trade_suggestions": [
+                {"signal_source_id": "m1-source", "period": "M1"},
+            ],
+        }
+
+        LLMService._retain_previous_source_results(
+            incoming, previous, {"m1-source"}, {"M1"},
+        )
+
+        self.assertEqual(incoming["trend_analysis"]["M1"]["trend"], "单边下跌")
+        self.assertEqual(incoming["trend_analysis"]["M5"]["confidence"], 82)
+        self.assertEqual(
+            [item["signal_source_id"] for item in incoming["trade_suggestions"]],
+            ["m5-source", "m1-source"],
+        )
+
     def test_parse_llm_response_extracts_json_from_text(self):
         service = LLMService(_Store(), _Klines())
         content = (
@@ -194,6 +224,42 @@ class LLMAnalysisTestCase(unittest.TestCase):
             result = service.call_llm_stream("分析行情")
 
         self.assertEqual({"direction": "buy"}, result)
+        self.assertEqual(2, request.call_count)
+
+    def test_call_llm_stream_retries_response_missing_requested_period(self):
+        service = LLMService(_Store(), _Klines())
+
+        def stream_response(content):
+            response = Mock(status_code=200)
+            chunk = json.dumps({
+                "choices": [{"delta": {"content": content}}],
+            }, ensure_ascii=False)
+            response.iter_lines.return_value = [
+                f"data: {chunk}".encode("utf-8"),
+                b"data: [DONE]",
+            ]
+            return response
+
+        plan = {
+            "BTCUSD": {"periods": {"M5": {"weight": 100}}},
+        }
+        with patch(
+            "market.services.llm_service.requests.post",
+            side_effect=[
+                stream_response('{"BTCUSD":{"trend_analysis":{}}}'),
+                stream_response(
+                    '{"BTCUSD":{"trend_analysis":{"M5":{"trend":"上涨","confidence":80}}}}'
+                ),
+            ],
+        ) as request:
+            result = service.call_llm_stream(
+                "分析行情",
+                response_validator=lambda payload: (
+                    service._validate_analysis_response(payload, plan)
+                ),
+            )
+
+        self.assertIn("BTCUSD", result)
         self.assertEqual(2, request.call_count)
 
     def test_call_llm_uses_reasoning_content_when_content_is_empty(self):
@@ -629,15 +695,14 @@ class LLMAnalysisTestCase(unittest.TestCase):
                 """
                 INSERT INTO strategy_deployments(
                     deployment_id, user_id, account_id, strategy_id, symbol,
-                    strategy_snapshot_hash, strategy_snapshot_json,
                     source_backtest_task_id, strategy_version_at, scheduled_end_at,
                     execution_mode, status, created_at, updated_at
-                ) VALUES('paper-ai-deploy', ?, ?, ?, 'GOLD_', 'hash', ?,
+                ) VALUES('paper-ai-deploy', ?, ?, ?, 'GOLD_',
                          '', ?, NULL, 'paper', 'active', ?, ?)
                 """,
                 (
                     user.user_id, account.account_id, strategy.strategy_id,
-                    json.dumps(strategy.to_dict()), now, now, now,
+                    now, now, now,
                 ),
             )
             service = LLMService(_RepoBackedStore(storage, user.user_id), _Klines())

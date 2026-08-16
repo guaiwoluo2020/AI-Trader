@@ -100,7 +100,7 @@ class SystemLog:
         self.account_id = account_id
         self.repository = SystemEventLogRepository()
         self._legacy_ws_clients = set()
-        print("[SystemLog] SQLite 事件日志已初始化")
+        print("[SystemLog] MySQL 事件日志已初始化")
 
     def set_scope(self, user_id: int = None, account_id: int = None):
         self.user_id = user_id

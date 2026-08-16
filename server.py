@@ -33,6 +33,7 @@ from market.llm_analyzer import LLMAnalyzer
 from market.system_log import SystemLog
 from membership import MembershipService
 from sqlite_storage import (
+    AISignalSourceRepository,
     PositionManagementEventRepository,
     PositionManagementPolicyRepository,
     RuntimeStateRepository,
@@ -56,6 +57,7 @@ class TradingServer:
         self.account_id = account_id
         self.strategy_deployments = StrategyDeploymentRepository()
         self.account_repository = TradingAccountRepository()
+        self._ai_signal_source_repository = AISignalSourceRepository()
         self.memberships = MembershipService()
 
         # 线程锁
@@ -1201,16 +1203,129 @@ class TradingServer:
             "decision": decision.to_dict() if decision else None,
         }
 
+    def _independent_ai_market_card(
+        self, source: Dict, analysis: Dict,
+    ) -> Dict:
+        """Render an AI source that has not yet been bound to a strategy."""
+        params = dict(source.get("config") or {})
+        source_id = str(source.get("signal_source_id") or "")
+        source_symbol = str(source.get("symbol") or "")
+        period = str(source.get("period") or "M5").upper()
+        current_price = self._latest_market_price(source_symbol)
+        trend = (analysis.get("trend_analysis") or {}).get(period) or {}
+        suggestions = [
+            item for item in (analysis.get("trade_suggestions") or [])
+            if item.get("signal_source_id") == source_id
+            or (
+                not item.get("signal_source_id")
+                and item.get("strategy_id") == "__independent__"
+                and item.get("period") == period
+            )
+        ]
+        suggestion = max(
+            suggestions,
+            key=lambda item: int(item.get("confidence", 0) or 0),
+            default=None,
+        )
+        direction = self._ai_direction(
+            (suggestion or {}).get("direction") or trend.get("trend")
+        )
+        confidence = int(
+            (suggestion or {}).get("confidence")
+            or trend.get("confidence")
+            or 0
+        )
+        minimum = int(params.get("min_confidence", 70) or 0)
+        entry_price = float((suggestion or {}).get("entry_price", 0) or 0)
+        threshold = float(params.get("entry_threshold", 0.0008) or 0)
+        distance_ratio = (
+            abs(current_price - entry_price) / entry_price
+            if current_price > 0 and entry_price > 0 else None
+        )
+
+        if not source.get("enabled", True):
+            status, reason = "strategy_inactive", "独立 AI 信号源尚未启用"
+        elif not analysis:
+            status, reason = "waiting_analysis", "等待首次 AI 分析"
+        elif analysis.get("data_stale") or analysis.get("market_status") in {
+            "stale", "closed",
+        }:
+            status, reason = "expired", "行情未更新，当前分析仅供参考"
+        elif confidence < minimum:
+            status, reason = (
+                "observing",
+                f"独立分析置信度 {confidence}% 低于要求 {minimum}%",
+            )
+        elif direction == "sideways":
+            status, reason = "observing", "独立 AI 分析判断为震荡"
+        elif suggestion is None:
+            status, reason = "observing", "已有方向判断，但模型尚未给出有效入场建议"
+        else:
+            status, reason = (
+                "observing",
+                "独立 AI 分析已完成；绑定策略后可参与交易决策",
+            )
+
+        return {
+            "card_id": f"independent:{source_id}",
+            "analysis_mode": "self_analysis",
+            "derived_from_shared": False,
+            "strategy_id": "",
+            "strategy_name": source.get("name") or "独立 AI 信号源",
+            "strategy_lifecycle": "independent",
+            "strategy_enabled": False,
+            "signal_source_id": source_id,
+            "source_enabled": source.get("enabled", True),
+            "symbol": source_symbol,
+            "period": period,
+            "model": params.get("model", ""),
+            "direction": direction,
+            "confidence": confidence,
+            "min_confidence": minimum,
+            "status": status,
+            "status_reason": reason,
+            "current_price": current_price,
+            "entry_price": entry_price,
+            "stop_loss": float((suggestion or {}).get("stop_loss", 0) or 0),
+            "take_profit": float((suggestion or {}).get("take_profit", 0) or 0),
+            "entry_threshold": threshold,
+            "distance_ratio": distance_ratio,
+            "trend": trend,
+            "overall_trend": analysis.get("overall_trend"),
+            "key_levels": analysis.get("key_levels"),
+            "suggestion": suggestion,
+            "analyzed_at": analysis.get("analyzed_at"),
+            "market_status": analysis.get("market_status", "unknown"),
+            "data_stale": bool(analysis.get("data_stale", False)),
+            "analysis_interval_minutes": int(
+                params.get("analysis_interval_minutes", 5) or 5
+            ),
+            "kline_count": int(params.get("kline_count", 100) or 100),
+            "share_runtime_data": bool(source.get("share_runtime_data", False)),
+            "system_prompt": params.get("system_prompt", ""),
+            "analysis_prompt_template": params.get(
+                "analysis_prompt_template", ""
+            ),
+            "signal": None,
+            "decision": None,
+        }
+
     def get_ai_market_cards(self, symbol: str = None) -> List[Dict]:
-        """按策略 AI 信号源解释最新分析及其信号转化状态。"""
+        """Render strategy-bound and independent AI analysis sources."""
         analyses = self.get_llm_analysis() or {}
         active_signals = self._signal_service.get_active_signals()
         cards = []
+        bound_source_ids = set()
         for strategy in self._strategy_store.get_all_strategies():
             if symbol and strategy.symbol != symbol:
                 continue
             for source in strategy.get_signal_sources("ai_entry"):
                 params = source.get("params") or {}
+                managed_source_id = str(
+                    params.get("ai_signal_source_id") or ""
+                ).strip()
+                if managed_source_id:
+                    bound_source_ids.add(managed_source_id)
                 current_price = self._latest_market_price(strategy.symbol)
                 if params.get("analysis_mode", "self_analysis") == "shared_reference":
                     cards.append(self._shared_ai_market_card(
@@ -1344,6 +1459,21 @@ class TradingServer:
                     "signal": signal.to_dict() if signal else None,
                     "decision": decision.to_dict() if decision else None,
                 })
+
+        if self.user_id is not None:
+            for source in self._ai_signal_source_repository.list(self.user_id):
+                source_id = str(source.get("signal_source_id") or "")
+                if source_id in bound_source_ids:
+                    continue
+                if symbol and source.get("symbol") != symbol:
+                    continue
+                if (source.get("config") or {}).get(
+                    "analysis_mode", "self_analysis"
+                ) != "self_analysis":
+                    continue
+                cards.append(self._independent_ai_market_card(
+                    source, analyses.get(source.get("symbol")) or {},
+                ))
         return cards
 
     def get_llm_status(self) -> Dict:

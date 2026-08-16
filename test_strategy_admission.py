@@ -153,9 +153,8 @@ class StrategyAdmissionTests(unittest.TestCase):
             """
             INSERT INTO strategy_deployments(
                 deployment_id, user_id, account_id, strategy_id, symbol,
-                execution_mode, status, created_at, updated_at,
-                strategy_snapshot_hash, strategy_snapshot_json
-            ) VALUES('dep-ai', ?, 1, ?, 'GOLD_', 'paper', 'active', 100, 100, '', '{}')
+                execution_mode, status, created_at, updated_at
+            ) VALUES('dep-ai', ?, 1, ?, 'GOLD_', 'paper', 'active', 100, 100)
             """,
             (self.user.user_id, self.strategy.strategy_id),
         )
@@ -194,9 +193,8 @@ class StrategyAdmissionTests(unittest.TestCase):
             """
             INSERT INTO strategy_deployments(
                 deployment_id, user_id, account_id, strategy_id, symbol,
-                execution_mode, status, created_at, updated_at,
-                strategy_snapshot_hash, strategy_snapshot_json
-            ) VALUES('dep-ma', ?, 1, ?, 'GOLD_', 'paper', 'active', 100, 100, '', '{}')
+                execution_mode, status, created_at, updated_at
+            ) VALUES('dep-ma', ?, 1, ?, 'GOLD_', 'paper', 'active', 100, 100)
             """,
             (self.user.user_id, self.strategy.strategy_id),
         )

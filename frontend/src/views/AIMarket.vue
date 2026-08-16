@@ -61,11 +61,11 @@
               <div class="card-footer"><span>{{ card.derived_from_shared ? `${card.source_owner_username} · ${card.source_symbol}` : (card.model || '平台默认模型') }} · {{ formatTime(card.analyzed_at) }}</span><v-btn size="small" variant="text" @click="openDetail(card, false)">查看分析</v-btn></div>
             </article>
           </div>
-          <div v-if="access.access_granted && !filteredOwn.length" class="empty-state"><v-icon size="56">mdi-brain</v-icon><h2>暂无 AI 分析</h2><p>启用包含自主分析或共享引用信号源的策略后，结果会显示在这里。</p></div>
+          <div v-if="access.access_granted && !filteredOwn.length" class="empty-state"><v-icon size="56">mdi-brain</v-icon><h2>暂无 AI 分析</h2><p>请先创建并启用 AI 信号源。自主分析无需绑定策略，产生结果后会显示在这里。</p><v-btn color="primary" prepend-icon="mdi-access-point-plus" @click="router.push('/ai-signal-sources')">创建 AI 信号源</v-btn></div>
         </v-window-item>
 
         <v-window-item value="shared">
-          <v-alert type="info" variant="tonal" class="ma-5 mb-0">这里展示平台共享数据；只有你在自己的策略中明确引用并配置阈值后，它才会作为你的信号源参与决策。</v-alert>
+          <v-alert type="info" variant="tonal" class="ma-5 mb-0">这里展示平台全部共享 AI 数据，并根据当前账户上报品种推荐适用关系；只有明确引用后，它才会参与你的策略决策。</v-alert>
           <div v-if="filteredShared.length" class="analysis-grid pa-5">
             <article v-for="card in filteredShared" :key="card.card_id" class="analysis-card shared-card">
               <div class="card-head">
@@ -73,6 +73,11 @@
                 <v-chip :color="directionMeta(card.direction).color" size="small" variant="tonal">{{ directionMeta(card.direction).label }}</v-chip>
               </div>
               <div class="shared-meta"><v-chip size="x-small" color="info" variant="tonal">{{ card.model }}</v-chip><v-chip size="x-small" variant="outlined">{{ lifecycleLabel(card.strategy_lifecycle) }}</v-chip><v-chip v-if="card.symbol_similarity != null" size="x-small" variant="outlined">品种相似 {{ Math.round(card.symbol_similarity * 100) }}%</v-chip></div>
+              <div class="recommendation-row">
+                <template v-if="card.recommended_symbols?.length"><span>推荐适用</span><v-chip v-for="target in card.recommended_symbols" :key="target" size="x-small" color="success" variant="tonal">{{ target }}</v-chip></template>
+                <template v-else-if="card.similar_symbols?.length"><span>相似候选</span><v-chip v-for="target in card.similar_symbols" :key="target" size="x-small" color="warning" variant="tonal">{{ target }}</v-chip></template>
+                <span v-else class="unmatched-note">当前账户上报品种暂未匹配，仍可查看分析</span>
+              </div>
               <div class="confidence-row"><span>AI 置信度</span><strong>{{ card.confidence }}%</strong></div>
               <v-progress-linear :model-value="card.confidence" color="info" height="8" rounded />
               <div class="price-grid compact"><div><span>建议入场</span><strong>{{ price(card.entry_price) }}</strong></div><div><span>止损 / 止盈</span><strong>{{ price(card.stop_loss) }} / {{ price(card.take_profit) }}</strong></div></div>
@@ -117,6 +122,7 @@ const requestingAccess = ref(false)
 const activeTab = ref('own')
 const ownCards = ref([])
 const sharedCards = ref([])
+const reportedSymbols = ref([])
 const summary = ref({})
 const access = ref({})
 const filters = reactive({ symbol: null, direction: null, status: null })
@@ -135,8 +141,9 @@ const statusOptions = [
   { title: '已生成决策', value: 'decision_created' }, { title: '等待分析', value: 'waiting_analysis' },
   { title: '策略未运行', value: 'strategy_inactive' }, { title: '分析已过期', value: 'expired' },
 ]
-const symbolOptions = computed(() => [...new Set([...ownCards.value, ...sharedCards.value].map(item => item.symbol).filter(Boolean))].sort())
-const applyFilters = cards => cards.filter(card => (!filters.symbol || card.symbol === filters.symbol) && (!filters.direction || card.direction === filters.direction) && (!filters.status || card.status === filters.status))
+const symbolOptions = computed(() => [...new Set([...reportedSymbols.value, ...ownCards.value.map(item => item.symbol), ...sharedCards.value.map(item => item.symbol)].filter(Boolean))].sort())
+const cardMatchesSymbol = (card, symbol) => !symbol || card.symbol === symbol || (card.recommended_symbols || []).includes(symbol) || (card.similar_symbols || []).includes(symbol)
+const applyFilters = cards => cards.filter(card => cardMatchesSymbol(card, filters.symbol) && (!filters.direction || card.direction === filters.direction) && (!filters.status || card.status === filters.status))
 const filteredOwn = computed(() => applyFilters(ownCards.value))
 const filteredShared = computed(() => applyFilters(sharedCards.value))
 
@@ -147,6 +154,7 @@ async function loadData() {
     const data = await marketAPI.getAIMarketView(selectedAccountId.value)
     ownCards.value = data.own || []
     sharedCards.value = data.shared || []
+    reportedSymbols.value = data.account?.reported_symbols || []
     summary.value = data.summary || {}
     access.value = data.access || {}
   } catch (error) {
@@ -177,6 +185,6 @@ onUnmounted(() => clearInterval(refreshTimer))
 </script>
 
 <style scoped>
-.ai-market-page{max-width:1600px;padding:28px}.ai-hero{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:26px 30px;color:#f4fbf8;border-radius:22px;background:radial-gradient(circle at 86% 18%,rgba(247,186,67,.28),transparent 28%),linear-gradient(125deg,#123c35 0%,#176b56 58%,#0d8f70 100%);box-shadow:0 18px 40px rgba(20,82,68,.18)}.ai-hero h1{margin:2px 0 6px;font-size:clamp(1.8rem,3vw,2.7rem);line-height:1.05}.ai-hero p{margin:0;color:rgba(244,251,248,.76)}.section-kicker{color:#f4c96b;font-size:.72rem;font-weight:800;letter-spacing:.16em}.hero-status{display:flex;align-items:center;gap:10px}.metric-card .v-card-text{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.metric-card strong{font-size:1.8rem}.time-metric strong{font-size:1rem}.filter-card,.content-card{border:1px solid #dce7e0;border-radius:18px;background:linear-gradient(155deg,#fff,#f8fbf9)}.filters{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:14px}.content-card{overflow:hidden}.page-tabs{padding:8px 14px 0;border-bottom:1px solid #e2ebe5}.analysis-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(350px,1fr));gap:18px}.analysis-card{display:flex;flex-direction:column;gap:16px;padding:20px;border:1px solid #dce7e0;border-radius:18px;background:#fff;box-shadow:0 10px 24px rgba(34,78,64,.06)}.analysis-card.status-ready_to_signal,.analysis-card.status-signal_formed,.analysis-card.status-decision_created{border-color:#64a98f;box-shadow:0 12px 28px rgba(29,130,98,.13)}.shared-card{border-color:#cfe0e7}.card-head,.card-footer,.confidence-row{display:flex;align-items:center;justify-content:space-between;gap:12px}.symbol-line{display:flex;align-items:center;gap:8px}.symbol-line strong{font-size:1.25rem}.card-head span,.card-footer span{color:#718078;font-size:.76rem}.confidence-row strong{font-size:1.25rem}.price-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.price-grid.compact{grid-template-columns:1fr 1.5fr}.price-grid div{display:flex;flex-direction:column;padding:10px;border-radius:10px;background:#f1f6f3}.price-grid span{color:#718078;font-size:.68rem}.price-grid strong{margin-top:2px;font-size:.85rem}.status-box{display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;background:#f0f6f3}.status-box.shared{background:#eff6f8}.status-box p{margin:2px 0 0;color:#52635e;font-size:.8rem;line-height:1.45}.shared-meta{display:flex;flex-wrap:wrap;gap:7px}.access-state,.empty-state{padding:72px 20px;text-align:center;color:#607269}.access-state h2,.empty-state h2{margin:14px 0 6px;color:#29493e}.access-state p,.empty-state p{margin:0 auto 20px;max-width:600px}.detail-body h3{margin:18px 0 6px;color:#29493e}.detail-body p{color:#52635e}.level-row{display:flex;flex-direction:column;gap:7px;padding:14px;border-radius:12px;background:#f1f6f3}.prompt-label{margin:12px 0 5px;font-weight:800}.detail-body pre{overflow:auto;max-height:230px;padding:14px;white-space:pre-wrap;border-radius:10px;background:#132b25;color:#dcece6;font-size:.75rem}
+.ai-market-page{max-width:1600px;padding:28px}.ai-hero{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:26px 30px;color:#f4fbf8;border-radius:22px;background:radial-gradient(circle at 86% 18%,rgba(247,186,67,.28),transparent 28%),linear-gradient(125deg,#123c35 0%,#176b56 58%,#0d8f70 100%);box-shadow:0 18px 40px rgba(20,82,68,.18)}.ai-hero h1{margin:2px 0 6px;font-size:clamp(1.8rem,3vw,2.7rem);line-height:1.05}.ai-hero p{margin:0;color:rgba(244,251,248,.76)}.section-kicker{color:#f4c96b;font-size:.72rem;font-weight:800;letter-spacing:.16em}.hero-status{display:flex;align-items:center;gap:10px}.metric-card .v-card-text{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.metric-card strong{font-size:1.8rem}.time-metric strong{font-size:1rem}.filter-card,.content-card{border:1px solid #dce7e0;border-radius:18px;background:linear-gradient(155deg,#fff,#f8fbf9)}.filters{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:14px}.content-card{overflow:hidden}.page-tabs{padding:8px 14px 0;border-bottom:1px solid #e2ebe5}.analysis-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(350px,1fr));gap:18px}.analysis-card{display:flex;flex-direction:column;gap:16px;padding:20px;border:1px solid #dce7e0;border-radius:18px;background:#fff;box-shadow:0 10px 24px rgba(34,78,64,.06)}.analysis-card.status-ready_to_signal,.analysis-card.status-signal_formed,.analysis-card.status-decision_created{border-color:#64a98f;box-shadow:0 12px 28px rgba(29,130,98,.13)}.shared-card{border-color:#cfe0e7}.card-head,.card-footer,.confidence-row{display:flex;align-items:center;justify-content:space-between;gap:12px}.symbol-line{display:flex;align-items:center;gap:8px}.symbol-line strong{font-size:1.25rem}.card-head span,.card-footer span{color:#718078;font-size:.76rem}.confidence-row strong{font-size:1.25rem}.price-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.price-grid.compact{grid-template-columns:1fr 1.5fr}.price-grid div{display:flex;flex-direction:column;padding:10px;border-radius:10px;background:#f1f6f3}.price-grid span{color:#718078;font-size:.68rem}.price-grid strong{margin-top:2px;font-size:.85rem}.status-box{display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;background:#f0f6f3}.status-box.shared{background:#eff6f8}.status-box p{margin:2px 0 0;color:#52635e;font-size:.8rem;line-height:1.45}.shared-meta,.recommendation-row{display:flex;align-items:center;flex-wrap:wrap;gap:7px}.recommendation-row{padding:10px 12px;border-radius:11px;background:#f4f8f5;color:#52635e;font-size:.75rem}.recommendation-row>span:first-child{font-weight:700}.unmatched-note{font-weight:400!important;color:#7a8882}.access-state,.empty-state{padding:72px 20px;text-align:center;color:#607269}.access-state h2,.empty-state h2{margin:14px 0 6px;color:#29493e}.access-state p,.empty-state p{margin:0 auto 20px;max-width:600px}.detail-body h3{margin:18px 0 6px;color:#29493e}.detail-body p{color:#52635e}.level-row{display:flex;flex-direction:column;gap:7px;padding:14px;border-radius:12px;background:#f1f6f3}.prompt-label{margin:12px 0 5px;font-weight:800}.detail-body pre{overflow:auto;max-height:230px;padding:14px;white-space:pre-wrap;border-radius:10px;background:#132b25;color:#dcece6;font-size:.75rem}
 @media(max-width:800px){.ai-market-page{padding:16px}.ai-hero{align-items:stretch;flex-direction:column;padding:22px}.hero-status{align-items:stretch;flex-direction:column}.hero-status .v-chip{align-self:flex-start}.filters{grid-template-columns:1fr}.analysis-grid{grid-template-columns:1fr;padding:16px!important}.price-grid{grid-template-columns:repeat(2,1fr)}.card-footer{align-items:flex-start;flex-direction:column}}
 </style>
