@@ -471,6 +471,11 @@ export const marketAPI = {
     return response.data
   },
 
+  async getInstrumentPriceObservations() {
+    const response = await api.get('/admin/instrument-price-observations')
+    return response.data
+  },
+
   async saveLLMScene(sceneCode, payload) {
     const response = await api.put(
       `/admin/llm/scenes/${encodeURIComponent(sceneCode)}`, payload
@@ -606,16 +611,6 @@ export const marketAPI = {
     return response.data
   },
 
-  async getDataMaintenance() {
-    const response = await api.get('/admin/system/data-maintenance')
-    return response.data
-  },
-
-  async runDataMaintenance() {
-    const response = await api.post('/admin/system/data-maintenance/run')
-    return response.data
-  },
-
   // ==================== 仓位管理 ====================
 
   // 获取持仓数据
@@ -720,6 +715,11 @@ export const marketAPI = {
   // 创建策略（同一品种可创建多条）
   async createStrategy(data) {
     const response = await api.post('/strategy', data)
+    return response.data
+  },
+
+  async quickCreateAIStrategy(data) {
+    const response = await api.post('/strategy/quick-create-ai', data)
     return response.data
   },
 

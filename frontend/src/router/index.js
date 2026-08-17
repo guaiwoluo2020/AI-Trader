@@ -18,7 +18,6 @@ import BacktestTasks from '../views/BacktestTasks.vue'
 import Accounts from '../views/Accounts.vue'
 import PositionManagement from '../views/PositionManagement.vue'
 import AlphaResearch from '../views/AlphaResearch.vue'
-import DataMaintenance from '../views/DataMaintenance.vue'
 import { authState } from '../auth'
 
 const routes = [
@@ -130,12 +129,6 @@ const routes = [
     component: SystemLog,
     meta: { requiresAuth: true }
   },
-  {
-    path: '/data-maintenance',
-    name: 'DataMaintenance',
-    component: DataMaintenance,
-    meta: { requiresAuth: true, requiresAdmin: true }
-  }
 ]
 
 const router = createRouter({

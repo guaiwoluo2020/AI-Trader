@@ -115,56 +115,53 @@ class LLMService:
         """Limit live AI analysis to strategies deployed on this account."""
         self._allowed_strategy_ids = set(strategy_ids)
 
+    def _source_is_due(self, source_id: str, interval_seconds: int) -> bool:
+        """Keep per-source intervals valid across service restarts.
+
+        The in-memory timestamp avoids a query for the normal path.  On the
+        first lookup after startup, seed it from persisted LLM call records so
+        a restart cannot schedule the same source again immediately.
+        """
+        source_id = str(source_id or "").strip()
+        if not source_id:
+            return False
+        now = time.time()
+        last_run = self._source_last_analysis_at.get(source_id)
+        if last_run is None:
+            storage = getattr(getattr(self.llm_store, "_repo", None), "storage", None)
+            if storage is not None:
+                row = storage.fetchone(
+                    """
+                    SELECT MAX(COALESCE(completed_at, created_at)) AS last_run_at
+                    FROM llm_call_logs
+                    WHERE user_id = ? AND scene_code = ?
+                      AND object_type = 'ai_market_analysis'
+                      AND FIND_IN_SET(?, object_id) > 0
+                    """,
+                    (self.llm_store.user_id, AI_SIGNAL_ANALYSIS, source_id),
+                )
+                last_run = float(row["last_run_at"] or 0) if row else 0.0
+            else:
+                last_run = 0.0
+            self._source_last_analysis_at[source_id] = last_run
+        return now - float(last_run or 0) >= max(1, int(interval_seconds))
+
     def _build_ai_analysis_plan(
         self, available_symbols: List[str], due_only: bool = False,
     ) -> Dict[str, Dict]:
         """聚合同一品种多策略启用的 AI 周期和分析约束。"""
-        if self._strategy_store is None:
-            return {
-                symbol: {
-                    "periods": {
-                        period: {"weight": 0}
-                        for period in ['H4', 'H1', 'M15', 'M5', 'M1']
-                    },
-                    "strategies": [],
-                }
-                for symbol in available_symbols
-            }
-
         available = set(available_symbols)
         plan: Dict[str, Dict] = {}
         seen_sources = set()
-        # Build source-owned profiles first so one source is analyzed only once
-        # even when several strategies or accounts bind to it.
+        # AI signal sources are standalone runtimes.  A strategy only consumes
+        # the source output for its own decision; deployment and bindings must
+        # never decide whether the source is analyzed.
         for source in self._ai_signal_source_repo.list(
             self.llm_store.user_id, enabled_only=True
         ):
             self._append_independent_ai_source_to_plan(
                 plan, source, due_only, seen_sources, available
             )
-        for strategy in self._strategy_store.get_all_strategies():
-            if strategy.symbol not in available:
-                continue
-            if (
-                self._allowed_strategy_ids is not None
-                and strategy.strategy_id not in self._allowed_strategy_ids
-            ):
-                continue
-
-            for source in strategy.get_signal_sources(
-                "ai_entry", enabled_only=True
-            ):
-                self._append_ai_source_to_plan(
-                    plan, strategy, source, due_only, seen_sources
-                )
-
-        for strategy in self._paper_deployed_strategies(available):
-            for source in strategy.get_signal_sources(
-                "ai_entry", enabled_only=True
-            ):
-                self._append_ai_source_to_plan(
-                    plan, strategy, source, due_only, seen_sources
-                )
         return plan
 
     def _append_independent_ai_source_to_plan(
@@ -177,14 +174,11 @@ class LLMService:
         if params.get("analysis_mode", "self_analysis") == "shared_reference":
             return
         source_id = str(source["signal_source_id"])
-        source_key = ("independent", source_id)
+        source_key = ("ai_source", source_id)
         if source_key in seen_sources:
             return
         interval = max(1, int(params.get("analysis_interval_minutes", 5))) * 60
-        if due_only and (
-            time.monotonic() - self._source_last_analysis_at.get(source_id, -interval)
-            < interval
-        ):
+        if due_only and not self._source_is_due(source_id, interval):
             return
         seen_sources.add(source_key)
         symbol_plan = plan.setdefault(source["symbol"], {"periods": {}, "strategies": []})
@@ -279,11 +273,7 @@ class LLMService:
         interval = max(
             1, int(params.get("analysis_interval_minutes", 5))
         ) * 60
-        if due_only and (
-            time.monotonic()
-            - self._source_last_analysis_at.get(source_id, -interval)
-            < interval
-        ):
+        if due_only and not self._source_is_due(source_id, interval):
             return
         seen_sources.add(source_key)
         period = source["period"]
@@ -1151,8 +1141,14 @@ class LLMService:
                 "大模型响应缺少必需的趋势分析：" + "、".join(missing)
             )
 
-    def _group_analysis_plans(self, analysis_plan: Dict[str, Dict]) -> List[Dict]:
-        """Group sources only when model, prompts, and references are identical."""
+    def _build_individual_analysis_requests(
+        self, analysis_plan: Dict[str, Dict],
+    ) -> List[Dict]:
+        """Build one isolated LLM request per AI source profile.
+
+        The method keeps its historical name for the backtest caller, but it no
+        longer groups sources by model, prompt, symbol, or period.
+        """
         config = self.llm_store.get_config()
         scene_defaults = self._scene_defaults(AI_SIGNAL_ANALYSIS)
         scene_model = scene_defaults.get("default_model_id") or getattr(config, "model", "")
@@ -1168,7 +1164,7 @@ class LLMService:
                 DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
             )
         )
-        groups: Dict[tuple, Dict] = {}
+        requests: List[Dict] = []
         for symbol, symbol_plan in analysis_plan.items():
             for profile in symbol_plan.get("strategies", []):
                 model = profile.get("model") or scene_model
@@ -1177,38 +1173,29 @@ class LLMService:
                     profile.get("analysis_prompt_template")
                     or scene_template
                 )
-                references = tuple(profile.get("reference_runtime_ids") or [])
-                key = (model, system_prompt, template, references)
-                group = groups.setdefault(key, {
+                references = list(profile.get("reference_runtime_ids") or [])
+                periods = {
+                    period: {
+                        "weight": int(weight),
+                        "kline_count": int(profile.get("kline_count", 100)),
+                    }
+                    for period, weight in self._period_weight_items(
+                        profile.get("periods")
+                    )
+                }
+                requests.append({
                     "model": model,
                     "system_prompt": system_prompt,
                     "analysis_prompt_template": template,
-                    "reference_runtime_ids": list(references),
-                    "plan": {},
+                    "reference_runtime_ids": references,
+                    "plan": {
+                        symbol: {
+                            "periods": periods,
+                            "strategies": [profile],
+                        }
+                    },
                 })
-                target = group["plan"].setdefault(
-                    symbol, {"periods": {}, "strategies": []}
-                )
-                target["strategies"].append(profile)
-                for period, weight in self._period_weight_items(
-                    profile.get("periods")
-                ):
-                    current = target["periods"].setdefault(
-                        period, {"weight": 0, "kline_count": 0}
-                    )
-                    current["weight"] = max(current["weight"], int(weight))
-                    current["kline_count"] = max(
-                        current["kline_count"], int(profile.get("kline_count", 100))
-                    )
-        if not groups and analysis_plan:
-            return [{
-                "model": scene_model,
-                "system_prompt": scene_system_prompt,
-                "analysis_prompt_template": scene_template,
-                "reference_runtime_ids": [],
-                "plan": analysis_plan,
-            }]
-        return list(groups.values())
+        return requests
 
     def _shared_reference_context(self, share_ids: List[str]) -> str:
         references = []
@@ -1229,7 +1216,13 @@ class LLMService:
         return json.dumps(references, ensure_ascii=False)[:30000]
 
     @staticmethod
-    def _merge_analysis_results(target: Dict, incoming: Dict) -> None:
+    def _accumulate_symbol_result(target: Dict, incoming: Dict) -> None:
+        """Accumulate isolated source results for the symbol-level read model.
+
+        Each incoming payload was generated by exactly one source request. This
+        only preserves the existing symbol-level API/storage shape; it does not
+        combine prompts or split a model response.
+        """
         for symbol, analysis in (incoming or {}).items():
             if not isinstance(analysis, dict):
                 continue
@@ -1458,10 +1451,10 @@ class LLMService:
                 ),
             }
 
-        groups = self._group_analysis_plans(analysis_plan)
+        requests = self._build_individual_analysis_requests(analysis_plan)
         report(
             "analyzing",
-            f"正在分析 {len(active_symbols)} 个品种，共 {len(groups)} 组模型配置...",
+            f"正在分析 {len(active_symbols)} 个品种，共 {len(requests)} 个 AI 信号源...",
         )
 
         def on_chunk(count, content):
@@ -1471,39 +1464,40 @@ class LLMService:
         response: Dict = {}
         analyzed_source_ids = set()
         analyzed_periods_by_symbol: Dict[str, set] = {}
-        for group in groups:
-            group_plan = {
-                symbol: item for symbol, item in group["plan"].items()
+        failed_sources: List[Dict] = []
+        for request in requests:
+            request_plan = {
+                symbol: item for symbol, item in request["plan"].items()
                 if symbol in active_symbols
             }
-            if not group_plan:
+            if not request_plan:
                 continue
             all_klines = self.collect_klines_for_analysis(
-                list(group_plan), group_plan
+                list(request_plan), request_plan
             )
             if not all_klines:
                 continue
             prompt = self.build_analysis_prompt(
                 all_klines,
-                group_plan,
-                analysis_prompt_template=group["analysis_prompt_template"],
+                request_plan,
+                analysis_prompt_template=request["analysis_prompt_template"],
                 reference_context=self._shared_reference_context(
-                    group["reference_runtime_ids"]
+                    request["reference_runtime_ids"]
                 ),
             )
             source_ids = sorted({
                 str(profile.get("signal_source_id") or "")
-                for item in group_plan.values()
+                for item in request_plan.values()
                 for profile in item.get("strategies", [])
                 if profile.get("signal_source_id")
             })
             try:
-                group_response = self.call_llm_stream(
+                request_response = self.call_llm_stream(
                     prompt,
                     on_chunk,
-                    model=group["model"],
-                    system_prompt=group["system_prompt"],
-                    response_validator=lambda payload, plan=group_plan: (
+                    model=request["model"],
+                    system_prompt=request["system_prompt"],
+                    response_validator=lambda payload, plan=request_plan: (
                         self._validate_analysis_response(payload, plan)
                     ),
                     object_type="ai_market_analysis",
@@ -1511,27 +1505,62 @@ class LLMService:
                 )
             except LLMRequestError as exc:
                 message = str(exc)
-                report("error", message)
-                return {"status": "error", "message": message}
-            group_response = self._normalize_analysis_response(
-                group_response or {}, group_plan
+                failed_sources.append({
+                    "source_ids": source_ids,
+                    "message": message,
+                })
+                # 一个信号源失败不能阻断同一轮的其他周期和品种。
+                print(
+                    "[LLMService] 独立信号源分析失败，继续处理后续信号源: "
+                    f"{','.join(source_ids) or 'unknown'}: {message}"
+                )
+                report(
+                    "warning",
+                    f"信号源 {','.join(source_ids) or 'unknown'} 分析失败，继续处理其他信号源",
+                )
+                continue
+            if not request_response:
+                message = "模型未返回有效分析结果"
+                failed_sources.append({
+                    "source_ids": source_ids,
+                    "message": message,
+                })
+                print(
+                    "[LLMService] 独立信号源返回空结果，继续处理后续信号源: "
+                    f"{','.join(source_ids) or 'unknown'}"
+                )
+                continue
+            request_response = self._normalize_analysis_response(
+                request_response or {}, request_plan
             )
-            self._merge_analysis_results(response, group_response)
-            self._publish_runtime_results(group_plan, group_response)
+            self._accumulate_symbol_result(response, request_response)
+            self._publish_runtime_results(request_plan, request_response)
             analyzed_source_ids.update(
                 profile.get("signal_source_id")
-                for item in group_plan.values()
+                for item in request_plan.values()
                 for profile in item.get("strategies", [])
             )
-            for symbol, item in group_plan.items():
+            for symbol, item in request_plan.items():
                 analyzed_periods_by_symbol.setdefault(symbol, set()).update(
                     str(period).upper()
                     for period in item.get("periods", {})
                 )
 
+        # 失败源只在本轮结束后更新失败时间，避免调度器在下一秒立即重复轰炸。
+        if failed_sources:
+            failed_at = time.time()
+            for item in failed_sources:
+                for source_id in item.get("source_ids", []):
+                    if source_id:
+                        self._source_last_analysis_at[source_id] = failed_at
+
         if not response:
-            report("error", "无K线数据可分析或模型未返回有效结果")
-            return {"status": "error", "message": "模型未返回有效分析结果"}
+            failure_message = "；".join(
+                item["message"] for item in failed_sources if item.get("message")
+            )
+            message = failure_message or "无K线数据可分析或模型未返回有效结果"
+            report("error", message)
+            return {"status": "error", "message": message}
 
         # 保存结果
         if response:
@@ -1546,7 +1575,7 @@ class LLMService:
                             analyzed_periods_by_symbol.get(symbol, set()),
                         )
                     self.llm_store.save_analysis_dict(symbol, analysis)
-            analyzed_at = time.monotonic()
+            analyzed_at = time.time()
             for source_id in analyzed_source_ids:
                 if source_id:
                     self._source_last_analysis_at[source_id] = analyzed_at
@@ -1555,11 +1584,15 @@ class LLMService:
             on_complete(response)
 
         analyzed_symbols = list(response.keys())
-        report("completed", f"分析完成，共生成 {len(analyzed_symbols)} 个品种的结果")
+        completion_message = f"分析完成，共生成 {len(analyzed_symbols)} 个品种的结果"
+        if failed_sources:
+            completion_message += f"，另有 {len(failed_sources)} 个信号源失败"
+        report("completed", completion_message)
         return {
             "status": "ok",
-            "message": "分析完成",
+            "message": completion_message,
             "analyzed_symbols": analyzed_symbols,
+            "failed_sources": failed_sources,
         }
 
     # ==================== 查询 ====================

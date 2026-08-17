@@ -136,6 +136,11 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
     normalized["max_stop_distance"] = _positive(
         normalized.get("max_stop_distance", 0), "最大止损距离", True
     )
+    if "signal_take_profit_close_percent" in normalized:
+        normalized["signal_take_profit_close_percent"] = min(
+            100.0,
+            max(0.0, float(normalized.get("signal_take_profit_close_percent", 0))),
+        )
     if (normalized["max_stop_distance"] > 0
             and normalized["max_stop_distance"] < normalized["min_stop_distance"]):
         raise ValueError("最大止损距离不能小于最小止损距离")

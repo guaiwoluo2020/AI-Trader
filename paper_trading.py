@@ -1222,6 +1222,17 @@ class PaperTradingService:
             for position in positions:
                 mark = bid if position["direction"] == "buy" else ask
                 reason = str(position["close_reason"] or "")
+                policy_snapshot = json.loads(
+                    position["position_policy_snapshot_json"] or "{}"
+                )
+                signal_tp_partial = float(
+                    policy_snapshot.get("config", {}).get(
+                        "signal_take_profit_close_percent", 0
+                    ) or 0
+                )
+                partial_done = set(json.loads(
+                    position["partial_levels_done_json"] or "[]"
+                ))
                 if position["direction"] == "buy":
                     if mark <= float(position["stop_loss"]):
                         reason = "stop_loss"
@@ -1229,7 +1240,11 @@ class PaperTradingService:
                         float(position["take_profit"]) > 0
                         and mark >= float(position["take_profit"])
                     ):
-                        reason = "take_profit"
+                        reason = (
+                            "" if signal_tp_partial > 0
+                            and "signal_take_profit" not in partial_done
+                            else "take_profit"
+                        )
                 else:
                     if mark >= float(position["stop_loss"]):
                         reason = "stop_loss"
@@ -1237,7 +1252,11 @@ class PaperTradingService:
                         float(position["take_profit"]) > 0
                         and mark <= float(position["take_profit"])
                     ):
-                        reason = "take_profit"
+                        reason = (
+                            "" if signal_tp_partial > 0
+                            and "signal_take_profit" not in partial_done
+                            else "take_profit"
+                        )
                 if not reason and position["exit_mode"] == "trailing_reverse":
                     initial_risk = float(position["initial_risk"])
                     favorable = float(position["favorable_price"])
@@ -1266,9 +1285,6 @@ class PaperTradingService:
                         (favorable, position["position_id"]),
                     )
                 if not reason and position["exit_mode"] == "position_manager":
-                    policy_snapshot = json.loads(
-                        position["position_policy_snapshot_json"] or "{}"
-                    )
                     favorable = float(position["favorable_price"] or position["entry_price"])
                     favorable = (
                         max(favorable, mark) if position["direction"] == "buy"
@@ -1358,13 +1374,15 @@ class PaperTradingService:
                                 """
                                 UPDATE paper_positions SET remaining_volume = ?,
                                     partial_levels_done_json = ?, stop_loss = ?,
-                                    favorable_price = ?,
+                                    take_profit = ?, favorable_price = ?,
                                     updated_at = ? WHERE position_id = ?
                                 """,
                                 (
                                     max(0.0, remaining - close_volume),
                                     json.dumps(sorted(done), ensure_ascii=False),
                                     action.stop_loss or position["stop_loss"],
+                                    0 if action.level_id == "signal_take_profit"
+                                    else position["take_profit"],
                                     favorable, now, position["position_id"],
                                 ),
                             )

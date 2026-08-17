@@ -744,24 +744,24 @@ class CachedLLMProvider:
             raise BacktestEngineError("当前用户未开通或未配置大模型分析")
 
         plan = {symbol: build_analysis_plan(strategy, signal_source_ids)}
-        groups = service._group_analysis_plans(plan)
+        requests = service._build_individual_analysis_requests(plan)
         combined_response: Dict = {}
         all_cache_hits = True
-        for group in groups:
-            group_plan = group["plan"]
+        for request in requests:
+            request_plan = request["plan"]
             prompt = service.build_analysis_prompt(
                 {symbol: klines},
-                group_plan,
-                analysis_prompt_template=group["analysis_prompt_template"],
+                request_plan,
+                analysis_prompt_template=request["analysis_prompt_template"],
                 reference_context=service._shared_reference_context(
-                    group["reference_runtime_ids"]
+                    request["reference_runtime_ids"]
                 ),
             )
-            prompt_hash = service.prompt_hash(prompt, group["system_prompt"])
+            prompt_hash = service.prompt_hash(prompt, request["system_prompt"])
             cache_key = hashlib.sha256(
                 "|".join((
                     str(user_id), dataset_hash, strategy_hash, str(analysis_time),
-                    group["model"], prompt_hash,
+                    request["model"], prompt_hash,
                 )).encode("utf-8")
             ).hexdigest()
             cached = self.cache.get(cache_key)
@@ -773,8 +773,8 @@ class CachedLLMProvider:
                 for _ in range(self.retries):
                     group_response = service.call_llm(
                         prompt,
-                        model=group["model"],
-                        system_prompt=group["system_prompt"],
+                        model=request["model"],
+                        system_prompt=request["system_prompt"],
                         object_type="backtest_replay",
                         object_id=cache_key,
                     )
@@ -783,7 +783,7 @@ class CachedLLMProvider:
                 if not group_response:
                     raise BacktestEngineError("大模型分析连续失败，回测已暂停")
                 group_response = service._normalize_analysis_response(
-                    group_response, group_plan
+                    group_response, request_plan
                 )
                 group_analysis = group_response.get(symbol, group_response)
                 self.cache.save(
@@ -793,12 +793,12 @@ class CachedLLMProvider:
                         "dataset_hash": dataset_hash,
                         "strategy_hash": strategy_hash,
                         "analysis_time": analysis_time,
-                        "model": group["model"],
+                        "model": request["model"],
                         "prompt_hash": prompt_hash,
                     },
                     group_analysis,
                 )
-            service._merge_analysis_results(combined_response, group_response)
+            service._accumulate_symbol_result(combined_response, group_response)
 
         analysis = combined_response.get(symbol, combined_response)
         if not isinstance(analysis, dict):
@@ -1488,6 +1488,42 @@ class M1BacktestEngine:
 
                 remaining_positions = []
                 for position in positions:
+                    policy_config = (position.position_policy_snapshot or {}).get(
+                        "config", {}
+                    )
+                    signal_tp_percent = float(
+                        policy_config.get("signal_take_profit_close_percent", 0) or 0
+                    )
+                    tp_hit = (
+                        signal_tp_percent > 0
+                        and position.take_profit > 0
+                        and "signal_take_profit" not in (position.partial_levels_done or [])
+                        and (
+                            float(bar["high"]) >= position.take_profit
+                            if position.direction == "buy"
+                            else float(bar["low"]) <= position.take_profit
+                        )
+                    )
+                    if tp_hit:
+                        remaining = position.remaining_volume or position.volume
+                        close_volume = remaining * min(100.0, signal_tp_percent) / 100.0
+                        trade, balance = self._close_at_price(
+                            position, bar, balance, template, point_size,
+                            contract_size, position.take_profit,
+                            "signal_take_profit_partial", close_volume=close_volume,
+                        )
+                        trades.append(trade)
+                        position.partial_levels_done = list(
+                            dict.fromkeys((position.partial_levels_done or []) + [
+                                "signal_take_profit"
+                            ])
+                        )
+                        # The residual position is now exited by the trailing
+                        # management rules instead of the original fixed AI TP.
+                        position.take_profit = 0.0
+                        if position.status == "open":
+                            remaining_positions.append(position)
+                        continue
                     closed = self._maybe_close(
                         position, bar, balance, template, point_size, contract_size
                     )

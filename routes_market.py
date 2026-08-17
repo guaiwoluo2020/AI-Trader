@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import asyncio
 import json
 import time
+import uuid
 
 from auth import AuthUser, get_auth_manager, require_admin, require_auth
 from ea_auth import EAIdentity, require_ea_auth
@@ -42,8 +43,8 @@ from user_quotas import UserQuotaService
 from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
 from market.system_log import get_system_log_broadcaster
-from data_retention import DataRetentionService
 from shared_notifications import SharedReferenceNotificationService
+from instrument_price_store import get_instrument_price_store
 
 
 def create_market_routes(
@@ -66,7 +67,6 @@ def create_market_routes(
     alpha_library = AlphaLibraryRepository()
     llm_governance = LLMGovernanceService()
     event_logs = SystemEventLogRepository()
-    data_retention = DataRetentionService()
     memberships = MembershipService()
     shared_notifications = SharedReferenceNotificationService()
 
@@ -1027,6 +1027,193 @@ def create_market_routes(
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    @protected_router.post("/strategy/quick-create-ai")
+    async def quick_create_ai_strategy(
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Create a draft AI strategy with a reusable source and 1R partial exit."""
+        from market.models import PositionManagementPolicy
+
+        try:
+            data = await request.json()
+            symbol = str(data.get("symbol") or "").strip()
+            period = str(data.get("period") or "M5").strip().upper()
+            account_id = data.get("account_id")
+            if not symbol:
+                raise ValueError("请选择交易品种")
+            if period not in {"M1", "M5", "M15", "H1", "H4"}:
+                raise ValueError("不支持的 AI 分析周期")
+
+            account = None
+            if account_id not in (None, ""):
+                account = TradingAccountRepository().get_by_id(
+                    user.user_id, int(account_id)
+                )
+                if account is None:
+                    raise ValueError("交易账户不存在或不属于当前用户")
+            if account is None:
+                account = TradingAccountRepository().get_primary_mt5(user.user_id)
+            broker_server = str(getattr(account, "mt5_server", "") or "")
+
+            # Reuse a published source first.  The repository ranks same-broker
+            # matches ahead of other shared sources with the same symbol.
+            managed_source = ai_signal_source_repo.find_shared_for_symbol_period(
+                user.user_id, symbol, period, broker_server
+            )
+            created_source = False
+            if managed_source is None:
+                access = llm_access_repo.get_status(user.user_id, user.role)
+                if not access["access_granted"]:
+                    raise ValueError("没有可复用的共享 AI 信号源，当前用户尚未开通大模型功能")
+                scene = llm_governance.scene_options(
+                    user.user_id, AI_SIGNAL_ANALYSIS
+                )
+                models = scene.get("models") or []
+                if not models:
+                    raise ValueError("管理员尚未为 AI 行情与交易信号配置可用模型")
+                managed_source = ai_signal_source_repo.create(user.user_id, {
+                    "name": f"{symbol} AI {period}",
+                    "symbol": symbol,
+                    "period": period,
+                    "enabled": True,
+                    "share_runtime_data": True,
+                    "config": {
+                        "analysis_mode": "self_analysis",
+                        "analysis_interval_minutes": max(
+                            {"M1": 1, "M5": 5, "M15": 15, "H1": 60, "H4": 240}[period],
+                            int(data.get("analysis_interval_minutes") or 5),
+                        ),
+                        "kline_count": max(10, min(500, int(data.get("kline_count") or 300))),
+                        "min_confidence": max(0, min(100, int(data.get("min_confidence") or 70))),
+                        "entry_threshold": float(data.get("entry_threshold") or 0.0008),
+                        "model": str(models[0]),
+                        "system_prompt": scene.get("system_prompt") or DEFAULT_SYSTEM_PROMPT,
+                        "analysis_prompt_template": (
+                            scene.get("user_prompt_template")
+                            or DEFAULT_ANALYSIS_PROMPT_TEMPLATE
+                        ),
+                        "reference_runtime_ids": [],
+                    },
+                })
+                created_source = True
+
+            owner_user_id = int(managed_source["user_id"])
+            managed_source_id = str(managed_source["signal_source_id"])
+            source_instance_id = uuid.uuid4().hex[:12]
+            source_config = managed_source.get("config") or {}
+            signal_params = {
+                "analysis_mode": (
+                    "shared_reference" if owner_user_id != user.user_id
+                    else "self_analysis"
+                ),
+                "ai_signal_source_id": managed_source_id,
+                "ai_signal_source_owner_id": owner_user_id,
+                "shared_runtime_id": (
+                    f"{owner_user_id}:ai:{managed_source_id}"
+                    if owner_user_id != user.user_id else ""
+                ),
+                "min_confidence": int(data.get("min_confidence") or source_config.get("min_confidence") or 70),
+                "entry_threshold": float(data.get("entry_threshold") or source_config.get("entry_threshold") or 0.0008),
+                "reference_runtime_ids": [],
+            }
+
+            policy = PositionManagementPolicy(
+                user_id=user.user_id,
+                name=f"{symbol} AI 信号止损止盈 · 1R分批",
+                visibility="private",
+                config={
+                    "initial_stop_rules": [{"type": "signal"}],
+                    "initial_take_profit_rules": [{"type": "signal"}],
+                    "management_rules": [{
+                        "type": "partial_take_profit",
+                        "levels": [{
+                            "level_id": "tp1_1r",
+                            "trigger_r": 1.0,
+                            "close_percent": 33.0,
+                            "move_sl": "break_even",
+                        }],
+                    }, {
+                        "type": "trailing_stop",
+                        "activation_r": 1.0,
+                        "distance_r": 0.8,
+                    }],
+                    "signal_take_profit_close_percent": 50.0,
+                    "min_risk_reward": 1.0,
+                    "min_stop_distance": 0.0,
+                    "max_stop_distance": 0.0,
+                },
+            )
+
+            with quota_service.guarded():
+                quota_service.assert_can_create(user.user_id, user.role, "strategies")
+                if created_source:
+                    quota_service.assert_can_create(
+                        user.user_id, user.role, "signal_sources"
+                    )
+                quota_service.assert_strategy_sources(
+                    user.user_id, user.role, "", [{
+                        "source": "ai_entry", "period": period,
+                        "params": signal_params,
+                    }],
+                )
+                position_policy_repo.save(policy)
+                engine = engine_manager.get_engine_for_user(user.user_id)
+                strategy = engine.strategy_service.strategy_store.create_strategy(
+                    symbol,
+                    {
+                        "strategy_name": str(
+                            data.get("strategy_name") or f"{symbol} AI 策略"
+                        ).strip(),
+                        "enabled": True,
+                        "auto_execute": True,
+                        "lifecycle_status": StrategyLifecycle.DRAFT,
+                        "signal_sources": [{
+                            "signal_source_id": source_instance_id,
+                            "source": "ai_entry",
+                            "enabled": True,
+                            "period": period,
+                            "weight": 100,
+                            "params": signal_params,
+                        }],
+                        "position_management_policy_id": policy.policy_id,
+                        "fixed_volume": float(data.get("fixed_volume") or 0.01),
+                        "risk_percent": float(data.get("risk_percent") or 1.0),
+                        "max_positions": int(data.get("max_positions") or 3),
+                        "max_same_direction": int(data.get("max_same_direction") or 2),
+                        "min_confidence": signal_params["min_confidence"],
+                        "consistency_requirement": "any",
+                        "visibility": "private",
+                    },
+                )
+
+            shared_ai_runtime_repo.sync_strategy_visibility(
+                user.user_id, strategy.to_dict()
+            )
+            engine_manager.refresh_user_strategies(user.user_id)
+            add_audit_event(
+                user, "strategy_quick_created", "一键创建 AI 策略",
+                f"为 {symbol} 创建 AI 策略 {strategy.strategy_name}",
+                {
+                    "symbol": symbol, "period": period,
+                    "signal_source_id": managed_source_id,
+                    "source_reused": not created_source,
+                    "position_policy_id": policy.policy_id,
+                }, "strategy", strategy.strategy_id,
+            )
+            return {
+                "status": "ok",
+                "message": "AI 策略已创建为草稿",
+                "source_reused": not created_source,
+                "signal_source": ai_signal_source_payload(managed_source),
+                "position_policy": policy.to_dict(),
+                "strategy": strategy_payload(strategy, user.user_id),
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
     @protected_router.get("/strategy/decisions")
     async def get_decisions(
         symbol: Optional[str] = None,
@@ -1639,35 +1826,6 @@ def create_market_routes(
             "message": f"已清理 {deleted} 条过期运行日志，审计日志未删除",
         }
 
-    @protected_router.get("/admin/system/data-maintenance")
-    async def get_data_maintenance(
-        user: AuthUser = Depends(require_admin),
-    ) -> Dict:
-        return {"status": "ok", **data_retention.get_status()}
-
-    @protected_router.post("/admin/system/data-maintenance/run")
-    async def run_data_maintenance(
-        user: AuthUser = Depends(require_admin),
-    ) -> Dict:
-        result = await asyncio.to_thread(
-            data_retention.run_maintenance, "manual"
-        )
-        event_logs.add({
-            "level": "info" if result.get("status") == "completed" else "error",
-            "category": "audit", "event_type": "data_maintenance_run",
-            "event_name": "执行数据维护", "user_id": user.user_id,
-            "actor_type": "user", "actor_id": str(user.user_id),
-            "status": result.get("status", "unknown"),
-            "message": "管理员手动执行数据维护",
-            "detail": {"run_id": result.get("run_id")},
-        })
-        return {
-            "status": result.get("status", "failed"),
-            "message": "数据维护执行完成" if result.get("status") == "completed"
-            else result.get("error_message") or "数据维护执行失败",
-            "run": result,
-        }
-
     # ==================== WebSocket接口 ====================
 
     @router.websocket("/ws/market")
@@ -1816,14 +1974,41 @@ def create_market_routes(
             ORDER BY last_reported_at DESC, report_count DESC
             """
         )
+        # Full K-line uploads are infrequent.  Prefer the short-lived quote
+        # cache populated by EA statistics/TICK reports so this admin view
+        # reflects the real latest market upload without high-frequency DB logs.
+        recent_quotes = {
+            (
+                str(item.get("broker_name") or "").strip().upper(),
+                str(item.get("symbol") or "").strip().upper(),
+            ): int((item.get("latest") or {}).get("timestamp") or 0)
+            for item in get_instrument_price_store().list()
+        }
         items = []
         for row in rows:
             item = dict(row)
             item["broker_name"] = instrument_mapping_repo.broker_name_from_server(
                 item.get("broker_server", "")
             )
+            quote_time = recent_quotes.get((
+                str(item["broker_name"] or "").strip().upper(),
+                str(item.get("symbol") or "").strip().upper(),
+            ), 0)
+            logged_time = int(item.get("last_reported_at") or 0)
+            if quote_time >= logged_time:
+                item["last_reported_at"] = quote_time
+                item["last_reported_source"] = "quote"
+            else:
+                item["last_reported_source"] = "kline_full"
             items.append(item)
         return {"status": "ok", "items": items}
+
+    @protected_router.get("/admin/instrument-price-observations")
+    async def list_instrument_price_observations(
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        """展示最近报价，关联判断由管理员手工完成。"""
+        return {"status": "ok", "items": get_instrument_price_store().list()}
 
     @protected_router.put("/admin/instrument-mappings")
     async def save_instrument_mapping(

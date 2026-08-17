@@ -639,10 +639,63 @@ class LLMAnalysisTestCase(unittest.TestCase):
             {"GOLD_": {"M5": _Klines().get_klines("GOLD_", "M5", 1)}},
             plan,
         )
-        groups = service._group_analysis_plans(plan)
+        requests = service._build_individual_analysis_requests(plan)
 
         self.assertIn("M5(权重30)", prompt)
-        self.assertEqual(groups[0]["plan"]["GOLD_"]["periods"]["M5"]["weight"], 30)
+        self.assertEqual(requests[0]["plan"]["GOLD_"]["periods"]["M5"]["weight"], 30)
+
+    def test_ai_requests_are_isolated_by_signal_source_and_period(self):
+        service = LLMService(_Store(), _Klines())
+        plan = {
+            "GOLD_": {
+                "periods": {
+                    "M1": {"weight": 30, "kline_count": 250},
+                    "M5": {"weight": 30, "kline_count": 230},
+                },
+                "strategies": [
+                    {
+                        "strategy_id": "gold-m1", "strategy_name": "GOLD M1",
+                        "signal_source_id": "source-m1",
+                        "periods": {"M1": 30}, "min_confidence": 70,
+                        "min_risk_reward": 1.0, "kline_count": 250,
+                    },
+                    {
+                        "strategy_id": "gold-m5", "strategy_name": "GOLD M5",
+                        "signal_source_id": "source-m5",
+                        "periods": {"M5": 30}, "min_confidence": 70,
+                        "min_risk_reward": 1.0, "kline_count": 230,
+                    },
+                ],
+            },
+            "BTCUSD": {
+                "periods": {"M1": {"weight": 30, "kline_count": 300}},
+                "strategies": [{
+                    "strategy_id": "btc-m1", "strategy_name": "BTC M1",
+                    "signal_source_id": "btc-source-m1",
+                    "periods": {"M1": 30}, "min_confidence": 70,
+                    "min_risk_reward": 1.0, "kline_count": 300,
+                }],
+            },
+        }
+
+        requests = service._build_individual_analysis_requests(plan)
+
+        self.assertEqual(len(requests), 3)
+        request_shapes = {
+            (
+                next(iter(request["plan"])),
+                next(iter(next(iter(request["plan"].values()))["periods"])),
+                next(iter(next(iter(request["plan"].values()))["strategies"]))[
+                    "signal_source_id"
+                ],
+            )
+            for request in requests
+        }
+        self.assertEqual(request_shapes, {
+            ("GOLD_", "M1", "source-m1"),
+            ("GOLD_", "M5", "source-m5"),
+            ("BTCUSD", "M1", "btc-source-m1"),
+        })
 
     def test_ai_plan_only_contains_strategies_deployed_on_account(self):
         strategies = [

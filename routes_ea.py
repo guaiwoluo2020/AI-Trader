@@ -15,6 +15,7 @@ from sqlite_storage import (
     TradeExecutionRepository,
     TradingAccountRepository,
 )
+from instrument_price_store import get_instrument_price_store
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
 
@@ -266,6 +267,17 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             bid = data.get("bidPrice")
             ask = data.get("askPrice")
             if bid is not None:
+                try:
+                    get_instrument_price_store().record(
+                        identity.user_id,
+                        identity.account_id,
+                        str(data.get("symbol", "")),
+                        float(bid),
+                        float(ask) if ask is not None else None,
+                    )
+                except Exception as exc:
+                    # 关联候选是辅助功能，不能影响 EA 统计和模拟撮合。
+                    print(f"[InstrumentMapping] 报价观察失败: {exc}")
                 try:
                     engine_manager.paper_trading.process_tick(
                         identity.user_id,

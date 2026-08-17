@@ -64,9 +64,14 @@
               <h2>把策略从想法推进到实盘</h2>
               <p>集中管理信号源、风险约束和验证进度，快速找到需要处理的策略。</p>
             </div>
-            <v-btn color="primary" size="large" class="strategy-primary-action" @click="newStrategyDialog = true">
-              <v-icon start>mdi-plus</v-icon>新建策略
-            </v-btn>
+            <div class="d-flex flex-wrap ga-2">
+              <v-btn color="primary" size="large" class="strategy-primary-action" @click="newStrategyDialog = true">
+                <v-icon start>mdi-plus</v-icon>新建策略
+              </v-btn>
+              <v-btn color="secondary" size="large" variant="tonal" @click="quickStrategyDialog = true">
+                <v-icon start>mdi-auto-fix</v-icon>一键创建 AI 策略
+              </v-btn>
+            </div>
           </section>
 
           <v-tabs v-model="strategyWorkspaceTab" color="primary" class="strategy-main-tabs">
@@ -384,6 +389,9 @@
           <v-card-title class="settings-card-title"><div><v-icon>mdi-swap-horizontal-bold</v-icon><span>交易商品种关联映射</span></div><small>同一关联组内的品种可用于共享策略与共享 AI 数据</small></v-card-title>
           <v-card-text>
             <v-alert type="info" variant="tonal" density="compact" class="mb-5">系统会从 MT5 服务器自动提取交易商，例如 <code>XMGlobal-MT5 2 → XMGlobal</code>。这里仅维护“交易商 + 原始品种”关系；把不同交易商的黄金品种放入同一个关联组即可共享。未配置时仅允许完全同名品种共享。</v-alert>
+            <div class="d-flex align-center justify-space-between mb-3"><div><strong>最近上报价格</strong><p class="text-caption text-medium-emphasis mb-0">每个交易商和品种仅保留最近 5 条、约 1 分钟内的报价，管理员可据此手工判断是否建立关联。</p></div><v-btn size="small" variant="text" prepend-icon="mdi-refresh" @click="loadInstrumentPriceObservations">刷新</v-btn></div>
+            <v-table v-if="instrumentPriceObservations.length" density="compact" class="quota-table mb-5"><thead><tr><th>交易商</th><th>品种</th><th>最新买价</th><th>最新卖价</th><th>中间价</th><th>最近 5 次中间价</th><th>关联状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in instrumentPriceObservations" :key="`${item.broker_name}-${item.symbol}`"><td>{{ item.broker_name }}</td><td><strong>{{ item.symbol }}</strong></td><td>{{ formatInstrumentPrice(item.latest?.bid) }}</td><td>{{ formatInstrumentPrice(item.latest?.ask) }}</td><td>{{ formatInstrumentPrice(item.latest?.mid) }}</td><td><span v-for="(price, index) in item.prices" :key="`${item.symbol}-${price.timestamp}-${index}`" class="mr-2">{{ formatInstrumentPrice(price.mid) }}</span></td><td><v-chip size="small" :color="item.mapped ? 'success' : 'grey'" variant="tonal">{{ item.mapped ? `已关联 · ${item.mapping_group}` : '未关联' }}</v-chip></td><td><v-btn v-if="!item.mapped" size="small" color="primary" variant="tonal" @click="useInstrumentPriceObservation(item)">建立关联</v-btn><span v-else class="text-caption text-success">已建立</span></td></tr></tbody></v-table>
+            <v-alert v-else type="info" variant="tonal" density="compact" class="mb-5">暂无最近价格数据。EA 上报统计数据后，这里会显示最新报价。</v-alert>
             <div class="d-flex align-center justify-space-between mb-3"><div><strong>已上报行情的交易商与品种</strong><p class="text-caption text-medium-emphasis mb-0">仅统计 EA 实际上传过 K 线的组合，可点击直接建立关联。</p></div><v-btn size="small" variant="text" prepend-icon="mdi-refresh" @click="loadInstrumentObservations">刷新</v-btn></div>
             <v-table v-if="instrumentObservations.length" density="compact" class="quota-table mb-5"><thead><tr><th>交易商</th><th>MT5 服务器</th><th>上报品种</th><th>账户数</th><th>最近上报</th><th></th></tr></thead><tbody><tr v-for="item in instrumentObservations" :key="`${item.broker_server}-${item.symbol}`"><td><strong>{{ item.broker_name || '未识别' }}</strong></td><td>{{ item.broker_server || '--' }}</td><td><v-chip size="small" color="success" variant="tonal">{{ item.symbol }}</v-chip></td><td>{{ item.account_count }}</td><td>{{ formatInvitationTime(item.last_reported_at) }}</td><td class="text-right"><v-btn size="small" color="primary" variant="tonal" @click="useInstrumentObservation(item)">建立关联</v-btn></td></tr></tbody></v-table>
             <v-alert v-else type="info" variant="tonal" density="compact" class="mb-5">暂未收到 EA 上报的 K 线行情。</v-alert>
@@ -968,6 +976,25 @@
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="quickStrategyDialog" max-width="620">
+      <v-card>
+        <v-card-title class="new-strategy-title"><v-avatar color="secondary" variant="tonal" size="42"><v-icon>mdi-auto-fix</v-icon></v-avatar><div><strong>一键创建 AI 策略</strong><span>自动复用同交易商共享信号源；没有时创建并共享运行数据。</span></div></v-card-title>
+        <v-card-text>
+          <v-select v-model="quickStrategySymbol" :items="strategySymbolOptions" label="交易品种" prepend-inner-icon="mdi-currency-usd" class="mt-4"></v-select>
+          <v-select v-model="quickStrategyPeriod" :items="signalPeriods" label="AI 分析周期" prepend-inner-icon="mdi-clock-outline"></v-select>
+          <v-text-field v-model="quickStrategyName" label="策略名称（可选）" placeholder="例如：BTCm M5 AI 策略" prepend-inner-icon="mdi-tag-outline"></v-text-field>
+          <v-alert type="info" variant="tonal" density="compact">
+            自动生成：AI 信号源、信号止损/止盈、1R 平仓 33%、到 AI 止盈再平剩余仓位 50% 后移动止损的持仓管理方案和私有草稿策略。策略不会自动部署。
+          </v-alert>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="quickStrategyDialog = false">取消</v-btn>
+          <v-btn color="secondary" :disabled="!quickStrategySymbol" :loading="quickStrategySaving" @click="quickCreateStrategy"><v-icon start>mdi-auto-fix</v-icon>立即创建</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="signalSourceDialog" max-width="760">
       <v-card>
         <v-card-title>{{ signalSourceEditMode === 'edit' ? '编辑信号源' : '添加信号源' }}</v-card-title>
@@ -1357,6 +1384,7 @@ export default {
 
     const instrumentMappings = ref([])
     const instrumentObservations = ref([])
+    const instrumentPriceObservations = ref([])
     const instrumentMappingSaving = ref(false)
     const instrumentMappingForm = ref({
       broker_name: '', native_symbol: '', mapping_group: '', display_name: '', enabled: true
@@ -1547,7 +1575,7 @@ export default {
         await Promise.all([
           loadUserQuotas(), loadInvitations(), loadEmailConfig(),
           loadLLMConfig(), loadLLMAccessRequests(), loadAdminStrategies(),
-          loadInstrumentMappings(), loadInstrumentObservations()
+          loadInstrumentMappings(), loadInstrumentObservations(), loadInstrumentPriceObservations()
         ])
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
@@ -1576,6 +1604,26 @@ export default {
         errorMessage.value = err.response?.data?.detail || '加载已上报品种失败'
         showError.value = true
       }
+    }
+
+    const loadInstrumentPriceObservations = async () => {
+      if (!isAdmin.value) return
+      try {
+        const data = await marketAPI.getInstrumentPriceObservations()
+        instrumentPriceObservations.value = data.items || []
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '加载最近报价失败'
+        showError.value = true
+      }
+    }
+
+    const formatInstrumentPrice = (value) => {
+      if (value === null || value === undefined || value === '') return '--'
+      return Number(value).toFixed(5)
+    }
+
+    const useInstrumentPriceObservation = (item) => {
+      useInstrumentObservation({ broker_name: item.broker_name, symbol: item.symbol })
     }
 
     const useInstrumentObservation = (item) => {
@@ -2127,6 +2175,8 @@ export default {
     const selectedStrategy = ref(null)
     const selectedStrategySnapshot = ref('')
     const newStrategyDialog = ref(false)
+    const quickStrategyDialog = ref(false)
+    const quickStrategySaving = ref(false)
     const strategySearch = ref('')
     const strategyLifecycleFilter = ref('all')
     const strategyVisibilityFilter = ref('all')
@@ -2165,6 +2215,9 @@ export default {
     const newStrategySymbol = ref('')
     const newStrategyName = ref('')
     const newStrategyPolicyId = ref('')
+    const quickStrategySymbol = ref('')
+    const quickStrategyPeriod = ref('M5')
+    const quickStrategyName = ref('')
     const signalSourceDialog = ref(false)
     const signalSourceTarget = ref(null)
     const signalSourceEditMode = ref('add')
@@ -3200,6 +3253,39 @@ export default {
     }
 
     // 添加策略
+    const quickCreateStrategy = async () => {
+      if (!quickStrategySymbol.value) {
+        errorMessage.value = '请先选择交易品种'
+        showError.value = true
+        return
+      }
+      quickStrategySaving.value = true
+      try {
+        const data = await marketAPI.quickCreateAIStrategy({
+          symbol: quickStrategySymbol.value,
+          period: quickStrategyPeriod.value,
+          strategy_name: quickStrategyName.value || undefined,
+        })
+        if (data.status !== 'ok') throw new Error(data.message || '创建失败')
+        successMessage.value = data.source_reused
+          ? 'AI 策略已创建，并复用了同交易商共享信号源'
+          : 'AI 策略已创建，并新建了共享运行数据的 AI 信号源'
+        showSuccess.value = true
+        const createdId = data.strategy?.strategy_id
+        quickStrategyDialog.value = false
+        quickStrategySymbol.value = ''
+        quickStrategyName.value = ''
+        await loadStrategies()
+        const created = strategies.value.find(strategy => strategy.strategy_id === createdId)
+        if (created) openStrategyDetail(created)
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || err.message || '一键创建 AI 策略失败'
+        showError.value = true
+      } finally {
+        quickStrategySaving.value = false
+      }
+    }
+
     const addStrategy = async () => {
       if (!newStrategySymbol.value || !newStrategyPolicyId.value) {
         errorMessage.value = '请先选择品种和持仓管理方案'
@@ -3286,9 +3372,13 @@ export default {
       testEmailConfig,
       instrumentMappings,
       instrumentObservations,
+      instrumentPriceObservations,
       instrumentMappingForm,
       instrumentMappingSaving,
       loadInstrumentObservations,
+      loadInstrumentPriceObservations,
+      formatInstrumentPrice,
+      useInstrumentPriceObservation,
       useInstrumentObservation,
       saveInstrumentMapping,
       deleteInstrumentMapping,
@@ -3361,6 +3451,8 @@ export default {
       strategyDetailTab,
       selectedStrategy,
       newStrategyDialog,
+      quickStrategyDialog,
+      quickStrategySaving,
       strategySearch,
       strategyLifecycleFilter,
       strategyVisibilityFilter,
@@ -3393,6 +3485,9 @@ export default {
       deploySelectedStrategyToLive,
       newStrategySymbol,
       newStrategyName,
+      quickStrategySymbol,
+      quickStrategyPeriod,
+      quickStrategyName,
       consistencyOptions,
       positionPolicies,
       positionPolicyOptions,
@@ -3406,6 +3501,7 @@ export default {
       closeStrategyDetail,
       deleteStrategy,
       addStrategy,
+      quickCreateStrategy,
       getLifecycleMeta,
       getLifecycleColor,
       getLifecycleActions,

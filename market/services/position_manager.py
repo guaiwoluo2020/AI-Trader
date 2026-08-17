@@ -203,6 +203,41 @@ class PositionManager:
                 **payload,
             })
 
+        # An AI take-profit is a staged exit: close the configured portion at
+        # the signal price, then let the remaining volume be managed by the
+        # trailing rules.  The caller clears the fixed TP after this action.
+        signal_tp_percent = float(
+            policy_config.get("signal_take_profit_close_percent", 0) or 0
+        )
+        signal_tp = float(position.get("take_profit") or 0)
+        signal_tp_hit = (
+            signal_tp_percent > 0
+            and signal_tp > 0
+            and "signal_take_profit" not in triggered_partials
+            and (
+                price >= signal_tp if direction == "buy"
+                else price <= signal_tp
+            )
+        )
+        if signal_tp_hit:
+            close_percent = min(100.0, max(0.0, signal_tp_percent))
+            close_volume = volume * close_percent / 100.0
+            add_event(
+                "signal_take_profit", "triggered",
+                f"到达 AI 止盈价，平 {close_percent:.0f}%；剩余仓位交给移动止损",
+                level_id="signal_take_profit",
+                close_percent=close_percent,
+                close_volume=close_volume,
+            )
+            return PositionAction(
+                "partial_close",
+                close_percent=close_percent,
+                close_volume=close_volume,
+                level_id="signal_take_profit",
+                reason="signal_take_profit_partial",
+                events=events,
+            )
+
         for rule in policy_config.get("management_rules", []):
             kind = rule.get("type")
             if kind == "reverse_signal" and reverse_signal:

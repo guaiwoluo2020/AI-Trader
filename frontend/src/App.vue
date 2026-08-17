@@ -119,7 +119,6 @@ export default {
           { title: '连接 MT5', path: '/mt5-setup', icon: 'mdi-connection' },
           { title: '用户配置', path: '/settings', icon: 'mdi-account-cog' },
           { title: '运行日志', path: '/logs', icon: 'mdi-text-box-outline' },
-          { title: '数据维护', path: '/data-maintenance', icon: 'mdi-database-cog-outline', adminOnly: true },
         ],
       },
     ]

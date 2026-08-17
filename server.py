@@ -617,13 +617,23 @@ class TradingServer:
                         continue
                     done.add(action.level_id)
                     state["partial_levels_done"] = sorted(done)
-                    if action.stop_loss:
-                        state["stop_loss"] = float(action.stop_loss)
+                    if action.stop_loss or action.level_id == "signal_take_profit":
+                        if action.stop_loss:
+                            state["stop_loss"] = float(action.stop_loss)
+                        if action.level_id == "signal_take_profit":
+                            state["take_profit"] = 0.0
                         self._position_update_instructions[symbol][ticket] = {
                             "ticket": ticket,
-                            "sl": round(float(action.stop_loss), 8),
-                            "tp": round(float(position.tp or 0), 8),
-                            "reason": f"{action.reason}:move_sl",
+                            "sl": round(float(state["stop_loss"]), 8),
+                            # The remaining volume must no longer be closed in
+                            # full by MT5 at the original AI target.
+                            "tp": 0 if action.level_id == "signal_take_profit"
+                            else round(float(position.tp or 0), 8),
+                            "reason": (
+                                f"{action.reason}:clear_tp"
+                                if action.level_id == "signal_take_profit"
+                                else f"{action.reason}:move_sl"
+                            ),
                         }
                     self._position_partial_instructions[symbol][
                         f"{ticket}:{action.level_id}"

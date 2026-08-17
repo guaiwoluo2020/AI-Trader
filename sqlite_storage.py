@@ -3614,6 +3614,86 @@ class AISignalSourceRepository:
         item["is_owner"] = item["user_id"] == int(viewer_user_id)
         return item
 
+    def find_shared_for_symbol_period(
+        self,
+        viewer_user_id: int,
+        symbol: str,
+        period: str,
+        broker_server: str = "",
+    ) -> Optional[Dict]:
+        """Find the best reusable shared AI source for a broker/symbol/period.
+
+        Runtime sharing is intentionally matched against the source owner's
+        latest MT5 server.  Prompts and model credentials are never returned
+        to the caller through the shared-source payload.
+        """
+        target_symbol = str(symbol or "").strip().upper()
+        target_period = str(period or "M5").strip().upper()
+        target_broker = str(broker_server or "").strip().split("-", 1)[0].strip().lower()
+        if not target_symbol or not target_period:
+            return None
+        rows = self.storage.fetchall(
+            """
+            SELECT source.*, users.username AS owner_username,
+                   COALESCE(c.mt5_server, a.mt5_server, '') AS owner_mt5_server,
+                   COALESCE(c.last_seen_at, a.last_seen_at, 0) AS owner_last_seen
+            FROM ai_signal_sources AS source
+            JOIN users ON users.id = source.user_id
+            LEFT JOIN trading_accounts AS a
+              ON a.user_id = source.user_id AND a.account_type = 'mt5'
+            LEFT JOIN mt5_account_connections AS c ON c.account_id = a.id
+            WHERE source.enabled = 1
+              AND source.share_runtime_data = 1
+              AND upper(trim(source.period)) = ?
+            ORDER BY owner_last_seen DESC, source.updated_at DESC,
+                     source.created_at ASC, source.signal_source_id ASC
+            """,
+            (target_period,),
+        )
+        mapped_fallback = None
+        for row in rows:
+            source_symbol = str(row["symbol"] or "").strip().upper()
+            same_symbol = source_symbol == target_symbol
+            owner_server = str(row["owner_mt5_server"] or "")
+            owner_broker = owner_server.split("-", 1)[0].strip().lower()
+            if same_symbol and target_broker and owner_broker == target_broker:
+                item = self._row_to_dict(row)
+                item["owner_username"] = row["owner_username"]
+                item["owner_mt5_server"] = owner_server
+                item["is_owner"] = int(row["user_id"]) == int(viewer_user_id)
+                if not item["is_owner"]:
+                    item["config"].pop("system_prompt", None)
+                    item["config"].pop("analysis_prompt_template", None)
+                    item["config"].pop("api_key", None)
+                return item
+            if target_broker and owner_server:
+                try:
+                    target_mapping = PlatformInstrumentMappingRepository(
+                        self.storage
+                    ).compatible(
+                        owner_server, str(row["symbol"] or ""),
+                        broker_server, symbol,
+                    )
+                except Exception:
+                    target_mapping = False
+                if target_mapping and mapped_fallback is None:
+                    mapped_fallback = row
+        # A matching symbol name from another broker is not safe to reuse:
+        # the quote scale and liquidity can differ.  Only an explicit platform
+        # mapping may bridge different broker-native symbols.
+        selected = mapped_fallback
+        if selected is None:
+            return None
+        item = self._row_to_dict(selected)
+        item["owner_username"] = selected["owner_username"]
+        item["owner_mt5_server"] = str(selected["owner_mt5_server"] or "")
+        item["is_owner"] = int(selected["user_id"]) == int(viewer_user_id)
+        if not item["is_owner"]:
+            item["config"].pop("system_prompt", None)
+            item["config"].pop("analysis_prompt_template", None)
+            item["config"].pop("api_key", None)
+        return item
+
     def create(self, user_id: int, data: Dict) -> Dict:
         now = _now_ts()
         source_id = str(data.get("signal_source_id") or uuid.uuid4().hex[:12])
