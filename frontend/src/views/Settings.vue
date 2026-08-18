@@ -1003,9 +1003,15 @@
             label="持仓管理方案"
             prepend-inner-icon="mdi-shield-check-outline"
           ></v-select>
+          <v-alert v-if="quickSelectedPositionPolicy" type="success" variant="tonal" density="compact" class="mb-3">
+            默认使用：{{ quickSelectedPositionPolicy.name }}{{ quickSelectedPositionPolicy.is_shared ? `（共享自 ${quickSelectedPositionPolicy.owner_username || '平台用户'}）` : '（我的方案）' }}
+          </v-alert>
+          <v-alert v-else type="info" variant="tonal" density="compact" class="mb-3">
+            当前没有合适的方案，创建时会自动生成并共享标准 AI 分批止盈方案。
+          </v-alert>
           <v-text-field v-model="quickStrategyName" label="策略名称（可选）" placeholder="例如：BTCm M5 AI 策略" prepend-inner-icon="mdi-tag-outline"></v-text-field>
           <v-alert type="info" variant="tonal" density="compact">
-            未替换持仓管理方案时，系统自动生成：信号止损/止盈、1R 平仓 33%、到 AI 止盈再平剩余仓位 50% 后移动止损的分批止盈方案和私有草稿策略。策略不会自动部署。
+            系统优先使用我的合适方案，其次复用平台共享方案；均没有时才自动生成并共享：信号止损/止盈、1R 平仓 33%、到 AI 止盈再平剩余仓位 50% 后移动止损。策略以草稿创建，不会自动部署。
           </v-alert>
         </v-card-text>
         <v-card-actions>
@@ -2243,6 +2249,7 @@ export default {
     const quickStrategyPolicyId = ref('__auto__')
     const quickStrategyOptionsLoading = ref(false)
     const quickAISignalSources = ref([])
+    const quickSharedPositionPolicies = ref([])
     const signalSourceDialog = ref(false)
     const signalSourceTarget = ref(null)
     const signalSourceEditMode = ref('add')
@@ -2355,10 +2362,45 @@ export default {
     const quickSelectedAISignalSource = computed(() => quickAISignalSources.value.find(
       item => item.signal_source_id === quickStrategySourceId.value
     ) || null)
+    const isAIPositionPolicy = (policy) => {
+      const config = policy?.config || {}
+      const hasRule = (key, type) => (config[key] || []).some(rule => rule?.type === type)
+      const managementTypes = new Set((config.management_rules || []).map(rule => rule?.type))
+      return hasRule('initial_stop_rules', 'signal')
+        && hasRule('initial_take_profit_rules', 'signal')
+        && managementTypes.has('partial_take_profit')
+        && managementTypes.has('trailing_stop')
+    }
+    const quickOwnPositionPolicies = computed(() => positionPolicies.value.filter(
+      policy => policy.enabled && isAIPositionPolicy(policy)
+    ))
+    const quickUsableSharedPositionPolicies = computed(() => quickSharedPositionPolicies.value.filter(
+      policy => policy.enabled && isAIPositionPolicy(policy)
+    ))
     const quickPositionPolicyOptions = computed(() => [
-      { title: '自动生成 AI 信号分批止盈方案', value: '__auto__' },
-      ...positionPolicyOptions.value
+      ...quickOwnPositionPolicies.value.map(policy => ({
+        title: `我的 · ${policy.name}`,
+        value: policy.policy_id
+      })),
+      ...quickUsableSharedPositionPolicies.value.map(policy => ({
+        title: `共享自 ${policy.owner_username || '平台用户'} · ${policy.name}`,
+        value: `shared:${policy.owner_user_id}:${policy.policy_id}`
+      })),
+      { title: '自动生成并共享 AI 信号分批止盈方案', value: '__auto__' }
     ])
+    const quickSelectedPositionPolicy = computed(() => {
+      if (quickStrategyPolicyId.value === '__auto__') return null
+      const sharedPrefix = 'shared:'
+      if (quickStrategyPolicyId.value.startsWith(sharedPrefix)) {
+        const [, ownerId, policyId] = quickStrategyPolicyId.value.split(':')
+        return quickUsableSharedPositionPolicies.value.find(policy => (
+          String(policy.owner_user_id) === ownerId && policy.policy_id === policyId
+        )) || null
+      }
+      return quickOwnPositionPolicies.value.find(
+        policy => policy.policy_id === quickStrategyPolicyId.value
+      ) || null
+    })
     const alphaLibraryOptions = computed(() => {
       const occupied = new Set(strategySignalSources(signalSourceTarget.value)
         .filter(item => item.source === 'alpha_factor')
@@ -2580,6 +2622,27 @@ export default {
         quickAISignalSources.value = []
       } finally {
         quickStrategyOptionsLoading.value = false
+      }
+    }
+
+    const loadQuickStrategyPolicies = async () => {
+      try {
+        const [ownData, sharedData] = await Promise.all([
+          marketAPI.getPositionManagementPolicies(),
+          marketAPI.getSharedPositionManagementPolicies()
+        ])
+        positionPolicies.value = ownData.policies || []
+        quickSharedPositionPolicies.value = (sharedData.policies || []).map(policy => ({
+          ...policy,
+          is_shared: true
+        }))
+        const own = quickOwnPositionPolicies.value[0]
+        const shared = quickUsableSharedPositionPolicies.value[0]
+        quickStrategyPolicyId.value = own?.policy_id
+          || (shared ? `shared:${shared.owner_user_id}:${shared.policy_id}` : '__auto__')
+      } catch (error) {
+        quickSharedPositionPolicies.value = []
+        quickStrategyPolicyId.value = '__auto__'
       }
     }
 
@@ -3335,7 +3398,10 @@ export default {
           ai_signal_source_owner_id: quickSelectedAISignalSource.value?.user_id || undefined,
           position_management_policy_id: quickStrategyPolicyId.value === '__auto__'
             ? undefined
-            : quickStrategyPolicyId.value,
+            : quickSelectedPositionPolicy.value?.policy_id,
+          position_management_policy_owner_id: quickSelectedPositionPolicy.value?.is_shared
+            ? quickSelectedPositionPolicy.value.owner_user_id
+            : undefined,
         })
         if (data.status !== 'ok') throw new Error(data.message || '创建失败')
         successMessage.value = data.source_reused
@@ -3363,7 +3429,7 @@ export default {
       quickStrategyPeriod.value ||= 'M5'
       quickStrategySourceId.value = '__auto__'
       quickStrategyPolicyId.value = '__auto__'
-      if (!positionPolicies.value.length) loadPositionPolicies()
+      loadQuickStrategyPolicies()
       loadQuickStrategySources()
       quickStrategyDialog.value = true
     }
@@ -3576,6 +3642,7 @@ export default {
       quickAISignalSourceOptions,
       quickSelectedAISignalSource,
       quickPositionPolicyOptions,
+      quickSelectedPositionPolicy,
       consistencyOptions,
       positionPolicies,
       positionPolicyOptions,
@@ -3591,6 +3658,7 @@ export default {
       addStrategy,
       openQuickStrategyDialog,
       loadQuickStrategySources,
+      loadQuickStrategyPolicies,
       quickCreateStrategy,
       getLifecycleMeta,
       getLifecycleColor,

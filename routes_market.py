@@ -1139,42 +1139,103 @@ def create_market_routes(
                 "reference_runtime_ids": [],
             }
 
+            def is_suitable_ai_policy(candidate) -> bool:
+                """Only reuse policies that implement the standard AI exit flow."""
+                config = (
+                    candidate.get("config") if isinstance(candidate, dict)
+                    else getattr(candidate, "config", None)
+                ) or {}
+
+                def has_rule(rule_group, rule_type):
+                    return any(
+                        isinstance(rule, dict) and rule.get("type") == rule_type
+                        for rule in (config.get(rule_group) or [])
+                    )
+
+                management_types = {
+                    rule.get("type")
+                    for rule in (config.get("management_rules") or [])
+                    if isinstance(rule, dict)
+                }
+                return (
+                    has_rule("initial_stop_rules", "signal")
+                    and has_rule("initial_take_profit_rules", "signal")
+                    and "partial_take_profit" in management_types
+                    and "trailing_stop" in management_types
+                )
+
             requested_policy_id = str(
                 data.get("position_management_policy_id") or ""
             ).strip()
+            requested_policy_owner_id = data.get("position_management_policy_owner_id")
             created_policy = False
+            reused_shared_policy = False
             if requested_policy_id:
-                policy = position_policy_repo.get(user.user_id, requested_policy_id)
-                if policy is None or not policy.enabled:
-                    raise ValueError("所选持仓管理方案不存在或已停用")
+                policy_owner_id = int(requested_policy_owner_id or user.user_id)
+                if policy_owner_id == user.user_id:
+                    policy = position_policy_repo.get(user.user_id, requested_policy_id)
+                else:
+                    # Keep the existing dynamic-reference model: the recipient
+                    # uses the publisher's live scheme without copying its rules.
+                    policy = position_policy_repo.use_shared_policy(
+                        user.user_id, policy_owner_id, requested_policy_id
+                    )
+                    reused_shared_policy = policy is not None
+                if policy is None or not policy.enabled or not is_suitable_ai_policy(policy):
+                    raise ValueError("所选持仓管理方案不存在、已停用或不适用于 AI 策略")
             else:
-                policy = PositionManagementPolicy(
-                    user_id=user.user_id,
-                    name=f"{symbol} AI 信号止损止盈 · 1R分批",
-                    visibility="private",
-                    config={
-                        "initial_stop_rules": [{"type": "signal"}],
-                        "initial_take_profit_rules": [{"type": "signal"}],
-                        "management_rules": [{
-                            "type": "partial_take_profit",
-                            "levels": [{
-                                "level_id": "tp1_1r",
-                                "trigger_r": 1.0,
-                                "close_percent": 33.0,
-                                "move_sl": "break_even",
-                            }],
-                        }, {
-                            "type": "trailing_stop",
-                            "activation_r": 1.0,
-                            "distance_r": 0.8,
-                        }],
-                        "signal_take_profit_close_percent": 50.0,
-                        "min_risk_reward": 1.0,
-                        "min_stop_distance": 0.0,
-                        "max_stop_distance": 0.0,
-                    },
+                policy = next(
+                    (
+                        item for item in position_policy_repo.list(
+                            user.user_id, enabled_only=True
+                        )
+                        if is_suitable_ai_policy(item)
+                    ),
+                    None,
                 )
-                created_policy = True
+                if policy is None:
+                    shared_policy = next(
+                        (
+                            item for item in position_policy_repo.list_shared(user.user_id)
+                            if is_suitable_ai_policy(item)
+                        ),
+                        None,
+                    )
+                    if shared_policy is not None:
+                        policy = position_policy_repo.use_shared_policy(
+                            user.user_id,
+                            int(shared_policy["owner_user_id"]),
+                            str(shared_policy["policy_id"]),
+                        )
+                        reused_shared_policy = policy is not None
+                if policy is None:
+                    policy = PositionManagementPolicy(
+                        user_id=user.user_id,
+                        name=f"{symbol} AI 信号止损止盈 · 1R分批",
+                        visibility="shared",
+                        config={
+                            "initial_stop_rules": [{"type": "signal"}],
+                            "initial_take_profit_rules": [{"type": "signal"}],
+                            "management_rules": [{
+                                "type": "partial_take_profit",
+                                "levels": [{
+                                    "level_id": "tp1_1r",
+                                    "trigger_r": 1.0,
+                                    "close_percent": 33.0,
+                                    "move_sl": "break_even",
+                                }],
+                            }, {
+                                "type": "trailing_stop",
+                                "activation_r": 1.0,
+                                "distance_r": 0.8,
+                            }],
+                            "signal_take_profit_close_percent": 50.0,
+                            "min_risk_reward": 1.0,
+                            "min_stop_distance": 0.0,
+                            "max_stop_distance": 0.0,
+                        },
+                    )
+                    created_policy = True
 
             with quota_service.guarded():
                 quota_service.assert_can_create(user.user_id, user.role, "strategies")
@@ -1231,6 +1292,7 @@ def create_market_routes(
                     "signal_source_id": managed_source_id,
                     "source_reused": not created_source,
                     "position_policy_reused": not created_policy,
+                    "position_policy_shared": reused_shared_policy,
                     "position_policy_id": policy.policy_id,
                 }, "strategy", strategy.strategy_id,
             )
@@ -1239,6 +1301,8 @@ def create_market_routes(
                 "message": "AI 策略已创建为草稿",
                 "source_reused": not created_source,
                 "signal_source": ai_signal_source_payload(managed_source),
+                "position_policy_reused": not created_policy,
+                "position_policy_shared": reused_shared_policy,
                 "position_policy": policy.to_dict(),
                 "strategy": strategy_payload(strategy, user.user_id),
             }
