@@ -68,8 +68,10 @@
               <v-btn color="primary" size="large" class="strategy-primary-action" @click="newStrategyDialog = true">
                 <v-icon start>mdi-plus</v-icon>新建策略
               </v-btn>
-              <v-btn color="secondary" size="large" variant="tonal" @click="quickStrategyDialog = true">
-                <v-icon start>mdi-auto-fix</v-icon>一键创建 AI 策略
+              <v-btn size="large" class="strategy-quick-action" @click="openQuickStrategyDialog">
+                <v-icon start>mdi-creation-outline</v-icon>
+                <span>一键创建 AI 策略</span>
+                <v-chip size="x-small" variant="flat" class="strategy-quick-action__badge">快速搭建</v-chip>
               </v-btn>
             </div>
           </section>
@@ -980,11 +982,30 @@
       <v-card>
         <v-card-title class="new-strategy-title"><v-avatar color="secondary" variant="tonal" size="42"><v-icon>mdi-auto-fix</v-icon></v-avatar><div><strong>一键创建 AI 策略</strong><span>自动复用同交易商共享信号源；没有时创建并共享运行数据。</span></div></v-card-title>
         <v-card-text>
-          <v-select v-model="quickStrategySymbol" :items="strategySymbolOptions" label="交易品种" prepend-inner-icon="mdi-currency-usd" class="mt-4"></v-select>
-          <v-select v-model="quickStrategyPeriod" :items="signalPeriods" label="AI 分析周期" prepend-inner-icon="mdi-clock-outline"></v-select>
+          <v-select v-model="quickStrategySymbol" :items="strategySymbolOptions" label="交易品种" prepend-inner-icon="mdi-currency-usd" class="mt-4" @update:model-value="loadQuickStrategySources"></v-select>
+          <v-select v-model="quickStrategyPeriod" :items="signalPeriods" label="AI 分析周期" prepend-inner-icon="mdi-clock-outline" @update:model-value="loadQuickStrategySources"></v-select>
+          <v-select
+            v-model="quickStrategySourceId"
+            :items="quickAISignalSourceOptions"
+            :loading="quickStrategyOptionsLoading"
+            label="AI 信号源"
+            prepend-inner-icon="mdi-brain"
+          ></v-select>
+          <v-alert v-if="quickSelectedAISignalSource" type="success" variant="tonal" density="compact" class="mb-3">
+            默认复用：{{ quickSelectedAISignalSource.name }} · {{ quickSelectedAISignalSource.symbol }} · {{ quickSelectedAISignalSource.period }} · 每 {{ quickSelectedAISignalSource.config?.analysis_interval_minutes || '-' }} 分钟分析
+          </v-alert>
+          <v-alert v-else type="info" variant="tonal" density="compact" class="mb-3">
+            当前没有可复用的同周期 AI 信号源，创建时会自动新建一个并共享运行数据。
+          </v-alert>
+          <v-select
+            v-model="quickStrategyPolicyId"
+            :items="quickPositionPolicyOptions"
+            label="持仓管理方案"
+            prepend-inner-icon="mdi-shield-check-outline"
+          ></v-select>
           <v-text-field v-model="quickStrategyName" label="策略名称（可选）" placeholder="例如：BTCm M5 AI 策略" prepend-inner-icon="mdi-tag-outline"></v-text-field>
           <v-alert type="info" variant="tonal" density="compact">
-            自动生成：AI 信号源、信号止损/止盈、1R 平仓 33%、到 AI 止盈再平剩余仓位 50% 后移动止损的持仓管理方案和私有草稿策略。策略不会自动部署。
+            未替换持仓管理方案时，系统自动生成：信号止损/止盈、1R 平仓 33%、到 AI 止盈再平剩余仓位 50% 后移动止损的分批止盈方案和私有草稿策略。策略不会自动部署。
           </v-alert>
         </v-card-text>
         <v-card-actions>
@@ -2218,6 +2239,10 @@ export default {
     const quickStrategySymbol = ref('')
     const quickStrategyPeriod = ref('M5')
     const quickStrategyName = ref('')
+    const quickStrategySourceId = ref('__auto__')
+    const quickStrategyPolicyId = ref('__auto__')
+    const quickStrategyOptionsLoading = ref(false)
+    const quickAISignalSources = ref([])
     const signalSourceDialog = ref(false)
     const signalSourceTarget = ref(null)
     const signalSourceEditMode = ref('add')
@@ -2320,6 +2345,20 @@ export default {
         value: item.signal_source_id,
         title: `${item.is_owner ? '我的' : `共享自 ${item.owner_username || '平台用户'}`} · ${item.name} · ${item.symbol} · ${item.period}${item.locked ? ' · 已冻结' : ''}`
       })))
+    const quickAISignalSourceOptions = computed(() => [
+      { title: '自动选择最佳共享源；没有则创建新源', value: '__auto__' },
+      ...quickAISignalSources.value.map(item => ({
+        value: item.signal_source_id,
+        title: `${item.is_owner ? '我的' : `共享自 ${item.owner_username || '平台用户'}`} · ${item.name} · ${item.symbol} · ${item.period}`
+      }))
+    ])
+    const quickSelectedAISignalSource = computed(() => quickAISignalSources.value.find(
+      item => item.signal_source_id === quickStrategySourceId.value
+    ) || null)
+    const quickPositionPolicyOptions = computed(() => [
+      { title: '自动生成 AI 信号分批止盈方案', value: '__auto__' },
+      ...positionPolicyOptions.value
+    ])
     const alphaLibraryOptions = computed(() => {
       const occupied = new Set(strategySignalSources(signalSourceTarget.value)
         .filter(item => item.source === 'alpha_factor')
@@ -2516,6 +2555,31 @@ export default {
       positionPolicies.value = data.policies || []
       if (!newStrategyPolicyId.value) {
         newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
+      }
+    }
+
+    const loadQuickStrategySources = async () => {
+      quickStrategySourceId.value = '__auto__'
+      if (!quickStrategySymbol.value) {
+        quickAISignalSources.value = []
+        return
+      }
+      quickStrategyOptionsLoading.value = true
+      try {
+        const data = await marketAPI.getAISignalSources({
+          symbol: quickStrategySymbol.value,
+          include_shared: true
+        })
+        quickAISignalSources.value = (data.items || []).filter(source => (
+          source.enabled && source.period === quickStrategyPeriod.value
+        ))
+        if (quickAISignalSources.value.length) {
+          quickStrategySourceId.value = quickAISignalSources.value[0].signal_source_id
+        }
+      } catch (error) {
+        quickAISignalSources.value = []
+      } finally {
+        quickStrategyOptionsLoading.value = false
       }
     }
 
@@ -3265,6 +3329,13 @@ export default {
           symbol: quickStrategySymbol.value,
           period: quickStrategyPeriod.value,
           strategy_name: quickStrategyName.value || undefined,
+          ai_signal_source_id: quickStrategySourceId.value === '__auto__'
+            ? undefined
+            : quickStrategySourceId.value,
+          ai_signal_source_owner_id: quickSelectedAISignalSource.value?.user_id || undefined,
+          position_management_policy_id: quickStrategyPolicyId.value === '__auto__'
+            ? undefined
+            : quickStrategyPolicyId.value,
         })
         if (data.status !== 'ok') throw new Error(data.message || '创建失败')
         successMessage.value = data.source_reused
@@ -3275,6 +3346,8 @@ export default {
         quickStrategyDialog.value = false
         quickStrategySymbol.value = ''
         quickStrategyName.value = ''
+        quickStrategySourceId.value = '__auto__'
+        quickStrategyPolicyId.value = '__auto__'
         await loadStrategies()
         const created = strategies.value.find(strategy => strategy.strategy_id === createdId)
         if (created) openStrategyDetail(created)
@@ -3284,6 +3357,15 @@ export default {
       } finally {
         quickStrategySaving.value = false
       }
+    }
+
+    const openQuickStrategyDialog = () => {
+      quickStrategyPeriod.value ||= 'M5'
+      quickStrategySourceId.value = '__auto__'
+      quickStrategyPolicyId.value = '__auto__'
+      if (!positionPolicies.value.length) loadPositionPolicies()
+      loadQuickStrategySources()
+      quickStrategyDialog.value = true
     }
 
     const addStrategy = async () => {
@@ -3488,6 +3570,12 @@ export default {
       quickStrategySymbol,
       quickStrategyPeriod,
       quickStrategyName,
+      quickStrategySourceId,
+      quickStrategyPolicyId,
+      quickStrategyOptionsLoading,
+      quickAISignalSourceOptions,
+      quickSelectedAISignalSource,
+      quickPositionPolicyOptions,
       consistencyOptions,
       positionPolicies,
       positionPolicyOptions,
@@ -3501,6 +3589,8 @@ export default {
       closeStrategyDetail,
       deleteStrategy,
       addStrategy,
+      openQuickStrategyDialog,
+      loadQuickStrategySources,
       quickCreateStrategy,
       getLifecycleMeta,
       getLifecycleColor,
@@ -3532,6 +3622,7 @@ export default {
       aiIntervalOptionsFor,
       aiSignalOptions,
       aiSignalOptionsLoading,
+      signalPeriods,
       managedAISignalSourceOptions,
       sharedAIRuntimeOptions,
       alphaLibraryOptions,
@@ -3601,6 +3692,9 @@ export default {
 .strategy-hero p { max-width: 650px; margin: 0; color: rgba(247,255,249,.76); }
 .strategy-eyebrow { color: #d9b968; font-size: .7rem; font-weight: 800; letter-spacing: .16em; }
 .strategy-primary-action { z-index: 1; background: #f6c657 !important; color: #263a31 !important; font-weight: 700; }
+.strategy-quick-action { z-index: 1; min-height: 44px; padding: 0 16px !important; border: 1px solid rgba(201, 244, 220, .72); border-radius: 12px !important; color: #f7fff9 !important; background: linear-gradient(135deg, #16865e, #0d6548) !important; box-shadow: 0 8px 18px rgba(4, 48, 33, .24); font-weight: 800; letter-spacing: .01em; }
+.strategy-quick-action:hover { border-color: #e1ffec; background: linear-gradient(135deg, #1c9b6b, #0f7855) !important; transform: translateY(-1px); }
+.strategy-quick-action__badge { margin-left: 7px; color: #145a40 !important; background: #e5f9ed !important; font-size: .62rem; font-weight: 800; }
 .strategy-main-tabs { margin-top: 22px; border-bottom: 1px solid var(--strategy-line); }
 .strategy-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 22px 0 16px; }
 .strategy-metrics article { position: relative; min-height: 106px; padding: 19px 21px; overflow: hidden; border: 1px solid var(--strategy-line); border-radius: 17px; background: #fff; }
@@ -3658,5 +3752,5 @@ export default {
 .shared-ai-runtime-list summary { margin-top: 9px; color: #176b4d; font-size: .76rem; font-weight: 700; cursor: pointer; }
 .shared-prompt-preview { max-height: 130px; margin-top: 8px; padding: 9px; overflow: auto; border-radius: 8px; background: rgba(255,255,255,.82); color: #53675e; font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .7rem; white-space: pre-wrap; }
 @media (max-width: 960px) { .strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; }.strategy-toolbar { grid-template-columns: 1fr 1fr; }.strategy-toolbar>*:first-child { grid-column: 1 / -1; } }
-	@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.settings-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero,.settings-hero { padding: 26px 22px; }.strategy-primary-action,.settings-hero .v-btn { width: 100%; }.strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article,.settings-metrics article { min-height: 104px; padding: 15px; }.settings-metrics strong { font-size: 1.28rem; }.settings-card-title { align-items: flex-start; flex-direction: column; }.user-settings-card :deep(.v-card-text) { padding: 18px 16px 22px; }.quota-table { min-width: 860px; }.quota-table :deep(.v-table__wrapper) { overflow-x: auto; }.strategy-governance-toolbar { grid-template-columns: 1fr; }.invitation-form { grid-template-columns: 1fr; }.invite-result { align-items: flex-start; flex-direction: column; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
+	@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.settings-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero,.settings-hero { padding: 26px 22px; }.strategy-primary-action,.strategy-quick-action,.settings-hero .v-btn { width: 100%; }.strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article,.settings-metrics article { min-height: 104px; padding: 15px; }.settings-metrics strong { font-size: 1.28rem; }.settings-card-title { align-items: flex-start; flex-direction: column; }.user-settings-card :deep(.v-card-text) { padding: 18px 16px 22px; }.quota-table { min-width: 860px; }.quota-table :deep(.v-table__wrapper) { overflow-x: auto; }.strategy-governance-toolbar { grid-template-columns: 1fr; }.invitation-form { grid-template-columns: 1fr; }.invite-result { align-items: flex-start; flex-direction: column; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
 </style>

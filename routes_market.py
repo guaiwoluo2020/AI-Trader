@@ -1056,12 +1056,33 @@ def create_market_routes(
                 account = TradingAccountRepository().get_primary_mt5(user.user_id)
             broker_server = str(getattr(account, "mt5_server", "") or "")
 
-            # Reuse a published source first.  The repository ranks same-broker
-            # matches ahead of other shared sources with the same symbol.
-            managed_source = ai_signal_source_repo.find_shared_for_symbol_period(
-                user.user_id, symbol, period, broker_server
-            )
+            requested_source_id = str(data.get("ai_signal_source_id") or "").strip()
+            requested_source_owner_id = data.get("ai_signal_source_owner_id")
+            managed_source = None
             created_source = False
+            if requested_source_id:
+                owner_user_id = int(requested_source_owner_id or user.user_id)
+                managed_source = ai_signal_source_repo.get_visible(
+                    user.user_id, requested_source_id, owner_user_id
+                )
+                if managed_source is None:
+                    raise ValueError("所选 AI 信号源不存在、已停用或无权使用")
+                if str(managed_source.get("period") or "").upper() != period:
+                    raise ValueError("所选 AI 信号源的分析周期与当前策略不一致")
+                source_symbol = str(managed_source.get("symbol") or "").strip()
+                if owner_user_id == user.user_id and source_symbol != symbol:
+                    raise ValueError("自己的 AI 信号源必须与策略品种一致")
+                if owner_user_id != user.user_id and source_symbol != symbol:
+                    if not instrument_mapping_repo.user_can_use_symbol(
+                        owner_user_id, source_symbol, user.user_id, symbol
+                    ):
+                        raise ValueError("所选共享 AI 信号源不适配当前品种")
+            else:
+                # Reuse a published source first. The repository ranks
+                # same-broker matches ahead of mapped symbols.
+                managed_source = ai_signal_source_repo.find_shared_for_symbol_period(
+                    user.user_id, symbol, period, broker_server
+                )
             if managed_source is None:
                 access = llm_access_repo.get_status(user.user_id, user.role)
                 if not access["access_granted"]:
@@ -1118,32 +1139,42 @@ def create_market_routes(
                 "reference_runtime_ids": [],
             }
 
-            policy = PositionManagementPolicy(
-                user_id=user.user_id,
-                name=f"{symbol} AI 信号止损止盈 · 1R分批",
-                visibility="private",
-                config={
-                    "initial_stop_rules": [{"type": "signal"}],
-                    "initial_take_profit_rules": [{"type": "signal"}],
-                    "management_rules": [{
-                        "type": "partial_take_profit",
-                        "levels": [{
-                            "level_id": "tp1_1r",
-                            "trigger_r": 1.0,
-                            "close_percent": 33.0,
-                            "move_sl": "break_even",
+            requested_policy_id = str(
+                data.get("position_management_policy_id") or ""
+            ).strip()
+            created_policy = False
+            if requested_policy_id:
+                policy = position_policy_repo.get(user.user_id, requested_policy_id)
+                if policy is None or not policy.enabled:
+                    raise ValueError("所选持仓管理方案不存在或已停用")
+            else:
+                policy = PositionManagementPolicy(
+                    user_id=user.user_id,
+                    name=f"{symbol} AI 信号止损止盈 · 1R分批",
+                    visibility="private",
+                    config={
+                        "initial_stop_rules": [{"type": "signal"}],
+                        "initial_take_profit_rules": [{"type": "signal"}],
+                        "management_rules": [{
+                            "type": "partial_take_profit",
+                            "levels": [{
+                                "level_id": "tp1_1r",
+                                "trigger_r": 1.0,
+                                "close_percent": 33.0,
+                                "move_sl": "break_even",
+                            }],
+                        }, {
+                            "type": "trailing_stop",
+                            "activation_r": 1.0,
+                            "distance_r": 0.8,
                         }],
-                    }, {
-                        "type": "trailing_stop",
-                        "activation_r": 1.0,
-                        "distance_r": 0.8,
-                    }],
-                    "signal_take_profit_close_percent": 50.0,
-                    "min_risk_reward": 1.0,
-                    "min_stop_distance": 0.0,
-                    "max_stop_distance": 0.0,
-                },
-            )
+                        "signal_take_profit_close_percent": 50.0,
+                        "min_risk_reward": 1.0,
+                        "min_stop_distance": 0.0,
+                        "max_stop_distance": 0.0,
+                    },
+                )
+                created_policy = True
 
             with quota_service.guarded():
                 quota_service.assert_can_create(user.user_id, user.role, "strategies")
@@ -1157,7 +1188,8 @@ def create_market_routes(
                         "params": signal_params,
                     }],
                 )
-                position_policy_repo.save(policy)
+                if created_policy:
+                    position_policy_repo.save(policy)
                 engine = engine_manager.get_engine_for_user(user.user_id)
                 strategy = engine.strategy_service.strategy_store.create_strategy(
                     symbol,
@@ -1198,6 +1230,7 @@ def create_market_routes(
                     "symbol": symbol, "period": period,
                     "signal_source_id": managed_source_id,
                     "source_reused": not created_source,
+                    "position_policy_reused": not created_policy,
                     "position_policy_id": policy.policy_id,
                 }, "strategy", strategy.strategy_id,
             )

@@ -10,8 +10,9 @@ import json
 import hashlib
 import re
 import time
+import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from ..models import LLMConfig, LLMAnalysisResult
@@ -38,6 +39,64 @@ class LLMService:
     # 分析间隔（秒）
     ANALYZE_INTERVAL = 300  # 5分钟
     MAX_RESPONSE_ATTEMPTS = 3
+    # All account runtimes use the same active provider. Keep a process-wide
+    # circuit breaker so a provider quota error cannot fan out across sources.
+    _provider_blocked_until: Dict[str, float] = {}
+    _provider_block_lock = threading.RLock()
+
+    @staticmethod
+    def _provider_key(config) -> str:
+        return str(getattr(config, "api_base", "") or "").rstrip("/").lower()
+
+    @classmethod
+    def _raise_if_provider_blocked(cls, config) -> None:
+        key = cls._provider_key(config)
+        if not key:
+            return
+        with cls._provider_block_lock:
+            blocked_until = float(cls._provider_blocked_until.get(key, 0))
+        remaining = blocked_until - time.time()
+        if remaining > 0:
+            minutes = max(1, int((remaining + 59) // 60))
+            raise LLMRequestError(
+                f"大模型供应商额度暂不可用，已暂停请求，约 {minutes} 分钟后再试"
+            )
+
+    @classmethod
+    def _record_provider_throttle(cls, config, detail: str) -> None:
+        """Pause the provider after 429s instead of repeatedly resending K lines."""
+        wait_seconds = 15 * 60
+        text = str(detail or "")
+        match = re.search(
+            r"reset(?:s)?\s+at\s+(\d{2})-(\d{2})\s+(\d{2}:\d{2}:\d{2})\s+UTC",
+            text,
+            flags=re.I,
+        )
+        if match:
+            month, day, clock = match.groups()
+            now_utc = datetime.now(timezone.utc)
+            try:
+                reset_at = datetime.strptime(
+                    f"{now_utc.year}-{month}-{day} {clock}",
+                    "%Y-%m-%d %H:%M:%S",
+                ).replace(tzinfo=timezone.utc)
+                if reset_at <= now_utc:
+                    reset_at = reset_at.replace(year=now_utc.year + 1)
+                wait_seconds = max(wait_seconds, int((reset_at - now_utc).total_seconds()))
+            except ValueError:
+                pass
+        key = cls._provider_key(config)
+        if not key:
+            return
+        blocked_until = time.time() + wait_seconds
+        with cls._provider_block_lock:
+            cls._provider_blocked_until[key] = max(
+                float(cls._provider_blocked_until.get(key, 0)), blocked_until
+            )
+        print(
+            "[LLMService] 供应商返回 429，已启用额度熔断，"
+            f"暂停请求约 {max(1, int((wait_seconds + 59) // 60))} 分钟"
+        )
 
     @staticmethod
     def _period_weight_items(periods) -> List[Tuple[str, int]]:
@@ -560,6 +619,7 @@ class LLMService:
         scene_code: str, object_type: str, object_id: str,
     ) -> Optional[Dict]:
         governance = self._llm_governance
+        self._raise_if_provider_blocked(self.llm_store.get_config())
         if governance is None:
             config = self.llm_store.get_config()
             reservation = {"model": model or config.model}
@@ -589,7 +649,10 @@ class LLMService:
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
-                "max_tokens": 4000
+                "max_tokens": 4000,
+                # AI signal analysis has a strict machine-readable contract.
+                # JSON mode prevents reasoning text from becoming the response.
+                "response_format": {"type": "json_object"},
             }
 
             response = requests.post(
@@ -601,6 +664,8 @@ class LLMService:
 
             if response.status_code != 200:
                 detail = self._provider_error_detail(response)
+                if response.status_code == 429:
+                    self._record_provider_throttle(config, detail)
                 print(
                     f"[LLMService] API调用失败: {response.status_code} - {detail}"
                 )
@@ -690,6 +755,7 @@ class LLMService:
         response_validator: callable = None,
     ) -> Optional[Dict]:
         governance = self._llm_governance
+        self._raise_if_provider_blocked(self.llm_store.get_config())
         if governance is None:
             config = self.llm_store.get_config()
             reservation = {"model": model or config.model}
@@ -720,7 +786,8 @@ class LLMService:
                 ],
                 "temperature": 0.3,
                 "max_tokens": 4000,
-                "stream": True
+                "stream": True,
+                "response_format": {"type": "json_object"},
             }
 
             response = requests.post(
@@ -733,6 +800,8 @@ class LLMService:
 
             if response.status_code != 200:
                 detail = self._provider_error_detail(response)
+                if response.status_code == 429:
+                    self._record_provider_throttle(config, detail)
                 print(
                     f"[LLMService] API调用失败: {response.status_code} - {detail}"
                 )
@@ -794,6 +863,11 @@ class LLMService:
                 )
             return parsed
 
+        except LLMResponseFormatError as exc:
+            if governance:
+                governance.finish_call(reservation, "failed", error=str(exc))
+            # Preserve format/contract failures so call_llm_stream retries them.
+            raise
         except LLMRequestError as exc:
             if governance:
                 governance.finish_call(reservation, "failed", error=str(exc))
@@ -817,8 +891,8 @@ class LLMService:
             return prompt
         return prompt + (
             "\n\n## 响应格式纠正\n"
-            "上一次响应为空或无法解析。请重新生成，并且只返回一个完整、合法的 "
-            "JSON 对象或数组；不要输出 Markdown 代码块、解释、前后缀或截断内容。"
+            "上一次响应未满足完整 JSON 契约。请重新生成，并且只返回一个完整、合法的 "
+            "JSON 对象；不要输出推理过程、Markdown 代码块、解释、前后缀或截断内容。"
         )
 
     def _parse_llm_response(self, content: str) -> Optional[Dict]:
@@ -843,7 +917,7 @@ class LLMService:
 
     @staticmethod
     def _message_content(message: Dict) -> str:
-        """Normalize OpenAI-compatible text and reasoning response shapes."""
+        """Extract only final response content from OpenAI-compatible payloads."""
         if not isinstance(message, dict):
             return ""
 
@@ -867,12 +941,6 @@ class LLMService:
         content = as_text(message.get("content"))
         if content.strip():
             return content
-
-        # Some reasoning models keep their final structured response here.
-        for key in ("reasoning_content", "reasoning", "analysis"):
-            fallback = as_text(message.get(key))
-            if fallback.strip():
-                return fallback
 
         # Tool-call style providers may put the JSON payload in arguments.
         for call in message.get("tool_calls") or []:
@@ -900,7 +968,7 @@ class LLMService:
             content = cls._message_content(choice.get("message") or {})
             if content.strip():
                 return content
-            for key in ("text", "content", "reasoning_content"):
+            for key in ("text", "content"):
                 value = choice.get(key)
                 if isinstance(value, str) and value.strip():
                     return value
@@ -1197,6 +1265,50 @@ class LLMService:
                 })
         return requests
 
+    @staticmethod
+    def _append_response_contract(prompt: str, analysis_plan: Dict[str, Dict]) -> str:
+        """Make the source-specific JSON shape explicit for smaller reasoning models."""
+        contracts = []
+        for symbol, symbol_plan in analysis_plan.items():
+            periods = [str(period).upper() for period in symbol_plan.get("periods", {})]
+            profiles = symbol_plan.get("strategies") or []
+            source_ids = [str(item.get("signal_source_id") or "") for item in profiles]
+            strategy_ids = [str(item.get("strategy_id") or "") for item in profiles]
+            trend_shape = {
+                period: {"trend": "趋势类型", "confidence": 0, "reason": "理由"}
+                for period in periods
+            }
+            example = {
+                symbol: {
+                    "trend_analysis": trend_shape,
+                    "overall_trend": {
+                        "direction": "方向", "strength": 0, "summary": "总结",
+                    },
+                    "key_levels": {"resistance": [], "support": []},
+                    "trade_suggestions": [],
+                }
+            }
+            contracts.append(
+                "- 顶层键必须且只能使用 %s；trend_analysis 必须包含键 %s；"
+                "trade_suggestions 可以是 []，如有建议，period 必须是 %s，"
+                "strategy_id 必须是 %s，signal_source_id 必须是 %s。\n"
+                "  最小有效 JSON 结构：%s"
+                % (
+                    json.dumps(symbol, ensure_ascii=False),
+                    json.dumps(periods, ensure_ascii=False),
+                    json.dumps(periods, ensure_ascii=False),
+                    json.dumps(strategy_ids, ensure_ascii=False),
+                    json.dumps(source_ids, ensure_ascii=False),
+                    json.dumps(example, ensure_ascii=False),
+                )
+            )
+        return prompt + (
+            "\n\n## 本次调用的强制 JSON 契约\n"
+            "以下契约优先于前文的通用输出说明。字段均区分大小写，必须完整出现；"
+            "不具备交易条件时 trade_suggestions 必须返回 []；不要输出思考过程。\n"
+            + "\n".join(contracts)
+        )
+
     def _shared_reference_context(self, share_ids: List[str]) -> str:
         references = []
         for share_id in share_ids[:10]:
@@ -1485,6 +1597,7 @@ class LLMService:
                     request["reference_runtime_ids"]
                 ),
             )
+            prompt = self._append_response_contract(prompt, request_plan)
             source_ids = sorted({
                 str(profile.get("signal_source_id") or "")
                 for item in request_plan.values()
