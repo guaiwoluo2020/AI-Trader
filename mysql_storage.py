@@ -177,6 +177,64 @@ class MySQLStorage:
                   COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS ai_trade_suggestions (
+                    suggestion_id VARCHAR(64) NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    signal_source_id VARCHAR(255) NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    period VARCHAR(16) NOT NULL,
+                    plan_fingerprint VARCHAR(128) NOT NULL,
+                    direction VARCHAR(16) NOT NULL,
+                    confidence INT NOT NULL DEFAULT 0,
+                    entry_price DOUBLE NOT NULL,
+                    stop_loss DOUBLE NOT NULL,
+                    take_profit DOUBLE NOT NULL,
+                    reason TEXT NOT NULL,
+                    analysis_at BIGINT NOT NULL,
+                    last_seen_at BIGINT NOT NULL,
+                    suggestion_count INT NOT NULL DEFAULT 1,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (suggestion_id),
+                    KEY idx_ai_trade_suggestions_source_time (
+                        user_id, signal_source_id, last_seen_at
+                    )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_sources ADD COLUMN "
+                        "market_data_account_id BIGINT NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    # The migration is idempotent; MySQL reports a duplicate
+                    # column on every startup after the first successful run.
+                    pass
+                conn.execute(
+                    """
+                    UPDATE ai_signal_sources AS source
+                    SET market_data_account_id = (
+                        SELECT account.id FROM trading_accounts AS account
+                        WHERE account.user_id = source.user_id
+                          AND account.account_type = 'mt5'
+                          AND account.status = 'active'
+                        ORDER BY COALESCE(account.last_seen_at, 0) DESC,
+                                 account.id DESC
+                        LIMIT 1
+                    )
+                    WHERE source.market_data_account_id = 0
+                      AND EXISTS (
+                        SELECT 1 FROM trading_accounts AS account
+                        WHERE account.user_id = source.user_id
+                          AND account.account_type = 'mt5'
+                          AND account.status = 'active'
+                    )
+                    """
+                )
             self._initialized = True
 
     def execute(self, sql: str, params: tuple = ()) -> None:

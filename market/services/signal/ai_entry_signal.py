@@ -91,14 +91,14 @@ class AIEntrySignalGenerator:
         try:
             matches = self._llm_analyzer.check_entry_price_nearby(
                 symbol, current_price, threshold=threshold,
-                # Cooldown and entry alerts must remain strategy-scoped. Using
-                # an empty ID here let one runtime consume another strategy's
-                # recommendation before its paper/live decision was evaluated.
                 strategy_id=strategy_id,
+                signal_source_id=signal_source_id,
             )
         except TypeError as exc:
             # Keep legacy analyzers usable while strategy-aware matching rolls out.
-            if "strategy_id" not in str(exc):
+            if not any(
+                field in str(exc) for field in ("signal_source_id", "strategy_id")
+            ):
                 raise
             matches = self._llm_analyzer.check_entry_price_nearby(
                 symbol, current_price, threshold=self.threshold,
@@ -245,16 +245,23 @@ class AIEntrySignalGenerator:
                     suggested_entry=current_price,
                 )
             else:
-                trigger_direction = trigger.action
-                trigger.market_direction = state["direction"]
-                trigger.action = direction_action(state["direction"])
-                trigger.state_ready = state["ready"]
-                trigger.confidence = state["confidence"]
-                trigger.is_entry_trigger = (
-                    state["direction"] in {"up", "down"}
-                    and trigger_direction == direction_action(state["direction"])
-                )
-                trigger.trigger_reason = state["reason"] or trigger.trigger_reason
+                # A validated near-price recommendation is an executable
+                # direction even when the broader market is range-bound.
+                # Trend state remains only the fallback when no recommendation
+                # survives the entry, exit, and confidence checks above.
+                if trigger.action in {"buy", "sell"}:
+                    trigger.market_direction = (
+                        "up" if trigger.action == "buy" else "down"
+                    )
+                    trigger.state_ready = True
+                    trigger.is_entry_trigger = True
+                else:
+                    trigger.market_direction = state["direction"]
+                    trigger.action = direction_action(state["direction"])
+                    trigger.state_ready = state["ready"]
+                    trigger.confidence = state["confidence"]
+                    trigger.is_entry_trigger = state["direction"] in {"up", "down"}
+                    trigger.trigger_reason = state["reason"] or trigger.trigger_reason
             trigger.signal_source_id = source_id
             signals.append(trigger)
         return signals
@@ -376,11 +383,18 @@ class AIEntrySignalGenerator:
                 suggested_entry=current_price,
             )
         else:
-            trigger.market_direction = state["direction"]
-            trigger.action = direction_action(state["direction"])
-            trigger.state_ready = state["ready"]
-            trigger.confidence = state["confidence"]
-            trigger.is_entry_trigger = state["direction"] in {"up", "down"}
+            # Shared AI results use the same rule as locally generated ones:
+            # a validated recommendation can trade a range boundary directly.
+            if trigger.action in {"buy", "sell"}:
+                trigger.market_direction = "up" if trigger.action == "buy" else "down"
+                trigger.state_ready = True
+                trigger.is_entry_trigger = True
+            else:
+                trigger.market_direction = state["direction"]
+                trigger.action = direction_action(state["direction"])
+                trigger.state_ready = state["ready"]
+                trigger.confidence = state["confidence"]
+                trigger.is_entry_trigger = state["direction"] in {"up", "down"}
         trigger.signal_source_id = config["signal_source_id"]
         return trigger
 

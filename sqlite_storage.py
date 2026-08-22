@@ -279,6 +279,30 @@ class SQLiteStorage:
                     CREATE INDEX IF NOT EXISTS idx_llm_call_quota
                     ON llm_call_logs(user_id, created_at, scene_code);
 
+                    CREATE TABLE IF NOT EXISTS ai_trade_suggestions (
+                        suggestion_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        signal_source_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        period TEXT NOT NULL,
+                        plan_fingerprint TEXT NOT NULL,
+                        direction TEXT NOT NULL,
+                        confidence INTEGER NOT NULL DEFAULT 0,
+                        entry_price REAL NOT NULL,
+                        stop_loss REAL NOT NULL,
+                        take_profit REAL NOT NULL,
+                        reason TEXT NOT NULL DEFAULT '',
+                        analysis_at INTEGER NOT NULL,
+                        last_seen_at INTEGER NOT NULL,
+                        suggestion_count INTEGER NOT NULL DEFAULT 1,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_ai_trade_suggestions_source_time
+                    ON ai_trade_suggestions(user_id, signal_source_id, last_seen_at DESC);
+
                     CREATE TABLE IF NOT EXISTS system_event_logs (
                         event_id TEXT PRIMARY KEY,
                         occurred_at INTEGER NOT NULL,
@@ -2880,6 +2904,25 @@ class StrategyDeploymentRepository:
         )
         return [str(row["strategy_id"]) for row in rows]
 
+    def list_for_strategy(self, user_id: int, strategy_id: str) -> List[Dict]:
+        """Return a user's account deployments for navigation and audit views."""
+        rows = self.storage.fetchall(
+            """
+            SELECT deployment.deployment_id, deployment.account_id,
+                   deployment.execution_mode, deployment.status,
+                   account.account_name, account.account_type
+            FROM strategy_deployments AS deployment
+            JOIN trading_accounts AS account ON account.id = deployment.account_id
+            WHERE deployment.user_id = ? AND deployment.strategy_id = ?
+              AND deployment.execution_mode IN ('paper', 'live')
+            ORDER BY CASE deployment.execution_mode WHEN 'paper' THEN 0 ELSE 1 END,
+                     CASE deployment.status WHEN 'active' THEN 0 ELSE 1 END,
+                     deployment.updated_at DESC
+            """,
+            (int(user_id), str(strategy_id)),
+        )
+        return [dict(row) for row in rows]
+
 
 class TradeExecutionRepository:
     """MT5 对服务端交易指令的即时执行回报。"""
@@ -3520,6 +3563,115 @@ class LLMAccessRepository:
         return self.get_status(int(row["user_id"])) if row else None
 
 
+class AITradeSuggestionRepository:
+    """Durable, source-scoped AI trade plan history."""
+
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or get_storage()
+
+    @staticmethod
+    def _plan_fingerprint(suggestion: Dict) -> str:
+        """Ignore explanatory wording so an unchanged price plan stays grouped."""
+        return "|".join((
+            str(suggestion.get("direction") or "").lower(),
+            str(suggestion.get("period") or "").upper(),
+            f"{float(suggestion.get('entry_price') or 0):.8f}",
+            f"{float(suggestion.get('stop_loss') or 0):.8f}",
+            f"{float(suggestion.get('take_profit') or 0):.8f}",
+        ))
+
+    @staticmethod
+    def _confidence(value) -> int:
+        try:
+            return max(0, min(100, int(float(value or 0))))
+        except (TypeError, ValueError):
+            return 0
+
+    def record_many(
+        self, user_id: int, symbol: str, suggestions: List[Dict],
+        analysis_at: Optional[int] = None,
+    ) -> None:
+        """Store one analysis batch, coalescing plans repeated from the prior run."""
+        now = _now_ts()
+        analysis_at = int(analysis_at or _now_ts())
+        for suggestion in suggestions or []:
+            if not isinstance(suggestion, dict):
+                continue
+            source_id = str(suggestion.get("signal_source_id") or "").strip()
+            if not source_id:
+                continue
+            try:
+                entry = float(suggestion.get("entry_price") or 0)
+                stop_loss = float(suggestion.get("stop_loss") or 0)
+                take_profit = float(suggestion.get("take_profit") or 0)
+            except (TypeError, ValueError):
+                continue
+            if min(entry, stop_loss, take_profit) <= 0:
+                continue
+            fingerprint = self._plan_fingerprint(suggestion)
+            previous = self.storage.fetchone(
+                """
+                SELECT suggestion_id FROM ai_trade_suggestions
+                WHERE user_id = ? AND signal_source_id = ? AND plan_fingerprint = ?
+                  AND analysis_at = (
+                    SELECT MAX(analysis_at) FROM ai_trade_suggestions
+                    WHERE user_id = ? AND signal_source_id = ? AND analysis_at < ?
+                  )
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (int(user_id), source_id, fingerprint, int(user_id), source_id, analysis_at),
+            )
+            if previous:
+                self.storage.execute(
+                    """
+                    UPDATE ai_trade_suggestions
+                    SET confidence = ?, reason = ?, analysis_at = ?, last_seen_at = ?,
+                        suggestion_count = suggestion_count + 1, updated_at = ?
+                    WHERE suggestion_id = ?
+                    """,
+                    (
+                        self._confidence(suggestion.get("confidence")),
+                        str(suggestion.get("reason") or "")[:4000], analysis_at,
+                        analysis_at, now, previous["suggestion_id"],
+                    ),
+                )
+                continue
+            self.storage.execute(
+                """
+                INSERT INTO ai_trade_suggestions(
+                    suggestion_id, user_id, signal_source_id, symbol, period,
+                    plan_fingerprint, direction, confidence, entry_price, stop_loss,
+                    take_profit, reason, analysis_at, last_seen_at, suggestion_count,
+                    created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex, int(user_id), source_id, str(symbol or ""),
+                    str(suggestion.get("period") or "").upper(), fingerprint,
+                    str(suggestion.get("direction") or "").lower(),
+                    self._confidence(suggestion.get("confidence")),
+                    entry, stop_loss, take_profit,
+                    str(suggestion.get("reason") or "")[:4000], analysis_at,
+                    analysis_at, now, now,
+                ),
+            )
+
+    def list_recent(self, user_id: int, signal_source_id: str, limit: int = 10) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT suggestion_id, symbol, period, direction, confidence, entry_price,
+                   stop_loss, take_profit, reason, analysis_at, last_seen_at,
+                   suggestion_count, created_at
+            FROM ai_trade_suggestions
+            WHERE user_id = ? AND signal_source_id = ?
+            ORDER BY last_seen_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (int(user_id), str(signal_source_id), max(1, min(100, int(limit)))),
+        )
+        return [dict(row) for row in rows]
+
+
 class AISignalSourceRepository:
     """Independent, reusable AI analysis sources owned by a user."""
 
@@ -3536,6 +3688,7 @@ class AISignalSourceRepository:
             "name": row["name"],
             "symbol": row["symbol"],
             "period": row["period"],
+            "market_data_account_id": int(row["market_data_account_id"] or 0),
             "config": json.loads(row["config_json"] or "{}"),
             "enabled": bool(row["enabled"]),
             "share_runtime_data": bool(row["share_runtime_data"]),
@@ -3700,13 +3853,14 @@ class AISignalSourceRepository:
         self.storage.execute(
             """
             INSERT INTO ai_signal_sources(
-                signal_source_id, user_id, name, symbol, period, config_json,
+                signal_source_id, user_id, name, symbol, period, market_data_account_id, config_json,
                 enabled, share_runtime_data, created_at, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source_id, int(user_id), str(data.get("name") or "AI 信号源").strip(),
                 str(data.get("symbol") or "").strip(), str(data.get("period") or "M5").upper(),
+                int(data.get("market_data_account_id") or 0),
                 json.dumps(data.get("config") or {}, ensure_ascii=False),
                 int(bool(data.get("enabled", True))),
                 int(bool(data.get("share_runtime_data", False))), now, now,
@@ -3724,13 +3878,14 @@ class AISignalSourceRepository:
         self.storage.execute(
             """
             UPDATE ai_signal_sources
-            SET name = ?, symbol = ?, period = ?, config_json = ?, enabled = ?,
+            SET name = ?, symbol = ?, period = ?, market_data_account_id = ?, config_json = ?, enabled = ?,
                 share_runtime_data = ?, updated_at = ?
             WHERE user_id = ? AND signal_source_id = ?
             """,
             (
                 str(merged.get("name") or "AI 信号源").strip(),
                 str(merged.get("symbol") or "").strip(), str(merged.get("period") or "M5").upper(),
+                int(merged.get("market_data_account_id") or 0),
                 json.dumps(merged.get("config") or {}, ensure_ascii=False),
                 int(bool(merged.get("enabled", True))), int(bool(merged.get("share_runtime_data", False))),
                 _now_ts(), int(user_id), str(signal_source_id),
@@ -3759,7 +3914,8 @@ class AISignalSourceRepository:
         )
 
     def is_locked(self, user_id: int, signal_source_id: str) -> bool:
-        # A shared output already consumed by another user must remain available.
+        # Draft strategies are editable and do not freeze a source. Freeze only
+        # when a referenced strategy is actively deployed to paper or live.
         share_id = f"{int(user_id)}:ai:{signal_source_id}"
         referenced_source = self.storage.fetchone(
             """
@@ -3773,30 +3929,82 @@ class AISignalSourceRepository:
             return True
         referenced = self.storage.fetchone(
             """
-            SELECT 1 FROM user_strategy_configs
-            WHERE user_id != ?
+            SELECT 1 FROM strategy_deployments AS deployment
+            JOIN user_strategy_configs AS strategy
+              ON strategy.user_id = deployment.user_id
+             AND strategy.strategy_id = deployment.strategy_id
+            WHERE deployment.status = 'active'
+              AND deployment.execution_mode IN ('paper', 'live')
               AND JSON_SEARCH(
-                  config_json, 'one', ?, NULL,
+                  strategy.config_json, 'one', ?, NULL,
                   '$.signal_sources[*].params.shared_runtime_id'
               ) IS NOT NULL
             LIMIT 1
-            """, (int(user_id), share_id),
+            """, (share_id,),
         )
         if referenced:
             return True
-        deployed = self.storage.fetchone(
+        direct_reference = self.storage.fetchone(
             """
-            SELECT 1 FROM strategy_deployments d
-            JOIN user_strategy_configs s ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
-            WHERE s.user_id = ? AND d.status IN ('active', 'paused', 'pending')
+            SELECT 1 FROM strategy_deployments AS deployment
+            JOIN user_strategy_configs AS strategy
+              ON strategy.user_id = deployment.user_id
+             AND strategy.strategy_id = deployment.strategy_id
+            WHERE deployment.status = 'active'
+              AND deployment.execution_mode IN ('paper', 'live')
               AND JSON_SEARCH(
-                  s.config_json, 'one', ?, NULL,
+                  strategy.config_json, 'one', ?, NULL,
                   '$.signal_sources[*].params.ai_signal_source_id'
               ) IS NOT NULL
             LIMIT 1
-            """, (int(user_id), str(signal_source_id)),
+            """, (str(signal_source_id),),
         )
-        return bool(deployed)
+        return bool(direct_reference)
+
+    def locked_ids(self, user_id: int, signal_source_ids: List[str]) -> set:
+        """Return locked source IDs using bulk queries instead of one call per source."""
+        source_ids = [str(item) for item in signal_source_ids if str(item)]
+        if not source_ids:
+            return set()
+        locked = set()
+        share_ids = [f"{int(user_id)}:ai:{source_id}" for source_id in source_ids]
+        share_placeholders = ",".join("?" for _ in share_ids)
+        rows = self.storage.fetchall(
+            "SELECT json_extract(config_json, '$.shared_runtime_id') AS share_id "
+            f"FROM ai_signal_sources WHERE user_id != ? AND json_extract(config_json, '$.shared_runtime_id') IN ({share_placeholders})",
+            (int(user_id), *share_ids),
+        )
+        for row in rows:
+            share_id = str(row["share_id"] or "")
+            if share_id in share_ids:
+                locked.add(share_id.rsplit(":ai:", 1)[-1])
+
+        def search_locked(values: List[str], path: str) -> None:
+            predicates = " OR ".join(
+                "JSON_SEARCH(config_json, 'one', ?, NULL, " + repr(path) + ") IS NOT NULL"
+                for _ in values
+            )
+            rows = self.storage.fetchall(
+                f"""
+                SELECT strategy.config_json FROM strategy_deployments AS deployment
+                JOIN user_strategy_configs AS strategy
+                  ON strategy.user_id = deployment.user_id
+                 AND strategy.strategy_id = deployment.strategy_id
+                WHERE deployment.status = 'active'
+                  AND deployment.execution_mode IN ('paper', 'live')
+                  AND ({predicates})
+                """,
+                tuple(values),
+            )
+            for row in rows:
+                payload = str(row["config_json"] or "")
+                for value in values:
+                    if value in payload:
+                        locked.add(value.rsplit(":ai:", 1)[-1] if ":ai:" in value else value)
+
+        search_locked(share_ids, "$.signal_sources[*].params.shared_runtime_id")
+        search_locked(source_ids, "$.signal_sources[*].params.ai_signal_source_id")
+        return locked
 
 
 class PlatformInstrumentMappingRepository:
@@ -4430,7 +4638,7 @@ class PositionManagementPolicyRepository:
             data["lifecycle_status"] = "draft"
             data["lifecycle_updated_at"] = now.isoformat()
             data["enabled"] = True
-            data["auto_execute"] = True
+            data.pop("auto_execute", None)
             data["updated_at"] = now.isoformat()
             self.storage.execute(
                 "UPDATE user_strategy_configs SET config_json = ?, updated_at = ? WHERE user_id = ? AND strategy_id = ?",
@@ -4617,7 +4825,6 @@ class StrategyConfigRepository:
             if "AI 信号源" in reason else "（来源已失效）"
         )
         reference.enabled = True
-        reference.auto_execute = True
         reference.lifecycle_status = "draft"
         reference.lifecycle_updated_at = now
         reference.strategy_name = f"{base_name}{marker}"
@@ -4950,7 +5157,6 @@ class StrategyConfigRepository:
             "is_shared": False,
             "signal_sources": [],
             "enabled": True,
-            "auto_execute": True,
             "lifecycle_status": "draft",
             "lifecycle_updated_at": now.isoformat(),
             # Store the source policy ID only.  Runtime resolution uses the
@@ -5033,7 +5239,6 @@ class StrategyConfigRepository:
             "visibility": "private",
             "is_shared": False,
             "enabled": True,
-            "auto_execute": True,
             "lifecycle_status": "draft",
             "source_strategy_id": "",
             "source_owner_user_id": 0,

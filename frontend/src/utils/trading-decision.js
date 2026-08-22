@@ -1,45 +1,49 @@
 export function normalizeTradingDecision(decision) {
+  const source = decision && typeof decision === 'object' ? decision : {}
   const rejected =
-    decision.status === 'rejected' || decision.decision_type === 'rejected'
-  const action = normalizeAction(decision.action)
+    source.status === 'rejected' || source.decision_type === 'rejected'
+  const action = normalizeAction(source.action)
 
   return {
     type: 'trading_decision',
-    decision_id: decision.decision_id,
-    symbol: decision.symbol,
-    strategy_id: decision.strategy_id,
-    strategy_name: decision.strategy_name || '未命名策略',
-    auto_execute: Boolean(decision.auto_execute),
-    auto_executed: Boolean(decision.auto_executed),
+    decision_id: source.decision_id,
+    symbol: source.symbol,
+    strategy_id: source.strategy_id,
+    strategy_name: source.strategy_name || '未命名策略',
+    auto_executed: Boolean(source.auto_executed),
+    execution_mode: source.execution_mode === 'paper' ? 'paper' : 'live',
     action,
-    status: decision.status,
+    status: source.status,
     rejected,
-    price: toNumberOrNull(decision.entry_price),
-    sl: toNumberOrNull(decision.sl),
-    tp: toNumberOrNull(decision.tp),
-    volume: toNumberOrNull(decision.volume),
-    reason: decision.decision_reason,
-    confidence: toNumberOrNull(decision.confidence_score),
-    signals: decision.signals || [],
-    signal_summary: decision.signal_summary || {},
-    risk_reward_ratio: toNumberOrNull(decision.risk_reward_ratio),
-    risk_warnings: collectRiskWarnings(decision),
+    price: toNumberOrNull(source.entry_price),
+    sl: toNumberOrNull(source.sl),
+    tp: toNumberOrNull(source.tp),
+    volume: toNumberOrNull(source.volume),
+    reason: source.decision_reason,
+    confidence: toNumberOrNull(source.confidence_score),
+    signals: source.signals || [],
+    signal_summary: source.signal_summary || {},
+    risk_reward_ratio: toNumberOrNull(source.risk_reward_ratio),
+    risk_warnings: collectRiskWarnings(source),
     timestamp:
-      decision.created_at || decision.timestamp || new Date().toISOString(),
+      source.created_at || source.timestamp || new Date().toISOString(),
+    observation_count: Math.max(1, Number(source.observation_count) || 1),
+    first_observed_at: source.first_observed_at || null,
+    last_observed_at: source.last_observed_at || null,
     pending_order:
-      !rejected && decision.order_id
+      !rejected && source.order_id
         ? {
-            order_id: decision.order_id,
+            order_id: source.order_id,
             action: action === 'buy' ? 'b' : 's',
-            price: toNumberOrNull(decision.entry_price),
-            sl: toNumberOrNull(decision.sl),
-            tp: toNumberOrNull(decision.tp),
-            mount: toNumberOrNull(decision.volume),
-            reason: decision.decision_reason,
-            strategy_id: decision.strategy_id,
-            strategy_name: decision.strategy_name || '未命名策略',
-            confirmed: Boolean(decision.auto_executed),
-            auto_executed: Boolean(decision.auto_executed),
+            price: toNumberOrNull(source.entry_price),
+            sl: toNumberOrNull(source.sl),
+            tp: toNumberOrNull(source.tp),
+            mount: toNumberOrNull(source.volume),
+            reason: source.decision_reason,
+            strategy_id: source.strategy_id,
+            strategy_name: source.strategy_name || '未命名策略',
+            confirmed: Boolean(source.auto_executed),
+            auto_executed: Boolean(source.auto_executed),
           }
         : null,
   }

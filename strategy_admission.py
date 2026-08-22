@@ -15,7 +15,7 @@ def strategy_fingerprint(strategy: Dict) -> str:
     ignored = {
         "strategy_name", "lifecycle_status", "lifecycle_label",
         "lifecycle_updated_at", "lifecycle_history", "created_at", "updated_at",
-        "enabled", "auto_execute",
+        "enabled",
     }
     payload = {key: value for key, value in strategy.items() if key not in ignored}
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

@@ -37,7 +37,6 @@ class PaperTradingServiceTests(unittest.TestCase):
             "strategy_name": "Gold Auto",
             "symbol": "GOLD_",
             "enabled": True,
-            "auto_execute": True,
             "max_positions": 3,
             "max_same_direction": 2,
             "position_management_policy_id": "policy-1",
@@ -90,7 +89,6 @@ class PaperTradingServiceTests(unittest.TestCase):
             "symbol": "GOLD_",
             "action": "buy",
             "status": "confirmed",
-            "auto_execute": True,
             "entry_price": 3000,
             "sl": 2990,
             "tp": 3010,
@@ -348,21 +346,11 @@ class PaperTradingServiceTests(unittest.TestCase):
         )
         self.assertEqual(order["status"], "canceled")
 
-    def test_paper_deployment_executes_without_enabling_live_auto_trade(self):
-        config_row = self.storage.fetchone(
-            "SELECT config_json FROM user_strategy_configs WHERE strategy_id = 'strategy-1'"
-        )
-        config = json.loads(config_row["config_json"])
-        config["auto_execute"] = False
-        self.storage.execute(
-            "UPDATE user_strategy_configs SET config_json = ? WHERE strategy_id = 'strategy-1'",
-            (json.dumps(config),),
-        )
+    def test_paper_deployment_executes_without_live_auto_trade_setting(self):
         self.service.deploy(
             self.user.user_id, self.account.account_id, "strategy-1"
         )
         decision = self.decision("paper-only")
-        decision["auto_execute"] = False
 
         self.assertEqual(
             self.service.enqueue_decisions(self.user.user_id, [decision]), 1
@@ -741,7 +729,6 @@ class PaperTradingServiceTests(unittest.TestCase):
         live = self._create_live_account("12345678")
         self.update_strategy_config({
             "enabled": False,
-            "auto_execute": False,
             "lifecycle_status": "production",
         })
 
@@ -753,7 +740,6 @@ class PaperTradingServiceTests(unittest.TestCase):
         live = self._create_live_account("12345679")
         self.update_strategy_config({
             "enabled": True,
-            "auto_execute": True,
             "lifecycle_status": "production",
         })
 

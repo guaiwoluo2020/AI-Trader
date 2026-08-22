@@ -402,6 +402,49 @@ class M1BacktestEngineTests(unittest.TestCase):
         self.assertEqual(signals[0].suggested_sl, 0)
         self.assertEqual(signals[0].suggested_tp, 0)
 
+    def test_range_bound_ai_recommendation_remains_an_entry_signal(self):
+        suggestion = {
+            "signal_source_id": "source-ai",
+            "period": "M5", "direction": "buy", "confidence": 80,
+            "entry_price": 100, "stop_loss": 99, "take_profit": 102,
+            "reason": "支撑位反弹",
+        }
+
+        class Analyzer:
+            @staticmethod
+            def check_entry_price_nearby(*_args, **_kwargs):
+                return [suggestion]
+
+            @staticmethod
+            def get_analysis(_symbol):
+                return {
+                    "trend_analysis": {
+                        "M5": {
+                            "trend": "横盘", "confidence": 60,
+                            "reason": "区间震荡",
+                        },
+                    },
+                }
+
+        strategy = SimpleNamespace(
+            strategy_id="range-strategy", min_confidence=70,
+            get_signal_sources=lambda *_args, **_kwargs: [{
+                "signal_source_id": "source-ai", "source": "ai_entry",
+                "period": "M5", "enabled": True,
+                "params": {"min_confidence": 70, "entry_threshold": 0.001},
+            }],
+        )
+        generator = AIEntrySignalGenerator()
+        generator.set_llm_analyzer(Analyzer())
+
+        signal = generator.generate_signals_for_strategy("BTCUSD", 100, strategy)[0]
+
+        self.assertEqual(signal.action, "buy")
+        self.assertEqual(signal.market_direction, "up")
+        self.assertEqual(signal.confidence, 80)
+        self.assertTrue(signal.state_ready)
+        self.assertTrue(signal.is_entry_trigger)
+
     def test_shared_ai_runtime_becomes_current_strategy_signal_source(self):
         shared = {
             "share_id": "2:source-strategy:source-ai",
@@ -413,7 +456,7 @@ class M1BacktestEngineTests(unittest.TestCase):
             "signal_params": {"analysis_interval_minutes": 5},
             "result": {
                 "trend_analysis": {
-                    "M5": {"trend": "up", "confidence": 88, "reason": "上升"}
+                    "M5": {"trend": "横盘", "confidence": 60, "reason": "区间震荡"}
                 },
                 "trade_suggestions": [{
                     "signal_source_id": "source-ai",
@@ -447,6 +490,8 @@ class M1BacktestEngineTests(unittest.TestCase):
         repeated = generator.generate_signals_for_strategy("GOLD_", 3000.0, strategy)
 
         self.assertEqual(first[0].action, "buy")
+        self.assertEqual(first[0].market_direction, "up")
+        self.assertEqual(first[0].confidence, 88)
         self.assertTrue(first[0].is_entry_trigger)
         self.assertEqual(first[0].signal_source_id, "consumer-ai")
         self.assertIn("shared-user", first[0].trigger_reason)

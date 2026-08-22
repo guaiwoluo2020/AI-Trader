@@ -28,6 +28,7 @@ from market.services import (
     MovingAverageSignalGenerator, AlphaFactorSignalGenerator,
 )
 from market.services import StatisticsService, PositionService, TradeHistoryService
+from market.services.strategy.transient_decision_store import transient_decision_store
 from market.trade_config import TradeConfig
 from market.llm_analyzer import LLMAnalyzer
 from market.system_log import SystemLog
@@ -439,7 +440,8 @@ class TradingServer:
             if not allow_new_orders:
                 continue
             decision = self.strategy_service.make_decision(
-                symbol, current_price, force_signals=signals, strategy=strategy
+                symbol, current_price, force_signals=signals, strategy=strategy,
+                audit_no_action=True,
             )
             if decision is not None:
                 # Strategy matching may use a platform canonical symbol (for
@@ -458,7 +460,6 @@ class TradingServer:
                         "symbol": decision.symbol,
                         "strategy_id": decision.strategy_id,
                         "strategy_name": decision.strategy_name,
-                        "auto_execute": decision.auto_execute,
                         "auto_executed": decision.auto_executed,
                         "confirmed": decision.auto_executed,
                         "action": decision.action,
@@ -470,6 +471,14 @@ class TradingServer:
                     result["pending_orders"].append(pending_order)
 
             self._record_decision(decision)
+
+            # Waiting states are aggregated in process only.  Keeping them out
+            # of the EA response also avoids returning one payload per quote.
+            if (
+                decision.action == "none"
+                and decision.decision_type == "no_action"
+            ):
+                continue
 
             # 创建待确认订单后再序列化和广播，确保携带真实 order_id。
             result["decisions"].append(decision.to_dict())
@@ -847,6 +856,16 @@ class TradingServer:
     # ==================== 决策历史 ====================
 
     def _record_decision(self, decision: TradingDecision) -> None:
+        if decision.action == "none" and decision.decision_type == "no_action":
+            # Quote-driven waiting states are useful operational context but
+            # must not crowd out execution history in MySQL.
+            transient_decision_store.record(
+                self.user_id, self.account_id, decision,
+            )
+            return
+        transient_decision_store.clear_for_strategy(
+            self.user_id, self.account_id, decision.strategy_id, decision.symbol,
+        )
         self._decision_history.append(decision)
         rejected = decision.status == "rejected"
         self.system_log.add_log(
@@ -890,7 +909,7 @@ class TradingServer:
                 continue
             decision.status = status
             if status == "confirmed":
-                decision.auto_executed = decision.auto_executed or decision.auto_execute
+                decision.auto_executed = True
             if self._runtime_repository:
                 self._runtime_repository.upsert_entity(
                     "strategy_decision",
@@ -911,8 +930,31 @@ class TradingServer:
         date_from: str = None,
         date_to: str = None,
     ) -> List[Dict]:
-        """获取当前账户的持久化决策历史，最新记录优先。"""
+        """获取当前账户的执行历史和聚合后的内存等待状态。"""
         decisions = list(self._decision_history)
+        if self._runtime_repository:
+            # Paper execution is driven by the paper engine, which persists its
+            # audits directly. Reload so an already-running web engine sees
+            # those decisions without needing a restart.
+            persisted = []
+            for item in self._runtime_repository.list_entities("strategy_decision"):
+                try:
+                    persisted.append(TradingDecision.from_dict(item))
+                except (TypeError, ValueError):
+                    continue
+            decisions_by_id = {item.decision_id: item for item in decisions}
+            decisions_by_id.update({item.decision_id: item for item in persisted})
+            decisions = list(decisions_by_id.values())
+        # Legacy no-action rows can remain in MySQL, but are superseded by the
+        # current in-memory aggregate and should not consume the UI history.
+        decisions = [
+            item for item in decisions
+            if not (
+                item.action == "none"
+                and item.decision_type == "no_action"
+            )
+        ]
+        decisions.extend(transient_decision_store.list(self.user_id, self.account_id))
         if symbol:
             decisions = [d for d in decisions if d.symbol == symbol]
         if strategy_id:
@@ -925,6 +967,7 @@ class TradingServer:
         if date_to:
             end = datetime.fromisoformat(date_to)
             decisions = [d for d in decisions if d.created_at and d.created_at <= end]
+        decisions.sort(key=lambda item: item.created_at or datetime.min)
         return [d.to_dict() for d in reversed(decisions[-max(1, min(count, 200)):])]
 
     def get_dashboard_overview(self, account) -> Dict:
@@ -988,7 +1031,6 @@ class TradingServer:
                 "symbol": strategy.symbol,
                 "lifecycle_status": strategy.lifecycle_status,
                 "enabled": True,
-                "auto_execute": True,
                 "direction": direction,
                 "confidence": round(float(confidence or 0), 2),
                 "latest_decision": decision,
@@ -1018,13 +1060,14 @@ class TradingServer:
 
         ai_cards = [
             card for card in self.get_ai_market_cards()
-            if card.get("strategy_id") in deployed_ids
-            and card.get("status") != "strategy_inactive"
+            if any(
+                item.get("strategy_id") in deployed_ids
+                for item in card.get("linked_strategies", [])
+            ) and card.get("status") != "source_disabled"
         ]
         ai_priority = {
-            "decision_created": 0, "signal_formed": 1,
-            "ready_to_signal": 2, "waiting_price": 3,
-            "observing": 4, "waiting_analysis": 5, "expired": 6,
+            "analysis_ready": 0, "observing": 1,
+            "waiting_analysis": 2, "expired": 3,
         }
         ai_cards.sort(key=lambda card: (
             ai_priority.get(card.get("status"), 9),
@@ -1253,7 +1296,7 @@ class TradingServer:
     def _independent_ai_market_card(
         self, source: Dict, analysis: Dict,
     ) -> Dict:
-        """Render an AI source that has not yet been bound to a strategy."""
+        """Render one AI market card for one managed analysis source."""
         params = dict(source.get("config") or {})
         source_id = str(source.get("signal_source_id") or "")
         source_symbol = str(source.get("symbol") or "")
@@ -1282,7 +1325,6 @@ class TradingServer:
             or trend.get("confidence")
             or 0
         )
-        minimum = int(params.get("min_confidence", 70) or 0)
         entry_price = float((suggestion or {}).get("entry_price", 0) or 0)
         threshold = float(params.get("entry_threshold", 0.0008) or 0)
         distance_ratio = (
@@ -1291,36 +1333,25 @@ class TradingServer:
         )
 
         if not source.get("enabled", True):
-            status, reason = "strategy_inactive", "独立 AI 信号源尚未启用"
+            status, reason = "source_disabled", "AI 信号源尚未启用"
         elif not analysis:
             status, reason = "waiting_analysis", "等待首次 AI 分析"
         elif analysis.get("data_stale") or analysis.get("market_status") in {
             "stale", "closed",
         }:
             status, reason = "expired", "行情未更新，当前分析仅供参考"
-        elif confidence < minimum:
-            status, reason = (
-                "observing",
-                f"独立分析置信度 {confidence}% 低于要求 {minimum}%",
-            )
+        elif suggestion is not None:
+            status, reason = "analysis_ready", "模型已给出可供策略评估的交易建议"
         elif direction == "sideways":
-            status, reason = "observing", "独立 AI 分析判断为震荡"
+            status, reason = "observing", "AI 判断为区间震荡，当前没有边界交易建议"
         elif suggestion is None:
             status, reason = "observing", "已有方向判断，但模型尚未给出有效入场建议"
-        else:
-            status, reason = (
-                "observing",
-                "独立 AI 分析已完成；绑定策略后可参与交易决策",
-            )
 
         return {
-            "card_id": f"independent:{source_id}",
+            "card_id": f"source:{source_id}",
             "analysis_mode": "self_analysis",
             "derived_from_shared": False,
-            "strategy_id": "",
-            "strategy_name": source.get("name") or "独立 AI 信号源",
-            "strategy_lifecycle": "independent",
-            "strategy_enabled": False,
+            "source_name": source.get("name") or "AI 信号源",
             "signal_source_id": source_id,
             "source_enabled": source.get("enabled", True),
             "symbol": source_symbol,
@@ -1328,7 +1359,6 @@ class TradingServer:
             "model": params.get("model", ""),
             "direction": direction,
             "confidence": confidence,
-            "min_confidence": minimum,
             "status": status,
             "status_reason": reason,
             "current_price": current_price,
@@ -1348,185 +1378,54 @@ class TradingServer:
                 params.get("analysis_interval_minutes", 5) or 5
             ),
             "kline_count": int(params.get("kline_count", 100) or 100),
+            "reference_market_data": params.get("reference_market_data") or [],
             "share_runtime_data": bool(source.get("share_runtime_data", False)),
             "system_prompt": params.get("system_prompt", ""),
             "analysis_prompt_template": params.get(
                 "analysis_prompt_template", ""
             ),
-            "signal": None,
-            "decision": None,
         }
 
     def get_ai_market_cards(self, symbol: str = None) -> List[Dict]:
-        """Render strategy-bound and independent AI analysis sources."""
+        """Render exactly one market-analysis card per owned AI source."""
         analyses = self.get_llm_analysis() or {}
-        active_signals = self._signal_service.get_active_signals()
         cards = []
-        bound_source_ids = set()
-        for strategy in self._strategy_store.get_all_strategies():
-            if symbol and strategy.symbol != symbol:
-                continue
-            for source in strategy.get_signal_sources("ai_entry"):
-                params = source.get("params") or {}
-                managed_source_id = str(
-                    params.get("ai_signal_source_id") or ""
-                ).strip()
-                if managed_source_id:
-                    bound_source_ids.add(managed_source_id)
-                managed_source = self._ai_signal_source_repository.get(
-                    int(self.user_id or 0), managed_source_id
-                ) if managed_source_id else None
-                current_price = self._latest_market_price(strategy.symbol)
-                if params.get("analysis_mode", "self_analysis") == "shared_reference":
-                    cards.append(self._shared_ai_market_card(
-                        strategy, source, current_price, active_signals
-                    ))
-                    continue
-                period = source.get("period", "")
-                source_id = source.get("signal_source_id", "")
-                analysis = analyses.get(strategy.symbol) or {}
-                trend = (analysis.get("trend_analysis") or {}).get(period) or {}
-                suggestions = [
-                    item for item in (analysis.get("trade_suggestions") or [])
-                    if item.get("signal_source_id") == source_id
-                    or (
-                        not item.get("signal_source_id")
-                        and item.get("strategy_id") == strategy.strategy_id
-                        and item.get("period") == period
-                    )
-                ]
-                suggestion = max(
-                    suggestions,
-                    key=lambda item: int(item.get("confidence", 0) or 0),
-                    default=None,
-                )
-                signal = next((
-                    item for item in active_signals
-                    if item.strategy_id == strategy.strategy_id
-                    and item.signal_source_id == source_id
-                ), None)
-                analyzed_at = analysis.get("analyzed_at")
-                decision = None
-                for candidate in reversed(self._decision_history):
-                    if analyzed_at and candidate.created_at:
-                        try:
-                            if candidate.created_at < datetime.fromisoformat(analyzed_at):
-                                continue
-                        except (TypeError, ValueError):
-                            pass
-                    if any(
-                        item.get("signal_source_id") == source_id
-                        for item in candidate.signals
-                    ):
-                        decision = candidate
-                        break
-
-                direction = self._ai_direction(
-                    (suggestion or {}).get("direction") or trend.get("trend")
-                )
-                confidence = int(
-                    (suggestion or {}).get("confidence")
-                    or trend.get("confidence")
-                    or 0
-                )
-                min_confidence = int(params.get("min_confidence", 70) or 0)
-                entry_price = float((suggestion or {}).get("entry_price", 0) or 0)
-                threshold = float(params.get("entry_threshold", 0.0008) or 0)
-                distance_ratio = (
-                    abs(current_price - entry_price) / entry_price
-                    if current_price > 0 and entry_price > 0 else None
-                )
-
-                if not source.get("enabled", True):
-                    status, status_reason = "strategy_inactive", "信号源尚未启用"
-                elif not analysis:
-                    status, status_reason = "waiting_analysis", "等待首次 AI 分析"
-                elif analysis.get("data_stale") or analysis.get("market_status") in {"stale", "closed"}:
-                    status, status_reason = "expired", "行情未更新，当前分析仅供参考"
-                elif decision is not None:
-                    status, status_reason = "decision_created", "已参与策略聚合并生成交易决策"
-                elif signal is not None and signal.is_entry_trigger:
-                    status, status_reason = "signal_formed", "置信度与入场价格条件均已满足"
-                elif confidence < min_confidence:
-                    status, status_reason = (
-                        "observing",
-                        f"置信度 {confidence}% 低于策略要求 {min_confidence}%",
-                    )
-                elif direction == "sideways":
-                    status, status_reason = "observing", "AI 判断为震荡，暂不形成方向信号"
-                elif suggestion is None:
-                    status, status_reason = "observing", "已有方向判断，但模型尚未给出有效入场建议"
-                elif distance_ratio is None:
-                    status, status_reason = "waiting_price", "等待实时价格后检查入场距离"
-                elif distance_ratio > threshold:
-                    status, status_reason = (
-                        "waiting_price",
-                        f"当前价格距建议入场价 {distance_ratio * 100:.3f}%",
-                    )
-                else:
-                    status, status_reason = "ready_to_signal", "价格已进入触发区，等待策略处理"
-
-                cards.append({
-                    "card_id": f"{strategy.strategy_id}:{source_id}",
-                    "analysis_mode": "self_analysis",
-                    "derived_from_shared": False,
-                    "strategy_id": strategy.strategy_id,
-                    "strategy_name": strategy.strategy_name,
-                    "strategy_lifecycle": strategy.lifecycle_status,
-                    "strategy_enabled": True,
-                    "signal_source_id": source_id,
-                    "source_enabled": source.get("enabled", True),
-                    "symbol": strategy.symbol,
-                    "period": period,
-                    "model": params.get("model", ""),
-                    "direction": direction,
-                    "confidence": confidence,
-                    "min_confidence": min_confidence,
-                    "status": status,
-                    "status_reason": status_reason,
-                    "current_price": current_price,
-                    "entry_price": entry_price,
-                    "stop_loss": float((suggestion or {}).get("stop_loss", 0) or 0),
-                    "take_profit": float((suggestion or {}).get("take_profit", 0) or 0),
-                    "entry_threshold": threshold,
-                    "distance_ratio": distance_ratio,
-                    "trend": trend,
-                    "overall_trend": analysis.get("overall_trend"),
-                    "key_levels": analysis.get("key_levels"),
-                    "suggestion": suggestion,
-                    "analyzed_at": analyzed_at,
-                    "market_status": analysis.get("market_status", "unknown"),
-                    "data_stale": bool(analysis.get("data_stale", False)),
-                    "analysis_interval_minutes": int(
-                        params.get("analysis_interval_minutes", 5) or 5
-                    ),
-                    "kline_count": int(params.get("kline_count", 100) or 100),
-                    "share_runtime_data": bool(
-                        (managed_source or {}).get("share_runtime_data", False)
-                    ),
-                    "system_prompt": params.get("system_prompt", ""),
-                    "analysis_prompt_template": params.get(
-                        "analysis_prompt_template", ""
-                    ),
-                    "signal": signal.to_dict() if signal else None,
-                    "decision": decision.to_dict() if decision else None,
-                })
-
         if self.user_id is not None:
             for source in self._ai_signal_source_repository.list(self.user_id):
                 source_id = str(source.get("signal_source_id") or "")
-                if source_id in bound_source_ids:
-                    continue
                 if symbol and source.get("symbol") != symbol:
                     continue
                 if (source.get("config") or {}).get(
                     "analysis_mode", "self_analysis"
                 ) != "self_analysis":
                     continue
-                cards.append(self._independent_ai_market_card(
+                card = self._independent_ai_market_card(
                     source, analyses.get(source.get("symbol")) or {},
-                ))
+                )
+                card["linked_strategies"] = self._linked_ai_strategies(source_id)
+                cards.append(card)
         return cards
+
+    def _linked_ai_strategies(self, managed_source_id: str) -> List[Dict]:
+        """List consumers without letting their rules alter the AI analysis."""
+        linked = []
+        for strategy in self._strategy_store.get_all_strategies():
+            for binding in strategy.get_signal_sources("ai_entry"):
+                params = binding.get("params") or {}
+                if str(params.get("ai_signal_source_id") or "") != managed_source_id:
+                    continue
+                deployment_repo = getattr(self, "strategy_deployments", None)
+                linked.append({
+                    "strategy_id": strategy.strategy_id,
+                    "strategy_name": strategy.strategy_name,
+                    "lifecycle_status": strategy.lifecycle_status,
+                    "binding_id": binding.get("signal_source_id", ""),
+                    "enabled": bool(binding.get("enabled", True)),
+                    "deployments": deployment_repo.list_for_strategy(
+                        int(self.user_id or 0), strategy.strategy_id,
+                    ) if deployment_repo else [],
+                })
+        return linked
 
     def get_llm_status(self) -> Dict:
         """获取大模型分析器状态"""

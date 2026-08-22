@@ -8,7 +8,7 @@
       ></v-app-bar-nav-icon>
       <v-toolbar-title>AITrader</v-toolbar-title>
       <v-spacer></v-spacer>
-      <AccountSelector v-if="showAccountSelector" class="mr-4" />
+      <AccountSelector v-if="showAccountSelector" :account-types="accountSelectorTypes" class="mr-4" />
       <div class="user-badge">{{ currentUsername }}</div>
       <v-btn variant="text" @click="logout">退出登录</v-btn>
     </v-app-bar>
@@ -128,8 +128,11 @@ export default {
     })))
     const showShell = computed(() => !route.meta.public)
     const currentUsername = computed(() => authState.user?.username || '未登录')
-    const accountRoutes = new Set(['Dashboard', 'TradeOrders', 'AIMarket', 'Market', 'Positions'])
+    const accountRoutes = new Set(['Dashboard', 'TradeOrders', 'Positions'])
     const showAccountSelector = computed(() => accountRoutes.has(route.name))
+    const accountSelectorTypes = computed(() => (
+      route.name === 'Dashboard' ? ['mt5'] : null
+    ))
     const { loadAccountContext } = useAccountContext()
 
     watch(
@@ -174,6 +177,7 @@ export default {
       showShell,
       currentUsername,
       showAccountSelector,
+      accountSelectorTypes,
       toggleDrawer,
       closeDrawer,
       logout,

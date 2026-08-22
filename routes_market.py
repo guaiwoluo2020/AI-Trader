@@ -21,16 +21,22 @@ from market.models.llm_config import (
     DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
     DEFAULT_SYSTEM_PROMPT,
 )
-from llm_governance import AI_SIGNAL_ANALYSIS, LLMGovernanceError, LLMGovernanceService
+from llm_governance import (
+    AI_SIGNAL_ANALYSIS, AI_SIGNAL_PROMPT_GENERATION,
+    LLMGovernanceError, LLMGovernanceService,
+)
+from market.services.llm_service import LLMRequestError
 from membership import MembershipService
 from sqlite_storage import (
     LLMAccessRepository,
     LLMConfigRepository,
     AISignalSourceRepository,
+    AITradeSuggestionRepository,
     SharedAIRuntimeRepository,
     PositionManagementPolicyRepository,
     PlatformInstrumentMappingRepository,
     StrategyConfigRepository,
+    StrategyDeploymentRepository,
     TradeConfigRepository,
     TradingAccountRepository,
     UserRepository,
@@ -47,6 +53,81 @@ from shared_notifications import SharedReferenceNotificationService
 from instrument_price_store import get_instrument_price_store
 
 
+AI_SIGNAL_SOURCE_RUNTIME_CONTRACT = {
+    "runtime_variables": [
+        {
+            "name": "{{market_data}}",
+            "required": True,
+            "description": "主品种、主周期的 K 线 Markdown 表格。只有配置数量的主 K 线完整可用时才会调用模型。",
+            "fields": ["timestamp", "open", "high", "low", "close"],
+        },
+        {
+            "name": "{{current_price}}",
+            "required": True,
+            "description": "主品种最新可观测报价，来自最新 M1 K 线的 close；用于理解当前市场位置和风险，不限制交易建议必须立即入场。",
+            "fields": ["symbol", "price", "timestamp", "source_period"],
+            "restriction": "报价不可用时仅能输出趋势分析，不能输出交易建议。",
+        },
+        {
+            "name": "{{reference_market_data}}",
+            "required": False,
+            "description": "配置后的参考品种或周期 K 线表格；未配置时为空。仅能辅助主行情判断。",
+            "fields": ["timestamp", "open", "high", "low", "close"],
+            "restriction": "不得据此单独输出趋势或交易建议。",
+        },
+    ],
+    "output_contract": {
+        "top_level": "必须以实际主品种名称作为唯一顶层键。",
+        "required": [
+            "trend_analysis[主周期].trend",
+            "trend_analysis[主周期].confidence（0-100）",
+            "trend_analysis[主周期].reason",
+            "trade_suggestions（没有机会时为 []）",
+        ],
+        "trade_suggestion": [
+            "signal_source_id", "period（必须为主周期）", "direction（buy 或 sell）",
+            "confidence（0-100）", "entry_price", "stop_loss", "take_profit", "reason",
+        ],
+        "price_rules": [
+            "buy: stop_loss < entry_price < take_profit",
+            "sell: take_profit < entry_price < stop_loss",
+        ],
+    },
+    "strategy_usage": [
+        "trend_analysis 用于策略的趋势共识判断。",
+        "trade_suggestions 是基于K线结构的未来价格计划；区间可给支撑买入/压力卖出，趋势可给回调或反抽顺势入场。策略只会在实际 Tick 接近 entry_price 时转为入场信号。",
+        "随后仍会校验止损止盈方向、最低盈亏比、最大风险和策略仓位限制。",
+    ],
+}
+AI_SIGNAL_KLINE_MIN_COUNT = 10
+AI_SIGNAL_KLINE_MAX_COUNT = 288
+
+
+def collect_ai_signal_symbols(
+    user_id: int,
+    engine_manager: TradingEngineManager,
+    trade_config_repo,
+    strategy_repo,
+    ai_signal_source_repo,
+) -> List[str]:
+    """Merge configured symbols with symbols currently reported by the EA."""
+    symbols = set()
+    engine = engine_manager.get_engine_for_user(user_id)
+    symbols.update(engine.kline_service.get_symbols())
+
+    config = trade_config_repo.get_config(user_id)
+    symbols.update(config.get("symbol_config", {}).keys())
+    symbols.update(
+        strategy.symbol for strategy in strategy_repo.get_all_strategies(user_id)
+        if strategy.symbol
+    )
+    symbols.update(
+        source["symbol"] for source in ai_signal_source_repo.list(user_id)
+        if source.get("symbol")
+    )
+    return sorted(symbols)
+
+
 def create_market_routes(
     engine_manager: TradingEngineManager,
 ) -> APIRouter:
@@ -56,6 +137,7 @@ def create_market_routes(
 
     trade_config_repo = TradeConfigRepository()
     strategy_repo = StrategyConfigRepository()
+    strategy_deployment_repo = StrategyDeploymentRepository()
     position_policy_repo = PositionManagementPolicyRepository()
     llm_config_repo = LLMConfigRepository()
     llm_access_repo = LLMAccessRepository()
@@ -1093,29 +1175,67 @@ def create_market_routes(
                 models = scene.get("models") or []
                 if not models:
                     raise ValueError("管理员尚未为 AI 行情与交易信号配置可用模型")
+                requested_model = str(data.get("model") or "").strip()
+                if requested_model and requested_model not in models:
+                    raise ValueError("所选 AI 模型未被管理员为 AI 行情与交易信号场景开放")
+                source_config = {
+                    "analysis_mode": "self_analysis",
+                    "analysis_interval_minutes": max(
+                        {"M1": 1, "M5": 5, "M15": 15, "H1": 60, "H4": 240}[period],
+                        int(data.get("analysis_interval_minutes") or 5),
+                    ),
+                    "kline_count": max(
+                        AI_SIGNAL_KLINE_MIN_COUNT,
+                        min(AI_SIGNAL_KLINE_MAX_COUNT, int(data.get("kline_count") or 288)),
+                    ),
+                    "entry_threshold": float(data.get("entry_threshold") or 0.0008),
+                    "model": requested_model or str(models[0]),
+                    "reference_runtime_ids": [],
+                    "reference_market_data": [],
+                }
+                generator_scene = llm_governance.scene_options(
+                    user.user_id, AI_SIGNAL_PROMPT_GENERATION
+                )
+                generator_prompt = str(
+                    generator_scene.get("user_prompt_template") or ""
+                ).replace(
+                    "{{signal_source_config}}",
+                    json.dumps({
+                        "name": f"{symbol} AI {period}", "symbol": symbol,
+                        "period": period,
+                        "analysis_interval_minutes": source_config["analysis_interval_minutes"],
+                        "kline_count": source_config["kline_count"],
+                        "reference_market_data": [],
+                    }, ensure_ascii=False),
+                ).replace(
+                    "{{user_intent}}",
+                    str(data.get("prompt_intent") or "识别主周期趋势、关键位置和满足条件的入场机会；数据不足时不要给出交易建议。"),
+                )
+                _, prompt_engine = resolve_web_engine(engine_manager, user, None)
+                prompt_result = await asyncio.to_thread(
+                    prompt_engine.llm_service.call_llm,
+                    generator_prompt, None, None, AI_SIGNAL_PROMPT_GENERATION,
+                    "ai_signal_prompt_candidate", "quick-create", 8000,
+                )
+                if not isinstance(prompt_result, dict):
+                    raise ValueError(
+                        "自动生成 AI 信号源提示词失败，请先在 AI 信号源页面生成后再创建策略"
+                    )
+                source_config.update({
+                    "prompt_mode": "custom",
+                    "system_prompt": str(prompt_result.get("system_prompt") or "").strip(),
+                    "analysis_prompt_template": str(
+                        prompt_result.get("analysis_prompt_template") or ""
+                    ).strip(),
+                })
+                normalize_ai_signal_prompt_config(source_config)
                 managed_source = ai_signal_source_repo.create(user.user_id, {
                     "name": f"{symbol} AI {period}",
                     "symbol": symbol,
                     "period": period,
                     "enabled": True,
                     "share_runtime_data": True,
-                    "config": {
-                        "analysis_mode": "self_analysis",
-                        "analysis_interval_minutes": max(
-                            {"M1": 1, "M5": 5, "M15": 15, "H1": 60, "H4": 240}[period],
-                            int(data.get("analysis_interval_minutes") or 5),
-                        ),
-                        "kline_count": max(10, min(500, int(data.get("kline_count") or 300))),
-                        "min_confidence": max(0, min(100, int(data.get("min_confidence") or 70))),
-                        "entry_threshold": float(data.get("entry_threshold") or 0.0008),
-                        "model": str(models[0]),
-                        "system_prompt": scene.get("system_prompt") or DEFAULT_SYSTEM_PROMPT,
-                        "analysis_prompt_template": (
-                            scene.get("user_prompt_template")
-                            or DEFAULT_ANALYSIS_PROMPT_TEMPLATE
-                        ),
-                        "reference_runtime_ids": [],
-                    },
+                    "config": source_config,
                 })
                 created_source = True
 
@@ -1134,7 +1254,7 @@ def create_market_routes(
                     f"{owner_user_id}:ai:{managed_source_id}"
                     if owner_user_id != user.user_id else ""
                 ),
-                "min_confidence": int(data.get("min_confidence") or source_config.get("min_confidence") or 70),
+                "min_confidence": int(data.get("min_confidence") or 70),
                 "entry_threshold": float(data.get("entry_threshold") or source_config.get("entry_threshold") or 0.0008),
                 "reference_runtime_ids": [],
             }
@@ -1259,7 +1379,6 @@ def create_market_routes(
                             data.get("strategy_name") or f"{symbol} AI 策略"
                         ).strip(),
                         "enabled": True,
-                        "auto_execute": True,
                         "lifecycle_status": StrategyLifecycle.DRAFT,
                         "signal_sources": [{
                             "signal_source_id": source_instance_id,
@@ -1339,6 +1458,48 @@ def create_market_routes(
             "status": "ok",
             "count": len(decisions),
             "decisions": decisions
+        }
+
+    @protected_router.get("/strategy/{strategy_id}/execution-overview")
+    async def get_strategy_execution_overview(
+        strategy_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Return deployment-scoped decision history for a single strategy.
+
+        This deliberately does not use the web page's selected market account:
+        one strategy can run in several paper and live accounts concurrently.
+        """
+        strategy = strategy_repo.get_strategy_by_id(user.user_id, strategy_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="策略不存在或不属于当前用户")
+
+        deployments = strategy_deployment_repo.list_for_strategy(
+            user.user_id, strategy_id
+        )
+        account_views = []
+        for deployment in deployments:
+            account_id = int(deployment["account_id"])
+            if deployment.get("execution_mode") == "paper":
+                engine_manager.paper_trading.reconcile_decision_statuses(
+                    user.user_id, account_id,
+                )
+            engine = engine_manager.get_engine(user.user_id, account_id)
+            decisions = engine.get_decision_history(
+                strategy_id=strategy_id, count=10,
+            )
+            account_views.append({
+                **deployment,
+                "decisions": decisions,
+            })
+        return {
+            "status": "ok",
+            "strategy": {
+                "strategy_id": strategy.strategy_id,
+                "strategy_name": strategy.strategy_name,
+                "symbol": strategy.symbol,
+            },
+            "deployments": account_views,
         }
 
     @protected_router.get("/strategy/shared")
@@ -2144,34 +2305,42 @@ def create_market_routes(
         scene_options = llm_governance.scene_options(
             user.user_id, AI_SIGNAL_ANALYSIS
         )
+        prompt_generation_options = llm_governance.scene_options(
+            user.user_id, AI_SIGNAL_PROMPT_GENERATION
+        )
         shared = [
             item for item in enrich_shared_ai_items(
                 shared_ai_runtime_repo.list_shared(user.user_id),
                 user.user_id, [symbol] if symbol else [],
             ) if not item["is_owner"]
         ]
-        # 获取用户可用的品种列表（来自策略、交易配置、已有信号源）
+        # Include live EA-reported symbols so a new signal source can be the
+        # first configuration that references a newly reported instrument.
         try:
-            config = trade_config_repo.get_config(user.user_id)
-            configured_symbols = list(config.get("symbol_config", {}).keys())
-            strategy_symbols = [
-                strategy.symbol
-                for strategy in strategy_repo.get_all_strategies(user.user_id)
-            ]
-            signal_source_symbols = [
-                s["symbol"] for s in ai_signal_source_repo.list(user.user_id)
-                if s.get("symbol")
-            ]
-            available_symbols = sorted(set(
-                configured_symbols + strategy_symbols + signal_source_symbols
-            ))
+            available_symbols = collect_ai_signal_symbols(
+                user.user_id,
+                engine_manager,
+                trade_config_repo,
+                strategy_repo,
+                ai_signal_source_repo,
+            )
         except Exception:
             available_symbols = []
+        market_data_accounts = []
+        for account in TradingAccountRepository().list_for_user(user.user_id):
+            if account.account_type != "mt5" or account.status != "active":
+                continue
+            market_data_accounts.append({
+                "value": account.account_id,
+                "title": account.account_name,
+            })
         return {
             "status": "ok",
             "access_granted": access["access_granted"],
             "models": scene_options["models"],
+            "prompt_generation_models": prompt_generation_options["models"],
             "symbols": available_symbols,
+            "market_data_accounts": market_data_accounts,
             "default_system_prompt": (
                 scene_options.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
             ),
@@ -2179,6 +2348,7 @@ def create_market_routes(
                 scene_options.get("user_prompt_template")
                 or DEFAULT_ANALYSIS_PROMPT_TEMPLATE
             ),
+            "runtime_contract": AI_SIGNAL_SOURCE_RUNTIME_CONTRACT,
             "shared_runtime_data": shared,
         }
 
@@ -2197,6 +2367,12 @@ def create_market_routes(
         config = data.get("config") or {}
         if not symbol or period not in {"M1", "M5", "M15", "H1", "H4"}:
             raise ValueError("请填写交易品种并选择有效的分析周期")
+        market_data_account_id = int(data.get("market_data_account_id") or 0)
+        market_account = TradingAccountRepository().get_by_id(
+            user.user_id, market_data_account_id
+        )
+        if market_account is None or market_account.account_type != "mt5":
+            raise ValueError("请选择自己的 MT5 行情来源账户")
         mode = str(config.get("analysis_mode") or "self_analysis")
         if mode != "self_analysis":
             raise ValueError("AI 信号源仅支持自主 AI 分析")
@@ -2212,6 +2388,175 @@ def create_market_routes(
         minimum = {"M1": 1, "M5": 5, "M15": 15, "H1": 60, "H4": 240}[period]
         if interval < minimum:
             raise ValueError(f"{period} 周期的调用间隔不能低于 {minimum} 分钟")
+        kline_count = int(config.get("kline_count") or 0)
+        if not AI_SIGNAL_KLINE_MIN_COUNT <= kline_count <= AI_SIGNAL_KLINE_MAX_COUNT:
+            raise ValueError(
+                f"AI 信号源分析 K 线数量必须在 {AI_SIGNAL_KLINE_MIN_COUNT}-"
+                f"{AI_SIGNAL_KLINE_MAX_COUNT} 根之间"
+            )
+        references = config.get("reference_market_data") or []
+        if not isinstance(references, list):
+            raise ValueError("参考行情配置格式无效")
+        if len(references) > 5:
+            raise ValueError("每个 AI 信号源最多配置 5 条参考行情")
+        occupied = set()
+        for reference in references:
+            if not isinstance(reference, dict):
+                raise ValueError("参考行情配置项格式无效")
+            ref_symbol = str(reference.get("symbol") or "").strip()
+            ref_period = str(reference.get("period") or "").strip().upper()
+            if not ref_symbol or ref_period not in {"M1", "M5", "M15", "H1", "H4"}:
+                raise ValueError("参考行情必须填写有效品种和周期")
+            if ref_symbol == symbol and ref_period == period:
+                raise ValueError("参考行情不能与主行情使用相同的品种和周期")
+            key = (ref_symbol.upper(), ref_period)
+            if key in occupied:
+                raise ValueError("同一个品种和周期不能重复添加参考行情")
+            occupied.add(key)
+            if str(reference.get("role") or "market_context") not in {
+                "higher_timeframe", "lower_timeframe", "related_symbol", "market_context"
+            }:
+                raise ValueError("参考行情类型无效")
+
+    def normalize_reference_market_data(config: Dict) -> None:
+        normalized = []
+        for reference in config.get("reference_market_data") or []:
+            normalized.append({
+                "symbol": str(reference.get("symbol") or "").strip(),
+                "period": str(reference.get("period") or "").strip().upper(),
+                "kline_count": max(
+                    AI_SIGNAL_KLINE_MIN_COUNT,
+                    min(AI_SIGNAL_KLINE_MAX_COUNT, int(reference.get("kline_count", 100) or 100)),
+                ),
+                "role": str(reference.get("role") or "market_context").strip(),
+            })
+        config["reference_market_data"] = normalized
+
+    def normalize_ai_signal_kline_count(config: Dict) -> None:
+        """Keep source requirements within the EA full-initialization window."""
+        config["kline_count"] = max(
+            AI_SIGNAL_KLINE_MIN_COUNT,
+            min(AI_SIGNAL_KLINE_MAX_COUNT, int(config.get("kline_count", 100) or 100)),
+        )
+
+    def prompt_candidate_context(data: Dict) -> Dict:
+        config = dict(data.get("config") or {})
+        normalize_ai_signal_kline_count(config)
+        normalize_reference_market_data(config)
+        return {
+            "name": str(data.get("name") or "").strip(),
+            "symbol": str(data.get("symbol") or "").strip(),
+            "period": str(data.get("period") or "").strip().upper(),
+            "analysis_interval_minutes": int(
+                config.get("analysis_interval_minutes") or 0
+            ),
+            "kline_count": int(config.get("kline_count") or 0),
+            "reference_market_data": config.get("reference_market_data") or [],
+            "runtime_contract": AI_SIGNAL_SOURCE_RUNTIME_CONTRACT,
+        }
+
+    def normalize_ai_signal_prompt_config(config: Dict) -> None:
+        """An AI source may run only with a user-applied generated prompt."""
+        config["prompt_mode"] = "custom"
+        system_prompt = str(config.get("system_prompt") or "").strip()
+        template = str(config.get("analysis_prompt_template") or "").strip()
+        if not system_prompt or not template:
+            raise ValueError("专属提示词必须包含 System Prompt 和分析模板")
+        if "{{market_data}}" not in template:
+            raise ValueError("专属提示词缺少 {{market_data}}")
+        if "{{strategy_context}}" in template:
+            raise ValueError("专属提示词不能包含已废弃的策略上下文")
+        references = config.get("reference_market_data") or []
+        if references and "{{reference_market_data}}" not in template:
+            raise ValueError("配置了参考行情时，专属提示词必须包含 {{reference_market_data}}")
+        config["system_prompt"] = system_prompt[:10000]
+        config["analysis_prompt_template"] = template[:50000]
+
+    @protected_router.post("/ai-signal-sources/generate-prompt")
+    async def generate_ai_signal_prompt(
+        request: Request, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Generate a source-specific prompt candidate from unsaved form data."""
+        try:
+            data = await request.json()
+            context = prompt_candidate_context(data)
+            if not context["symbol"] or context["period"] not in {
+                "M1", "M5", "M15", "H1", "H4",
+            }:
+                raise ValueError("请先选择主品种和主分析周期")
+            intent = str(data.get("intent") or "").strip()
+            if not intent:
+                raise ValueError("请描述希望 AI 重点分析什么")
+            if len(intent) > 2000:
+                raise ValueError("分析想法不能超过 2000 个字符")
+            scene = llm_governance.scene_options(
+                user.user_id, AI_SIGNAL_PROMPT_GENERATION,
+            )
+            prompt = str(scene.get("user_prompt_template") or "")
+            prompt = prompt.replace(
+                "{{signal_source_config}}",
+                json.dumps(context, ensure_ascii=False),
+            ).replace("{{user_intent}}", intent)
+            requested_models = data.get("model_ids") or []
+            if isinstance(requested_models, str):
+                requested_models = [requested_models]
+            if not isinstance(requested_models, list):
+                raise ValueError("提示词生成模型格式无效")
+            requested_models = list(dict.fromkeys(
+                str(model or "").strip() for model in requested_models if str(model or "").strip()
+            ))
+            if len(requested_models) > 3:
+                raise ValueError("一次最多选择 3 个模型生成候选")
+            models = requested_models or [str(scene.get("default_model_id") or "")]
+            available_models = set(scene.get("models") or [])
+            if any(model not in available_models for model in models):
+                raise ValueError("所选模型不在提示词生成场景的可用模型列表中")
+            _, engine = resolve_web_engine(engine_manager, user, None)
+
+            async def generate_for_model(model: str) -> Dict:
+                result = await asyncio.to_thread(
+                    engine.llm_service.call_llm,
+                    prompt, model, None, AI_SIGNAL_PROMPT_GENERATION,
+                    "ai_signal_prompt_candidate", str(data.get("signal_source_id") or "draft"),
+                    8000,
+                )
+                if not isinstance(result, dict):
+                    raise ValueError("大模型未返回有效提示词候选")
+                system_prompt = str(result.get("system_prompt") or "").strip()
+                template = str(result.get("analysis_prompt_template") or "").strip()
+                if not system_prompt or not template:
+                    raise ValueError("提示词候选缺少 System Prompt 或分析模板")
+                if "{{market_data}}" not in template:
+                    raise ValueError("提示词候选缺少 {{market_data}}，请重新生成")
+                if "{{current_price}}" not in template:
+                    raise ValueError("提示词候选缺少 {{current_price}}，请重新生成")
+                if "{{strategy_context}}" in template:
+                    raise ValueError("提示词候选包含已废弃的策略上下文，请重新生成")
+                if context["reference_market_data"] and "{{reference_market_data}}" not in template:
+                    raise ValueError("提示词候选未包含参考行情变量，请重新生成")
+                return {
+                    "model": model,
+                    "system_prompt": system_prompt[:10000],
+                    "analysis_prompt_template": template[:50000],
+                    "summary": str(result.get("summary") or "").strip()[:1000],
+                    "assumptions": result.get("assumptions") or [],
+                    "context": context,
+                }
+
+            generated = await asyncio.gather(
+                *(generate_for_model(model) for model in models), return_exceptions=True,
+            )
+            candidates = [item for item in generated if isinstance(item, dict)]
+            if not candidates:
+                errors = [str(item) for item in generated if isinstance(item, Exception)]
+                raise ValueError(errors[0] if errors else "未能生成有效提示词候选")
+            return {
+                "status": "ok",
+                "candidates": candidates,
+                "errors": [str(item) for item in generated if isinstance(item, Exception)],
+            }
+        except (ValueError, LLMGovernanceError, LLMRequestError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @protected_router.get("/ai-signal-sources")
     async def get_ai_signal_sources(
@@ -2235,7 +2580,13 @@ def create_market_routes(
             if target_symbol and is_owner and item.get("symbol") != target_symbol:
                 continue
             item["is_owner"] = is_owner
-            visible_items.append(ai_signal_source_payload(item))
+            visible_items.append(item)
+        locked_ids = ai_signal_source_repo.locked_ids(
+            user.user_id,
+            [item["signal_source_id"] for item in visible_items],
+        )
+        for item in visible_items:
+            item["locked"] = item["signal_source_id"] in locked_ids
         return {
             "status": "ok",
             "items": visible_items,
@@ -2245,6 +2596,11 @@ def create_market_routes(
     async def create_ai_signal_source(request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
         try:
             data = await request.json()
+            config = dict(data.get("config") or {})
+            normalize_ai_signal_kline_count(config)
+            normalize_reference_market_data(config)
+            normalize_ai_signal_prompt_config(config)
+            data["config"] = config
             validate_independent_ai_signal_source(user, data)
             with quota_service.guarded():
                 quota_service.assert_can_create(
@@ -2263,7 +2619,13 @@ def create_market_routes(
             if current is None:
                 raise HTTPException(status_code=404, detail="AI 信号源不存在")
             candidate = {**current, **data}
+            candidate_config = dict(candidate.get("config") or {})
+            normalize_ai_signal_kline_count(candidate_config)
+            normalize_reference_market_data(candidate_config)
+            normalize_ai_signal_prompt_config(candidate_config)
+            candidate["config"] = candidate_config
             validate_independent_ai_signal_source(user, candidate)
+            data["config"] = candidate_config
             source = ai_signal_source_repo.update(user.user_id, signal_source_id, data)
             return {"status": "ok", "source": ai_signal_source_payload(source)}
         except ValueError as exc:
@@ -2298,12 +2660,10 @@ def create_market_routes(
 
     @protected_router.get("/llm/market-view")
     async def get_ai_market_view(
-        account_id: Optional[int] = Query(None),
         symbol: Optional[str] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        """聚合当前账户 AI 分析状态和平台共享分析。"""
-        account, engine = resolve_web_engine(engine_manager, user, account_id)
+        """Aggregate AI sources by their configured market-data account."""
         access = llm_access_repo.get_status(user.user_id, user.role)
         effective_config = llm_config_repo.get_effective_config(user.user_id)
         access = {
@@ -2313,12 +2673,34 @@ def create_market_routes(
                 access["access_granted"] and effective_config.enabled
             ),
         }
-        own_cards = engine.get_ai_market_cards(symbol)
-        reported_symbols = engine.kline_service.get_symbols()
+        own_cards = []
+        reported_symbols = set()
+        accounts = TradingAccountRepository()
+        for source in ai_signal_source_repo.list(user.user_id):
+            if symbol and source.get("symbol") != symbol:
+                continue
+            account = accounts.get_by_id(
+                user.user_id, int(source.get("market_data_account_id") or 0)
+            )
+            if account is None or account.account_type != "mt5":
+                continue
+            engine = engine_manager.get_engine(user.user_id, account.account_id)
+            reported_symbols.update(engine.kline_service.get_symbols())
+            analysis = engine.get_llm_analysis(source.get("symbol")) or {}
+            card = engine._independent_ai_market_card(source, analysis)
+            card["linked_strategies"] = engine._linked_ai_strategies(
+                str(source.get("signal_source_id") or "")
+            )
+            card["market_data_account"] = {
+                "account_id": account.account_id,
+                "account_name": account.account_name,
+                "mt5_server": account.mt5_server or "",
+            }
+            own_cards.append(card)
         shared_cards = []
         for item in enrich_shared_ai_items(
             shared_ai_runtime_repo.list_shared(user.user_id),
-            user.user_id, reported_symbols, account.mt5_server,
+            user.user_id, [], "",
         ):
             if item["is_owner"]:
                 continue
@@ -2329,8 +2711,13 @@ def create_market_routes(
                 key=lambda value: int(value.get("confidence", 0) or 0),
                 default=None,
             )
-            direction = engine._ai_direction(
-                (suggestion or {}).get("direction") or trend.get("trend")
+            direction_value = str(
+                (suggestion or {}).get("direction") or trend.get("trend") or ""
+            ).lower()
+            direction = (
+                "up" if direction_value in {"up", "buy", "bullish", "上涨", "看涨"}
+                else "down" if direction_value in {"down", "sell", "bearish", "下跌", "看跌"}
+                else "sideways"
             )
             confidence = int(
                 (suggestion or {}).get("confidence")
@@ -2342,7 +2729,7 @@ def create_market_routes(
             elif item["similar_symbols"]:
                 applicability = "相似候选 " + "、".join(item["similar_symbols"])
             else:
-                applicability = "暂未匹配当前账户上报品种"
+                applicability = "可作为共享行情参考"
             shared_cards.append({
                 **item,
                 "card_id": item["share_id"],
@@ -2362,9 +2749,7 @@ def create_market_routes(
         return {
             "status": "ok",
             "account": {
-                "account_id": account.account_id if account else 0,
-                "account_name": account.account_name if account else "",
-                "reported_symbols": reported_symbols,
+                "reported_symbols": sorted(reported_symbols),
             },
             "access": access,
             "own": own_cards,
@@ -2372,9 +2757,7 @@ def create_market_routes(
             "summary": {
                 "own_count": len(own_cards),
                 "actionable_count": sum(
-                    card["status"] in {
-                        "ready_to_signal", "signal_formed", "decision_created"
-                    }
+                    card["status"] == "analysis_ready"
                     for card in own_cards
                 ),
                 "shared_count": len(shared_cards),
@@ -2418,6 +2801,21 @@ def create_market_routes(
                 item["result"] = None
                 item.pop("result_summary", None)
             items.append(item)
+        return {"status": "ok", "items": items}
+
+    @protected_router.get("/llm/market-suggestions/{signal_source_id}")
+    async def get_ai_market_suggestions(
+        signal_source_id: str,
+        limit: int = Query(10, ge=1, le=100),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Return private, durable AI trade plans for one owned signal source."""
+        source = ai_signal_source_repo.get(user.user_id, signal_source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="AI 信号源不存在")
+        items = AITradeSuggestionRepository().list_recent(
+            user.user_id, signal_source_id, limit,
+        )
         return {"status": "ok", "items": items}
 
     @protected_router.post("/llm/access/request")

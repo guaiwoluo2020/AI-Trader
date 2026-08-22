@@ -2,7 +2,7 @@
 """统一交易账户管理接口。"""
 
 import time
-from typing import Dict
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -29,15 +29,21 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         accounts = repository.list_for_user(user.user_id)
+        payloads = []
+        for account in accounts:
+            # list_deployments also expires timed-out paper deployments before
+            # we derive the account's runtime state from them.
+            deployments = engine_manager.paper_trading.list_deployments(
+                user.user_id, account.account_id
+            )
+            payloads.append({
+                **_account_payload(account, deployments),
+                "deployments": deployments,
+            })
         return {
             "status": "ok",
             "count": len(accounts),
-            "accounts": [{
-                **_account_payload(account),
-                "deployments": engine_manager.paper_trading.list_deployments(
-                    user.user_id, account.account_id
-                ),
-            } for account in accounts],
+            "accounts": payloads,
         }
 
     @router.post("/accounts/paper")
@@ -335,13 +341,30 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     return router
 
 
-def _account_payload(account: TradingAccountRecord) -> Dict:
+def _account_payload(
+    account: TradingAccountRecord, deployments: Optional[List[Dict]] = None,
+) -> Dict:
     connected = bool(
         account.account_type == "mt5"
         and account.last_seen_at
         and int(time.time()) - account.last_seen_at <= 120
     )
-    active = bool(account.status == "active" and connected)
+    active_deployment_count = 0
+    if account.account_type == "paper":
+        active_deployment_count = sum(
+            item.get("status") == "active"
+            and item.get("execution_mode") == "paper"
+            for item in deployments or []
+        )
+        active = bool(
+            account.status == "active"
+            and account.enabled
+            and account.trading_enabled
+            and account.auto_trading_enabled
+            and active_deployment_count
+        )
+    else:
+        active = bool(account.status == "active" and connected)
     activity_status = (
         "archived" if account.status == "archived"
         else "paused" if not account.trading_enabled
@@ -374,6 +397,7 @@ def _account_payload(account: TradingAccountRecord) -> Dict:
         ),
         "connected": connected,
         "active": active,
+        "active_deployment_count": active_deployment_count,
         "activity_status": activity_status,
         "last_seen_at": account.last_seen_at,
         "financial_updated_at": account.financial_updated_at,
@@ -383,5 +407,7 @@ def _account_payload(account: TradingAccountRecord) -> Dict:
         "created_at": account.created_at,
         "engine_status": (
             "connected" if connected else "offline"
-        ) if account.account_type == "mt5" else "ready",
+        ) if account.account_type == "mt5" else (
+            "running" if active else "ready"
+        ),
     }

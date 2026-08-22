@@ -24,6 +24,13 @@ class _SourceRepository:
     def list(self, user_id):
         return self._sources
 
+    def get(self, user_id, source_id):
+        return next(
+            (source for source in self._sources
+             if source["signal_source_id"] == source_id),
+            None,
+        )
+
 
 class _KlineService:
     @staticmethod
@@ -36,6 +43,7 @@ class _Strategy:
     strategy_id = "strategy-1"
     strategy_name = "BTC strategy"
     lifecycle_status = "draft"
+    min_confidence = 65
 
     def __init__(self, source):
         self._source = source
@@ -57,7 +65,7 @@ def _managed_source(source_id="btc-m5"):
             "model": "deepseek-v4-flash",
             "min_confidence": 70,
             "analysis_interval_minutes": 5,
-            "kline_count": 100,
+            "kline_count": 288,
         },
     }
 
@@ -94,17 +102,17 @@ class AIMarketCardsTestCase(unittest.TestCase):
         engine.get_llm_analysis = lambda: {"BTCUSD": _analysis()}
         return engine
 
-    def test_unbound_independent_source_is_rendered(self):
+    def test_ai_source_is_rendered_once_without_strategy_binding(self):
         cards = self._engine().get_ai_market_cards()
 
         self.assertEqual(len(cards), 1)
-        self.assertEqual(cards[0]["card_id"], "independent:btc-m5")
+        self.assertEqual(cards[0]["card_id"], "source:btc-m5")
         self.assertEqual(cards[0]["period"], "M5")
         self.assertEqual(cards[0]["confidence"], 82)
-        self.assertEqual(cards[0]["strategy_id"], "")
-        self.assertIn("绑定策略后", cards[0]["status_reason"])
+        self.assertEqual(cards[0]["linked_strategies"], [])
+        self.assertEqual(cards[0]["status"], "analysis_ready")
 
-    def test_bound_source_is_not_rendered_twice(self):
+    def test_bound_source_is_rendered_once_without_strategy_threshold(self):
         strategy_source = {
             "signal_source_id": "btc-m5",
             "source": "ai_entry",
@@ -121,7 +129,11 @@ class AIMarketCardsTestCase(unittest.TestCase):
         ]).get_ai_market_cards()
 
         self.assertEqual(len(cards), 1)
-        self.assertEqual(cards[0]["strategy_id"], "strategy-1")
+        self.assertEqual(cards[0]["card_id"], "source:btc-m5")
+        self.assertEqual(cards[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(cards[0]["kline_count"], 288)
+        self.assertEqual(cards[0]["confidence"], 82)
+        self.assertEqual(cards[0]["linked_strategies"][0]["strategy_id"], "strategy-1")
 
 
 if __name__ == "__main__":

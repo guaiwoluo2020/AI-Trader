@@ -10,6 +10,11 @@ const loadingAccounts = ref(false)
 function stateMeta(account) {
   if (account.status === 'archived') return { label: '已归档', color: 'grey' }
   if (!account.trading_enabled) return { label: '已暂停', color: 'warning' }
+  if (account.account_type === 'paper') {
+    return account.active
+      ? { label: '模拟运行中', color: 'success' }
+      : { label: '模拟引擎就绪', color: 'teal' }
+  }
   if (account.active) return { label: '活跃', color: 'success' }
   return { label: '不活跃', color: 'error' }
 }
@@ -18,7 +23,9 @@ async function loadAccountContext() {
   loadingAccounts.value = true
   try {
     const data = await accountAPI.list()
-    accounts.value = (data.accounts || []).filter(item => item.account_type === 'mt5')
+    accounts.value = (Array.isArray(data.accounts) ? data.accounts : []).filter(item => (
+      item.account_type === 'mt5' || item.account_type === 'paper'
+    ))
     const selectedExists = accounts.value.some(
       item => item.account_id === selectedAccountId.value
     )
@@ -48,14 +55,16 @@ function selectAccount(accountId) {
 }
 
 export function useAccountContext() {
-  const selectedAccount = computed(() => accounts.value.find(
+  const selectedAccount = computed(() => (Array.isArray(accounts.value) ? accounts.value : []).find(
     item => item.account_id === selectedAccountId.value
   ) || null)
-  const accountOptions = computed(() => accounts.value.map(account => {
+  const accountOptions = computed(() => (Array.isArray(accounts.value) ? accounts.value : []).map(account => {
     const state = stateMeta(account)
     return {
       value: account.account_id,
-      title: `${account.account_name} · ${account.mt5_login || '账号待上报'} · ${state.label}`,
+      title: account.account_type === 'paper'
+        ? `${account.account_name} · 模拟盘 · ${state.label}`
+        : `${account.account_name} · ${account.mt5_login || '账号待上报'} · ${state.label}`,
       account,
       state,
     }

@@ -783,9 +783,9 @@
                 <v-col cols="12">
                   <div class="llm-section-head compact">
                     <div>
-                      <div class="font-weight-bold">场景模型与提示词</div>
+                      <div class="font-weight-bold">场景模型</div>
                       <div class="text-caption text-medium-emphasis">
-                        每个调用场景可独立选择模型、默认模型和提示词模板；切换供应商后需要重新确认这些模型。
+                        每个调用场景可独立选择模型和默认模型；提示词由系统维护，切换供应商后需要重新确认这些模型。
                       </div>
                     </div>
                   </div>
@@ -813,50 +813,9 @@
                       v-model="scene.allow_user_selection" color="success" hide-details
                       label="允许用户选择模型"
                     />
-                    <template v-if="scene.scene_code === 'ai_signal_analysis'">
-                      <div class="prompt-profile-head mt-4">
-                        <div>
-                          <strong>提示词版本</strong>
-                          <p>可保存多套行情分析提示词，实时 AI 分析只使用标记为默认的版本。</p>
-                        </div>
-                        <v-btn size="small" variant="tonal" color="primary" @click="addAIScenePrompt(scene)">
-                          <v-icon start>mdi-plus</v-icon>新增提示词
-                        </v-btn>
-                      </div>
-                      <v-alert type="info" variant="tonal" density="compact" class="mb-3">
-                        {{ scenePromptHint(scene.scene_code) }}
-                      </v-alert>
-                      <article v-for="prompt in scene.prompt_profiles" :key="prompt.prompt_id" class="prompt-profile-card" :class="{ 'is-default': prompt.is_default }">
-                        <div class="d-flex align-center justify-space-between ga-2 mb-3">
-                          <v-text-field v-model="prompt.prompt_name" label="提示词名称" density="compact" hide-details class="prompt-profile-name" />
-                          <div class="d-flex align-center ga-1">
-                            <v-btn size="small" :color="prompt.is_default ? 'success' : 'primary'" :variant="prompt.is_default ? 'flat' : 'tonal'" @click="setDefaultAIScenePrompt(scene, prompt.prompt_id)">
-                              <v-icon start>{{ prompt.is_default ? 'mdi-check-decagram' : 'mdi-star-outline' }}</v-icon>{{ prompt.is_default ? '默认使用中' : '设为默认' }}
-                            </v-btn>
-                            <v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" :disabled="scene.prompt_profiles.length === 1" @click="removeAIScenePrompt(scene, prompt.prompt_id)" />
-                          </div>
-                        </div>
-                        <v-textarea v-model="prompt.system_prompt" label="System Prompt" rows="3" auto-grow variant="outlined" density="compact" class="prompt-template-editor" />
-                        <v-textarea v-model="prompt.user_prompt_template" label="User Prompt 模板" rows="8" auto-grow variant="outlined" density="compact" class="mt-3 prompt-template-editor" />
-                      </article>
-                    </template>
-                    <v-expansion-panels v-else class="mt-3" variant="accordion">
-                      <v-expansion-panel>
-                        <v-expansion-panel-title>
-                          <div class="d-flex align-center ga-2">
-                            <v-icon color="primary">mdi-text-box-edit-outline</v-icon>
-                            <span>场景提示词</span>
-                          </div>
-                        </v-expansion-panel-title>
-                        <v-expansion-panel-text>
-                          <v-alert type="info" variant="tonal" density="compact" class="mb-3">
-                            {{ scenePromptHint(scene.scene_code) }}
-                          </v-alert>
-                          <v-textarea v-model="scene.system_prompt" label="System Prompt" rows="3" auto-grow variant="outlined" density="compact" class="prompt-template-editor" />
-                          <v-textarea v-model="scene.user_prompt_template" label="User Prompt 模板" rows="10" auto-grow variant="outlined" density="compact" class="mt-3 prompt-template-editor" />
-                        </v-expansion-panel-text>
-                      </v-expansion-panel>
-                    </v-expansion-panels>
+                    <v-alert type="info" variant="tonal" density="compact" class="mt-3">
+                      提示词由系统按场景维护。AI 信号源可由用户根据当前品种、周期、参考行情和分析目标生成专属候选提示词。
+                    </v-alert>
                     <v-btn block variant="tonal" color="primary" class="mt-3" @click="saveLLMScene(scene)">
                       保存场景配置
                     </v-btn>
@@ -991,6 +950,16 @@
             label="AI 信号源"
             prepend-inner-icon="mdi-brain"
           ></v-select>
+          <v-select
+            v-if="!quickSelectedAISignalSource"
+            v-model="quickStrategyModel"
+            :items="quickStrategyModelOptions"
+            :loading="quickStrategyOptionsLoading"
+            label="AI 模型（新建信号源时使用）"
+            prepend-inner-icon="mdi-robot-outline"
+            hint="仅在新建 AI 信号源时选择"
+            persistent-hint
+          ></v-select>
           <v-alert v-if="quickSelectedAISignalSource" type="success" variant="tonal" density="compact" class="mb-3">
             默认复用：{{ quickSelectedAISignalSource.name }} · {{ quickSelectedAISignalSource.symbol }} · {{ quickSelectedAISignalSource.period }} · 每 {{ quickSelectedAISignalSource.config?.analysis_interval_minutes || '-' }} 分钟分析
           </v-alert>
@@ -1026,6 +995,10 @@
       <v-card>
         <v-card-title>{{ signalSourceEditMode === 'edit' ? '编辑信号源' : '添加信号源' }}</v-card-title>
         <v-card-text>
+          <v-progress-linear v-if="signalSourceDialogLoading" indeterminate color="primary" class="mb-4" />
+          <v-alert v-if="signalSourceDialogLoading" type="info" variant="tonal" density="compact" class="mb-4">
+            正在加载可复用的共享信号源、模型和 Alpha 选项，请稍候…
+          </v-alert>
           <v-alert
             v-if="!newSignalSource.source || !newSignalSource.params"
             type="error"
@@ -1283,7 +1256,7 @@
         <v-card-actions>
           <v-spacer></v-spacer>
           <v-btn variant="text" @click="signalSourceDialog = false">取消</v-btn>
-          <v-btn color="primary" :disabled="!canSaveSignalSource" @click="saveSignalSourceFromDialog">
+          <v-btn color="primary" :disabled="signalSourceDialogLoading || !canSaveSignalSource" @click="saveSignalSourceFromDialog">
             {{ signalSourceEditMode === 'edit' ? '保存' : '添加' }}
           </v-btn>
         </v-card-actions>
@@ -1372,15 +1345,6 @@ export default {
     const enabledLLMModelIds = computed(() => llmGovernance.value.models
       .filter(model => model.enabled && model.available)
       .map(model => model.model_id))
-    const scenePromptHint = (sceneCode) => {
-      const hints = {
-        ai_signal_analysis: '必须保留 {{strategy_context}} 和 {{market_data}}，系统会注入策略约束与K线数据。',
-        backtest_report_analysis: '必须保留 {{backtest_snapshot}}，系统会注入回测任务、交易流水与资金曲线摘要。',
-        alpha_candidate_generation: '必须保留研究目标、周期、预测窗口、候选数量和因子目录相关变量。',
-        alpha_iterative_refinement: '必须保留当前候选、历史迭代、研究目标和因子目录相关变量。'
-      }
-      return hints[sceneCode] || '请保留模板中的变量占位符，避免调用时缺少上下文。'
-    }
     const llmAccess = ref({
       status: 'not_requested',
       access_granted: false,
@@ -2144,49 +2108,6 @@ export default {
       }
     }
 
-    const buildClientId = (prefix = '', length = 12) => {
-      const cryptoApi = globalThis.crypto
-      const uuid = cryptoApi?.randomUUID?.()
-      if (uuid) return `${prefix}${uuid.replaceAll('-', '').slice(0, length)}`
-      const bytes = cryptoApi?.getRandomValues
-        ? cryptoApi.getRandomValues(new Uint8Array(length))
-        : null
-      const chars = []
-      for (let index = 0; index < length; index += 1) {
-        const value = bytes ? bytes[index] : Math.floor(Math.random() * 36)
-        chars.push(value.toString(36).slice(-1))
-      }
-      return `${prefix}${Date.now().toString(36)}${chars.join('')}`
-    }
-
-    const newPromptProfileId = () => buildClientId('prompt-')
-
-    const addAIScenePrompt = (scene) => {
-      const profiles = scene.prompt_profiles ||= []
-      const defaultPrompt = profiles.find(item => item.is_default) || profiles[0] || scene
-      profiles.push({
-        prompt_id: newPromptProfileId(),
-        prompt_name: `提示词 ${profiles.length + 1}`,
-        system_prompt: defaultPrompt.system_prompt || '',
-        user_prompt_template: defaultPrompt.user_prompt_template || '',
-        is_default: false,
-      })
-    }
-
-    const setDefaultAIScenePrompt = (scene, promptId) => {
-      for (const prompt of scene.prompt_profiles || []) {
-        prompt.is_default = prompt.prompt_id === promptId
-      }
-    }
-
-    const removeAIScenePrompt = (scene, promptId) => {
-      const profiles = scene.prompt_profiles || []
-      if (profiles.length <= 1) return
-      const removed = profiles.find(item => item.prompt_id === promptId)
-      scene.prompt_profiles = profiles.filter(item => item.prompt_id !== promptId)
-      if (removed?.is_default) scene.prompt_profiles[0].is_default = true
-    }
-
     // ==================== 策略配置 ====================
 
     // 策略数据
@@ -2246,11 +2167,14 @@ export default {
     const quickStrategyPeriod = ref('M5')
     const quickStrategyName = ref('')
     const quickStrategySourceId = ref('__auto__')
+    const quickStrategyModel = ref('')
     const quickStrategyPolicyId = ref('__auto__')
     const quickStrategyOptionsLoading = ref(false)
     const quickAISignalSources = ref([])
+    const quickStrategyModelOptions = ref([])
     const quickSharedPositionPolicies = ref([])
     const signalSourceDialog = ref(false)
+    const signalSourceDialogLoading = ref(false)
     const signalSourceTarget = ref(null)
     const signalSourceEditMode = ref('add')
     const editingSignalSourceId = ref('')
@@ -2414,6 +2338,11 @@ export default {
       }))
     })
     const formatSimilarity = (value) => `${Math.round(Number(value || 0) * 100)}%`
+    const buildClientId = (prefix = '', length = 12) => {
+      const random = globalThis.crypto?.randomUUID?.().replaceAll('-', '')
+        || Math.random().toString(36).slice(2)
+      return `${prefix}${random}`.slice(0, length)
+    }
     function lifecycleLabel (status) {
       return ({
         draft: '草稿', backtesting: '回测中', backtest_passed: '回测通过',
@@ -2608,10 +2537,20 @@ export default {
       }
       quickStrategyOptionsLoading.value = true
       try {
-        const data = await marketAPI.getAISignalSources({
-          symbol: quickStrategySymbol.value,
-          include_shared: true
-        })
+        const [data, llmOptions] = await Promise.all([
+          marketAPI.getAISignalSources({
+            symbol: quickStrategySymbol.value,
+            include_shared: true
+          }),
+          marketAPI.getLLMSignalOptions(quickStrategySymbol.value)
+        ])
+        quickStrategyModelOptions.value = (llmOptions.models || []).map(model => ({
+          title: model,
+          value: model
+        }))
+        if (!quickStrategyModel.value || !quickStrategyModelOptions.value.some(item => item.value === quickStrategyModel.value)) {
+          quickStrategyModel.value = quickStrategyModelOptions.value[0]?.value || ''
+        }
         quickAISignalSources.value = (data.items || []).filter(source => (
           source.enabled && source.period === quickStrategyPeriod.value
         ))
@@ -2620,6 +2559,7 @@ export default {
         }
       } catch (error) {
         quickAISignalSources.value = []
+        quickStrategyModelOptions.value = []
       } finally {
         quickStrategyOptionsLoading.value = false
       }
@@ -3298,28 +3238,41 @@ export default {
     const refreshDialogDefaultsAfterOptionsLoaded = () => {}
 
     const openSignalSourceDialog = async (strategy, source = null) => {
-      signalSourceTarget.value = strategy
-      if (source) {
-        signalSourceEditMode.value = 'edit'
-        editingSignalSourceId.value = source.signal_source_id
-        setDialogSignalSource(source)
+      signalSourceDialogLoading.value = true
+      try {
+        signalSourceTarget.value = strategy
+        if (source) {
+          signalSourceEditMode.value = 'edit'
+          editingSignalSourceId.value = source.signal_source_id
+          setDialogSignalSource(source)
+        } else {
+          signalSourceEditMode.value = 'add'
+          editingSignalSourceId.value = ''
+          const firstAvailableType = Object.keys(signalSourceMeta).find(
+            sourceType => availablePeriodsForSource(sourceType).length
+          )
+          if (!firstAvailableType) {
+            errorMessage.value = '当前策略已没有可添加的信号源周期'
+            showError.value = true
+            return
+          }
+          const firstPeriod = firstAvailableType === 'key_level'
+            ? 'M1'
+            : availablePeriodsForSource(firstAvailableType)[0]
+          setDialogSignalSource(sourceDefaults(firstAvailableType, firstPeriod))
+        }
+        // 弹窗先打开，但配置和保存按钮在共享信号源等数据加载完成前保持锁定。
         signalSourceDialog.value = true
         await Promise.all([loadAISignalOptions(strategy.symbol), loadAlphaLibrary()])
         refreshDialogDefaultsAfterOptionsLoaded()
-        return
+      } catch (error) {
+        console.error('打开信号源配置失败:', error)
+        signalSourceDialog.value = false
+        errorMessage.value = error?.message || '打开信号源配置失败，请刷新后重试'
+        showError.value = true
+      } finally {
+        signalSourceDialogLoading.value = false
       }
-      signalSourceEditMode.value = 'add'
-      editingSignalSourceId.value = ''
-      const firstAvailableType = Object.keys(signalSourceMeta).find(
-        sourceType => availablePeriodsForSource(sourceType).length
-      ) || 'key_level'
-      const firstPeriod = firstAvailableType === 'key_level'
-        ? 'M1'
-        : availablePeriodsForSource(firstAvailableType)[0] || 'M1'
-      setDialogSignalSource(sourceDefaults(firstAvailableType, firstPeriod))
-      signalSourceDialog.value = true
-      await Promise.all([loadAISignalOptions(strategy.symbol), loadAlphaLibrary()])
-      refreshDialogDefaultsAfterOptionsLoaded()
     }
 
     const saveSignalSourceFromDialog = () => {
@@ -3391,6 +3344,7 @@ export default {
         const data = await marketAPI.quickCreateAIStrategy({
           symbol: quickStrategySymbol.value,
           period: quickStrategyPeriod.value,
+          model: quickStrategyModel.value || undefined,
           strategy_name: quickStrategyName.value || undefined,
           ai_signal_source_id: quickStrategySourceId.value === '__auto__'
             ? undefined
@@ -3428,6 +3382,7 @@ export default {
     const openQuickStrategyDialog = () => {
       quickStrategyPeriod.value ||= 'M5'
       quickStrategySourceId.value = '__auto__'
+      quickStrategyModel.value = ''
       quickStrategyPolicyId.value = '__auto__'
       loadQuickStrategyPolicies()
       loadQuickStrategySources()
@@ -3567,10 +3522,6 @@ export default {
       syncLLMModels,
       toggleLLMModel,
       saveLLMScene,
-      addAIScenePrompt,
-      setDefaultAIScenePrompt,
-      removeAIScenePrompt,
-      scenePromptHint,
       selectLLMProvider,
       newLLMProvider,
       activateLLMProvider,
@@ -3637,6 +3588,8 @@ export default {
       quickStrategyPeriod,
       quickStrategyName,
       quickStrategySourceId,
+      quickStrategyModel,
+      quickStrategyModelOptions,
       quickStrategyPolicyId,
       quickStrategyOptionsLoading,
       quickAISignalSourceOptions,
@@ -3678,6 +3631,7 @@ export default {
       useSharedStrategy,
       // 信号配置
       signalSourceDialog,
+      signalSourceDialogLoading,
       signalSourceEditMode,
       newSignalSource,
       signalSourceMeta,

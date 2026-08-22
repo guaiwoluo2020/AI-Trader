@@ -735,7 +735,6 @@ class LLMAnalysisTestCase(unittest.TestCase):
                 "strategy_name": "模拟AI策略",
                 "symbol": "GOLD_",
                 "enabled": False,
-                "auto_execute": False,
                 "lifecycle_status": "backtest_passed",
                 "signal_sources": [{
                     "signal_source_id": "paper-ai-source",

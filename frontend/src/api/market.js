@@ -502,6 +502,11 @@ export const marketAPI = {
     return response.data
   },
 
+  async generateAISignalPrompt(data) {
+    const response = await api.post('/ai-signal-sources/generate-prompt', data)
+    return response.data
+  },
+
   async createAISignalSource(data) {
     const response = await api.post('/ai-signal-sources', data)
     return response.data
@@ -539,6 +544,11 @@ export const marketAPI = {
 
   async getAIMarketHistory(signalSourceId) {
     const response = await api.get(`/llm/market-history/${encodeURIComponent(signalSourceId)}`)
+    return response.data
+  },
+
+  async getAIMarketSuggestions(signalSourceId) {
+    const response = await api.get(`/llm/market-suggestions/${encodeURIComponent(signalSourceId)}`)
     return response.data
   },
 
@@ -799,6 +809,13 @@ export const marketAPI = {
     if (filters.date_to) params.date_to = filters.date_to
     if (accountId) params.account_id = accountId
     const response = await api.get('/strategy/decisions', { params })
+    return response.data
+  },
+
+  async getStrategyExecutionOverview(strategyId) {
+    const response = await api.get(
+      `/strategy/${encodeURIComponent(strategyId)}/execution-overview`
+    )
     return response.data
   },
 

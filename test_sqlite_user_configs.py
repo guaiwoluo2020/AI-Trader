@@ -298,7 +298,6 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
             strategy_name="平台策略",
             visibility="shared",
             enabled=True,
-            auto_execute=True,
             lifecycle_status=StrategyLifecycle.PRODUCTION,
             position_management_policy_id="alice-policy",
             signal_sources=[ai_source],
@@ -319,7 +318,6 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
         self.assertNotEqual(copied.strategy_id, source.strategy_id)
         self.assertEqual(copied.visibility, "private")
         self.assertTrue(copied.enabled)
-        self.assertTrue(copied.auto_execute)
         self.assertEqual(copied.lifecycle_status, StrategyLifecycle.PRODUCTION)
         self.assertEqual(copied.position_management_policy_id, "alice-policy")
         self.assertEqual(copied.source_strategy_id, source.strategy_id)

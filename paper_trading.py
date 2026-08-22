@@ -14,12 +14,13 @@ from typing import Dict, List, Optional, Tuple
 
 from market.models import PositionManagementPolicy, StrategyLifecycle, TradingStrategy
 from market.services.position_manager import PositionManager
+from market.services.strategy.transient_decision_store import transient_decision_store
 from membership import MembershipService
 from sqlite_storage import (
     PositionManagementEventRepository,
     PositionManagementPolicyRepository, SQLiteStorage,
     PlatformInstrumentMappingRepository, StrategyConfigRepository,
-    TradingAccountRepository, get_storage,
+    RuntimeStateRepository, TradingAccountRepository, get_storage,
 )
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 
@@ -93,7 +94,6 @@ class PaperTradingService:
                 "symbol": row["symbol"],
                 "strategy_name": config.get("strategy_name", row["strategy_id"]),
                 "enabled": True,
-                "auto_execute": True,
                 "lifecycle_status": lifecycle,
                 "paper_eligible": paper_eligible,
                 "paper_direct_allowed": ai_direct,
@@ -402,8 +402,7 @@ class PaperTradingService:
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name,
                    json_extract(s.config_json, '$.lifecycle_status') AS lifecycle_status,
-                   1 AS strategy_enabled,
-                   1 AS strategy_auto_execute
+                   1 AS strategy_enabled
             FROM strategy_deployments d
             LEFT JOIN user_strategy_configs s
               ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
@@ -590,13 +589,33 @@ class PaperTradingService:
                     self._paper_risk_check(aid, s, volume, px)
                 ),
                 position_policy=PositionManagementPolicy.from_dict(policy_snapshot),
+                audit_no_action=True,
             )
             if decision is not None:
                 # Keep the simulated order on the EA's native broker symbol
                 # after the strategy was matched through a platform mapping.
                 decision.symbol = symbol
-            if decision and self._create_order(
-                user_id, deployment, decision.to_dict(), now
+                decision_payload = decision.to_dict()
+                if (
+                    decision.action == "none"
+                    and decision.decision_type == "no_action"
+                ):
+                    transient_decision_store.record(
+                        user_id, account_id, decision,
+                    )
+                else:
+                    transient_decision_store.clear_for_strategy(
+                        user_id, account_id, decision.strategy_id, decision.symbol,
+                    )
+                    runtime = RuntimeStateRepository(
+                        user_id, account_id, self.storage,
+                    )
+                    runtime.upsert_entity(
+                        "strategy_decision", decision.decision_id, decision_payload,
+                        symbol=decision.symbol, status=decision.status,
+                    )
+            if decision and decision_payload.get("action") != "none" and self._create_order(
+                user_id, deployment, decision_payload, now
             ):
                 created += 1
         return created
@@ -671,8 +690,7 @@ class PaperTradingService:
         settings = self._settings(account_id)
         deployments = [dict(row) for row in self.storage.fetchall(
             """
-            SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name,
-                   1 AS auto_execute
+            SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name
             FROM strategy_deployments d
             LEFT JOIN user_strategy_configs s
               ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
@@ -1084,6 +1102,7 @@ class PaperTradingService:
             bid = midpoint - configured_spread / 2
             ask = midpoint + configured_spread / 2
         result = {"filled": 0, "closed": 0, "rejected": 0}
+        decision_updates = []
         with self.storage._lock, self.storage._connect() as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             account = conn.execute(
@@ -1175,6 +1194,10 @@ class PaperTradingService:
                         now, now, now,
                     ),
                 )
+                decision_updates.append((
+                    str(order["decision_id"]), str(order["order_id"]),
+                    "confirmed", True,
+                ))
                 policy_snapshot = json.loads(order["position_policy_snapshot_json"] or "{}")
                 conn.execute(
                     """
@@ -1468,6 +1491,11 @@ class PaperTradingService:
                 ),
             )
             conn.commit()
+        for decision_id, order_id, status, auto_executed in decision_updates:
+            self._sync_paper_decision_status(
+                user_id, account_id, decision_id, order_id,
+                status=status, auto_executed=auto_executed,
+            )
         if any(result.values()):
             parts = [
                 f"成交 {result['filled']} 笔" if result["filled"] else "",
@@ -1483,6 +1511,46 @@ class PaperTradingService:
                 now,
             )
         return result
+
+    def reconcile_decision_statuses(self, user_id: int, account_id: int) -> None:
+        """Backfill execution status for paper decisions created before a fill."""
+        orders = self.storage.fetchall(
+            """
+            SELECT decision_id, order_id, status
+            FROM paper_orders
+            WHERE user_id = ? AND account_id = ?
+              AND status IN ('filled', 'rejected')
+            ORDER BY updated_at DESC
+            LIMIT 200
+            """,
+            (user_id, account_id),
+        )
+        for order in orders:
+            self._sync_paper_decision_status(
+                user_id, account_id, str(order["decision_id"]),
+                str(order["order_id"]),
+                status="confirmed" if order["status"] == "filled" else "rejected",
+                auto_executed=order["status"] == "filled",
+            )
+
+    def _sync_paper_decision_status(
+        self, user_id: int, account_id: int, decision_id: str, order_id: str,
+        status: str, auto_executed: bool,
+    ) -> None:
+        if not decision_id:
+            return
+        runtime = RuntimeStateRepository(user_id, account_id, self.storage)
+        for payload in runtime.list_entities("strategy_decision"):
+            if str(payload.get("decision_id") or "") != decision_id:
+                continue
+            payload["status"] = status
+            payload["auto_executed"] = bool(auto_executed)
+            payload["order_id"] = order_id
+            runtime.upsert_entity(
+                "strategy_decision", decision_id, payload,
+                symbol=str(payload.get("symbol") or ""), status=status,
+            )
+            return
 
     def run_maintenance(self) -> Dict:
         """使用最近一次有效报价维护 Paper 持仓，页面关闭后仍持续运行。"""
@@ -1612,7 +1680,6 @@ class PaperTradingService:
             strategy["position_management_policy_snapshot"] = policy.to_dict()
         # A deployment is the runtime enablement switch for paper trading.
         strategy["enabled"] = True
-        strategy["auto_execute"] = True
         return strategy
 
     def _paper_account(self, user_id: int, account_id: int):

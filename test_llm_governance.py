@@ -7,6 +7,7 @@ from pathlib import Path
 
 from llm_governance import (
     AI_SIGNAL_ANALYSIS,
+    AI_SIGNAL_PROMPT_GENERATION,
     ALPHA_CANDIDATE_GENERATION,
     ALPHA_CANDIDATE_PROMPT_TEMPLATE,
     ALPHA_SYSTEM_PROMPT,
@@ -62,6 +63,26 @@ class LLMGovernanceTestCase(unittest.TestCase):
         self.assertIn("量化研究助手", reservation["system_prompt"])
         self.assertIn("{{factor_catalog}}", reservation["user_prompt_template"])
         self.assertEqual(self.service.quota_status(self.user.user_id)["used"], 1)
+
+    def test_prompt_generation_scene_reuses_signal_models_when_unconfigured(self):
+        options = self.service.scene_options(
+            self.user.user_id, AI_SIGNAL_PROMPT_GENERATION
+        )
+        self.assertEqual(options["models"], ["model-a"])
+        self.assertEqual(options["default_model_id"], "model-a")
+
+    def test_missing_builtin_scene_is_reseeded_on_use(self):
+        self.storage.execute(
+            "DELETE FROM llm_scene_policies WHERE scene_code = ?",
+            (AI_SIGNAL_PROMPT_GENERATION,),
+        )
+
+        options = self.service.scene_options(
+            self.user.user_id, AI_SIGNAL_PROMPT_GENERATION
+        )
+
+        self.assertEqual(options["scene_code"], AI_SIGNAL_PROMPT_GENERATION)
+        self.assertEqual(options["models"], ["model-a"])
 
     def test_low_frequency_scenes_share_daily_free_quota(self):
         for index in range(FREE_DAILY_LIMIT):

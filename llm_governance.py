@@ -16,6 +16,7 @@ from system_event_log import SystemEventLogRepository
 
 
 AI_SIGNAL_ANALYSIS = "ai_signal_analysis"
+AI_SIGNAL_PROMPT_GENERATION = "ai_signal_prompt_generation"
 BACKTEST_REPORT_ANALYSIS = "backtest_report_analysis"
 ALPHA_CANDIDATE_GENERATION = "alpha_candidate_generation"
 ALPHA_ITERATIVE_REFINEMENT = "alpha_iterative_refinement"
@@ -25,25 +26,35 @@ DEFAULT_SYSTEM_PROMPT = (
     "请用JSON格式输出分析结果，不要有任何额外的文字说明。"
 )
 
-DEFAULT_ANALYSIS_PROMPT_TEMPLATE = """你是一位专业的金融分析师。请分析以下交易品种的K线数据，并给出趋势判断和交易建议。
+DEFAULT_ANALYSIS_PROMPT_TEMPLATE = """你是一位专业的金融分析师。请分析主行情的K线数据，并给出趋势判断和交易建议。
 
 ## 分析要求
 
-1. 对策略启用的每个周期判断趋势类型、置信度(0-100)和理由
+1. 只对主分析周期判断趋势类型、置信度(0-100)和理由
 2. 给出整体趋势方向、强度(0-100)和总结
 3. 根据K线数据分别给出3个关键支撑位和压力位
-4. 交易建议必须覆盖策略启用的全部AI周期，period只能是H4、H1、M15、M5、M1之一
-5. 每条建议的止盈止损必须满足关联策略中最高的最低盈亏比要求
+4. 交易建议只针对主分析周期。当前报价仅用于理解当前位置和风险，不要求 entry_price 接近当前价；只有不存在可辩护的结构化计划时 trade_suggestions 才返回 []
+5. 参考行情仅用于校验、确认或否定主行情判断，不能单独输出交易建议
+6. 区间震荡可在已验证支撑附近给 buy、压力附近给 sell，止损放在区间外、止盈指向另一侧；当前价在区间中部时仍可给出未来边界计划
+7. 单边上涨可在回调/回踩至趋势线或支撑时给 buy，止损放在趋势失效位下方；单边下跌可在反抽至压力时给 sell，止损放在趋势失效位上方
 
 趋势类型可选：单边上涨、单边下跌、区间震荡、震荡上升、震荡下跌、震荡收窄、震荡扩大。
 
-## 策略约束
-
-{{strategy_context}}
-
-## K线数据
+## 主行情 K线数据
 
 {{market_data}}
+
+## 可选参考行情
+
+{{reference_market_data}}
+
+如果参考行情为空，忽略本节。参考行情只能辅助主行情判断，不能独立产生趋势或交易建议。
+
+## 当前可交易参考价
+
+{{current_price}}
+
+该价格是当前市场位置的参考；后续策略只会在实时 Tick 接近 entry_price 时再评估入场。它不是立即下单要求，也不限制输出未来的回调、反抽或区间边界计划。
 
 ## 输出格式
 
@@ -51,19 +62,42 @@ DEFAULT_ANALYSIS_PROMPT_TEMPLATE = """你是一位专业的金融分析师。请
 {
   "品种": {
     "trend_analysis": {
-      "策略启用周期": {"trend": "趋势类型", "confidence": 置信度, "reason": "判断理由"}
+      "主分析周期": {"trend": "趋势类型", "confidence": 置信度, "reason": "判断理由"}
     },
     "overall_trend": {"direction": "方向", "strength": 强度, "summary": "总结"},
     "key_levels": {"resistance": [压力位1, 压力位2, 压力位3], "support": [支撑位1, 支撑位2, 支撑位3]},
     "trade_suggestions": [{
-      "strategy_id": "策略ID", "signal_source_id": "信号源实例ID",
-      "period": "策略启用周期",
+      "signal_source_id": "信号源实例ID", "period": "主分析周期",
       "direction": "buy或sell", "confidence": 置信度,
       "entry_price": 入场价格, "stop_loss": 止损价格, "take_profit": 止盈价格,
       "reason": "交易理由"
     }]
   }
 }
+"""
+
+AI_SIGNAL_PROMPT_GENERATOR_SYSTEM_PROMPT = (
+    "你是交易系统提示词设计助手。根据用户的分析目标和当前 AI 信号源配置，"
+    "生成一份可执行的行情分析提示词。只返回合法 JSON，不输出 Markdown。"
+)
+
+AI_SIGNAL_PROMPT_GENERATOR_TEMPLATE = """请为下面的 AI 信号源生成一份专属提示词候选。
+
+信号源配置：
+{{signal_source_config}}
+
+用户希望：
+{{user_intent}}
+
+硬性要求：
+1. 输出 JSON 对象，字段必须为 system_prompt、analysis_prompt_template、summary、assumptions。
+2. analysis_prompt_template 必须保留 {{market_data}} 和 {{current_price}}；如果配置了参考行情，应保留 {{reference_market_data}}。
+3. 不得出现 {{strategy_context}}、strategy_id 或任何策略级约束。
+4. 严格遵循配置中 runtime_contract：不要虚构任何输入变量、K线字段或输出字段。
+5. 只分析主品种和主周期；参考行情只能辅助判断，不能单独生成交易建议。
+6. 必须要求纯 JSON 输出，并完整要求 runtime_contract 中的顶层键、trend_analysis、trade_suggestions、方向、置信度、周期与止损止盈规则。
+7. 必须明确 current_price 只作当前市场位置与风险参考，trade_suggestions 可给出未来计划价位；区间行情使用支撑/压力边界计划，单边趋势使用未失效趋势中的回调/反抽计划。实时 Tick 接近 entry_price 后才由策略评估入场。
+8. system_prompt 不超过 800 个中文字符，analysis_prompt_template 不超过 2,000 个中文字符；不要解释提示词设计过程。
 """
 
 BACKTEST_REPORT_SYSTEM_PROMPT = (
@@ -171,6 +205,11 @@ SCENE_DEFAULTS = (
         DEFAULT_SYSTEM_PROMPT, DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
     ),
     (
+        AI_SIGNAL_PROMPT_GENERATION, "AI 信号提示词生成", "low", 0, 0,
+        AI_SIGNAL_PROMPT_GENERATOR_SYSTEM_PROMPT,
+        AI_SIGNAL_PROMPT_GENERATOR_TEMPLATE,
+    ),
+    (
         BACKTEST_REPORT_ANALYSIS, "回测报告分析", "low", 0, 0,
         BACKTEST_REPORT_SYSTEM_PROMPT, BACKTEST_REPORT_PROMPT_TEMPLATE,
     ),
@@ -221,38 +260,16 @@ class LLMGovernanceService:
                     system_prompt, user_prompt_template, now,
                 ),
             )
+            # Prompts are system-owned baseline contracts. Administrators
+            # configure models and scene availability, not prompt text.
             self.storage.execute(
                 """
                 UPDATE llm_scene_policies
-                SET system_prompt = CASE WHEN system_prompt = '' THEN ? ELSE system_prompt END,
-                    user_prompt_template = CASE WHEN user_prompt_template = '' THEN ? ELSE user_prompt_template END
+                SET system_prompt = ?, user_prompt_template = ?
                 WHERE scene_code = ?
                 """,
                 (system_prompt, user_prompt_template, code),
             )
-            if code == AI_SIGNAL_ANALYSIS:
-                prompt_count = self.storage.fetchone(
-                    "SELECT COUNT(*) AS total FROM llm_scene_prompts WHERE scene_code = ?",
-                    (code,),
-                )
-                if int(prompt_count["total"] if prompt_count else 0) == 0:
-                    policy = self.storage.fetchone(
-                        "SELECT system_prompt, user_prompt_template FROM llm_scene_policies WHERE scene_code = ?",
-                        (code,),
-                    )
-                    self.storage.execute(
-                        """
-                        INSERT INTO llm_scene_prompts(
-                            prompt_id, scene_code, prompt_name, system_prompt,
-                            user_prompt_template, is_default, created_at, updated_at
-                        ) VALUES(?, ?, ?, ?, ?, 1, ?, ?)
-                        """,
-                        (
-                            f"{code}:default", code, "默认提示词",
-                            policy["system_prompt"], policy["user_prompt_template"],
-                            now, now,
-                        ),
-                    )
 
     def _bootstrap_model(self, model_id: str) -> None:
         now = int(time.time())
@@ -368,21 +385,6 @@ class LLMGovernanceService:
                     (row["scene_code"],),
                 )],
             })
-            if row["scene_code"] == AI_SIGNAL_ANALYSIS:
-                item["prompt_profiles"] = [dict(prompt) | {
-                    "is_default": bool(prompt["is_default"]),
-                } for prompt in self.storage.fetchall(
-                    """
-                    SELECT prompt_id, prompt_name, system_prompt, user_prompt_template,
-                           is_default, created_at, updated_at
-                    FROM llm_scene_prompts
-                    WHERE scene_code = ?
-                    ORDER BY is_default DESC, updated_at DESC, prompt_name
-                    """,
-                    (row["scene_code"],),
-                )]
-            else:
-                item["prompt_profiles"] = []
             scenes.append(item)
         return scenes
 
@@ -417,11 +419,15 @@ class LLMGovernanceService:
     ) -> None:
         if not system_prompt or not user_prompt_template:
             raise LLMGovernanceError("场景提示词不能为空")
-        if scene_code == AI_SIGNAL_ANALYSIS and (
-            "{{strategy_context}}" not in user_prompt_template
-            or "{{market_data}}" not in user_prompt_template
-        ):
-            raise LLMGovernanceError("AI行情分析提示词必须保留 {{strategy_context}} 和 {{market_data}}")
+        if scene_code == AI_SIGNAL_ANALYSIS:
+            if "{{market_data}}" not in user_prompt_template:
+                raise LLMGovernanceError("AI行情分析提示词必须保留 {{market_data}}")
+            if "{{strategy_context}}" in user_prompt_template:
+                raise LLMGovernanceError("AI行情分析提示词不能包含 {{strategy_context}}")
+        if scene_code == AI_SIGNAL_PROMPT_GENERATION:
+            for token in ("{{signal_source_config}}", "{{user_intent}}"):
+                if token not in user_prompt_template:
+                    raise LLMGovernanceError(f"提示词生成模板必须保留 {token}")
         if scene_code == BACKTEST_REPORT_ANALYSIS and "{{backtest_snapshot}}" not in user_prompt_template:
             raise LLMGovernanceError("回测报告提示词必须保留 {{backtest_snapshot}}")
         if scene_code == ALPHA_CANDIDATE_GENERATION:
@@ -441,35 +447,6 @@ class LLMGovernanceService:
                 if token not in user_prompt_template:
                     raise LLMGovernanceError(f"Alpha迭代提示词必须保留 {token}")
 
-    def _normalize_ai_prompt_profiles(self, data: Dict) -> List[Dict]:
-        profiles = data.get("prompt_profiles") or []
-        if not isinstance(profiles, list) or not profiles:
-            raise LLMGovernanceError("AI行情分析至少需要保留一条提示词")
-        normalized = []
-        for profile in profiles:
-            if not isinstance(profile, dict):
-                raise LLMGovernanceError("提示词配置格式不正确")
-            prompt_name = str(profile.get("prompt_name") or "").strip()
-            if not prompt_name:
-                raise LLMGovernanceError("请填写提示词名称")
-            system_prompt = str(profile.get("system_prompt") or "").strip()
-            user_prompt_template = str(profile.get("user_prompt_template") or "").strip()
-            self._validate_scene_prompt(
-                AI_SIGNAL_ANALYSIS, system_prompt, user_prompt_template,
-            )
-            normalized.append({
-                "prompt_id": str(profile.get("prompt_id") or uuid.uuid4().hex),
-                "prompt_name": prompt_name[:100],
-                "system_prompt": system_prompt,
-                "user_prompt_template": user_prompt_template,
-                "is_default": bool(profile.get("is_default")),
-            })
-        if len({profile["prompt_id"] for profile in normalized}) != len(normalized):
-            raise LLMGovernanceError("提示词标识重复，请删除后重新添加")
-        if sum(profile["is_default"] for profile in normalized) != 1:
-            raise LLMGovernanceError("AI行情分析必须且只能选择一条默认提示词")
-        return normalized
-
     def save_scene(self, scene_code: str, data: Dict, admin_user_id: int) -> Dict:
         current = self.storage.fetchone(
             "SELECT * FROM llm_scene_policies WHERE scene_code = ?", (scene_code,)
@@ -485,25 +462,12 @@ class LLMGovernanceService:
         default_model = str(data.get("default_model_id") or "").strip()
         if default_model not in model_ids:
             raise LLMGovernanceError("默认模型必须包含在场景可用模型中")
-        prompt_profiles = (
-            self._normalize_ai_prompt_profiles(data)
-            if scene_code == AI_SIGNAL_ANALYSIS else []
+        defaults = next(
+            (item for item in SCENE_DEFAULTS if item[0] == scene_code), None
         )
-        default_prompt = next(
-            (profile for profile in prompt_profiles if profile["is_default"]), None,
-        )
-        system_prompt = (
-            default_prompt["system_prompt"] if default_prompt
-            else str(data.get("system_prompt") or "").strip()
-        )
-        user_prompt_template = (
-            default_prompt["user_prompt_template"] if default_prompt
-            else str(data.get("user_prompt_template") or "").strip()
-        )
-        if scene_code != AI_SIGNAL_ANALYSIS:
-            self._validate_scene_prompt(
-                scene_code, system_prompt, user_prompt_template,
-            )
+        if defaults is None:
+            raise LLMGovernanceError("未知的大模型调用场景")
+        system_prompt, user_prompt_template = defaults[-2:]
         self.storage.execute(
             """
             UPDATE llm_scene_policies SET enabled = ?, default_model_id = ?,
@@ -521,25 +485,6 @@ class LLMGovernanceService:
                 "INSERT INTO llm_scene_models(scene_code, model_id) VALUES(?, ?)",
                 (scene_code, model_id),
             )
-        if scene_code == AI_SIGNAL_ANALYSIS:
-            now = int(time.time())
-            self.storage.execute(
-                "DELETE FROM llm_scene_prompts WHERE scene_code = ?", (scene_code,)
-            )
-            for profile in prompt_profiles:
-                self.storage.execute(
-                    """
-                    INSERT INTO llm_scene_prompts(
-                        prompt_id, scene_code, prompt_name, system_prompt,
-                        user_prompt_template, is_default, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        profile["prompt_id"], scene_code, profile["prompt_name"],
-                        profile["system_prompt"], profile["user_prompt_template"],
-                        int(profile["is_default"]), now, now,
-                    ),
-                )
         return next(item for item in self.list_scenes() if item["scene_code"] == scene_code)
 
     def quota_status(self, user_id: int) -> Dict:
@@ -567,10 +512,29 @@ class LLMGovernanceService:
 
     def scene_options(self, user_id: int, scene_code: str) -> Dict:
         scene = next((item for item in self.list_scenes() if item["scene_code"] == scene_code), None)
+        if scene is None and any(item[0] == scene_code for item in SCENE_DEFAULTS):
+            # Long-running installations can receive a new built-in scene
+            # before their database has been reseeded. Repair that state at
+            # the point of use instead of rejecting a valid built-in scene.
+            self._seed()
+            scene = next(
+                (item for item in self.list_scenes() if item["scene_code"] == scene_code),
+                None,
+            )
         if scene is None:
             raise LLMGovernanceError("未知的大模型调用场景")
         enabled = {item["model_id"] for item in self.list_models() if item["enabled"] and item["available"]}
         scene["models"] = [model for model in scene.pop("model_ids") if model in enabled]
+        if scene_code == AI_SIGNAL_PROMPT_GENERATION and not scene["models"]:
+            # Prompt generation is a low-frequency companion to AI signal setup.
+            # Reuse the signal-analysis allowlist until an administrator gives
+            # this scene its own model selection, instead of showing an empty UI.
+            analysis = self.scene_options(user_id, AI_SIGNAL_ANALYSIS)
+            scene["models"] = list(analysis["models"])
+            if scene["models"] and scene.get("default_model_id") not in scene["models"]:
+                scene["default_model_id"] = analysis.get("default_model_id")
+                if scene["default_model_id"] not in scene["models"]:
+                    scene["default_model_id"] = scene["models"][0]
         scene["quota"] = self.quota_status(user_id) if scene["frequency_class"] == "low" else None
         return scene
 

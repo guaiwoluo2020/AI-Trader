@@ -16,7 +16,10 @@ test -x "$APP_DIR/venv/bin/python"
 set -a
 source /etc/ai-trader.env
 set +a
-"$APP_DIR/venv/bin/python" -c 'from sqlite_storage import get_storage; get_storage().initialize()'
+
+# Production storage is MySQL. Do not run the legacy SQLite initialization
+# during deploy; it can fail before the service restart on a MySQL-only host.
+"$APP_DIR/venv/bin/python" -c 'import pymysql'
 
 chown -R root:root "$APP_DIR"
 chmod -R a+rX "$APP_DIR"

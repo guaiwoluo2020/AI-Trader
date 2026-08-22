@@ -225,6 +225,32 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(repeated)
 
+    def test_quote_audit_returns_each_waiting_evaluation_for_memory_aggregation(self):
+        strategy = TradingStrategy(
+            symbol="GOLD_", min_confidence=50,
+            consistency_requirement="majority",
+            signal_sources=[{
+                "signal_source_id": "key", "source": "key_level",
+                "period": "M1", "weight": 100, "params": {},
+            }],
+        )
+        service = StrategyService(
+            strategy_store=_StrategyStore(strategy), risk_manager=_RiskManager()
+        )
+        waiting_signal = self._state(strategy, "key", "up", trigger=False)
+
+        first = service.make_decision(
+            "GOLD_", 4100, force_signals=[waiting_signal], strategy=strategy,
+            audit_no_action=True,
+        )
+        second = service.make_decision(
+            "GOLD_", 4100, force_signals=[waiting_signal], strategy=strategy,
+            audit_no_action=True,
+        )
+
+        self.assertEqual(first.action, "none")
+        self.assertEqual(second.action, "none")
+
     def test_ai_interval_cannot_be_shorter_than_signal_period(self):
         strategy = TradingStrategy(symbol="GOLD_", signal_sources=[{
             "signal_source_id": "ai-m15",
@@ -505,7 +531,6 @@ class StrategyServiceTestCase(unittest.TestCase):
         strategy = TradingStrategy(
             symbol="GOLD_",
             enabled=True,
-            auto_execute=True,
             lifecycle_status=StrategyLifecycle.PRODUCTION,
         )
 
@@ -513,7 +538,6 @@ class StrategyServiceTestCase(unittest.TestCase):
 
         self.assertEqual(strategy.lifecycle_status, StrategyLifecycle.DRAFT)
         self.assertTrue(strategy.enabled)
-        self.assertTrue(strategy.auto_execute)
         self.assertEqual(
             strategy.lifecycle_history[-1]["reason"],
             "策略参数已修改，需要重新验证",
@@ -772,9 +796,8 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(len(decision.signals), 1)
         self.assertEqual(decision.signals[0]["source_period"], "M1")
 
-    def test_auto_execute_strategy_confirms_order_and_uses_ea_action(self):
-        strategy = TradingStrategy(symbol="GOLD_", auto_execute=True)
-        restored_strategy = TradingStrategy.from_dict(strategy.to_dict())
+    def test_executable_decision_confirms_order_and_uses_ea_action(self):
+        strategy = TradingStrategy(symbol="GOLD_")
         pending_orders = _PendingOrderService()
         service = StrategyService(
             strategy_store=_StrategyStore(strategy),
@@ -785,7 +808,6 @@ class StrategyServiceTestCase(unittest.TestCase):
             symbol="GOLD_",
             strategy_id=strategy.strategy_id,
             strategy_name=strategy.strategy_name,
-            auto_execute=True,
             action="buy",
             entry_price=4020.0,
             sl=4010.0,
@@ -796,14 +818,13 @@ class StrategyServiceTestCase(unittest.TestCase):
         order_id = service.execute_decision(decision)
 
         self.assertEqual(order_id, "order-1")
-        self.assertTrue(restored_strategy.auto_execute)
         self.assertEqual(pending_orders.created[0]["action"], "b")
         self.assertEqual(pending_orders.confirmed, ["order-1"])
         self.assertTrue(decision.auto_executed)
         self.assertEqual(decision.status, "confirmed")
 
-    def test_manual_strategy_keeps_order_pending(self):
-        strategy = TradingStrategy(symbol="GOLD_", auto_execute=False)
+    def test_executable_decision_confirms_sell_order(self):
+        strategy = TradingStrategy(symbol="GOLD_")
         pending_orders = _PendingOrderService()
         service = StrategyService(
             strategy_store=_StrategyStore(strategy),
@@ -813,7 +834,6 @@ class StrategyServiceTestCase(unittest.TestCase):
         decision = TradingDecision(
             symbol="GOLD_",
             strategy_id=strategy.strategy_id,
-            auto_execute=False,
             action="sell",
             entry_price=4020.0,
             sl=4030.0,
@@ -823,9 +843,9 @@ class StrategyServiceTestCase(unittest.TestCase):
         service.execute_decision(decision)
 
         self.assertEqual(pending_orders.created[0]["action"], "s")
-        self.assertEqual(pending_orders.confirmed, [])
-        self.assertFalse(decision.auto_executed)
-        self.assertEqual(decision.status, "pending")
+        self.assertEqual(pending_orders.confirmed, ["order-1"])
+        self.assertTrue(decision.auto_executed)
+        self.assertEqual(decision.status, "confirmed")
 
 
 if __name__ == "__main__":

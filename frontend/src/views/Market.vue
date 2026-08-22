@@ -1,210 +1,79 @@
 <template>
-  <v-container fluid>
-    <section class="execution-hero mb-5">
+  <v-container fluid class="execution-page">
+    <header class="page-header">
       <div>
-        <div class="section-kicker">LIVE STRATEGY OPERATIONS</div>
+        <div class="section-kicker">STRATEGY OPERATIONS</div>
         <h1>策略执行中心</h1>
-        <p>
-          {{ selectedAccount?.account_name || '当前账户' }} · 实时跟踪策略决策与账户自动执行
-        </p>
+        <p>{{ decisionFilters.strategy_id ? '查看该策略在全部账户中的部署与决策记录' : '按策略汇总模拟盘与实盘部署' }}</p>
       </div>
-      <v-chip :color="wsConnected ? 'success' : 'error'" variant="flat">
-        <v-icon start>mdi-lan-connect</v-icon>
-        {{ wsConnected ? '实时通道已连接' : '实时通道断开' }}
-      </v-chip>
+      <div class="header-summary">
+        <span>{{ decisionFilters.strategy_id ? '运行部署' : '运行策略' }}</span>
+        <strong>{{ runningDeploymentCount }}</strong>
+      </div>
+    </header>
+
+    <section v-if="decisionFilters.strategy_id" class="focus-section">
+      <div class="section-heading">
+        <div>
+          <div class="section-label">策略运行过程</div>
+          <h2>{{ focusedStrategyName }}</h2>
+        </div>
+        <div class="d-flex align-center ga-2">
+          <v-chip size="small" color="primary" variant="tonal">{{ focusedDeployments.length }} 个部署</v-chip>
+          <v-btn icon="mdi-close" variant="text" size="small" title="关闭策略详情" @click="clearFocus" />
+        </div>
+      </div>
+      <v-alert v-if="loadingFocusedExecution" type="info" variant="tonal" density="compact">正在加载该策略的运行记录。</v-alert>
+      <v-alert v-else-if="!focusedDeployments.length" type="info" variant="tonal" density="compact">该策略尚未部署到模拟盘或实盘账户。</v-alert>
+      <v-row v-else class="deployment-grid">
+        <v-col v-for="deployment in focusedDeployments" :key="deployment.deployment_id" cols="12" lg="6">
+          <article class="deployment-panel">
+            <div class="deployment-heading">
+              <div><strong>{{ deployment.account_name }}</strong><span>{{ deployment.symbol }}</span></div>
+              <div class="d-flex align-center ga-2"><v-chip size="x-small" :color="deployment.execution_mode === 'paper' ? 'info' : 'success'" variant="tonal">{{ executionModeLabel(deployment.execution_mode) }}</v-chip><v-chip size="x-small" variant="outlined">{{ deployment.status === 'active' ? '运行中' : deployment.status }}</v-chip></div>
+            </div>
+            <p v-if="!deployment.decisions.length" class="empty-decision">该部署尚未生成决策记录。</p>
+            <div v-else class="decision-list">
+              <button v-for="decision in deployment.decisions" :key="decision.decision_id" class="decision-row" type="button" @click="openDecisionDetail(decision)">
+                <span class="decision-marker" :class="decision.action || 'none'"></span>
+                <span class="decision-main"><strong>{{ decision.action === 'buy' ? '买入' : decision.action === 'sell' ? '卖出' : '不执行' }}</strong><small>{{ decision.reason || '未提供决策理由' }}</small></span>
+                <span class="decision-meta"><v-chip size="x-small" variant="outlined">{{ getDecisionStatusLabel(decision.status, decision.auto_executed, decision.execution_mode) }}</v-chip><v-chip v-if="decision.action === null && decision.observation_count > 1" size="x-small" color="info" variant="tonal">已聚合 {{ decision.observation_count }} 次未执行</v-chip><small>信号 {{ decision.signals?.length || 0 }} · {{ decision.confidence || 0 }}%</small><time>{{ formatTime(decision.timestamp) }}</time></span>
+              </button>
+            </div>
+          </article>
+        </v-col>
+      </v-row>
     </section>
 
-    <v-row class="mb-2">
-      <v-col cols="12" sm="4">
-        <v-card class="metric-card" variant="tonal" color="primary">
-          <v-card-text><span>运行策略</span><strong>{{ activeDeployments.length }}</strong></v-card-text>
-        </v-card>
-      </v-col>
-      <v-col cols="12" sm="4">
-        <v-card class="metric-card" variant="tonal" color="warning">
-          <v-card-text><span>待处理决策</span><strong>{{ pendingOrders.length }}</strong></v-card-text>
-        </v-card>
-      </v-col>
-      <v-col cols="12" sm="4">
-        <v-card class="metric-card" variant="tonal" color="info">
-          <v-card-text><span>已记录决策</span><strong>{{ decisionAlerts.length }}</strong></v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
+    <section class="strategy-section">
+      <div class="section-heading"><div><div class="section-label">运行概览</div><h2>当前运行策略</h2></div><span class="section-note">{{ activeStrategyGroups.length }} 个策略</span></div>
+      <div v-if="activeStrategyGroups.length" class="strategy-list">
+        <article v-for="strategy in activeStrategyGroups" :key="strategy.strategy_id" class="strategy-row">
+          <div class="strategy-identity"><strong>{{ strategy.strategy_name }}</strong><span>{{ strategy.symbol }}</span></div>
+          <div class="deployment-tags"><span v-for="deployment in strategy.deployments" :key="deployment.deployment_id"><v-icon size="14" :color="deployment.execution_mode === 'paper' ? 'info' : 'success'">mdi-circle</v-icon>{{ deployment.account_name }}</span></div>
+          <div class="strategy-action"><span>{{ strategy.deployments.length }} 个部署</span><v-btn size="small" color="primary" variant="tonal" @click="focusStrategy(strategy.strategy_id)">查看过程</v-btn></div>
+        </article>
+      </div>
+      <v-alert v-else type="info" variant="tonal" density="compact">当前没有运行中的模拟盘或实盘策略。</v-alert>
+    </section>
 
-    <v-card class="mb-4">
-      <v-card-title class="d-flex align-center">
-        <v-icon class="mr-2">mdi-play-circle-outline</v-icon>
-        当前运行策略
-      </v-card-title>
-      <v-card-text>
-        <div v-if="activeDeployments.length" class="d-flex flex-wrap ga-2">
-          <v-chip
-            v-for="deployment in activeDeployments"
-            :key="deployment.deployment_id"
-            color="success"
-            variant="tonal"
-          >
-            {{ deployment.strategy_name || deployment.strategy_id }} · {{ deployment.symbol }}
-          </v-chip>
-        </div>
-        <v-alert v-else type="info" variant="tonal" density="compact">
-          当前账户尚未绑定运行中的实盘策略
-        </v-alert>
-      </v-card-text>
-    </v-card>
-
-    <v-card class="mb-4 pending-card">
-      <v-card-title class="d-flex align-center">
-        <v-icon class="mr-2" color="warning">mdi-inbox-arrow-down-outline</v-icon>
-        待处理决策
-        <v-chip size="small" color="warning" class="ml-2">{{ pendingOrders.length }}</v-chip>
-      </v-card-title>
-      <v-card-text>
-        <v-alert v-if="!pendingOrders.length" type="success" variant="tonal" density="compact">
-          当前没有需要人工处理的策略决策
-        </v-alert>
-        <v-row v-else>
-          <v-col v-for="order in pendingOrders" :key="order.order_id" cols="12">
-            <div class="pending-order-row">
-              <div class="pending-order-main">
-                <div class="d-flex flex-wrap align-center ga-2 mb-2">
-                  <strong>{{ order.symbol }}</strong>
-                  <v-chip size="small" :color="order.action === 'b' ? 'success' : 'error'">
-                    {{ order.action === 'b' ? '买入' : '卖出' }}
-                  </v-chip>
-                  <v-chip size="small" variant="outlined">
-                    {{ order.strategy_name || order.strategy_id || '策略决策' }}
-                  </v-chip>
-                </div>
-                <div class="text-caption text-medium-emphasis">{{ order.reason }}</div>
-              </div>
-              <div class="pending-order-fields">
-                <v-text-field v-model.number="order.mount" label="手数" type="number" step="0.01" min="0.01" density="compact" hide-details variant="outlined" />
-                <v-text-field v-model.number="order.sl" label="止损" type="number" density="compact" hide-details variant="outlined" />
-                <v-text-field v-model.number="order.tp" label="止盈" type="number" density="compact" hide-details variant="outlined" />
-              </div>
-              <div class="pending-order-actions">
-                <v-btn color="success" :loading="confirmingOrderId === order.order_id" @click="confirmPendingOrder(order)">确认执行</v-btn>
-                <v-btn variant="outlined" color="error" :loading="rejectingOrderId === order.order_id" @click="rejectPendingOrder(order.order_id)">放弃</v-btn>
-              </div>
-            </div>
-          </v-col>
-        </v-row>
-      </v-card-text>
-    </v-card>
-
-    <v-card class="mb-4">
-      <v-card-title class="d-flex align-center flex-wrap ga-2">
-        <v-icon class="mr-1">mdi-history</v-icon>
-        最新策略决策
-        <v-spacer />
-        <v-select v-model="decisionFilters.strategy_id" :items="strategyFilterOptions" label="策略" clearable density="compact" hide-details variant="outlined" class="decision-filter" />
-        <v-select v-model="decisionFilters.status" :items="decisionStatusOptions" label="状态" clearable density="compact" hide-details variant="outlined" class="decision-filter" />
-        <v-text-field v-model="decisionFilters.date_from" label="开始时间" type="datetime-local" density="compact" hide-details variant="outlined" class="decision-time-filter" />
-        <v-text-field v-model="decisionFilters.date_to" label="结束时间" type="datetime-local" density="compact" hide-details variant="outlined" class="decision-time-filter" />
-        <v-btn color="primary" variant="tonal" :loading="loadingDecisions" @click="loadDecisions">查询</v-btn>
-      </v-card-title>
-      <v-card-text v-if="!decisionAlerts.length" class="text-center text-medium-emphasis py-8">
-        暂无符合条件的策略决策
-      </v-card-text>
-    </v-card>
-
-    <!-- 交易决策提醒 -->
-    <v-row v-if="decisionAlerts.length > 0">
-      <v-col cols="12">
-        <v-alert
-          v-for="(alert, index) in decisionAlerts"
-          :key="alert.decision_id || index"
-          :type="alert.rejected ? 'warning' : alert.action === 'buy' ? 'success' : 'error'"
-          class="mb-2"
-        >
-          <div class="d-flex flex-wrap align-center">
-            <v-icon small class="mr-1">mdi-chart-line</v-icon>
-            <strong>{{ alert.symbol }}</strong>
-            <v-chip small outlined color="blue-grey" class="ml-2">
-              <v-icon small left>mdi-strategy</v-icon>
-              {{ alert.strategy_name }} · {{ alert.strategy_id }}
-            </v-chip>
-            <v-chip
-              small
-              :color="alert.action === 'buy' ? 'success' : alert.action === 'sell' ? 'error' : 'grey'"
-              class="ml-2"
-            >
-              <v-icon small left>
-                {{ alert.action === 'buy' ? 'mdi-arrow-up-bold' : alert.action === 'sell' ? 'mdi-arrow-down-bold' : 'mdi-help' }}
-              </v-icon>
-              {{ alert.action === 'buy' ? '买入' : alert.action === 'sell' ? '卖出' : '方向未知' }}
-            </v-chip>
-            <v-chip v-if="alert.rejected" small outlined color="warning" class="ml-2">
-              <v-icon small left>mdi-shield-alert</v-icon>
-              风控拦截
-            </v-chip>
-            <v-chip v-else-if="alert.auto_executed" small color="warning" class="ml-2">
-              <v-icon small left>mdi-robot</v-icon>
-              已自动下单
-            </v-chip>
-            <v-chip v-if="alert.confidence" small color="primary" class="ml-2">
-              置信度: {{ alert.confidence }}%
-            </v-chip>
-          </div>
-
-          <div class="mt-2">
-            <span class="text-caption mr-4">入场价: <strong>{{ formatTradePrice(alert.price) }}</strong></span>
-            <span class="text-caption mr-4">止损: <strong>{{ formatTradePrice(alert.sl) }}</strong></span>
-            <span class="text-caption mr-4">止盈: <strong>{{ formatTradePrice(alert.tp) }}</strong></span>
-            <span v-if="alert.risk_reward_ratio" class="text-caption">
-              盈亏比: <strong>{{ alert.risk_reward_ratio }}</strong>
-            </span>
-          </div>
-
-          <!-- 信号来源 -->
-          <div v-if="alert.signals && alert.signals.length > 0" class="mt-2">
-            <span class="text-caption mr-2">信号来源:</span>
-            <v-chip
-              v-for="(signal, sIdx) in getVisibleSignals(alert)"
-              :key="sIdx"
-              size="x-small"
-              class="mr-1"
-              :color="getSignalSourceColor(signal.source)"
-            >
-              {{ formatSignalLabel(signal) }}
-            </v-chip>
-            <v-btn
-              v-if="alert.signals.length > 3"
-              size="x-small"
-              variant="text"
-              class="ml-1"
-              @click="toggleSignalExpand(index)"
-            >
-              {{ isSignalExpanded(index) ? '收起' : `+${alert.signals.length - 3} 更多` }}
-              <v-icon end small>{{ isSignalExpanded(index) ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
-            </v-btn>
-          </div>
-
-          <div v-if="alert.rejected" class="mt-3 pa-2 amber lighten-5 rounded">
-            <div class="text-subtitle-2 font-weight-bold mb-1">
-              <v-icon small color="warning" class="mr-1">mdi-shield-alert</v-icon>
-              当前信号不可确认
-            </div>
-            <div class="text-caption grey--text text--darken-1">
-              {{
-                alert.risk_warnings.length
-                  ? alert.risk_warnings.join('；')
-                  : alert.reason
-              }}
-            </div>
-          </div>
-
-          <div class="mt-2 d-flex align-center ga-2">
-            <v-chip size="small" :color="getDecisionStatusColor(alert.status)" variant="tonal">
-              {{ getDecisionStatusLabel(alert.status, alert.auto_executed) }}
-            </v-chip>
-            <span class="text-caption text-medium-emphasis">{{ formatTime(alert.timestamp) }}</span>
-          </div>
-        </v-alert>
-      </v-col>
-    </v-row>
+    <v-dialog v-model="decisionDetailDialog" max-width="860" scrollable>
+      <v-card v-if="selectedDecision">
+        <v-card-title class="d-flex align-center"><v-icon class="mr-2">mdi-file-search-outline</v-icon>{{ selectedDecision.strategy_name }} · 执行详情<v-spacer/><v-btn icon="mdi-close" variant="text" @click="decisionDetailDialog = false"/></v-card-title>
+        <v-card-text class="decision-detail">
+          <div class="detail-chips"><v-chip size="small" :color="selectedDecision.execution_mode === 'paper' ? 'info' : 'success'" variant="tonal">{{ executionModeLabel(selectedDecision.execution_mode) }}</v-chip><v-chip size="small" :color="selectedDecision.action === 'buy' ? 'success' : selectedDecision.action === 'sell' ? 'error' : 'info'" variant="tonal">{{ selectedDecision.action === 'buy' ? '买入' : selectedDecision.action === 'sell' ? '卖出' : '不执行' }}</v-chip><v-chip size="small" variant="outlined">{{ getDecisionStatusLabel(selectedDecision.status, selectedDecision.auto_executed, selectedDecision.execution_mode) }}</v-chip></div>
+          <h3>行情与信号</h3>
+          <v-alert v-if="!selectedDecision.signals.length" type="info" variant="tonal">本次决策未保留可展示的信号明细。</v-alert>
+          <v-list v-else density="compact" class="signal-detail-list"><v-list-item v-for="(signal, index) in selectedDecision.signals" :key="`${signal.signal_id || signal.signal_source_id || signal.source}-${index}`"><v-list-item-title>{{ formatSignalLabel(signal) }}</v-list-item-title><v-list-item-subtitle>{{ signal.trigger_reason || '未提供信号理由' }}</v-list-item-subtitle><template #append><span class="text-caption">{{ formatTradePrice(signal.suggested_entry || signal.trigger_price) }}</span></template></v-list-item></v-list>
+          <h3>策略执行逻辑</h3>
+          <div class="detail-grid"><div><span>策略</span><strong>{{ selectedDecision.strategy_name }}</strong></div><div><span>聚合方式</span><strong>{{ selectedDecision.decision_type || '--' }}</strong></div><div><span>参与信号</span><strong>{{ selectedDecision.signal_summary?.total_count ?? selectedDecision.signals.length }}</strong></div><div><span>最终置信度</span><strong>{{ selectedDecision.confidence || 0 }}%</strong></div></div>
+          <p class="decision-reason">{{ selectedDecision.reason || '未提供策略决策理由' }}</p>
+          <h3>执行结果</h3>
+          <div class="detail-grid"><div><span>入场价</span><strong>{{ formatTradePrice(selectedDecision.price) }}</strong></div><div><span>止损 / 止盈</span><strong>{{ formatTradePrice(selectedDecision.sl) }} / {{ formatTradePrice(selectedDecision.tp) }}</strong></div><div><span>手数</span><strong>{{ selectedDecision.volume || '--' }}</strong></div><div><span>状态</span><strong>{{ getDecisionStatusLabel(selectedDecision.status, selectedDecision.auto_executed, selectedDecision.execution_mode) }}</strong></div></div>
+          <v-alert v-if="selectedDecision.risk_warnings?.length" type="warning" variant="tonal" class="mt-4">{{ selectedDecision.risk_warnings.join('；') }}</v-alert>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
 
     <!-- 错误提示 -->
     <v-snackbar v-model="showError" color="error" timeout="5000">
@@ -214,7 +83,8 @@
 </template>
 
 <script>
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { marketAPI } from '@/api/market'
 import { useAccountContext } from '@/composables/useAccountContext'
 import {
@@ -228,13 +98,18 @@ export default {
     // 数据
     const decisionAlerts = ref([])  // 统一的决策提醒列表
     const expandedSignals = ref(new Set())  // 展开信号的状态
+    const route = useRoute()
+    const router = useRouter()
+    const decisionDetailDialog = ref(false)
+    const selectedDecision = ref(null)
     const showError = ref(false)
     const errorMessage = ref('')
 
-    const pendingOrders = ref([])
     const loadingDecisions = ref(false)
+    const loadingFocusedExecution = ref(false)
+    const focusedExecution = ref(null)
     const decisionFilters = reactive({
-      strategy_id: null,
+      strategy_id: route.query.strategy_id || null,
       status: null,
       date_from: '',
       date_to: '',
@@ -246,114 +121,58 @@ export default {
       { title: '已过期', value: 'expired' },
     ]
 
-    // 订单确认/放弃状态
-    const confirmingOrderId = ref(null)
-    const rejectingOrderId = ref(null)
+    const { accounts, loadAccountContext } = useAccountContext()
 
-    // WebSocket
-    const ws = ref(null)
-    const wsConnected = ref(false)
-    let wsReconnectTimer = null
-    let statusInterval = null
-    let isUnmounted = false
-    const { selectedAccountId, selectedAccount } = useAccountContext()
-
-    const activeDeployments = computed(() => (
-      selectedAccount.value?.deployments || []
-    ).filter(item => item.execution_mode === 'live' && item.status === 'active'))
-    const strategyFilterOptions = computed(() => activeDeployments.value.map(item => ({
-      title: `${item.strategy_name || item.strategy_id} · ${item.symbol}`,
+    const activeDeployments = computed(() => (accounts.value || []).flatMap(account => (
+      (Array.isArray(account?.deployments) ? account.deployments : [])
+        .filter(item => item && ['paper', 'live'].includes(item.execution_mode) && item.status === 'active')
+        .map(item => ({
+          ...item,
+          account_id: account.account_id,
+          account_name: account.account_name,
+          account_type: account.account_type,
+        }))
+    )))
+    const activeStrategyGroups = computed(() => {
+      const groups = new Map()
+      for (const deployment of activeDeployments.value.filter(Boolean)) {
+        const strategyId = deployment.strategy_id
+        if (!groups.has(strategyId)) {
+          groups.set(strategyId, {
+            strategy_id: strategyId,
+            strategy_name: deployment.strategy_name || strategyId,
+            symbol: deployment.symbol,
+            deployments: [],
+          })
+        }
+        groups.get(strategyId).deployments.push(deployment)
+      }
+      return [...groups.values()].sort((left, right) => (
+        left.strategy_name.localeCompare(right.strategy_name, 'zh-CN')
+      ))
+    })
+    const focusedDeployments = computed(() => focusedExecution.value?.deployments || [])
+    const runningDeploymentCount = computed(() => (
+      decisionFilters.strategy_id
+        ? focusedDeployments.value.filter(item => item?.status === 'active').length
+        : activeDeployments.value.length
+    ))
+    const focusedStrategyName = computed(() => (
+      focusedExecution.value?.strategy?.strategy_name
+      || strategyFilterOptions.value.find(item => item.value === decisionFilters.strategy_id)?.title
+      || decisionFilters.strategy_id
+    ))
+    const strategyFilterOptions = computed(() => activeStrategyGroups.value.map(item => ({
+      title: `${item.strategy_name} · ${item.symbol}`,
       value: item.strategy_id,
     })))
-    const connectWebSocket = () => {
-      if (
-        isUnmounted ||
-        !selectedAccountId.value ||
-        ws.value?.readyState === WebSocket.OPEN ||
-        ws.value?.readyState === WebSocket.CONNECTING
-      ) {
-        return
-      }
-      const accountId = selectedAccountId.value
-      const socket = marketAPI.createWebSocket(
-        // onMessage
-        (data) => {
-          if (data.type === 'trading_decision') {
-            // 策略层产生的交易决策
-            console.log('收到交易决策:', data)
-            const decision = data.data
-            if (
-              decisionAlerts.value.some(
-                (alert) => alert.decision_id === decision.decision_id
-              )
-            ) {
-              return
-            }
-            const alert = normalizeTradingDecision(decision)
-            decisionAlerts.value.unshift(alert)
-            if (decisionAlerts.value.length > 50) {
-              decisionAlerts.value.pop()
-            }
-            loadPendingOrders()
-          } else if (data.type === 'pending_order') {
-            // 订单状态更新（确认后）
-            console.log('收到订单更新:', data)
-            const order = data.data
-            // 更新对应的 alert
-            const alertIndex = decisionAlerts.value.findIndex(
-              a => a.pending_order?.order_id === order.order_id
-            )
-            if (alertIndex >= 0) {
-              decisionAlerts.value[alertIndex].status = 'confirmed'
-            }
-            loadPendingOrders()
-            loadDecisions()
-          } else if (data.type === 'connected') {
-            wsConnected.value = true
-          }
-        },
-        // onError
-        () => {
-          wsConnected.value = false
-        },
-        // onOpen
-        () => {
-          wsConnected.value = true
-        },
-        // onClose
-        () => {
-          if (ws.value !== socket) return
-          wsConnected.value = false
-          ws.value = null
-          if (!isUnmounted && selectedAccountId.value === accountId) {
-            clearTimeout(wsReconnectTimer)
-            wsReconnectTimer = setTimeout(() => {
-              connectWebSocket()
-            }, 5000)
-          }
-        },
-        accountId
-      )
-      ws.value = socket
-    }
-
-    const loadPendingOrders = async () => {
-      try {
-        const data = await marketAPI.getPendingOrders(null, selectedAccountId.value)
-        pendingOrders.value = data.orders || []
-      } catch (err) {
-        console.error('加载待确认订单失败:', err)
-      }
-    }
-
     const loadDecisions = async () => {
-      if (!selectedAccountId.value) return
       loadingDecisions.value = true
       try {
         const data = await marketAPI.getDecisions({
           ...decisionFilters,
           count: 50,
-        }, selectedAccountId.value)
+        })
         decisionAlerts.value = (data.decisions || []).map(normalizeTradingDecision)
       } catch (err) {
         console.error('加载策略决策历史失败:', err)
@@ -362,43 +181,31 @@ export default {
       }
     }
 
-    const confirmPendingOrder = async (order) => {
-      confirmingOrderId.value = order.order_id
-      try {
-        const data = await marketAPI.confirmOrderWithUpdate(order.order_id, {
-          mount: order.mount,
-          sl: order.sl,
-          tp: order.tp
-        }, selectedAccountId.value)
-        if (data.status === 'ok') {
-          await Promise.all([loadPendingOrders(), loadDecisions()])
-        } else {
-          errorMessage.value = data.message || '确认订单失败'
-          showError.value = true
-        }
-      } catch (err) {
-        errorMessage.value = `确认订单失败: ${err.message}`
-        showError.value = true
-      } finally {
-        confirmingOrderId.value = null
+    const loadFocusedExecution = async () => {
+      const strategyId = decisionFilters.strategy_id
+      if (!strategyId) {
+        focusedExecution.value = null
+        return
       }
-    }
-
-    const rejectPendingOrder = async (orderId) => {
-      rejectingOrderId.value = orderId
+      loadingFocusedExecution.value = true
       try {
-        const data = await marketAPI.rejectOrder(orderId, selectedAccountId.value)
-        if (data.status === 'ok') {
-          await Promise.all([loadPendingOrders(), loadDecisions()])
-        } else {
-          errorMessage.value = data.message || '放弃订单失败'
-          showError.value = true
+        const data = await marketAPI.getStrategyExecutionOverview(strategyId)
+        focusedExecution.value = {
+          ...data,
+          deployments: (Array.isArray(data.deployments) ? data.deployments : [])
+            .filter(Boolean)
+            .map(deployment => ({
+            ...deployment,
+            decisions: (Array.isArray(deployment.decisions) ? deployment.decisions : [])
+              .filter(Boolean)
+              .map(normalizeTradingDecision),
+          })),
         }
       } catch (err) {
-        errorMessage.value = `放弃订单失败: ${err.message}`
-        showError.value = true
+        focusedExecution.value = null
+        console.error('加载策略部署运行记录失败:', err)
       } finally {
-        rejectingOrderId.value = null
+        loadingFocusedExecution.value = false
       }
     }
 
@@ -407,15 +214,35 @@ export default {
       confirmed: 'success',
       rejected: 'error',
       expired: 'grey',
+      skipped: 'info',
     }[status] || 'info')
 
-    const getDecisionStatusLabel = (status, autoExecuted = false) => {
+    const getDecisionStatusLabel = (status, autoExecuted = false, executionMode = 'live') => {
       if (status === 'confirmed') return autoExecuted ? '已自动执行' : '已确认执行'
+      if (status === 'pending' && executionMode === 'paper') return '等待模拟撮合'
       return {
         pending: '等待确认',
         rejected: '已拒绝',
         expired: '已过期',
+        skipped: '未执行',
       }[status] || status || '未知状态'
+    }
+
+    const executionModeLabel = (mode) => mode === 'paper' ? '模拟盘' : '实盘'
+
+    const openDecisionDetail = (decision) => {
+      selectedDecision.value = decision
+      decisionDetailDialog.value = true
+    }
+
+    const focusStrategy = (strategyId) => {
+      router.replace({ query: { ...route.query, strategy_id: strategyId } })
+    }
+
+    const clearFocus = () => {
+      const query = { ...route.query }
+      delete query.strategy_id
+      router.replace({ query })
     }
 
     // 辅助方法
@@ -489,61 +316,38 @@ export default {
 
     // 生命周期
     onMounted(async () => {
-      if (selectedAccountId.value) {
-        loadPendingOrders()
-        loadDecisions()
-        connectWebSocket()
-      }
-
-      // 定时刷新
-      statusInterval = setInterval(() => {
-        if (!selectedAccountId.value) return
-        loadPendingOrders()
-        loadDecisions()
-      }, 10000)
-
+      await loadAccountContext()
+      await loadFocusedExecution()
     })
 
-    watch(selectedAccountId, async (value) => {
-      clearTimeout(wsReconnectTimer)
-      ws.value?.close()
-      ws.value = null
-      wsConnected.value = false
-      decisionAlerts.value = []
-      pendingOrders.value = []
-      if (!value || isUnmounted) return
-      await Promise.all([loadPendingOrders(), loadDecisions()])
-      connectWebSocket()
-    })
-
-    onUnmounted(() => {
-      isUnmounted = true
-      clearInterval(statusInterval)
-      clearTimeout(wsReconnectTimer)
-      ws.value?.close()
-      ws.value = null
+    watch(() => route.query.strategy_id, async (strategyId) => {
+      decisionFilters.strategy_id = strategyId || null
+      await loadFocusedExecution()
     })
 
     return {
       decisionAlerts,
+      decisionDetailDialog,
+      selectedDecision,
       showError,
       errorMessage,
-      wsConnected,
-      pendingOrders,
-      selectedAccount,
       activeDeployments,
+      activeStrategyGroups,
+      runningDeploymentCount,
+      focusedDeployments,
+      focusedStrategyName,
+      loadingFocusedExecution,
       strategyFilterOptions,
       decisionFilters,
       decisionStatusOptions,
       loadingDecisions,
       loadDecisions,
-      // 决策订单操作
-      confirmingOrderId,
-      rejectingOrderId,
-      confirmPendingOrder,
-      rejectPendingOrder,
       getDecisionStatusColor,
       getDecisionStatusLabel,
+      executionModeLabel,
+      openDecisionDetail,
+      focusStrategy,
+      clearFocus,
       getSignalSourceColor,
       formatTime,
       formatTradePrice,
@@ -558,118 +362,209 @@ export default {
 </script>
 
 <style scoped>
-.execution-hero {
+.execution-page {
+  max-width: 1520px;
+  margin: 0 auto;
+  padding: 28px 32px 48px;
+}
+
+.page-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 26px 30px;
-  color: #f4fbf8;
-  border-radius: 22px;
-  background:
-    radial-gradient(circle at 86% 18%, rgba(247, 186, 67, 0.28), transparent 28%),
-    linear-gradient(125deg, #123c35 0%, #176b56 58%, #0d8f70 100%);
-  box-shadow: 0 18px 40px rgba(20, 82, 68, 0.18);
+  padding: 0 0 22px;
+  border-bottom: 1px solid #dce4e2;
 }
 
-.execution-hero h1 {
-  margin: 2px 0 6px;
-  font-size: clamp(1.8rem, 3vw, 2.7rem);
-  line-height: 1.05;
-}
-
-.execution-hero p {
+.page-header h1,
+.section-heading h2 {
   margin: 0;
-  color: rgba(244, 251, 248, 0.76);
+  color: #172b31;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.page-header h1 { font-size: 1.85rem; }
+.section-heading h2 { font-size: 1.2rem; }
+
+.page-header p {
+  margin: 7px 0 0;
+  color: #68777c;
+  font-size: .9rem;
 }
 
 .section-kicker {
-  color: #f4c96b;
+  color: #247d68;
   font-size: 0.72rem;
-  font-weight: 800;
-  letter-spacing: 0.16em;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
-.metric-card .v-card-text {
+.header-summary {
   display: flex;
-  align-items: baseline;
+  min-width: 118px;
+  flex-direction: column;
+  align-items: flex-end;
+  padding: 9px 0 9px 20px;
+  border-left: 3px solid #38a078;
+}
+
+.header-summary span,
+.section-label,
+.section-note {
+  color: #748187;
+  font-size: .75rem;
+  letter-spacing: 0;
+}
+
+.header-summary strong {
+  color: #1f6454;
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.focus-section,
+.strategy-section {
+  margin-top: 28px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.deployment-grid { margin-top: -12px; }
+
+.deployment-panel,
+.strategy-list {
+  border: 1px solid #dbe4e2;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.deployment-panel { overflow: hidden; }
+
+.deployment-heading {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-height: 58px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e5ecea;
+  background: #f7faf9;
 }
 
-.metric-card strong {
-  font-size: 1.9rem;
-}
-
-.pending-order-row {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(360px, 1.2fr) auto;
-  gap: 18px;
-  align-items: center;
-  padding: 16px;
-  border: 1px solid rgba(117, 91, 15, 0.18);
-  border-radius: 14px;
-  background: linear-gradient(100deg, rgba(255, 248, 225, 0.8), rgba(255, 255, 255, 0.9));
-}
-
-.pending-order-fields {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(90px, 1fr));
-  gap: 10px;
-}
-
-.pending-order-actions {
+.deployment-heading > div:first-child {
   display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.deployment-heading strong { color: #203239; font-size: .92rem; }
+.deployment-heading span { color: #748187; font-size: .75rem; margin-top: 2px; }
+.empty-decision { margin: 0; padding: 24px 16px; color: #7a878c; font-size: .84rem; }
+
+.decision-list { display: flex; flex-direction: column; }
+
+.decision-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 11px;
+  width: 100%;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid #edf1f0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.decision-row:last-child { border-bottom: 0; }
+.decision-row:hover { background: #f4f9f7; }
+.decision-marker { width: 8px; height: 8px; border-radius: 50%; background: #8ea0a5; }
+.decision-marker.buy { background: #2f9c72; }
+.decision-marker.sell { background: #d65d50; }
+.decision-main { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.decision-main strong { color: #26383e; font-size: .84rem; font-weight: 700; }
+.decision-main small { overflow: hidden; color: #69777d; font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+.decision-meta { display: flex; min-width: 150px; flex-direction: column; align-items: flex-end; gap: 3px; color: #76858a; font-size: .72rem; }
+.decision-meta small, .decision-meta time { font-size: .7rem; white-space: nowrap; }
+
+.strategy-list { overflow: hidden; }
+.strategy-row {
+  display: grid;
+  grid-template-columns: minmax(210px, .8fr) minmax(300px, 1.4fr) auto;
+  gap: 20px;
+  align-items: center;
+  min-height: 76px;
+  padding: 13px 16px;
+  border-bottom: 1px solid #e8efed;
+}
+.strategy-row:last-child { border-bottom: 0; }
+.strategy-identity { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.strategy-identity strong { overflow: hidden; color: #24363c; font-size: .92rem; text-overflow: ellipsis; white-space: nowrap; }
+.strategy-identity span { color: #6a7a80; font-size: .76rem; }
+.deployment-tags { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.deployment-tags span { display: inline-flex; align-items: center; gap: 5px; color: #52636a; font-size: .8rem; }
+.strategy-action { display: flex; align-items: center; justify-content: flex-end; gap: 12px; color: #68777c; font-size: .76rem; white-space: nowrap; }
+
+.decision-detail h3 {
+  margin: 22px 0 10px;
+  color: #29493e;
+  font-size: 1rem;
+}
+
+.detail-chips {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
-.decision-filter {
-  max-width: 190px;
+.signal-detail-list {
+  border: 1px solid #dce7e0;
+  border-radius: 8px;
 }
 
-.decision-time-filter {
-  max-width: 215px;
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.v-card {
-  margin-bottom: 16px;
+.detail-grid div {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  border-radius: 6px;
+  background: #f1f6f3;
 }
 
-.trend-card {
-  height: 100%;
+.detail-grid span {
+  color: #718078;
+  font-size: .75rem;
 }
 
-.reason-text {
-  font-size: 11px;
-  color: #666;
-  line-height: 1.3;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+.decision-reason {
+  margin: 12px 0 0;
+  color: #52635e;
 }
 
 @media (max-width: 960px) {
-  .execution-hero,
-  .pending-order-row {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-  }
+  .execution-page { padding: 22px 16px 36px; }
+  .strategy-row { grid-template-columns: 1fr; gap: 10px; align-items: start; }
+  .strategy-action { justify-content: space-between; }
+}
 
-  .pending-order-fields {
-    grid-template-columns: 1fr;
-  }
-
-  .pending-order-actions .v-btn {
-    flex: 1;
-  }
-
-  .decision-filter,
-  .decision-time-filter {
-    max-width: none;
-    width: 100%;
-  }
+@media (max-width: 600px) {
+  .page-header, .deployment-heading { align-items: flex-start; flex-direction: column; }
+  .header-summary { align-items: flex-start; padding: 8px 0 0 12px; }
+  .decision-row { grid-template-columns: 8px minmax(0, 1fr); }
+  .decision-meta { grid-column: 2; align-items: flex-start; min-width: 0; }
 }
 </style>

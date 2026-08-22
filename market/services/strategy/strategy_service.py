@@ -47,6 +47,7 @@ class StrategyService:
         self.decision_cooldown = 60  # 60秒冷却
         self._allowed_strategy_ids: Optional[set] = None
         self._consensus_directions: Dict[str, str] = {}
+        self._no_action_audit_at: Dict[str, datetime] = {}
 
         print("[StrategyService] 策略决策服务已初始化")
 
@@ -291,7 +292,8 @@ class StrategyService:
                      position_checker: Callable = None,
                      risk_checker: Callable = None,
                      position_policy: PositionManagementPolicy = None,
-                     position_context: Optional[Dict] = None) -> Optional[TradingDecision]:
+                     position_context: Optional[Dict] = None,
+                     audit_no_action: bool = False) -> Optional[TradingDecision]:
         """
         做出交易决策
 
@@ -330,16 +332,28 @@ class StrategyService:
 
         if analysis["action"] == "none":
             self._consensus_directions[cooldown_key] = "none"
-            return None
+            return self._no_action_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                "未形成可执行方向：" + self._no_action_reason(analysis, strategy),
+                audit_no_action, cooldown_key, decision_time,
+            )
 
         action = analysis["action"]
         previous_direction = self._consensus_directions.get(cooldown_key, "none")
         consensus_changed = previous_direction != action
         analysis["consensus_changed"] = consensus_changed
         if not analysis["triggered"] and not consensus_changed:
-            return None
+            return self._no_action_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                "方向一致但没有新的入场触发，继续等待价格或信号变化",
+                audit_no_action, cooldown_key, decision_time,
+            )
         if self._is_in_cooldown(cooldown_key, decision_time):
-            return None
+            return self._no_action_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                "策略决策冷却中，避免重复下单",
+                audit_no_action, cooldown_key, decision_time,
+            )
 
         enabled_signals = [
             signal
@@ -354,7 +368,11 @@ class StrategyService:
         # 选择最佳信号（用于止损止盈）
         best_signal = self._select_best_signal(enabled_signals, action, strategy)
         if not best_signal:
-            return None
+            return self._no_action_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                "没有满足策略启用条件的方向信号",
+                audit_no_action, cooldown_key, decision_time,
+            )
         market_direction = "up" if action == "buy" else "down"
         directional_signals = [
             signal for signal in enabled_signals
@@ -506,7 +524,7 @@ class StrategyService:
                 symbol=symbol,
                 strategy_id=strategy.strategy_id,
                 strategy_name=strategy.strategy_name,
-                auto_execute=True,
+                execution_mode=execution_mode,
                 action=action,
                 decision_type="rejected",
                 signals=[s.to_dict() for s in enabled_signals],
@@ -543,7 +561,7 @@ class StrategyService:
             symbol=symbol,
             strategy_id=strategy.strategy_id,
             strategy_name=strategy.strategy_name,
-            auto_execute=True,
+            execution_mode=execution_mode,
             action=action,
             decision_type="signal_combined" if len(signals) > 1 else "single_signal",
             signals=[s.to_dict() for s in enabled_signals],
@@ -569,6 +587,52 @@ class StrategyService:
         print(f"[StrategyService] 生成决策: {decision.decision_id} {action} {symbol} @ {entry_price}")
 
         return decision
+
+    def _no_action_decision(
+        self, symbol: str, strategy: TradingStrategy, signals: List[TradingSignal],
+        analysis: Dict, execution_mode: str, reason: str, enabled: bool,
+        cooldown_key: str, decision_time: Optional[datetime],
+    ) -> Optional[TradingDecision]:
+        """Return a transient waiting state for every quote-driven evaluation."""
+        if not enabled:
+            return None
+        now = decision_time or datetime.now()
+        return TradingDecision(
+            symbol=symbol,
+            strategy_id=strategy.strategy_id,
+            strategy_name=strategy.strategy_name,
+            execution_mode=execution_mode,
+            action="none",
+            decision_type="no_action",
+            signals=[signal.to_dict() for signal in signals],
+            signal_summary=analysis,
+            decision_reason=reason,
+            confidence_score=max(
+                float(analysis.get("buy_confidence", 0) or 0),
+                float(analysis.get("sell_confidence", 0) or 0),
+            ),
+            status="skipped",
+            created_at=now,
+        )
+
+    @staticmethod
+    def _no_action_reason(analysis: Dict, strategy: TradingStrategy) -> str:
+        if not analysis.get("ready_count"):
+            return (
+                f"{analysis.get('total_count', 0)} 个已配置信号源均未提供可用方向"
+            )
+        if analysis.get("buy_count") and analysis.get("sell_count"):
+            return "买入与卖出信号冲突，策略不执行"
+        direction = analysis.get("direction")
+        confidence = analysis.get(
+            "buy_confidence" if direction == "buy" else "sell_confidence", 0,
+        )
+        if direction and float(confidence or 0) < strategy.min_confidence:
+            return (
+                f"{direction} 方向置信度 {float(confidence):.0f}% 低于策略要求 "
+                f"{strategy.min_confidence}%"
+            )
+        return "信号一致性未达到策略要求"
 
     def _select_best_signal(self, signals: List[TradingSignal],
                            action: str, strategy: TradingStrategy) -> Optional[TradingSignal]:
@@ -712,14 +776,13 @@ class StrategyService:
         decision.order_id = order_id
         decision.status = "pending"
 
-        if decision.auto_execute:
-            confirmed_order = self._pending_order_service.confirm_order(order_id)
-            if confirmed_order:
-                decision.auto_executed = True
-                decision.status = "confirmed"
-                print(f"[StrategyService] 策略自动下单: {order_id}")
-            else:
-                print(f"[StrategyService] 策略自动下单失败: {order_id}")
+        confirmed_order = self._pending_order_service.confirm_order(order_id)
+        if confirmed_order:
+            decision.auto_executed = True
+            decision.status = "confirmed"
+            print(f"[StrategyService] 策略自动下单: {order_id}")
+        else:
+            print(f"[StrategyService] 策略自动下单失败: {order_id}")
 
         print(f"[StrategyService] 决策已执行，订单ID: {order_id}")
         return order_id

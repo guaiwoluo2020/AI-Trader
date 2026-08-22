@@ -1,7 +1,7 @@
 <template>
   <v-select
     :model-value="selectedAccountId"
-    :items="accountOptions"
+    :items="visibleAccountOptions"
     item-title="title"
     item-value="value"
     label="当前查看账户"
@@ -35,7 +35,12 @@
 </template>
 
 <script setup>
+import { computed, watch } from 'vue'
 import { useAccountContext } from '@/composables/useAccountContext'
+
+const props = defineProps({
+  accountTypes: { type: Array, default: null },
+})
 
 const {
   selectedAccountId,
@@ -43,6 +48,17 @@ const {
   loadingAccounts,
   selectAccount,
 } = useAccountContext()
+
+const visibleAccountOptions = computed(() => (
+  props.accountTypes?.length
+    ? accountOptions.value.filter(item => props.accountTypes.includes(item.account.account_type))
+    : accountOptions.value
+))
+
+watch(visibleAccountOptions, (options) => {
+  if (!options.length || options.some(item => item.value === selectedAccountId.value)) return
+  selectAccount(options[0].value)
+}, { immediate: true })
 </script>
 
 <style scoped>

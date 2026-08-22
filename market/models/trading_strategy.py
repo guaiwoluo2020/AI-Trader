@@ -128,6 +128,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "system_prompt": "",
             "analysis_prompt_template": "",
             "reference_runtime_ids": [],
+            "reference_market_data": [],
             "shared_runtime_id": "",
         }
     elif source == "moving_average":
@@ -315,10 +316,11 @@ def normalize_signal_sources(
                 raise ValueError("AI系统提示词不能超过10000个字符")
             if len(params["analysis_prompt_template"]) > 50000:
                 raise ValueError("AI分析提示词不能超过50000个字符")
-            if params["analysis_prompt_template"]:
-                for placeholder in ("{{strategy_context}}", "{{market_data}}"):
-                    if placeholder not in params["analysis_prompt_template"]:
-                        raise ValueError(f"AI分析提示词必须包含 {placeholder}")
+            if (
+                params["analysis_prompt_template"]
+                and "{{market_data}}" not in params["analysis_prompt_template"]
+            ):
+                raise ValueError("AI分析提示词必须包含 {{market_data}}")
             # Runtime-data sharing belongs to the standalone AI signal source,
             # not to a strategy's serialised source binding.
             params.pop("share_runtime_data", None)
@@ -328,6 +330,36 @@ def normalize_signal_sources(
             params["reference_runtime_ids"] = list(dict.fromkeys(
                 str(value).strip() for value in references if str(value).strip()
             ))[:10]
+            references = params.get("reference_market_data") or []
+            if not isinstance(references, list):
+                raise ValueError("参考行情配置格式无效")
+            if len(references) > 5:
+                raise ValueError("每个 AI 信号源最多配置 5 条参考行情")
+            normalized_references = []
+            occupied_references = set()
+            for reference in references:
+                if not isinstance(reference, dict):
+                    raise ValueError("参考行情配置项格式无效")
+                reference_symbol = str(reference.get("symbol") or "").strip()
+                reference_period = str(reference.get("period") or "").strip().upper()
+                if not reference_symbol or reference_period not in SIGNAL_PERIODS:
+                    raise ValueError("参考行情必须填写有效品种和周期")
+                if reference_symbol == str(raw.get("symbol") or "").strip() and reference_period == period:
+                    raise ValueError("参考行情不能与主行情使用相同的品种和周期")
+                key = (reference_symbol.upper(), reference_period)
+                if key in occupied_references:
+                    raise ValueError("同一个品种和周期不能重复添加参考行情")
+                occupied_references.add(key)
+                role = str(reference.get("role") or "market_context").strip()
+                if role not in {"higher_timeframe", "lower_timeframe", "related_symbol", "market_context"}:
+                    raise ValueError("参考行情类型无效")
+                normalized_references.append({
+                    "symbol": reference_symbol,
+                    "period": reference_period,
+                    "kline_count": max(10, min(500, int(reference.get("kline_count", 100) or 100))),
+                    "role": role,
+                })
+            params["reference_market_data"] = normalized_references
             params["shared_runtime_id"] = str(
                 params.get("shared_runtime_id") or ""
             ).strip()
@@ -388,7 +420,6 @@ class TradingStrategy:
 
     # 策略不再承担运行开关；是否运行由账户部署关系和账户交易开关控制。
     enabled: bool = True
-    auto_execute: bool = True
 
     # 直接构造策略保持历史兼容；通过 StrategyStore 创建的新策略会显式设为草稿。
     lifecycle_status: str = StrategyLifecycle.PRODUCTION
@@ -495,7 +526,6 @@ class TradingStrategy:
         if not self.lifecycle_updated_at:
             self.lifecycle_updated_at = self.created_at
         self.enabled = True
-        self.auto_execute = True
         if not self.strategy_name:
             self.strategy_name = f"Strategy_{self.symbol}"
         self.signal_sources = normalize_signal_sources(self.signal_sources)
@@ -583,9 +613,8 @@ class TradingStrategy:
             if visibility is None:
                 visibility = "shared" if data.get("is_shared") else "private"
             self.visibility = "shared" if visibility == "shared" else "private"
-        # 策略级 enabled/auto_execute 已废弃，统一由账户部署关系控制。
+        # 策略级 enabled 已废弃，统一由账户部署关系控制。
         self.enabled = True
-        self.auto_execute = True
         if "signal_config" in data:
             self.signal_config = data["signal_config"]
             if "signal_sources" not in data:
@@ -762,7 +791,6 @@ class TradingStrategy:
             "visibility": self.visibility,
             "is_shared": self.visibility == "shared",
             "enabled": True,
-            "auto_execute": True,
             "lifecycle_status": self.lifecycle_status,
             "lifecycle_label": StrategyLifecycle.LABELS[self.lifecycle_status],
             "lifecycle_updated_at": (
@@ -846,7 +874,6 @@ class TradingStrategy:
                 else data.get('visibility', 'private')
             ),
             enabled=True,
-            auto_execute=True,
             lifecycle_status=lifecycle_status,
             lifecycle_updated_at=lifecycle_updated_at,
             lifecycle_history=data.get('lifecycle_history', []),
@@ -889,8 +916,8 @@ class TradingDecision:
     symbol: str                       # 品种
     strategy_id: str                  # 来源策略ID
     strategy_name: str = ""           # 来源策略名称
-    auto_execute: bool = False        # 策略是否要求自动下单
     auto_executed: bool = False       # 是否已自动生成 EA 指令
+    execution_mode: str = "live"     # live / paper
 
     # ==================== 决策结果 ====================
     action: str = ""                  # buy/sell/none
@@ -922,6 +949,10 @@ class TradingDecision:
     decision_id: str = ""
     status: str = "pending"           # pending/confirmed/rejected/expired
     created_at: datetime = None
+    # Waiting decisions are aggregated in memory and deliberately never saved.
+    observation_count: int = 1
+    first_observed_at: datetime = None
+    last_observed_at: datetime = None
 
     # ==================== 关联 ====================
     order_id: Optional[str] = None
@@ -939,8 +970,8 @@ class TradingDecision:
             "symbol": self.symbol,
             "strategy_id": self.strategy_id,
             "strategy_name": self.strategy_name,
-            "auto_execute": self.auto_execute,
             "auto_executed": self.auto_executed,
+            "execution_mode": self.execution_mode,
             "action": self.action,
             "decision_type": self.decision_type,
             "signals": self.signals,
@@ -958,6 +989,15 @@ class TradingDecision:
             "risk_check": self.risk_check,
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+            "observation_count": self.observation_count,
+            "first_observed_at": (
+                self.first_observed_at.isoformat()
+                if self.first_observed_at else None
+            ),
+            "last_observed_at": (
+                self.last_observed_at.isoformat()
+                if self.last_observed_at else None
+            ),
             "order_id": self.order_id,
         }
 
@@ -967,13 +1007,19 @@ class TradingDecision:
         created_at = data.get('created_at')
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at)
+        first_observed_at = data.get('first_observed_at')
+        if isinstance(first_observed_at, str):
+            first_observed_at = datetime.fromisoformat(first_observed_at)
+        last_observed_at = data.get('last_observed_at')
+        if isinstance(last_observed_at, str):
+            last_observed_at = datetime.fromisoformat(last_observed_at)
 
         return cls(
             symbol=data.get('symbol', ''),
             strategy_id=data.get('strategy_id', ''),
             strategy_name=data.get('strategy_name', ''),
-            auto_execute=data.get('auto_execute', False),
             auto_executed=data.get('auto_executed', False),
+            execution_mode=data.get('execution_mode', 'live'),
             action=data.get('action', ''),
             decision_type=data.get('decision_type', ''),
             signals=data.get('signals', []),
@@ -992,5 +1038,8 @@ class TradingDecision:
             decision_id=data.get('decision_id', ''),
             status=data.get('status', 'pending'),
             created_at=created_at,
+            observation_count=int(data.get('observation_count', 1) or 1),
+            first_observed_at=first_observed_at,
+            last_observed_at=last_observed_at,
             order_id=data.get('order_id'),
         )

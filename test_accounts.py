@@ -18,6 +18,7 @@ from sqlite_storage import (
     UserRepository,
 )
 from paper_trading import PaperTradingService
+from routes_accounts import _account_payload
 
 
 class TradingAccountRepositoryTests(unittest.TestCase):
@@ -85,6 +86,27 @@ class TradingAccountRepositoryTests(unittest.TestCase):
         self.assertEqual(paper.daily_order_limit, 100)
         self.assertIsNone(connection)
         self.assertIsNone(self.repository.authenticate(self.user.user_id, "invalid"))
+
+    def test_paper_account_is_active_only_with_a_runnable_deployment(self):
+        paper = self.repository.create_paper_account(
+            self.user.user_id, "Runtime Paper", 10000
+        )
+
+        ready = _account_payload(paper, [])
+        running = _account_payload(paper, [{
+            "status": "active", "execution_mode": "paper",
+        }])
+        paused = _account_payload(paper, [{
+            "status": "paused", "execution_mode": "paper",
+        }])
+
+        self.assertFalse(ready["active"])
+        self.assertEqual(ready["active_deployment_count"], 0)
+        self.assertEqual(ready["engine_status"], "ready")
+        self.assertTrue(running["active"])
+        self.assertEqual(running["active_deployment_count"], 1)
+        self.assertEqual(running["engine_status"], "running")
+        self.assertFalse(paused["active"])
 
     def test_accounts_are_scoped_to_user(self):
         self.repository.create_paper_account(

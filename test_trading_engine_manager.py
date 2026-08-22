@@ -560,7 +560,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         self.assertNotEqual(broadcasts[0]["order_id"], decision.decision_id)
         manager.close_all()
 
-    def test_auto_execute_strategy_creates_instruction_without_confirmation(self):
+    def test_executable_strategy_creates_instruction_without_confirmation(self):
         account, _ = TradingAccountRepository().create_or_rotate_default(
             self.admin.user_id
         )
@@ -570,7 +570,6 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             symbol="GOLD#",
             strategy_id="auto-strategy",
             strategy_name="Auto Strategy",
-            auto_execute=True,
             action="buy",
             entry_price=3300.0,
             sl=3290.0,
@@ -597,7 +596,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         self.assertEqual(instructions[0]["action"], "b")
         manager.close_all()
 
-    def test_account_controls_block_strategy_auto_execution(self):
+    def test_account_controls_block_strategy_execution(self):
         repository = TradingAccountRepository()
         account, _ = repository.create_or_rotate_default(self.admin.user_id)
         repository.update_controls(
@@ -611,7 +610,6 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             symbol="GOLD#",
             strategy_id="auto-strategy",
             strategy_name="Auto Strategy",
-            auto_execute=True,
             action="buy",
             entry_price=3300.0,
             sl=3290.0,

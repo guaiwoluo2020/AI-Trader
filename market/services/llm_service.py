@@ -21,7 +21,10 @@ from ..models.llm_config import (
 )
 from ..store import LLMStore
 from .kline_service import KlineService
-from sqlite_storage import AISignalSourceRepository, SharedAIRuntimeRepository
+from sqlite_storage import (
+    AISignalSourceRepository, AITradeSuggestionRepository,
+    SharedAIRuntimeRepository,
+)
 from llm_governance import AI_SIGNAL_ANALYSIS, LLMGovernanceService
 
 
@@ -31,6 +34,10 @@ class LLMRequestError(RuntimeError):
 
 class LLMResponseFormatError(LLMRequestError):
     """大模型响应不是可用的 JSON。"""
+
+
+AI_SIGNAL_KLINE_MIN_COUNT = 10
+AI_SIGNAL_KLINE_MAX_COUNT = 288
 
 
 class LLMService:
@@ -46,7 +53,28 @@ class LLMService:
 
     @staticmethod
     def _provider_key(config) -> str:
-        return str(getattr(config, "api_base", "") or "").rstrip("/").lower()
+        """Use the active endpoint and model as the circuit-breaker identity.
+
+        A provider can expose multiple models with independent quotas. Including
+        the model also prevents a model switch from inheriting the old model's
+        cooldown when the endpoint stays the same.
+        """
+        api_base = str(getattr(config, "api_base", "") or "").rstrip("/").lower()
+        model = str(getattr(config, "model", "") or "").strip().lower()
+        return f"{api_base}|{model}" if api_base else ""
+
+    @classmethod
+    def clear_provider_block(cls, config=None, api_base: str = "", model: str = "") -> None:
+        """Clear a provider/model cooldown after configuration changes."""
+        if config is not None:
+            key = cls._provider_key(config)
+        else:
+            endpoint = str(api_base or "").rstrip("/").lower()
+            key = f"{endpoint}|{str(model or '').strip().lower()}" if endpoint else ""
+        if not key:
+            return
+        with cls._provider_block_lock:
+            cls._provider_blocked_until.pop(key, None)
 
     @classmethod
     def _raise_if_provider_blocked(cls, config) -> None:
@@ -156,6 +184,7 @@ class LLMService:
         self._source_last_analysis_at = {}
         self._shared_runtime_repo = SharedAIRuntimeRepository()
         self._ai_signal_source_repo = AISignalSourceRepository()
+        self._trade_suggestion_repo = AITradeSuggestionRepository()
         repo = getattr(self.llm_store, "_repo", None)
         self._llm_governance = (
             LLMGovernanceService(repo.storage) if repo is not None else None
@@ -218,6 +247,10 @@ class LLMService:
         for source in self._ai_signal_source_repo.list(
             self.llm_store.user_id, enabled_only=True
         ):
+            if int(source.get("market_data_account_id") or 0) != int(
+                getattr(self.llm_store, "_account_id", 0) or 0
+            ):
+                continue
             self._append_independent_ai_source_to_plan(
                 plan, source, due_only, seen_sources, available
             )
@@ -244,22 +277,28 @@ class LLMService:
         period = str(source.get("period") or "M5").upper()
         current = symbol_plan["periods"].get(period, {"weight": 0, "kline_count": 0})
         current["weight"] = max(current["weight"], 100)
-        current["kline_count"] = max(current["kline_count"], max(10, min(500, int(params.get("kline_count", 100)))))
+        kline_count = max(
+            AI_SIGNAL_KLINE_MIN_COUNT,
+            min(AI_SIGNAL_KLINE_MAX_COUNT, int(params.get("kline_count", 100))),
+        )
+        current["kline_count"] = max(current["kline_count"], kline_count)
         symbol_plan["periods"][period] = current
         symbol_plan["strategies"].append({
-            "strategy_id": "__independent__",
+            # The runtime profile belongs to the AI source, not to a strategy.
+            "strategy_id": "",
             "strategy_name": source.get("name") or "独立 AI 信号源",
             "signal_source_id": source_id,
             "periods": {period: 100},
-            "min_confidence": int(params.get("min_confidence", 70)),
-            "min_risk_reward": 1.0,
+            # Confidence is evaluated by each strategy binding, not the source.
+            "min_confidence": 0,
             "analysis_interval_minutes": interval // 60,
-            "kline_count": int(params.get("kline_count", 100)),
+            "kline_count": kline_count,
             "model": str(params.get("model") or ""),
             "system_prompt": str(params.get("system_prompt") or ""),
             "analysis_prompt_template": str(params.get("analysis_prompt_template") or ""),
             "share_runtime_data": bool(source.get("share_runtime_data")),
             "reference_runtime_ids": list(params.get("reference_runtime_ids") or []),
+            "reference_market_data": list(params.get("reference_market_data") or []),
             "signal_params": params,
             "symbol": source["symbol"],
             "strategy_lifecycle": "independent",
@@ -346,7 +385,10 @@ class LLMService:
         current["weight"] = max(current["weight"], int(source["weight"]))
         current["kline_count"] = max(
             current["kline_count"],
-            max(10, min(500, int(params.get("kline_count", 100)))),
+            max(
+                AI_SIGNAL_KLINE_MIN_COUNT,
+                min(AI_SIGNAL_KLINE_MAX_COUNT, int(params.get("kline_count", 100))),
+            ),
         )
         symbol_plan["periods"][period] = current
         runtime_shared = bool(managed_source.get("share_runtime_data"))
@@ -360,7 +402,10 @@ class LLMService:
             ),
             "min_risk_reward": strategy.min_risk_reward,
             "analysis_interval_minutes": interval // 60,
-            "kline_count": int(params.get("kline_count", 100)),
+            "kline_count": max(
+                AI_SIGNAL_KLINE_MIN_COUNT,
+                min(AI_SIGNAL_KLINE_MAX_COUNT, int(params.get("kline_count", 100))),
+            ),
             "model": str(params.get("model") or ""),
             "system_prompt": str(params.get("system_prompt") or ""),
             "analysis_prompt_template": str(
@@ -369,6 +414,9 @@ class LLMService:
             "share_runtime_data": runtime_shared,
             "reference_runtime_ids": list(
                 params.get("reference_runtime_ids") or []
+            ),
+            "reference_market_data": list(
+                params.get("reference_market_data") or []
             ),
             "signal_params": dict(params),
             "symbol": strategy.symbol,
@@ -448,9 +496,14 @@ class LLMService:
         system_prompt: str = None, analysis_prompt_template: str = None,
     ) -> Dict:
         """配置 LLM 参数"""
+        previous_config = self.llm_store.get_config()
         config = self.llm_store.update_config(
             api_key, api_base, model, system_prompt, analysis_prompt_template
         )
+        # Switching supplier/model must take effect in the live process. Do not
+        # let a cooldown from the previous configuration block the new one.
+        self.clear_provider_block(previous_config)
+        self.clear_provider_block(config)
         return {
             "status": "ok",
             "enabled": config.enabled,
@@ -500,7 +553,80 @@ class LLMService:
             if klines_data:
                 all_klines[symbol] = klines_data
 
+        # Reference markets are optional context. They are fetched only for
+        # the source currently being analyzed and never become output periods.
+        references = []
+        for symbol_plan in (analysis_plan or {}).values():
+            for profile in symbol_plan.get("strategies", []):
+                references.extend(profile.get("reference_market_data") or [])
+        seen_references = set()
+        for reference in references:
+            ref_symbol = str(reference.get("symbol") or "").strip()
+            ref_period = str(reference.get("period") or "").upper()
+            key = (ref_symbol.upper(), ref_period)
+            if not ref_symbol or not ref_period or key in seen_references:
+                continue
+            seen_references.add(key)
+            # Do not overwrite primary data if a malformed/legacy config
+            # happens to point at the same symbol and period.
+            if ref_symbol in all_klines and ref_period in all_klines[ref_symbol]:
+                continue
+            klines = self.kline_service.get_klines(
+                ref_symbol, ref_period,
+                max(
+                    AI_SIGNAL_KLINE_MIN_COUNT,
+                    min(AI_SIGNAL_KLINE_MAX_COUNT, int(reference.get("kline_count", 100) or 100)),
+                ),
+            )
+            if klines:
+                all_klines.setdefault(ref_symbol, {})[ref_period] = klines
+
         return all_klines
+
+    @staticmethod
+    def _missing_primary_kline_data(
+        all_klines: Dict[str, Dict], analysis_plan: Dict[str, Dict],
+    ) -> List[str]:
+        """Return primary symbol/periods that lack their requested K-line count."""
+        missing = []
+        for symbol, symbol_plan in analysis_plan.items():
+            available_periods = all_klines.get(symbol, {})
+            for period, settings in symbol_plan.get("periods", {}).items():
+                required = max(10, int(settings.get("kline_count", 10) or 10))
+                actual = len(available_periods.get(period, []))
+                if actual < required:
+                    missing.append(f"{symbol}/{period} ({actual}/{required})")
+        return missing
+
+    @staticmethod
+    def _format_market_price(value) -> str:
+        """Preserve broker price precision when serializing K-lines for the LLM."""
+        try:
+            return f"{float(value):.10f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _current_price_context(
+        self, all_klines: Dict[str, Dict], primary_keys: set,
+    ) -> str:
+        """Provide the latest observable quote separately from analysis K-lines."""
+        quotes = []
+        for symbol, _period in sorted(primary_keys):
+            latest = []
+            service = getattr(self, "kline_service", None)
+            if service is not None:
+                latest = service.get_klines(symbol, "M1", 1) or []
+            if not latest:
+                available = all_klines.get(symbol, {})
+                latest = next((rows for rows in available.values() if rows), [])[-1:]
+            if not latest:
+                continue
+            quote = latest[-1]
+            quotes.append(
+                f"- {symbol}: {self._format_market_price(quote.get('close'))} "
+                f"（报价时间: {quote.get('timestamp', 'unknown')}，来源: 最新 M1）"
+            )
+        return "\n".join(quotes) or "当前报价暂不可用，禁止输出交易建议。"
 
     # ==================== Prompt 构建 ====================
 
@@ -511,49 +637,60 @@ class LLMService:
         analysis_prompt_template: Optional[str] = None,
         reference_context: str = "",
     ) -> str:
-        """构建分析提示词"""
-        strategy_sections = []
+        """Build a source-level prompt with one primary market and optional context."""
         market_sections = []
+        reference_sections = []
+        primary_keys = set()
+        reference_keys = set()
+        for symbol_plan in (analysis_plan or {}).values():
+            for profile in symbol_plan.get("strategies", []):
+                primary_symbol = str(profile.get("symbol") or "").strip().upper()
+                for period in profile.get("periods") or {}:
+                    primary_keys.add((primary_symbol, str(period).upper()))
+                for reference in profile.get("reference_market_data") or []:
+                    reference_keys.add((
+                        str(reference.get("symbol") or "").strip().upper(),
+                        str(reference.get("period") or "").strip().upper(),
+                    ))
         for symbol, klines_data in all_klines.items():
-            constraints = [f"### {symbol}"]
-            if analysis_plan and symbol in analysis_plan:
-                for profile in analysis_plan[symbol]["strategies"]:
-                    periods = "、".join(
-                        f"{period}(权重{weight})"
-                        for period, weight in self._period_weight_items(
-                            profile.get("periods")
-                        )
-                    )
-                    constraints.append(
-                        f"- {profile['strategy_name']} ({profile['strategy_id']}), "
-                        f"信号源ID {profile.get('signal_source_id', '')}: "
-                        f"AI周期 {periods}；最低置信度 "
-                        f"{profile['min_confidence']}%；最低盈亏比 "
-                        f"{profile['min_risk_reward']}"
-                    )
-            if len(constraints) == 1:
-                constraints.append("- 使用系统默认分析约束")
-            strategy_sections.append("\n".join(constraints))
-
-            market_lines = [f"### {symbol}"]
             for period, klines in klines_data.items():
-                market_lines.append(f"\n#### {period} 周期（{len(klines)}根K线）")
+                market_lines = [f"### {symbol} / {period}（{len(klines)}根K线）"]
                 market_lines.append("| 时间 | 开盘 | 最高 | 最低 | 收盘 |")
                 market_lines.append("|------|------|------|------|------|")
                 for k in klines:
                     market_lines.append(
-                        f"| {k['timestamp']} | {k['open']:.2f} | "
-                        f"{k['high']:.2f} | {k['low']:.2f} | {k['close']:.2f} |"
+                        f"| {k['timestamp']} | {self._format_market_price(k['open'])} | "
+                        f"{self._format_market_price(k['high'])} | "
+                        f"{self._format_market_price(k['low'])} | "
+                        f"{self._format_market_price(k['close'])} |"
                     )
-            market_sections.append("\n".join(market_lines))
+                section = "\n".join(market_lines)
+                key = (str(symbol).upper(), str(period).upper())
+                if key in primary_keys:
+                    market_sections.append(section)
+                elif key in reference_keys:
+                    reference_sections.append(section)
 
         config = self.llm_store.get_config()
         template = analysis_prompt_template or getattr(
             config, "analysis_prompt_template", DEFAULT_ANALYSIS_PROMPT_TEMPLATE
         )
-        prompt = template.replace(
-            "{{strategy_context}}", "\n\n".join(strategy_sections)
-        ).replace("{{market_data}}", "\n\n".join(market_sections))
+        # The old placeholder is deliberately blank: a source is no longer
+        # given strategy constraints, even when an old custom template has it.
+        prompt = template.replace("{{strategy_context}}", "").replace(
+            "{{market_data}}", "\n\n".join(market_sections)
+        )
+        current_price_text = self._current_price_context(all_klines, primary_keys)
+        prompt = prompt.replace("{{current_price}}", current_price_text)
+        if "{{current_price}}" not in template:
+            prompt += "\n\n## 当前可交易参考价\n" + current_price_text
+        reference_text = "\n\n".join(reference_sections)
+        prompt = prompt.replace("{{reference_market_data}}", reference_text)
+        if reference_text and "{{reference_market_data}}" not in template:
+            prompt += (
+                "\n\n## 可选参考行情（仅辅助判断，不生成独立交易信号）\n"
+                + reference_text
+            )
         if reference_context:
             prompt += (
                 "\n\n## 其他用户共享的历史AI运行数据（仅供参考）\n"
@@ -561,10 +698,15 @@ class LLMService:
                 f"{reference_context}"
             )
         return prompt + (
-            "\n\n## 策略归属硬性要求\n"
-            "trade_suggestions 中每条建议必须包含 strategy_id 和 signal_source_id，"
-            "且只能填写上方策略约束中列出的ID；同一周期被多个信号源启用时，必须分别"
-            "输出建议，不得省略或合并。"
+            "\n\n## 信号源输出要求\n"
+            "trade_suggestions 中每条建议必须包含 signal_source_id 和 period，"
+            "且只能对应主行情与当前 AI 信号源。参考行情只用于上下文，不能出现在 "
+            "trend_analysis 或 trade_suggestions 中。当前可交易参考价只用于理解当前位置和风险，"
+            "不限制 entry_price 必须接近当前价。交易建议应是由K线结构得出的可执行价格计划："
+            "区间震荡可在确认支撑附近给 buy、确认压力附近给 sell，止损置于区间外；"
+            "单边趋势可在回调/反抽至趋势线、支撑或压力时给顺势入场计划，并给出失效止损。"
+            "只有没有可辩护的结构化入场计划时才返回空数组。实时策略会在后续 Tick 接近 "
+            "entry_price 时再决定是否形成入场信号。"
         )
 
     def prompt_hash(self, prompt: str, system_prompt: Optional[str] = None) -> str:
@@ -594,6 +736,7 @@ class LLMService:
         system_prompt: Optional[str] = None,
         scene_code: str = AI_SIGNAL_ANALYSIS,
         object_type: str = "", object_id: str = "",
+        max_tokens: int = 4000,
     ) -> Optional[Dict]:
         """调用 LLM API；响应格式错误时最多尝试三次。"""
         for attempt in range(1, self.MAX_RESPONSE_ATTEMPTS + 1):
@@ -601,7 +744,7 @@ class LLMService:
             try:
                 return self._call_llm_once(
                     attempt_prompt, model, system_prompt,
-                    scene_code, object_type, object_id,
+                    scene_code, object_type, object_id, max_tokens,
                 )
             except LLMResponseFormatError as exc:
                 if attempt >= self.MAX_RESPONSE_ATTEMPTS:
@@ -616,10 +759,9 @@ class LLMService:
 
     def _call_llm_once(
         self, prompt: str, model: Optional[str], system_prompt: Optional[str],
-        scene_code: str, object_type: str, object_id: str,
+        scene_code: str, object_type: str, object_id: str, max_tokens: int,
     ) -> Optional[Dict]:
         governance = self._llm_governance
-        self._raise_if_provider_blocked(self.llm_store.get_config())
         if governance is None:
             config = self.llm_store.get_config()
             reservation = {"model": model or config.model}
@@ -628,6 +770,9 @@ class LLMService:
                 self.llm_store.user_id, scene_code, model, object_type, object_id
             )
             config = reservation["config"]
+        # Resolve the effective provider first. This is important after an
+        # admin switches suppliers while existing engines remain alive.
+        self._raise_if_provider_blocked(config)
 
         try:
             headers = {
@@ -637,6 +782,9 @@ class LLMService:
 
             data = {
                 "model": reservation["model"],
+                # Structured JSON responses must use the final answer channel.
+                # Thinking models may otherwise put all output in reasoning_content.
+                "enable_thinking": False,
                 "messages": [
                     {
                         "role": "system",
@@ -649,7 +797,7 @@ class LLMService:
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
-                "max_tokens": 4000,
+                "max_tokens": max(1, int(max_tokens)),
                 # AI signal analysis has a strict machine-readable contract.
                 # JSON mode prevents reasoning text from becoming the response.
                 "response_format": {"type": "json_object"},
@@ -755,7 +903,6 @@ class LLMService:
         response_validator: callable = None,
     ) -> Optional[Dict]:
         governance = self._llm_governance
-        self._raise_if_provider_blocked(self.llm_store.get_config())
         if governance is None:
             config = self.llm_store.get_config()
             reservation = {"model": model or config.model}
@@ -764,6 +911,7 @@ class LLMService:
                 self.llm_store.user_id, scene_code, model, object_type, object_id
             )
             config = reservation["config"]
+        self._raise_if_provider_blocked(config)
 
         try:
             headers = {
@@ -773,6 +921,8 @@ class LLMService:
 
             data = {
                 "model": reservation["model"],
+                # Disable reasoning for machine-readable signal/prompt responses.
+                "enable_thinking": False,
                 "messages": [
                     {
                         "role": "system",
@@ -1073,7 +1223,8 @@ class LLMService:
         """将模型生成的自然语言周期归一化为策略使用的周期代码。"""
         text = str(value or "").upper()
         for profile in symbol_plan.get("strategies", []):
-            if profile["strategy_id"].upper() in text and len(profile["periods"]) == 1:
+            source_id = str(profile.get("signal_source_id") or "").upper()
+            if source_id and source_id in text and len(profile["periods"]) == 1:
                 return next(iter(profile["periods"]))
 
         match = re.search(r"(?<![A-Z0-9])(M15|M5|M1|H4|H1)(?![A-Z0-9])", text)
@@ -1095,7 +1246,7 @@ class LLMService:
     def _normalize_analysis_response(
         self, response: Dict, analysis_plan: Dict[str, Dict]
     ) -> Dict:
-        """规范模型建议，并确保止盈满足对应策略的最低盈亏比。"""
+        """Normalize one AI source's suggestions without strategy side effects."""
         response = self._coerce_analysis_response(response, analysis_plan)
         for symbol, analysis in response.items():
             if not isinstance(analysis, dict) or symbol not in analysis_plan:
@@ -1127,61 +1278,23 @@ class LLMService:
                 if entry <= 0 or stop_loss <= 0 or take_profit <= 0 or not valid_levels:
                     continue
 
-                profiles = [
-                    profile for profile in symbol_plan.get("strategies", [])
-                    if period in dict(
-                        self._period_weight_items(profile.get("periods"))
-                    )
-                ]
-                requested_strategy_id = str(
-                    suggestion.get("strategy_id") or ""
-                ).strip()
-                if requested_strategy_id:
-                    profiles = [
-                        profile for profile in profiles
-                        if profile["strategy_id"] == requested_strategy_id
-                    ]
-                requested_source_id = str(
-                    suggestion.get("signal_source_id") or ""
-                ).strip()
-                if requested_source_id:
-                    profiles = [
-                        profile for profile in profiles
-                        if profile.get("signal_source_id") == requested_source_id
-                    ]
-                if not profiles:
+                profiles = symbol_plan.get("strategies") or []
+                if len(profiles) != 1:
                     continue
-
-                risk = abs(entry - stop_loss)
-                if risk <= 0:
-                    continue
-                for profile in profiles:
-                    if int(suggestion.get("confidence", 0)) < int(
-                        profile.get("min_confidence", 0)
-                    ):
-                        continue
-                    strategy_suggestion = dict(suggestion)
-                    required_rr = max(
-                        1.0, float(profile.get("min_risk_reward", 1.0))
-                    )
-                    strategy_tp = take_profit
-                    reward = abs(strategy_tp - entry)
-                    if reward / risk < required_rr:
-                        strategy_tp = (
-                            entry + risk * required_rr
-                            if direction == "buy"
-                            else entry - risk * required_rr
-                        )
-                    strategy_suggestion.update({
-                        "strategy_id": profile["strategy_id"],
-                        "strategy_name": profile["strategy_name"],
-                        "signal_source_id": profile.get("signal_source_id", ""),
-                        "period": period,
-                        "entry_price": entry,
-                        "stop_loss": stop_loss,
-                        "take_profit": round(strategy_tp, 8),
-                    })
-                    normalized.append(strategy_suggestion)
+                profile = profiles[0]
+                source_suggestion = dict(suggestion)
+                source_suggestion.update({
+                    "signal_source_id": profile.get("signal_source_id", ""),
+                    "period": period,
+                    "entry_price": entry,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                })
+                # Model output is source-owned. A binding strategy applies its
+                # own confidence, risk and position-management rules later.
+                source_suggestion.pop("strategy_id", None)
+                source_suggestion.pop("strategy_name", None)
+                normalized.append(source_suggestion)
 
             analysis["trade_suggestions"] = normalized
         return response
@@ -1220,27 +1333,27 @@ class LLMService:
         config = self.llm_store.get_config()
         scene_defaults = self._scene_defaults(AI_SIGNAL_ANALYSIS)
         scene_model = scene_defaults.get("default_model_id") or getattr(config, "model", "")
-        scene_system_prompt = (
-            scene_defaults.get("system_prompt")
-            or getattr(config, "system_prompt", DEFAULT_SYSTEM_PROMPT)
-        )
-        scene_template = (
-            scene_defaults.get("user_prompt_template")
-            or getattr(
-                config,
-                "analysis_prompt_template",
-                DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
-            )
-        )
+        scene_models = set(scene_defaults.get("models") or [])
         requests: List[Dict] = []
         for symbol, symbol_plan in analysis_plan.items():
             for profile in symbol_plan.get("strategies", []):
                 model = profile.get("model") or scene_model
-                system_prompt = profile.get("system_prompt") or scene_system_prompt
-                template = (
-                    profile.get("analysis_prompt_template")
-                    or scene_template
-                )
+                if scene_models and model not in scene_models:
+                    print(
+                        "[LLMService] AI信号源模型不在当前场景可用列表，"
+                        f"已回退到场景默认模型: {model} -> {scene_model}"
+                    )
+                    model = scene_model
+                system_prompt = str(profile.get("system_prompt") or "").strip()
+                template = str(profile.get("analysis_prompt_template") or "").strip()
+                if not system_prompt or not template:
+                    # Source records created before the dedicated prompt flow are
+                    # intentionally not allowed to silently use a generic prompt.
+                    print(
+                        "[LLMService] 跳过缺少专属提示词的 AI 信号源: "
+                        f"{profile.get('signal_source_id') or 'unknown'}"
+                    )
+                    continue
                 references = list(profile.get("reference_runtime_ids") or [])
                 periods = {
                     period: {
@@ -1273,7 +1386,6 @@ class LLMService:
             periods = [str(period).upper() for period in symbol_plan.get("periods", {})]
             profiles = symbol_plan.get("strategies") or []
             source_ids = [str(item.get("signal_source_id") or "") for item in profiles]
-            strategy_ids = [str(item.get("strategy_id") or "") for item in profiles]
             trend_shape = {
                 period: {"trend": "趋势类型", "confidence": 0, "reason": "理由"}
                 for period in periods
@@ -1285,19 +1397,19 @@ class LLMService:
                         "direction": "方向", "strength": 0, "summary": "总结",
                     },
                     "key_levels": {"resistance": [], "support": []},
+                    "context_observations": [],
                     "trade_suggestions": [],
                 }
             }
             contracts.append(
                 "- 顶层键必须且只能使用 %s；trend_analysis 必须包含键 %s；"
                 "trade_suggestions 可以是 []，如有建议，period 必须是 %s，"
-                "strategy_id 必须是 %s，signal_source_id 必须是 %s。\n"
+                "signal_source_id 必须是 %s。\n"
                 "  最小有效 JSON 结构：%s"
                 % (
                     json.dumps(symbol, ensure_ascii=False),
                     json.dumps(periods, ensure_ascii=False),
                     json.dumps(periods, ensure_ascii=False),
-                    json.dumps(strategy_ids, ensure_ascii=False),
                     json.dumps(source_ids, ensure_ascii=False),
                     json.dumps(example, ensure_ascii=False),
                 )
@@ -1305,7 +1417,8 @@ class LLMService:
         return prompt + (
             "\n\n## 本次调用的强制 JSON 契约\n"
             "以下契约优先于前文的通用输出说明。字段均区分大小写，必须完整出现；"
-            "不具备交易条件时 trade_suggestions 必须返回 []；不要输出思考过程。\n"
+            "trade_suggestions 可给出未来价格计划，只有不存在可辩护计划时才返回 []；"
+            "不要输出思考过程。\n"
             + "\n".join(contracts)
         )
 
@@ -1421,7 +1534,7 @@ class LLMService:
 
     def check_entry_price_nearby(
         self, symbol: str, current_price: float, threshold: float = 0.0008,
-        strategy_id: str = "",
+        strategy_id: str = "", signal_source_id: str = "",
     ) -> List[Dict]:
         """
         检查当前价格是否接近 AI 建议的入场价
@@ -1441,10 +1554,8 @@ class LLMService:
             return matched
 
         for suggestion in result.trade_suggestions:
-            suggestion_strategy_id = str(
-                suggestion.get("strategy_id") or ""
-            )
-            if strategy_id and suggestion_strategy_id != strategy_id:
+            suggestion_source_id = str(suggestion.get("signal_source_id") or "")
+            if signal_source_id and suggestion_source_id != signal_source_id:
                 continue
             entry_price = suggestion.get('entry_price')
             period = suggestion.get('period')
@@ -1473,9 +1584,9 @@ class LLMService:
                 if can_alert:
                     matched.append({
                         "symbol": symbol,
-                        "strategy_id": suggestion_strategy_id,
-                        "strategy_name": suggestion.get("strategy_name", ""),
-                        "signal_source_id": suggestion.get("signal_source_id", ""),
+                        "strategy_id": strategy_id,
+                        "strategy_name": "",
+                        "signal_source_id": suggestion_source_id,
                         "period": period,
                         "direction": direction,
                         "entry_price": entry_price,
@@ -1584,10 +1695,28 @@ class LLMService:
             }
             if not request_plan:
                 continue
+            source_ids = sorted({
+                str(profile.get("signal_source_id") or "")
+                for item in request_plan.values()
+                for profile in item.get("strategies", [])
+                if profile.get("signal_source_id")
+            })
             all_klines = self.collect_klines_for_analysis(
                 list(request_plan), request_plan
             )
             if not all_klines:
+                continue
+            missing_klines = self._missing_primary_kline_data(
+                all_klines, request_plan
+            )
+            if missing_klines:
+                message = "主行情K线不足: " + "、".join(missing_klines)
+                failed_sources.append({
+                    "source_ids": source_ids,
+                    "message": message,
+                })
+                print(f"[LLMService] 跳过AI分析: {message}")
+                report("warning", message)
                 continue
             prompt = self.build_analysis_prompt(
                 all_klines,
@@ -1598,12 +1727,6 @@ class LLMService:
                 ),
             )
             prompt = self._append_response_contract(prompt, request_plan)
-            source_ids = sorted({
-                str(profile.get("signal_source_id") or "")
-                for item in request_plan.values()
-                for profile in item.get("strategies", [])
-                if profile.get("signal_source_id")
-            })
             try:
                 request_response = self.call_llm_stream(
                     prompt,
@@ -1677,8 +1800,18 @@ class LLMService:
 
         # 保存结果
         if response:
+            analysis_at = int(time.time())
             for symbol, analysis in response.items():
                 if isinstance(analysis, dict):
+                    # Persist only suggestions returned for this invocation.
+                    # _retain_previous_source_results below appends still-valid
+                    # results from sources that were not due this time.
+                    self._trade_suggestion_repo.record_many(
+                        self.llm_store.user_id,
+                        symbol,
+                        analysis.get("trade_suggestions") or [],
+                        analysis_at,
+                    )
                     previous = self.llm_store.get_analysis_result(symbol)
                     if previous:
                         self._retain_previous_source_results(
