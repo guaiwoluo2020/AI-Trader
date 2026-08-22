@@ -1302,6 +1302,17 @@ class LLMService:
                 return period
         return None
 
+    @staticmethod
+    def _normalize_confidence(value) -> int:
+        """Accept providers that return confidence as either 0-1 or 0-100."""
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return 0
+        if 0 < confidence <= 1:
+            confidence *= 100
+        return max(0, min(100, int(round(confidence))))
+
     def _normalize_analysis_response(
         self, response: Dict, analysis_plan: Dict[str, Dict]
     ) -> Dict:
@@ -1313,6 +1324,13 @@ class LLMService:
 
             symbol_plan = analysis_plan[symbol]
             enabled_periods = set(symbol_plan.get("periods", {}))
+            trends = analysis.get("trend_analysis") or {}
+            if isinstance(trends, dict):
+                for trend in trends.values():
+                    if isinstance(trend, dict):
+                        trend["confidence"] = self._normalize_confidence(
+                            trend.get("confidence")
+                        )
             normalized = []
             for suggestion in analysis.get("trade_suggestions", []):
                 if not isinstance(suggestion, dict):
@@ -1345,6 +1363,9 @@ class LLMService:
                 source_suggestion.update({
                     "signal_source_id": profile.get("signal_source_id", ""),
                     "period": period,
+                    "confidence": self._normalize_confidence(
+                        suggestion.get("confidence")
+                    ),
                     "entry_price": entry,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,

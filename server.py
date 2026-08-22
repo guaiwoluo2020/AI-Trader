@@ -1298,6 +1298,16 @@ class TradingServer:
             return "down"
         return "sideways"
 
+    @staticmethod
+    def _confidence_percent(value) -> int:
+        try:
+            confidence = float(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        if 0 < confidence <= 1:
+            confidence *= 100
+        return max(0, min(100, int(round(confidence))))
+
     def _latest_market_price(self, symbol: str) -> float:
         klines = self.kline_service.get_klines(symbol, "M1", 1)
         if not klines:
@@ -1418,16 +1428,14 @@ class TradingServer:
         ]
         suggestion = max(
             suggestions,
-            key=lambda item: int(item.get("confidence", 0) or 0),
+            key=lambda item: self._confidence_percent(item.get("confidence")),
             default=None,
         )
         direction = self._ai_direction(
             (suggestion or {}).get("direction") or trend.get("trend")
         )
-        confidence = int(
-            (suggestion or {}).get("confidence")
-            or trend.get("confidence")
-            or 0
+        confidence = self._confidence_percent(
+            (suggestion or {}).get("confidence") or trend.get("confidence")
         )
         entry_price = float((suggestion or {}).get("entry_price", 0) or 0)
         threshold = float(params.get("entry_threshold", 0.0008) or 0)
