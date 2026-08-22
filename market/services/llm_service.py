@@ -185,6 +185,7 @@ class LLMService:
         self._shared_runtime_repo = SharedAIRuntimeRepository()
         self._ai_signal_source_repo = AISignalSourceRepository()
         self._trade_suggestion_repo = AITradeSuggestionRepository()
+        self._plan_update_handler = None
         repo = getattr(self.llm_store, "_repo", None)
         self._llm_governance = (
             LLMGovernanceService(repo.storage) if repo is not None else None
@@ -198,6 +199,64 @@ class LLMService:
     def set_strategy_store(self, strategy_store) -> None:
         """注入当前用户的策略仓储，用于约束分析范围。"""
         self._strategy_store = strategy_store
+
+    def set_plan_update_handler(self, handler) -> None:
+        """Notify the account runtime when an AI source publishes a new plan."""
+        self._plan_update_handler = handler
+
+    @staticmethod
+    def _suggestion_signature(items: List[Dict]) -> tuple:
+        """Compare material plan fields, not model wording or list order."""
+        normalized = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                normalized.append((
+                    str(item.get("direction") or "").lower(),
+                    str(item.get("period") or "").upper(),
+                    round(float(item.get("entry_price") or 0), 8),
+                    round(float(item.get("stop_loss") or 0), 8),
+                    round(float(item.get("take_profit") or 0), 8),
+                    max(0, min(100, int(float(item.get("confidence") or 0)))),
+                ))
+            except (TypeError, ValueError):
+                continue
+        return tuple(sorted(normalized))
+
+    def _plan_updates_for_request(
+        self, request_plan: Dict[str, Dict], response: Dict,
+    ) -> List[Dict]:
+        """Emit only newly published, changed or withdrawn source plans."""
+        updates = []
+        for symbol, plan in request_plan.items():
+            analysis = response.get(symbol) if isinstance(response, dict) else None
+            if not isinstance(analysis, dict):
+                continue
+            previous = self.llm_store.get_analysis_result(symbol)
+            previous_items = list(getattr(previous, "trade_suggestions", []) or [])
+            current_items = list(analysis.get("trade_suggestions") or [])
+            for profile in plan.get("strategies", []):
+                source_id = str(profile.get("signal_source_id") or "")
+                if not source_id:
+                    continue
+                before = [item for item in previous_items if isinstance(item, dict) and str(item.get("signal_source_id") or "") == source_id]
+                current = [item for item in current_items if isinstance(item, dict) and str(item.get("signal_source_id") or "") == source_id]
+                if self._suggestion_signature(before) == self._suggestion_signature(current):
+                    continue
+                # Do not create a "cleared" event before this source has ever
+                # produced a plan; an empty first analysis is ordinary state.
+                if previous is None and not current:
+                    continue
+                updates.append({
+                    "signal_source_id": source_id,
+                    "symbol": symbol,
+                    "period": str(profile.get("periods") and next(iter(profile["periods"])) or ""),
+                    "suggestions": current,
+                    "previous_suggestions": before,
+                    "change_type": "created" if not before else ("withdrawn" if not current else "changed"),
+                })
+        return updates
 
     def set_allowed_strategy_ids(self, strategy_ids) -> None:
         """Limit live AI analysis to strategies deployed on this account."""
@@ -1685,6 +1744,7 @@ class LLMService:
                 report("streaming", f"正在接收分析结果... ({len(content)} 字符)")
 
         response: Dict = {}
+        plan_updates: List[Dict] = []
         analyzed_source_ids = set()
         analyzed_periods_by_symbol: Dict[str, set] = {}
         failed_sources: List[Dict] = []
@@ -1769,6 +1829,9 @@ class LLMService:
             request_response = self._normalize_analysis_response(
                 request_response or {}, request_plan
             )
+            plan_updates.extend(
+                self._plan_updates_for_request(request_plan, request_response)
+            )
             self._accumulate_symbol_result(response, request_response)
             self._publish_runtime_results(request_plan, request_response)
             analyzed_source_ids.update(
@@ -1825,6 +1888,13 @@ class LLMService:
             for source_id in analyzed_source_ids:
                 if source_id:
                     self._source_last_analysis_at[source_id] = analyzed_at
+
+        if plan_updates and self._plan_update_handler:
+            try:
+                self._plan_update_handler(plan_updates)
+            except Exception as exc:
+                # A decision-audit failure must never discard the analysis.
+                print(f"[LLMService] AI计划评估记录失败: {exc}")
 
         if on_complete:
             on_complete(response)

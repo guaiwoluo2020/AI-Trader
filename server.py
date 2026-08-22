@@ -130,6 +130,7 @@ class TradingServer:
             self._signal_service,
             self._risk_manager
         )
+        self.llm_service.set_plan_update_handler(self._record_ai_plan_evaluations)
 
         # ==================== 交易配置 ====================
         self.trade_config = (
@@ -901,6 +902,109 @@ class TradingServer:
                 status=decision.status,
             )
             self._runtime_repository.trim_entities("strategy_decision", 200)
+
+    def _record_ai_plan_evaluations(self, updates: List[Dict]) -> None:
+        """Persist one conclusion per deployment when an AI price plan changes."""
+        for update in updates or []:
+            source_id = str(update.get("signal_source_id") or "")
+            symbol = str(update.get("symbol") or "")
+            suggestions = list(update.get("suggestions") or [])
+            current_price = self._latest_market_price(symbol)
+            for strategy in self._strategy_store.get_all_strategies():
+                binding = next((
+                    item for item in strategy.get_signal_sources("ai_entry")
+                    if str((item.get("params") or {}).get("ai_signal_source_id") or "") == source_id
+                ), None)
+                if binding is None:
+                    continue
+                deployments = [
+                    item for item in self.strategy_deployments.list_for_strategy(
+                        int(self.user_id or 0), strategy.strategy_id,
+                    ) if item.get("status") == "active"
+                ]
+                if not deployments:
+                    continue
+                params = binding.get("params") or {}
+                suggestion = max(
+                    suggestions,
+                    key=lambda item: float(item.get("confidence") or 0),
+                    default=None,
+                )
+                reason, confidence, entry, stop_loss, take_profit = self._ai_plan_conclusion(
+                    suggestion,
+                    current_price,
+                    int(params.get("min_confidence", strategy.min_confidence) or 0),
+                    float(strategy.min_risk_reward or 0),
+                    float(params.get("entry_threshold", 0.0008) or 0.0008),
+                    str(update.get("change_type") or "changed"),
+                )
+                for deployment in deployments:
+                    decision = TradingDecision(
+                        symbol=symbol,
+                        strategy_id=strategy.strategy_id,
+                        strategy_name=strategy.strategy_name,
+                        execution_mode=str(deployment.get("execution_mode") or "live"),
+                        action="none",
+                        decision_type="ai_plan_evaluation",
+                        signals=[{
+                            "source": "ai_entry",
+                            "signal_source_id": source_id,
+                            "source_period": update.get("period") or "",
+                            "direction": suggestion.get("direction") if suggestion else "",
+                            "confidence": confidence,
+                            "suggested_entry": entry,
+                            "stop_loss": stop_loss,
+                            "take_profit": take_profit,
+                            "trigger_reason": "AI交易计划已更新，策略即时评估",
+                        }],
+                        signal_summary={"total_count": 1 if suggestion else 0, "source": "ai_plan"},
+                        entry_price=entry,
+                        sl=stop_loss,
+                        tp=take_profit,
+                        decision_reason=reason,
+                        confidence_score=confidence,
+                        status="skipped",
+                    )
+                    runtime = RuntimeStateRepository(
+                        int(self.user_id or 0), int(deployment["account_id"]),
+                    )
+                    runtime.upsert_entity(
+                        "strategy_decision", decision.decision_id, decision.to_dict(),
+                        symbol=symbol, status=decision.status,
+                    )
+                    runtime.trim_entities("strategy_decision", 200)
+                    transient_decision_store.clear_for_strategy(
+                        int(self.user_id or 0), int(deployment["account_id"]),
+                        strategy.strategy_id, symbol,
+                    )
+
+    @staticmethod
+    def _ai_plan_conclusion(
+        suggestion: Optional[Dict], current_price: float, minimum_confidence: int,
+        minimum_rr: float, entry_threshold: float, change_type: str,
+    ) -> tuple:
+        if not suggestion:
+            return (
+                "AI交易计划已撤销或本轮未给出有效建议，策略不执行并等待后续分析。",
+                0.0, 0.0, 0.0, 0.0,
+            )
+        confidence = float(suggestion.get("confidence") or 0)
+        entry = float(suggestion.get("entry_price") or 0)
+        stop_loss = float(suggestion.get("stop_loss") or 0)
+        take_profit = float(suggestion.get("take_profit") or 0)
+        if confidence < minimum_confidence:
+            return (f"AI计划已{change_type}，但置信度 {confidence:.0f}% 低于策略要求 {minimum_confidence}%，暂不执行。", confidence, entry, stop_loss, take_profit)
+        risk = abs(entry - stop_loss)
+        reward = abs(take_profit - entry)
+        ratio = reward / risk if risk > 0 else 0
+        if ratio < minimum_rr:
+            return (f"AI计划已{change_type}，但盈亏比 {ratio:.2f} 低于策略要求 {minimum_rr:.2f}，暂不执行。", confidence, entry, stop_loss, take_profit)
+        distance = abs(current_price - entry) / entry if current_price > 0 and entry > 0 else None
+        if distance is None:
+            return ("AI计划已更新，但当前账户暂无可用报价；等待下一次 Tick 评估入场。", confidence, entry, stop_loss, take_profit)
+        if distance > entry_threshold:
+            return (f"AI计划已{change_type}：当前价 {current_price:.2f} 尚未进入 {entry:.2f} 的入场阈值，等待实时 Tick。", confidence, entry, stop_loss, take_profit)
+        return (f"AI计划已{change_type}：当前价 {current_price:.2f} 已接近计划入场 {entry:.2f}；等待下一次 Tick 完成实时信号与风控判断。", confidence, entry, stop_loss, take_profit)
 
     def update_decision_status(self, order_id: str, status: str) -> bool:
         """按关联订单同步决策状态，并持久化审计结果。"""

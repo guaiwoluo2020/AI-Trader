@@ -66,7 +66,7 @@
           <v-alert v-if="!selectedDecision.signals.length" type="info" variant="tonal">本次决策未保留可展示的信号明细。</v-alert>
           <v-list v-else density="compact" class="signal-detail-list"><v-list-item v-for="(signal, index) in selectedDecision.signals" :key="`${signal.signal_id || signal.signal_source_id || signal.source}-${index}`"><v-list-item-title>{{ formatSignalLabel(signal) }}</v-list-item-title><v-list-item-subtitle>{{ signal.trigger_reason || '未提供信号理由' }}</v-list-item-subtitle><template #append><span class="text-caption">{{ formatTradePrice(signal.suggested_entry || signal.trigger_price) }}</span></template></v-list-item></v-list>
           <h3>策略执行逻辑</h3>
-          <div class="detail-grid"><div><span>策略</span><strong>{{ selectedDecision.strategy_name }}</strong></div><div><span>聚合方式</span><strong>{{ selectedDecision.decision_type || '--' }}</strong></div><div><span>参与信号</span><strong>{{ selectedDecision.signal_summary?.total_count ?? selectedDecision.signals.length }}</strong></div><div><span>最终置信度</span><strong>{{ selectedDecision.confidence || 0 }}%</strong></div></div>
+          <div class="detail-grid"><div><span>策略</span><strong>{{ selectedDecision.strategy_name }}</strong></div><div><span>决策类型</span><strong>{{ decisionTypeLabel(selectedDecision.decision_type) }}</strong></div><div><span>参与信号</span><strong>{{ selectedDecision.signal_summary?.total_count ?? selectedDecision.signals.length }}</strong></div><div><span>最终置信度</span><strong>{{ selectedDecision.confidence || 0 }}%</strong></div></div>
           <p class="decision-reason">{{ selectedDecision.reason || '未提供策略决策理由' }}</p>
           <h3>执行结果</h3>
           <div class="detail-grid"><div><span>入场价</span><strong>{{ formatTradePrice(selectedDecision.price) }}</strong></div><div><span>止损 / 止盈</span><strong>{{ formatTradePrice(selectedDecision.sl) }} / {{ formatTradePrice(selectedDecision.tp) }}</strong></div><div><span>手数</span><strong>{{ selectedDecision.volume || '--' }}</strong></div><div><span>状态</span><strong>{{ getDecisionStatusLabel(selectedDecision.status, selectedDecision.auto_executed, selectedDecision.execution_mode) }}</strong></div></div>
@@ -229,6 +229,12 @@ export default {
     }
 
     const executionModeLabel = (mode) => mode === 'paper' ? '模拟盘' : '实盘'
+    const decisionTypeLabel = (value) => ({
+      ai_plan_evaluation: 'AI 计划评估',
+      no_action: 'Tick 等待评估',
+      signal_combined: '信号聚合决策',
+      single_signal: '单信号决策',
+    }[value] || value || '--')
 
     const openDecisionDetail = (decision) => {
       selectedDecision.value = decision
@@ -345,6 +351,7 @@ export default {
       getDecisionStatusColor,
       getDecisionStatusLabel,
       executionModeLabel,
+      decisionTypeLabel,
       openDecisionDetail,
       focusStrategy,
       clearFocus,
