@@ -109,11 +109,39 @@ def collect_ai_signal_symbols(
     trade_config_repo,
     strategy_repo,
     ai_signal_source_repo,
+    account_repo=None,
 ) -> List[str]:
-    """Merge configured symbols with symbols currently reported by the EA."""
+    """Merge every durable user symbol with symbols currently reported by MT5.
+
+    A strategy can be created before the selected MT5 engine has received its
+    first tick (and engines are intentionally in-memory).  Therefore this
+    list must not be derived from one primary engine alone.
+    """
     symbols = set()
-    engine = engine_manager.get_engine_for_user(user_id)
-    symbols.update(engine.kline_service.get_symbols())
+
+    def add_engine_symbols(engine) -> None:
+        try:
+            symbols.update(engine.kline_service.get_symbols())
+        except Exception:
+            # Configuration remains usable while an account engine is starting
+            # or has been evicted after its idle timeout.
+            pass
+
+    try:
+        add_engine_symbols(engine_manager.get_engine_for_user(user_id))
+    except Exception:
+        pass
+
+    if account_repo is not None:
+        for account in account_repo.list_for_user(user_id):
+            if account.account_type != "mt5" or account.status != "active":
+                continue
+            try:
+                add_engine_symbols(
+                    engine_manager.get_engine(user_id, account.account_id)
+                )
+            except Exception:
+                continue
 
     config = trade_config_repo.get_config(user_id)
     symbols.update(config.get("symbol_config", {}).keys())
@@ -623,23 +651,23 @@ def create_market_routes(
         account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        """获取用户可配置的品种，不依赖行情是否仍在内存中。"""
-        _, engine = resolve_web_engine(engine_manager, user, account_id)
-        market_symbols = engine.kline_service.get_symbols()
-        config = trade_config_repo.get_config(user.user_id)
-        configured_symbols = list(config.get("symbol_config", {}).keys())
-        strategy_symbols = [
-            strategy.symbol
-            for strategy in strategy_repo.get_all_strategies(user.user_id)
-        ]
-        symbols = sorted(set(
-            market_symbols + configured_symbols + strategy_symbols
-        ))
+        """Return symbols that can be selected when creating a strategy."""
+        account_repo = TradingAccountRepository()
+        symbols = collect_ai_signal_symbols(
+            user.user_id,
+            engine_manager,
+            trade_config_repo,
+            strategy_repo,
+            ai_signal_source_repo,
+            account_repo,
+        )
         return {
             "status": "ok",
             "symbols": symbols,
             "count": len(symbols),
-            "market_symbols": market_symbols,
+            # Kept for older clients. The full list intentionally includes
+            # durable configuration as well as currently observed symbols.
+            "market_symbols": symbols,
         }
 
     @protected_router.get("/market/configured_symbols")

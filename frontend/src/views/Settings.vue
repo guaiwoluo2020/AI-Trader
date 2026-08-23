@@ -65,7 +65,7 @@
               <p>集中管理信号源、风险约束和验证进度，快速找到需要处理的策略。</p>
             </div>
             <div class="d-flex flex-wrap ga-2">
-              <v-btn color="primary" size="large" class="strategy-primary-action" @click="newStrategyDialog = true">
+              <v-btn color="primary" size="large" class="strategy-primary-action" @click="openNewStrategyDialog">
                 <v-icon start>mdi-plus</v-icon>新建策略
               </v-btn>
               <v-btn size="large" class="strategy-quick-action" @click="openQuickStrategyDialog">
@@ -121,7 +121,7 @@
 
                 <div v-if="!filteredStrategies.length" class="strategy-empty">
                   <v-icon size="52">mdi-radar</v-icon><h3>{{ strategies.length ? '没有符合筛选条件的策略' : '还没有策略' }}</h3><p>{{ strategies.length ? '调整筛选条件后再试试。' : '创建第一条策略，开始配置交易信号。' }}</p>
-                  <v-btn v-if="!strategies.length" color="primary" variant="tonal" @click="newStrategyDialog = true">新建策略</v-btn>
+                  <v-btn v-if="!strategies.length" color="primary" variant="tonal" @click="openNewStrategyDialog">新建策略</v-btn>
                 </div>
               </v-card>
             </v-window-item>
@@ -924,7 +924,7 @@
       <v-card>
         <v-card-title class="new-strategy-title"><v-avatar color="primary" variant="tonal" size="42"><v-icon>mdi-chart-timeline-variant-shimmer</v-icon></v-avatar><div><strong>新建策略</strong><span>先创建基础信息，再进入详情添加信号源。</span></div></v-card-title>
         <v-card-text>
-          <v-select v-model="newStrategySymbol" :items="strategySymbolOptions" label="交易品种" prepend-inner-icon="mdi-currency-usd" class="mt-4"></v-select>
+          <v-select v-model="newStrategySymbol" :items="strategySymbolOptions" :loading="strategySymbolsLoading" label="交易品种" prepend-inner-icon="mdi-currency-usd" class="mt-4"></v-select>
           <v-text-field v-model="newStrategyName" label="策略名称" placeholder="例如：GOLD M5 趋势策略" prepend-inner-icon="mdi-tag-outline"></v-text-field>
           <v-select v-model="newStrategyPolicyId" :items="positionPolicyOptions" label="持仓管理方案" prepend-inner-icon="mdi-shield-check-outline"></v-select>
           <v-alert type="info" variant="tonal" density="compact">新策略默认为私有草稿，不会立即参与交易。</v-alert>
@@ -1814,6 +1814,7 @@ export default {
         symbols.value = data.symbols || []
       } catch (err) {
         console.error('加载品种列表失败:', err)
+        throw err
       }
     }
 
@@ -2115,6 +2116,7 @@ export default {
     const strategyQuota = ref({ usage: { signal_sources: 0 }, limits: { strategies: 5, signal_sources: 10 } })
     const strategiesLoading = ref(false)
     const strategySaving = ref(null)
+    const strategySymbolsLoading = ref(false)
     const strategyLifecycleSaving = ref(null)
     const strategyAdmissions = ref({})
     const positionPolicies = ref([])
@@ -3379,11 +3381,30 @@ export default {
       }
     }
 
-    const openQuickStrategyDialog = () => {
+    const openNewStrategyDialog = async () => {
+      newStrategyDialog.value = true
+      strategySymbolsLoading.value = true
+      try {
+        await loadSymbols()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || err.message || '加载交易品种失败'
+        showError.value = true
+      } finally {
+        strategySymbolsLoading.value = false
+      }
+    }
+
+    const openQuickStrategyDialog = async () => {
       quickStrategyPeriod.value ||= 'M5'
       quickStrategySourceId.value = '__auto__'
       quickStrategyModel.value = ''
       quickStrategyPolicyId.value = '__auto__'
+      try {
+        await loadSymbols()
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || err.message || '加载交易品种失败'
+        showError.value = true
+      }
       loadQuickStrategyPolicies()
       loadQuickStrategySources()
       quickStrategyDialog.value = true
@@ -3550,6 +3571,7 @@ export default {
       strategyDetailTab,
       selectedStrategy,
       newStrategyDialog,
+      strategySymbolsLoading,
       quickStrategyDialog,
       quickStrategySaving,
       strategySearch,
@@ -3609,6 +3631,7 @@ export default {
       closeStrategyDetail,
       deleteStrategy,
       addStrategy,
+      openNewStrategyDialog,
       openQuickStrategyDialog,
       loadQuickStrategySources,
       loadQuickStrategyPolicies,
