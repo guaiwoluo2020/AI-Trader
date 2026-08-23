@@ -1614,6 +1614,12 @@ def create_market_routes(
                         "reason": event.get("message") or event.get("event_type"),
                         "event_id": event.get("event_id"),
                     })
+            print(
+                "[StrategyExecutionChart]",
+                f"strategy={strategy_id} deployment={deployment.get('deployment_id')} ",
+                f"account={account_id} mode={deployment.get('execution_mode')} ",
+                f"symbol={symbol} period={period} bars={len(bars)} events={len(events)}",
+            )
             account_views.append({
                 **deployment,
                 "symbol": symbol,
