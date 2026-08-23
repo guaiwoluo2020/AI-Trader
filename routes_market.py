@@ -38,6 +38,8 @@ from sqlite_storage import (
     StrategyConfigRepository,
     StrategyDeploymentRepository,
     TradeConfigRepository,
+    TradeExecutionRepository,
+    PositionManagementEventRepository,
     TradingAccountRepository,
     UserRepository,
 )
@@ -1516,8 +1518,89 @@ def create_market_routes(
             decisions = engine.get_decision_history(
                 strategy_id=strategy_id, count=10,
             )
+            symbol = str(deployment.get("symbol") or strategy.symbol or "")
+            strategy_config = getattr(strategy, "config", None) or {}
+            source_periods = [
+                str(item.get("period") or "").upper()
+                for item in (getattr(strategy, "signal_sources", None) or [])
+                if isinstance(item, dict)
+            ]
+            period = str(strategy_config.get("primary_period") or next(
+                (value for value in source_periods if value), "M5"
+            )).upper()
+            if period not in {"M1", "M5", "M15", "H1", "H4"}:
+                period = "M5"
+            bars = engine.kline_service.get_klines(symbol, period, 288)
+            events = []
+            if deployment.get("execution_mode") == "paper":
+                detail = engine_manager.paper_trading.get_account_detail(
+                    user.user_id, account_id,
+                )
+                for order in detail.get("orders", []):
+                    if (str(order.get("deployment_id")) != str(deployment.get("deployment_id"))
+                            or str(order.get("symbol")) != symbol
+                            or order.get("status") != "filled"):
+                        continue
+                    events.append({
+                        "type": "buy" if str(order.get("direction")).lower() == "buy" else "sell",
+                        "timestamp": order.get("filled_at") or order.get("requested_at"),
+                        "price": order.get("filled_price") or order.get("requested_price"),
+                        "reason": "订单成交",
+                        "order_id": order.get("order_id"),
+                    })
+                for trade in detail.get("trades", []):
+                    if (str(trade.get("deployment_id")) != str(deployment.get("deployment_id"))
+                            or str(trade.get("symbol")) != symbol):
+                        continue
+                    reason = str(trade.get("exit_reason") or "平仓")
+                    lowered = reason.lower()
+                    event_type = "take_profit" if "profit" in lowered or "tp" in lowered else (
+                        "stop_loss" if "stop" in lowered or "sl" in lowered else "close"
+                    )
+                    events.append({
+                        "type": event_type,
+                        "timestamp": trade.get("closed_at"),
+                        "price": trade.get("exit_price"),
+                        "reason": reason,
+                        "trade_id": trade.get("trade_id"),
+                    })
+            else:
+                for report in TradeExecutionRepository().list_for_account(
+                    user.user_id, account_id, 200,
+                ):
+                    if str(report.get("symbol")) != symbol or not report.get("success"):
+                        continue
+                    action = str(report.get("action") or "").lower()
+                    events.append({
+                        "type": "buy" if action in {"buy", "b"} else "sell",
+                        "timestamp": report.get("reported_at"),
+                        "price": report.get("executed_price") or report.get("requested_price"),
+                        "reason": "实盘成交回报",
+                        "order_id": report.get("order_id") or report.get("instruction_id"),
+                    })
+                for event in PositionManagementEventRepository().list_for_account(
+                    user.user_id, account_id, symbol, 200,
+                ):
+                    event_type = str(event.get("event_type") or "").lower()
+                    if "take" in event_type or "profit" in event_type:
+                        marker = "take_profit"
+                    elif "stop" in event_type:
+                        marker = "stop_loss"
+                    elif "close" in event_type:
+                        marker = "close"
+                    else:
+                        continue
+                    events.append({
+                        "type": marker,
+                        "timestamp": event.get("event_time"),
+                        "price": event.get("price"),
+                        "reason": event.get("message") or event.get("event_type"),
+                        "event_id": event.get("event_id"),
+                    })
             account_views.append({
                 **deployment,
+                "symbol": symbol,
+                "chart": {"symbol": symbol, "period": period, "bars": bars, "events": events},
                 "decisions": decisions,
             })
         return {

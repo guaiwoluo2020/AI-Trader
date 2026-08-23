@@ -2910,6 +2910,7 @@ class StrategyDeploymentRepository:
             """
             SELECT deployment.deployment_id, deployment.account_id,
                    deployment.execution_mode, deployment.status,
+                   deployment.symbol,
                    account.account_name, account.account_type
             FROM strategy_deployments AS deployment
             JOIN trading_accounts AS account ON account.id = deployment.account_id
@@ -4780,6 +4781,23 @@ class PositionManagementEventRepository:
             ORDER BY event_time, created_at LIMIT ?
             """,
             (int(user_id), int(account_id), str(position_key), int(limit)),
+        )
+        return [self._row_to_dict(row) for row in rows]
+
+    def list_for_account(
+        self, user_id: int, account_id: int, symbol: str = "", limit: int = 200,
+    ) -> List[Dict]:
+        """Return recent management events for an account, optionally scoped to a symbol."""
+        clauses = ["user_id = ?", "account_id = ?"]
+        params = [int(user_id), int(account_id)]
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(str(symbol))
+        params.append(max(1, min(int(limit), 500)))
+        rows = self.storage.fetchall(
+            f"SELECT * FROM position_management_events WHERE {' AND '.join(clauses)} "
+            "ORDER BY event_time DESC, created_at DESC LIMIT ?",
+            params,
         )
         return [self._row_to_dict(row) for row in rows]
 

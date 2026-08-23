@@ -267,6 +267,23 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             bid = data.get("bidPrice")
             ask = data.get("askPrice")
             if bid is not None:
+                # Tick 是实盘策略入场触发的驱动源。此前这里仅更新账户快照并
+                # 驱动模拟撮合，导致 AI 计划在分析时尚未到入场价时，后续
+                # 实盘 Tick 不会重新评估价格条件，也就不会创建 MT5 指令。
+                # 在统计上报链路中复用 TradingServer 的统一策略评估入口；
+                # EA 后续轮询 get_trades 时即可领取已创建的交易指令。
+                try:
+                    live_price = (
+                        (float(bid) + float(ask)) / 2
+                        if ask is not None else float(bid)
+                    )
+                    server.process_price(
+                        str(data.get("symbol", "")), live_price,
+                    )
+                except Exception as exc:
+                    # 实盘统计上报必须优先成功；策略评估错误留在服务日志中，
+                    # 不影响 EA 继续上报行情。
+                    print(f"[LiveTrading] Tick 策略评估失败: {exc}")
                 try:
                     get_instrument_price_store().record(
                         identity.user_id,

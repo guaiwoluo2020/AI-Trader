@@ -9,6 +9,7 @@
       <div class="header-summary">
         <span>{{ decisionFilters.strategy_id ? '运行部署' : '运行策略' }}</span>
         <strong>{{ runningDeploymentCount }}</strong>
+        <div class="header-mini"><span>模拟盘</span><b>{{ activeDeployments.filter(item => item.execution_mode === 'paper').length }}</b><span>实盘</span><b>{{ activeDeployments.filter(item => item.execution_mode === 'live').length }}</b></div>
       </div>
     </header>
 
@@ -32,6 +33,7 @@
               <div><strong>{{ deployment.account_name }}</strong><span>{{ deployment.symbol }}</span></div>
               <div class="d-flex align-center ga-2"><v-chip size="x-small" :color="deployment.execution_mode === 'paper' ? 'info' : 'success'" variant="tonal">{{ executionModeLabel(deployment.execution_mode) }}</v-chip><v-chip size="x-small" variant="outlined">{{ deployment.status === 'active' ? '运行中' : deployment.status }}</v-chip></div>
             </div>
+            <StrategyExecutionChart v-if="deployment.chart" :symbol="deployment.chart.symbol || deployment.symbol" :period="deployment.chart.period" :bars="deployment.chart.bars" :events="deployment.chart.events" />
             <p v-if="!deployment.decisions.length" class="empty-decision">该部署尚未生成决策记录。</p>
             <div v-else class="decision-list">
               <button v-for="decision in deployment.decisions" :key="decision.decision_id" class="decision-row" type="button" @click="openDecisionDetail(decision)">
@@ -87,6 +89,7 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { marketAPI } from '@/api/market'
 import { useAccountContext } from '@/composables/useAccountContext'
+import StrategyExecutionChart from '@/components/StrategyExecutionChart.vue'
 import {
   formatTradePrice,
   normalizeTradingDecision,
@@ -380,8 +383,12 @@ export default {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 0 0 22px;
-  border-bottom: 1px solid #dce4e2;
+  min-height: 142px;
+  padding: 24px 28px;
+  border: 1px solid #d8e5de;
+  border-radius: 16px;
+  background: linear-gradient(120deg, #f4faf6 0%, #eef7f2 62%, #fbf5e9 100%);
+  box-shadow: 0 8px 24px rgba(42, 92, 72, .06);
 }
 
 .page-header h1,
@@ -410,11 +417,12 @@ export default {
 
 .header-summary {
   display: flex;
-  min-width: 118px;
+  min-width: 170px;
   flex-direction: column;
   align-items: flex-end;
-  padding: 9px 0 9px 20px;
-  border-left: 3px solid #38a078;
+  gap: 8px;
+  padding-left: 24px;
+  border-left: 1px solid #c8ddd2;
 }
 
 .header-summary span,
@@ -430,6 +438,9 @@ export default {
   font-size: 2rem;
   line-height: 1;
 }
+
+.header-mini { display: flex; align-items: center; gap: 6px; color: #718078; font-size: .72rem; }
+.header-mini b { color: #31564b; font-size: .85rem; }
 
 .focus-section,
 .strategy-section {
@@ -570,7 +581,7 @@ export default {
 
 @media (max-width: 600px) {
   .page-header, .deployment-heading { align-items: flex-start; flex-direction: column; }
-  .header-summary { align-items: flex-start; padding: 8px 0 0 12px; }
+  .header-summary { align-items: flex-start; padding: 8px 0 0 12px; border-left: 0; }
   .decision-row { grid-template-columns: 8px minmax(0, 1fr); }
   .decision-meta { grid-column: 2; align-items: flex-start; min-width: 0; }
 }
