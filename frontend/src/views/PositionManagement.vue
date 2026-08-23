@@ -175,7 +175,7 @@ import { computed, defineComponent, h, onMounted, reactive, ref } from 'vue'
 import { marketAPI } from '../api/market'
 
 const periods = ['M1', 'M5', 'M15', 'H1', 'H4']
-const labels = { signal: '信号建议', pivot: '转折点', atr: 'ATR', fixed_points: '固定点数', fixed_percent: '固定比例', risk_reward: '盈亏比', none: '不设固定止盈', break_even: '保本', pivot_trailing: '转折跟进', trailing_stop: '移动止损', partial_take_profit: '分批止盈', reverse_signal: '反向退出', max_holding_bars: '时间退出' }
+const labels = { signal: '信号建议', pivot: '转折点', atr: 'ATR', fixed_points: '固定点数', fixed_percent: '固定百分比', risk_reward: '盈亏比', none: '不设固定止盈', break_even: '保本', pivot_trailing: '转折跟进', trailing_stop: '移动止损', partial_take_profit: '分批止盈', reverse_signal: '反向退出', max_holding_bars: '时间退出' }
 const partialMoveOptions = [
   { title: '不调整', value: 'none' },
   { title: '推到保本', value: 'break_even' },
@@ -224,13 +224,28 @@ const RuleChain = defineComponent({
     const update = (index, key, value) => { const next = deepClone(props.modelValue); next[index][key] = value; emit('update:modelValue', next) }
     const remove = index => emit('update:modelValue', props.modelValue.filter((_, i) => i !== index))
     const add = () => emit('update:modelValue', [...props.modelValue, { type: props.kind === 'stop' ? 'fixed_percent' : 'risk_reward', value: props.kind === 'stop' ? 0.003 : 2 }])
+    const asPercent = value => {
+      const decimal = Number(value)
+      return Number.isFinite(decimal) ? Number((decimal * 100).toFixed(8)) : 0
+    }
+    const asDecimal = value => {
+      const percent = Number(value)
+      return Number.isFinite(percent) ? percent / 100 : 0
+    }
     return () => h('div', { class: 'rule-chain mt-5' }, [
       h('div', { class: 'd-flex align-center mb-2' }, [h('div', { class: 'section-title' }, props.title), h('div', { class: 'flex-grow-1' }), h('button', { class: 'add-rule', onClick: add }, '+ 添加兜底规则')]),
       ...props.modelValue.map((rule, index) => h('div', { class: 'rule-row' }, [
         h('span', { class: 'rule-index' }, String(index + 1)),
         h('select', { value: rule.type, onChange: e => update(index, 'type', e.target.value) }, options.value.map(value => h('option', { value }, labels[value]))),
         rule.type === 'pivot' ? h('select', { value: rule.period || 'M5', onChange: e => update(index, 'period', e.target.value) }, periods.map(value => h('option', { value }, value))) : null,
-        ['atr', 'fixed_points', 'fixed_percent', 'risk_reward'].includes(rule.type) ? h('input', { type: 'number', min: 0, step: 0.1, value: rule.value, onInput: e => update(index, 'value', Number(e.target.value)) }) : null,
+        rule.type === 'fixed_percent'
+          ? h('div', { class: 'percent-input' }, [
+              h('input', { type: 'number', min: 0, max: 100, step: 0.01, value: asPercent(rule.value), onInput: e => update(index, 'value', asDecimal(e.target.value)) }),
+              h('span', { class: 'percent-suffix' }, '%'),
+            ])
+          : ['atr', 'fixed_points', 'risk_reward'].includes(rule.type)
+            ? h('input', { type: 'number', min: 0, step: 0.1, value: rule.value, onInput: e => update(index, 'value', Number(e.target.value)) })
+            : null,
         h('button', { class: 'remove-rule', disabled: props.modelValue.length === 1, onClick: () => remove(index) }, '移除'),
       ])),
     ])
@@ -324,8 +339,8 @@ onMounted(load)
 .empty-state { padding:70px; text-align:center; border:1px dashed #aebdb4; border-radius:22px; color:#607269; }
 .empty-state.compact { min-height:150px; display:grid; place-items:center; padding:34px; }
 .section-title { font-size:14px; font-weight:800; color:#26483d; }.rule-chain { padding:18px; border:1px solid #dce7e0; border-radius:16px; background:#f8fbf9; }
-.rule-row { display:grid; grid-template-columns:32px minmax(160px,1fr) 110px 110px 62px; gap:10px; align-items:center; margin-top:8px; }.rule-row select,.rule-row input { height:40px; border:1px solid #c9d6ce; border-radius:8px; padding:0 10px; background:white; }.rule-index { width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#245d4c;color:white;font-size:12px; }.add-rule,.remove-rule { border:0;background:transparent;color:#23745c;cursor:pointer;font-weight:700; }.remove-rule { color:#b84b43; }
+.rule-row { display:grid; grid-template-columns:32px minmax(160px,1fr) 110px 110px 62px; gap:10px; align-items:center; margin-top:8px; }.rule-row select,.rule-row input { height:40px; border:1px solid #c9d6ce; border-radius:8px; padding:0 10px; background:white; }.percent-input { position:relative; }.percent-input input { width:100%; padding-right:28px; }.percent-suffix { position:absolute; right:10px; top:50%; transform:translateY(-50%); color:#607269; font-size:13px; pointer-events:none; }.rule-index { width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#245d4c;color:white;font-size:12px; }.add-rule,.remove-rule { border:0;background:transparent;color:#23745c;cursor:pointer;font-weight:700; }.remove-rule { color:#b84b43; }
 .partial-levels { display:grid; gap:10px; padding:16px; border:1px solid #dce7e0; border-radius:16px; background:#fbfdfb; }
 .partial-row { display:grid; grid-template-columns:32px 1fr 1fr 1fr 44px; gap:10px; align-items:center; }
-@media (max-width:700px) { .policy-page{padding:16px}.page-hero{align-items:start;gap:20px;flex-direction:column}.rule-row{grid-template-columns:28px 1fr}.rule-row select,.rule-row input,.remove-rule{grid-column:2}.page-hero h1{font-size:34px} }
+@media (max-width:700px) { .policy-page{padding:16px}.page-hero{align-items:start;gap:20px;flex-direction:column}.rule-row{grid-template-columns:28px 1fr}.rule-row select,.rule-row input,.rule-row .percent-input,.remove-rule{grid-column:2}.page-hero h1{font-size:34px} }
 </style>
