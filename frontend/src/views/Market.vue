@@ -193,17 +193,32 @@ export default {
       loadingFocusedExecution.value = true
       try {
         const data = await marketAPI.getStrategyExecutionOverview(strategyId)
-        focusedExecution.value = {
-          ...data,
-          deployments: (Array.isArray(data.deployments) ? data.deployments : [])
+        const deployments = await Promise.all(
+          (Array.isArray(data.deployments) ? data.deployments : [])
             .filter(Boolean)
-            .map(deployment => ({
-            ...deployment,
-            decisions: (Array.isArray(deployment.decisions) ? deployment.decisions : [])
-              .filter(Boolean)
-              .map(normalizeTradingDecision),
-          })),
-        }
+            .map(async deployment => {
+              const chart = deployment.chart || {}
+              let bars = Array.isArray(chart.bars) ? chart.bars : []
+              const symbol = chart.symbol || deployment.symbol || data.strategy?.symbol || ''
+              const period = chart.period || 'M5'
+              if (!bars.length && symbol) {
+                try {
+                  const klineData = await marketAPI.getKlines(symbol, period, 288)
+                  bars = Array.isArray(klineData?.data) ? klineData.data : []
+                } catch (klineError) {
+                  console.warn('加载策略部署K线失败:', symbol, klineError)
+                }
+              }
+              return {
+                ...deployment,
+                chart: { ...chart, symbol, period, bars, events: Array.isArray(chart.events) ? chart.events : [] },
+                decisions: (Array.isArray(deployment.decisions) ? deployment.decisions : [])
+                  .filter(Boolean)
+                  .map(normalizeTradingDecision),
+              }
+            }),
+        )
+        focusedExecution.value = { ...data, deployments }
       } catch (err) {
         focusedExecution.value = null
         console.error('加载策略部署运行记录失败:', err)
