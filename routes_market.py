@@ -605,6 +605,23 @@ def create_market_routes(
         engine = engine_manager.get_engine_for_user(user.user_id)
         period = period.upper()
         klines = engine.kline_service.get_klines(symbol, period, count)
+        # MT5 broker suffixes (for example BTCUSD/BTCUSDm) can differ from
+        # the strategy symbol while representing the same reported stream.
+        # Fall back to a normalized in-memory symbol so execution charts do
+        # not disappear merely because of the broker suffix.
+        if not klines:
+            store = getattr(engine.kline_service, "store", None)
+            stored = getattr(store, "_klines", {})
+            requested = str(symbol).rstrip("#").lower()
+            requested_base = requested[:-1] if requested.endswith("m") else requested
+            for actual_symbol in stored.keys():
+                normalized = str(actual_symbol).rstrip("#").lower()
+                normalized_base = normalized[:-1] if normalized.endswith("m") else normalized
+                if normalized == requested or normalized_base == requested_base:
+                    klines = engine.kline_service.get_klines(actual_symbol, period, count)
+                    if klines:
+                        symbol = actual_symbol
+                        break
 
         return {
             "status": "ok",
