@@ -135,6 +135,37 @@ class AIMarketCardsTestCase(unittest.TestCase):
         self.assertEqual(cards[0]["confidence"], 82)
         self.assertEqual(cards[0]["linked_strategies"][0]["strategy_id"], "strategy-1")
 
+    def test_each_source_card_uses_its_own_snapshot_and_timestamp(self):
+        m1 = _managed_source("btc-m1")
+        m1["period"] = "M1"
+        m5 = _managed_source("btc-m5")
+        engine = self._engine()
+        engine._ai_signal_source_repository = _SourceRepository([m1, m5])
+        aggregate = _analysis("btc-m1")
+        aggregate["analyzed_at"] = "2026-08-26T02:00:00"
+        aggregate["source_results"] = {
+            "btc-m1": {
+                "trend_analysis": {"M1": {"trend": "单边上涨", "confidence": 81}},
+                "trade_suggestions": [],
+                "analyzed_at": "2026-08-26T02:00:00",
+                "market_status": "active",
+            },
+            "btc-m5": {
+                "trend_analysis": {"M5": {"trend": "区间震荡", "confidence": 63}},
+                "trade_suggestions": [],
+                "analyzed_at": "2026-08-25T20:00:00",
+                "market_status": "active",
+            },
+        }
+        engine.get_llm_analysis = lambda: {"BTCUSD": aggregate}
+
+        cards = {card["signal_source_id"]: card for card in engine.get_ai_market_cards()}
+
+        self.assertEqual(cards["btc-m1"]["analyzed_at"], "2026-08-26T02:00:00")
+        self.assertEqual(cards["btc-m1"]["confidence"], 81)
+        self.assertEqual(cards["btc-m5"]["analyzed_at"], "2026-08-25T20:00:00")
+        self.assertEqual(cards["btc-m5"]["confidence"], 63)
+
 
 if __name__ == "__main__":
     unittest.main()

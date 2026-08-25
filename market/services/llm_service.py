@@ -187,6 +187,7 @@ class LLMService:
         self._strategy_store = None
         self._allowed_strategy_ids = None
         self._source_last_analysis_at = {}
+        self._persisted_source_results = {}
         self._shared_runtime_repo = SharedAIRuntimeRepository()
         self._ai_signal_source_repo = AISignalSourceRepository()
         self._trade_suggestion_repo = AITradeSuggestionRepository()
@@ -323,6 +324,48 @@ class LLMService:
                 last_run = 0.0
             self._source_last_analysis_at[source_id] = last_run
         return now - float(last_run or 0) >= max(1, int(interval_seconds))
+
+    def get_persisted_source_result(
+        self, source_id: str, symbol: str,
+    ) -> Optional[Dict]:
+        """Restore the latest successful result for one legacy source card."""
+        cache_key = (str(source_id or ""), str(symbol or "").upper())
+        if not all(cache_key):
+            return None
+        if cache_key in self._persisted_source_results:
+            return self._persisted_source_results[cache_key]
+        storage = getattr(getattr(self.llm_store, "_repo", None), "storage", None)
+        if storage is None:
+            return None
+        row = storage.fetchone(
+            """
+            SELECT result_summary, COALESCE(completed_at, created_at) AS analyzed_at
+            FROM llm_call_logs
+            WHERE user_id = ? AND scene_code = ?
+              AND object_type = 'ai_market_analysis' AND status = 'completed'
+              AND FIND_IN_SET(?, object_id) > 0
+            ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 1
+            """,
+            (self.llm_store.user_id, AI_SIGNAL_ANALYSIS, cache_key[0]),
+        )
+        result = None
+        if row:
+            try:
+                payload = json.loads(row["result_summary"] or "{}")
+                result = payload.get(symbol) or payload.get(cache_key[1])
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["analyzed_at"] = datetime.fromtimestamp(
+                        float(row["analyzed_at"] or 0), timezone.utc
+                    ).isoformat()
+                    result.setdefault("market_status", "active")
+                    result.setdefault("data_stale", False)
+                else:
+                    result = None
+            except (TypeError, ValueError, json.JSONDecodeError, OverflowError):
+                result = None
+        self._persisted_source_results[cache_key] = result
+        return result
 
     def _build_ai_analysis_plan(
         self, available_symbols: List[str], due_only: bool = False,
@@ -2090,9 +2133,48 @@ class LLMService:
             current.setdefault("trade_suggestions", []).extend(
                 analysis.get("trade_suggestions") or []
             )
+            current.setdefault("source_results", {}).update(
+                analysis.get("source_results") or {}
+            )
             for key in ("market_structure", "trade_horizon", "overall_trend", "key_levels", "analyzed_at"):
                 if analysis.get(key) is not None:
                     current[key] = analysis[key]
+
+    @staticmethod
+    def _attach_source_results(response: Dict, plan: Dict) -> None:
+        """Attach the isolated model response to its signal-source instance."""
+        analyzed_at = datetime.now().isoformat()
+        for symbol, symbol_plan in plan.items():
+            analysis = response.get(symbol)
+            if not isinstance(analysis, dict):
+                continue
+            snapshots = analysis.setdefault("source_results", {})
+            for profile in symbol_plan.get("strategies", []):
+                source_id = str(profile.get("signal_source_id") or "")
+                if not source_id:
+                    continue
+                periods = {
+                    str(period).upper()
+                    for period in (profile.get("periods") or {})
+                }
+                snapshots[source_id] = {
+                    "trend_analysis": {
+                        period: value
+                        for period, value in (analysis.get("trend_analysis") or {}).items()
+                        if str(period).upper() in periods
+                    },
+                    "overall_trend": analysis.get("overall_trend"),
+                    "key_levels": analysis.get("key_levels"),
+                    "market_structure": analysis.get("market_structure"),
+                    "trade_horizon": analysis.get("trade_horizon"),
+                    "trade_suggestions": [
+                        item for item in (analysis.get("trade_suggestions") or [])
+                        if str(item.get("signal_source_id") or "") == source_id
+                    ],
+                    "analyzed_at": analyzed_at,
+                    "data_stale": False,
+                    "market_status": "active",
+                }
 
     @staticmethod
     def _retain_previous_source_results(
@@ -2116,6 +2198,15 @@ class LLMService:
         analysis["trade_suggestions"] = (
             retained_suggestions + analysis.get("trade_suggestions", [])
         )
+        retained_source_results = {
+            source_id: value
+            for source_id, value in (previous.source_results or {}).items()
+            if source_id not in analyzed_source_ids
+        }
+        analysis["source_results"] = {
+            **retained_source_results,
+            **(analysis.get("source_results") or {}),
+        }
 
     def _publish_runtime_results(self, plan: Dict, response: Dict) -> None:
         config = self.llm_store.get_config()
@@ -2574,6 +2665,7 @@ class LLMService:
             request_response = self._normalize_analysis_response(
                 request_response or {}, request_plan
             )
+            self._attach_source_results(request_response, request_plan)
             plan_updates.extend(
                 self._plan_updates_for_request(request_plan, request_response)
             )

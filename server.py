@@ -1634,6 +1634,20 @@ class TradingServer:
         source_id = str(source.get("signal_source_id") or "")
         source_symbol = str(source.get("symbol") or "")
         period = str(source.get("period") or "M5").upper()
+        source_analysis = (
+            (analysis.get("source_results") or {}).get(source_id)
+            if isinstance(analysis, dict) else None
+        )
+        if not isinstance(source_analysis, dict):
+            resolver = getattr(
+                getattr(self, "llm_service", None),
+                "get_persisted_source_result", None,
+            )
+            source_analysis = (
+                resolver(source_id, source_symbol) if resolver else None
+            )
+        if isinstance(source_analysis, dict):
+            analysis = source_analysis
         current_price = self._latest_market_price(source_symbol)
         trend = (analysis.get("trend_analysis") or {}).get(period) or {}
         suggestions = [

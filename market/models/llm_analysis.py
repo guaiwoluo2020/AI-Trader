@@ -19,6 +19,7 @@ class LLMAnalysisResult:
     market_structure: Optional[Dict] = None
     trade_horizon: Optional[Dict] = None
     trade_suggestions: List[Dict] = field(default_factory=list)
+    source_results: Dict = field(default_factory=dict)
     analyzed_at: Optional[str] = None
     data_stale: bool = False
     market_status: str = "active"  # active, stale, closed
@@ -33,6 +34,7 @@ class LLMAnalysisResult:
             "market_structure": self.market_structure,
             "trade_horizon": self.trade_horizon,
             "trade_suggestions": self.trade_suggestions,
+            "source_results": self.source_results,
             "analyzed_at": self.analyzed_at,
             "data_stale": self.data_stale,
             "market_status": self.market_status
@@ -49,7 +51,8 @@ class LLMAnalysisResult:
             market_structure=data.get("market_structure"),
             trade_horizon=data.get("trade_horizon"),
             trade_suggestions=data.get("trade_suggestions", []),
-            analyzed_at=datetime.now().isoformat(),
+            source_results=data.get("source_results") or {},
+            analyzed_at=data.get("analyzed_at") or datetime.now().isoformat(),
             data_stale=False,
             market_status="active"
         )
@@ -65,6 +68,7 @@ class LLMAnalysisResult:
             market_structure=data.get("market_structure"),
             trade_horizon=data.get("trade_horizon"),
             trade_suggestions=data.get("trade_suggestions") or [],
+            source_results=data.get("source_results") or {},
             analyzed_at=data.get("analyzed_at"),
             data_stale=bool(data.get("data_stale", False)),
             market_status=str(data.get("market_status", "active")),
