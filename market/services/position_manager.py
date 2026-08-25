@@ -146,12 +146,22 @@ class PositionManager:
         if stop is None:
             raise ValueError("没有止损规则能够生成有效价格")
         risk = abs(entry_price - stop)
-        minimum = float(config.get("min_stop_distance", 0))
-        maximum = float(config.get("max_stop_distance", 0))
+        minimum = entry_price * float(config.get("min_stop_percent", 0.1) or 0) / 100.0
+        maximum = entry_price * float(config.get("max_stop_percent", 0.7) or 0) / 100.0
+        if not minimum:
+            minimum = float(config.get("min_stop_distance", 0) or 0)
+        if not maximum:
+            maximum = float(config.get("max_stop_distance", 0) or 0)
         if minimum and risk < minimum:
-            raise ValueError("止损距离小于持仓管理方案限制")
+            raise ValueError(
+                f"止损距离 {risk:.2f} 小于持仓管理方案最小比例 "
+                f"{float(config.get('min_stop_percent', 0) or 0):.2f}%"
+            )
         if maximum and risk > maximum:
-            raise ValueError("止损距离超过持仓管理方案限制")
+            raise ValueError(
+                f"止损距离 {risk:.2f} 超过持仓管理方案最大比例 "
+                f"{float(config.get('max_stop_percent', 0) or 0):.2f}%"
+            )
         take_profit, take_rule = self._resolve_rule(
             config["initial_take_profit_rules"], direction, entry_price,
             float(signal_take_profit or 0), risk, pivots, atr, False, current_time,

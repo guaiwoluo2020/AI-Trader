@@ -54,6 +54,8 @@ def default_position_management_config() -> Dict:
             ]},
         ],
         "min_risk_reward": 1.0,
+        "min_stop_percent": 0.1,
+        "max_stop_percent": 0.7,
         "min_stop_distance": 0.0,
         "max_stop_distance": 0.0,
         "setup_profiles": [],
@@ -139,6 +141,12 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
     normalized["min_risk_reward"] = _positive(
         normalized.get("min_risk_reward", 1), "最小盈亏比", True
     )
+    normalized["min_stop_percent"] = _positive(
+        normalized.get("min_stop_percent", 0.1), "最小止损比例", True
+    )
+    normalized["max_stop_percent"] = _positive(
+        normalized.get("max_stop_percent", 0.7), "最大止损比例", True
+    )
     normalized["min_stop_distance"] = _positive(
         normalized.get("min_stop_distance", 0), "最小止损距离", True
     )
@@ -150,8 +158,8 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
             100.0,
             max(0.0, float(normalized.get("signal_take_profit_close_percent", 0))),
         )
-    if (normalized["max_stop_distance"] > 0
-            and normalized["max_stop_distance"] < normalized["min_stop_distance"]):
+    if (normalized["max_stop_percent"] > 0
+            and normalized["max_stop_percent"] < normalized["min_stop_percent"]):
         raise ValueError("最大止损距离不能小于最小止损距离")
     profiles = []
     base_config = {
@@ -180,6 +188,7 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
         allowed_override_keys = {
             "initial_stop_rules", "initial_take_profit_rules",
             "management_rules", "min_risk_reward",
+            "min_stop_percent", "max_stop_percent",
             "min_stop_distance", "max_stop_distance",
         }
         overrides = {

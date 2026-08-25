@@ -490,8 +490,6 @@ class TradingStrategy:
     # ==================== 过滤条件 ====================
     min_risk_reward: float = 1.0
     max_risk_reward: float = 5.0
-    min_sl_points: float = 5.0
-    max_sl_points: float = 100.0
 
     # ==================== 时间过滤 ====================
     trading_hours: Dict = field(default_factory=lambda: {
@@ -589,8 +587,7 @@ class TradingStrategy:
             "conflict_resolution", "fixed_volume", "volume_mode",
             "risk_percent", "max_risk_points", "max_positions",
             "max_same_direction", "position_management_policy_id",
-            "min_risk_reward", "max_risk_reward",
-            "min_sl_points", "max_sl_points", "trading_hours",
+            "min_risk_reward", "max_risk_reward", "trading_hours",
             "position_conflict",
         }
         before = {
@@ -814,8 +811,6 @@ class TradingStrategy:
             "position_management_policy_id": self.position_management_policy_id,
             "min_risk_reward": self.min_risk_reward,
             "max_risk_reward": self.max_risk_reward,
-            "min_sl_points": self.min_sl_points,
-            "max_sl_points": self.max_sl_points,
             "trading_hours": self.trading_hours,
             "position_conflict": self.position_conflict,
             "source_strategy_id": self.source_strategy_id,
@@ -895,8 +890,6 @@ class TradingStrategy:
             ),
             min_risk_reward=data.get('min_risk_reward', 1.0),
             max_risk_reward=data.get('max_risk_reward', 5.0),
-            min_sl_points=data.get('min_sl_points', 5.0),
-            max_sl_points=data.get('max_sl_points', 100.0),
             trading_hours=data.get('trading_hours', {"start": "00:00", "end": "23:59", "exclude_hours": []}),
             position_conflict=data.get('position_conflict', PositionConflict.ALLOW_OPPOSITE),
             strategy_id=data.get('strategy_id', ''),

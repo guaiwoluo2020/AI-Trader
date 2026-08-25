@@ -379,8 +379,7 @@ def create_market_routes(
             "conflict_resolution", "fixed_volume", "volume_mode",
             "risk_percent", "max_risk_points", "max_positions",
             "max_same_direction", "position_management_policy_id",
-            "min_risk_reward", "max_risk_reward",
-            "min_sl_points", "max_sl_points", "trading_hours",
+            "min_risk_reward", "max_risk_reward", "trading_hours",
             "position_conflict",
         }
         if (

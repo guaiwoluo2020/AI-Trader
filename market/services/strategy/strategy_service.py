@@ -539,60 +539,6 @@ class StrategyService:
                 reason, decision_time,
             )
 
-        # 动态止损范围（根据价格调整）
-        # 最小止损 = 价格的 0.05% 或 5 点（取较大）
-        # 最大止损 = 价格的 2% 或 100 点（取较小）
-        price_min_sl = entry_price * 0.0005  # 价格的 0.05%
-        price_max_sl = entry_price * 0.02    # 价格的 2%
-
-        # 确保 min <= max
-        dynamic_min_sl = max(1.0, price_min_sl)  # 最小至少 1 点
-        dynamic_max_sl = max(dynamic_min_sl, price_max_sl)  # 最大至少等于最小
-
-        # 如果动态范围不合理，跳过
-        if dynamic_min_sl > dynamic_max_sl:
-            print(f"[StrategyService] 动态止损范围无效: [{dynamic_min_sl:.2f}, {dynamic_max_sl:.2f}], 跳过决策")
-            return None
-
-        # 检查止损点数
-        if risk_points < dynamic_min_sl or risk_points > dynamic_max_sl:
-            reason = (
-                f"止损距离 {risk_points:.2f} 不在动态范围 "
-                f"[{dynamic_min_sl:.2f}, {dynamic_max_sl:.2f}]"
-            )
-            print(f"[StrategyService] {reason} (价格={entry_price:.2f})")
-            return self._rejected_decision(
-                symbol, strategy, signals, analysis, execution_mode,
-                entry_price, sl, tp, risk_points, reward_points, rr_ratio,
-                reason, decision_time,
-            )
-
-        # These strategy-level bounds existed in the data model but were not
-        # enforced by the live decision path. Enforce them only when positive;
-        # zero keeps legacy strategies' old behaviour.
-        if strategy.min_sl_points > 0 and risk_points < strategy.min_sl_points:
-            reason = (
-                f"止损距离 {risk_points:.2f} 小于策略最小止损点数 "
-                f"{strategy.min_sl_points:.2f}"
-            )
-            print(f"[StrategyService] {reason}")
-            return self._rejected_decision(
-                symbol, strategy, signals, analysis, execution_mode,
-                entry_price, sl, tp, risk_points, reward_points, rr_ratio,
-                reason, decision_time,
-            )
-        if strategy.max_sl_points > 0 and risk_points > strategy.max_sl_points:
-            reason = (
-                f"止损距离 {risk_points:.2f} 超过策略最大止损点数 "
-                f"{strategy.max_sl_points:.2f}"
-            )
-            print(f"[StrategyService] {reason}")
-            return self._rejected_decision(
-                symbol, strategy, signals, analysis, execution_mode,
-                entry_price, sl, tp, risk_points, reward_points, rr_ratio,
-                reason, decision_time,
-            )
-
         # 计算手数
         volume = (
             volume_calculator(symbol, risk_points, strategy)

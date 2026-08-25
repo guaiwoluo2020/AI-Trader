@@ -161,8 +161,8 @@
           </div>
           <v-row>
             <v-col cols="6" md="3"><v-text-field v-model.number="form.config.min_risk_reward" label="最小盈亏比" type="number" min="0" step="0.1" /></v-col>
-            <v-col cols="6" md="3"><v-text-field v-model.number="form.config.min_stop_distance" label="最小止损距离" type="number" min="0" /></v-col>
-            <v-col cols="6" md="3"><v-text-field v-model.number="form.config.max_stop_distance" label="最大止损距离（0不限）" type="number" min="0" /></v-col>
+            <v-col cols="6" md="3"><v-text-field v-model.number="form.config.min_stop_percent" label="最小止损比例" suffix="%" hint="默认 0.1%，按入场价计算" persistent-hint type="number" min="0" step="0.01" /></v-col>
+            <v-col cols="6" md="3"><v-text-field v-model.number="form.config.max_stop_percent" label="最大止损比例" suffix="%" hint="默认 0.7%，按入场价计算" persistent-hint type="number" min="0" step="0.01" /></v-col>
           </v-row>
           <v-divider class="my-6" />
           <div class="d-flex align-center ga-3"><div><div class="section-title">场景规则</div><div class="text-caption text-medium-emphasis">按具体Setup、通用场景族或信号来源覆盖默认规则；未命中时继续使用上面的默认方案。</div></div><v-spacer/><v-btn color="primary" variant="tonal" prepend-icon="mdi-plus" @click="addSetupProfile">新增场景规则</v-btn></div>
@@ -267,7 +267,8 @@ const usedSharedPolicyKeys = computed(() => new Set(
 const defaultConfig = () => ({
   initial_stop_rules: [{ type: 'pivot', period: 'M5', selection: 'nearest', max_age_bars: 100, buffer: { type: 'fixed_points', value: 0 } }, { type: 'fixed_percent', value: 0.003 }],
   initial_take_profit_rules: [{ type: 'risk_reward', value: 2 }],
-  management_rules: [], min_risk_reward: 1, min_stop_distance: 0, max_stop_distance: 0,
+  management_rules: [], min_risk_reward: 1, min_stop_percent: 0.1, max_stop_percent: 0.7,
+  min_stop_distance: 0, max_stop_distance: 0,
   setup_profiles: [],
 })
 const form = reactive({ policy_id: '', name: '', enabled: true, is_shared: false, config: defaultConfig() })
