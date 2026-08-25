@@ -619,6 +619,7 @@ class SQLiteStorage:
                         slippage REAL NOT NULL DEFAULT 0,
                         mt5_order INTEGER NOT NULL DEFAULT 0,
                         mt5_deal INTEGER NOT NULL DEFAULT 0,
+                        mt5_position_id INTEGER NOT NULL DEFAULT 0,
                         retcode INTEGER NOT NULL DEFAULT 0,
                         error_message TEXT NOT NULL DEFAULT '',
                         reported_at INTEGER NOT NULL,
@@ -630,6 +631,33 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_trade_execution_reports_account
                     ON trade_execution_reports(account_id, reported_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS live_trade_deals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        account_id INTEGER NOT NULL,
+                        ticket INTEGER NOT NULL,
+                        mt5_order INTEGER NOT NULL DEFAULT 0,
+                        mt5_position_id INTEGER NOT NULL DEFAULT 0,
+                        symbol TEXT NOT NULL DEFAULT '',
+                        deal_type INTEGER NOT NULL DEFAULT 0,
+                        entry_type INTEGER NOT NULL DEFAULT 0,
+                        volume REAL NOT NULL DEFAULT 0,
+                        price REAL NOT NULL DEFAULT 0,
+                        profit REAL NOT NULL DEFAULT 0,
+                        swap REAL NOT NULL DEFAULT 0,
+                        commission REAL NOT NULL DEFAULT 0,
+                        deal_time TEXT NOT NULL DEFAULT '',
+                        comment TEXT NOT NULL DEFAULT '',
+                        received_at INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        UNIQUE(account_id, ticket),
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY(account_id) REFERENCES trading_accounts(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_live_trade_deals_account
+                    ON live_trade_deals(account_id, deal_time DESC, received_at DESC);
 
                     CREATE TABLE IF NOT EXISTS backtest_datasets (
                         dataset_id TEXT PRIMARY KEY,
@@ -1319,6 +1347,15 @@ class SQLiteStorage:
                     conn, "backtest_tasks", "engine_version", "TEXT NOT NULL DEFAULT ''"
                 )
                 self._ensure_column(
+                    conn, "trade_execution_reports", "mt5_position_id",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                for table in ("trade_execution_reports", "live_trade_deals"):
+                    self._ensure_column(
+                        conn, table, "position_attribution_json",
+                        "TEXT NOT NULL DEFAULT '{}'",
+                    )
+                self._ensure_column(
                     conn, "llm_call_logs", "result_summary", "VARCHAR(4096) NOT NULL DEFAULT ''"
                 )
                 self._ensure_column(
@@ -1386,6 +1423,21 @@ class SQLiteStorage:
                     )
                     self._ensure_column(
                         conn, table, "position_policy_snapshot_json",
+                        "TEXT NOT NULL DEFAULT '{}'",
+                    )
+                    self._ensure_column(
+                        conn, table, "position_attribution_json",
+                        "TEXT NOT NULL DEFAULT '{}'",
+                    )
+                self._ensure_column(
+                    conn, "paper_trades", "position_attribution_json",
+                    "TEXT NOT NULL DEFAULT '{}'",
+                )
+                for table in (
+                    "backtest_orders", "backtest_positions", "backtest_trades",
+                ):
+                    self._ensure_column(
+                        conn, table, "position_attribution_json",
                         "TEXT NOT NULL DEFAULT '{}'",
                     )
                 self._ensure_column(
@@ -2080,6 +2132,22 @@ class UserRepository:
         user = self.get_by_id(user_id)
         if user is None:
             raise RuntimeError("更新密码后未找到用户")
+        return user
+
+    def rotate_token_version(self, user_id: int) -> UserRecord:
+        """Invalidate all existing web sessions and return the new user record."""
+        now = _now_ts()
+        self.storage.execute(
+            """
+            UPDATE users
+            SET token_version = token_version + 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, int(user_id)),
+        )
+        user = self.get_by_id(user_id)
+        if user is None:
+            raise RuntimeError("刷新登录会话后未找到用户")
         return user
 
     def count(self) -> int:
@@ -2941,6 +3009,14 @@ class TradeExecutionRepository:
         raw_slippage = executed_price - requested_price
         slippage = raw_slippage if action in {"b", "buy"} else -raw_slippage
         now = _now_ts()
+        runtime = self.storage.fetchone(
+            "SELECT payload_json FROM runtime_entities WHERE user_id = ? "
+            "AND account_id = ? AND entity_type = 'trading_instruction' "
+            "AND entity_id = ?",
+            (int(user_id), int(account_id), instruction_id),
+        )
+        instruction = json.loads(runtime["payload_json"] or "{}") if runtime else {}
+        attribution = dict(instruction.get("position_attribution") or {})
         values = (
             user_id, account_id, instruction_id,
             str(payload.get("order_id", "") or ""),
@@ -2952,18 +3028,27 @@ class TradeExecutionRepository:
             slippage,
             int(payload.get("mt5_order", 0) or 0),
             int(payload.get("mt5_deal", 0) or 0),
+            int(
+                payload.get("mt5_position_id")
+                or payload.get("mt5_position")
+                or payload.get("position_id")
+                or payload.get("position_ticket")
+                or 0
+            ),
             int(payload.get("retcode", 0) or 0),
             str(payload.get("error_message", "") or "")[:500],
             now, json.dumps(payload, ensure_ascii=False),
+            json.dumps(attribution, ensure_ascii=False),
         )
         self.storage.execute(
             """
             INSERT INTO trade_execution_reports(
                 user_id, account_id, instruction_id, order_id, symbol, action,
                 success, requested_price, executed_price, requested_volume,
-                executed_volume, slippage, mt5_order, mt5_deal, retcode,
+                executed_volume, slippage, mt5_order, mt5_deal, mt5_position_id, retcode,
                 error_message, reported_at, payload_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , position_attribution_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_id, instruction_id) DO UPDATE SET
                 success = excluded.success,
                 executed_price = excluded.executed_price,
@@ -2971,10 +3056,12 @@ class TradeExecutionRepository:
                 slippage = excluded.slippage,
                 mt5_order = excluded.mt5_order,
                 mt5_deal = excluded.mt5_deal,
+                mt5_position_id = excluded.mt5_position_id,
                 retcode = excluded.retcode,
                 error_message = excluded.error_message,
                 reported_at = excluded.reported_at,
                 payload_json = excluded.payload_json
+                , position_attribution_json = excluded.position_attribution_json
             """,
             values,
         )
@@ -2985,12 +3072,36 @@ class TradeExecutionRepository:
             """,
             (account_id, instruction_id),
         )
-        return dict(row)
+        return self._deserialize(row)
+
+    @staticmethod
+    def _deserialize(row) -> Optional[Dict]:
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["position_attribution"] = json.loads(
+                item.get("position_attribution_json") or "{}"
+            )
+        except (TypeError, ValueError):
+            item["position_attribution"] = {}
+        return item
+
+    def find_for_position(
+        self, user_id: int, account_id: int, mt5_position_id: int,
+    ) -> Optional[Dict]:
+        row = self.storage.fetchone(
+            "SELECT * FROM trade_execution_reports WHERE user_id = ? "
+            "AND account_id = ? AND mt5_position_id = ? AND success = 1 "
+            "ORDER BY reported_at DESC, id DESC LIMIT 1",
+            (int(user_id), int(account_id), int(mt5_position_id or 0)),
+        )
+        return self._deserialize(row)
 
     def list_for_account(
         self, user_id: int, account_id: int, count: int = 100
     ) -> List[Dict]:
-        return [dict(row) for row in self.storage.fetchall(
+        return [self._deserialize(row) for row in self.storage.fetchall(
             """
             SELECT * FROM trade_execution_reports
             WHERE user_id = ? AND account_id = ?
@@ -2998,6 +3109,125 @@ class TradeExecutionRepository:
             """,
             (user_id, account_id, max(1, min(int(count), 500))),
         )]
+
+
+class LiveTradeDealRepository:
+    """持久化 EA 上报的 MT5 成交流水。
+
+    运行态内存/`runtime_entities` 仍用于风控的短期窗口；该表用于账户页、
+    策略回放等需要稳定读取的最近成交，避免服务重启或 24 小时清理后消失。
+    """
+
+    def __init__(self, storage: Optional[SQLiteStorage] = None):
+        self.storage = storage or get_storage()
+
+    def record_many(self, user_id: int, account_id: int, deals: List[Dict]) -> int:
+        if not deals:
+            return 0
+        received_at = _now_ts()
+        count = 0
+        for deal in deals:
+            ticket = int(deal.get("ticket", 0) or 0)
+            if ticket <= 0:
+                continue
+            mt5_order = int(deal.get("order", 0) or 0)
+            mt5_position_id = int(
+                deal.get("position_id", deal.get("mt5_position_id", 0)) or 0
+            )
+            execution = self.storage.fetchone(
+                "SELECT position_attribution_json FROM trade_execution_reports "
+                "WHERE user_id = ? AND account_id = ? AND success = 1 "
+                "AND ((mt5_position_id > 0 AND mt5_position_id = ?) "
+                "OR (mt5_order > 0 AND mt5_order = ?)) "
+                "ORDER BY reported_at DESC, id DESC LIMIT 1",
+                (int(user_id), int(account_id), mt5_position_id, mt5_order),
+            )
+            attribution = json.loads(
+                execution["position_attribution_json"] or "{}"
+            ) if execution else {}
+            entry_type = int(deal.get("entry", 0) or 0)
+            if attribution and entry_type != 0:
+                opening = self.storage.fetchone(
+                    "SELECT price, deal_type FROM live_trade_deals WHERE user_id = ? "
+                    "AND account_id = ? AND mt5_position_id = ? AND entry_type = 0 "
+                    "ORDER BY deal_time, id LIMIT 1",
+                    (int(user_id), int(account_id), mt5_position_id),
+                )
+                initial_risk = float(attribution.get("initial_risk") or 0)
+                realized_r = 0.0
+                if opening and initial_risk > 0:
+                    sign = 1 if int(opening["deal_type"] or 0) == 0 else -1
+                    realized_r = (
+                        (float(deal.get("price", 0) or 0) - float(opening["price"]))
+                        * sign / initial_risk
+                    )
+                from market.services.position_attribution import close_position_attribution
+                comment = str(deal.get("comment") or "").strip().lower()
+                exit_reason = (
+                    "stop_loss" if comment.startswith("[sl")
+                    else "take_profit" if comment.startswith("[tp")
+                    else "forced_close" if comment.startswith("[so")
+                    else "position_close"
+                )
+                attribution = close_position_attribution(
+                    attribution,
+                    exit_reason,
+                    realized_r,
+                )
+            values = (
+                int(user_id), int(account_id), ticket,
+                mt5_order, mt5_position_id,
+                str(deal.get("symbol", "") or ""),
+                int(deal.get("type", 0) or 0), int(deal.get("entry", 0) or 0),
+                float(deal.get("volume", 0) or 0), float(deal.get("price", 0) or 0),
+                float(deal.get("profit", 0) or 0), float(deal.get("swap", 0) or 0),
+                float(deal.get("commission", 0) or 0),
+                str(deal.get("time", "") or ""),
+                str(deal.get("comment", "") or ""), received_at,
+                json.dumps(deal, ensure_ascii=False),
+                json.dumps(attribution, ensure_ascii=False),
+            )
+            self.storage.execute(
+                """
+                INSERT INTO live_trade_deals(
+                    user_id, account_id, ticket, mt5_order, mt5_position_id,
+                    symbol, deal_type, entry_type, volume, price, profit, swap,
+                    commission, deal_time, comment, received_at, payload_json
+                    , position_attribution_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, ticket) DO UPDATE SET
+                    mt5_order = excluded.mt5_order,
+                    mt5_position_id = excluded.mt5_position_id,
+                    symbol = excluded.symbol, deal_type = excluded.deal_type,
+                    entry_type = excluded.entry_type, volume = excluded.volume,
+                    price = excluded.price, profit = excluded.profit,
+                    swap = excluded.swap, commission = excluded.commission,
+                    deal_time = excluded.deal_time, comment = excluded.comment,
+                    received_at = excluded.received_at, payload_json = excluded.payload_json
+                    , position_attribution_json = excluded.position_attribution_json
+                """,
+                values,
+            )
+            count += 1
+        return count
+
+    def list_for_account(self, user_id: int, account_id: int, count: int = 100) -> List[Dict]:
+        rows = self.storage.fetchall(
+            """
+            SELECT * FROM live_trade_deals
+            WHERE user_id = ? AND account_id = ?
+            ORDER BY COALESCE(deal_time, '' ) DESC, received_at DESC, id DESC LIMIT ?
+            """,
+            (int(user_id), int(account_id), max(1, min(int(count), 100))),
+        )
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["position_attribution"] = json.loads(
+                item.get("position_attribution_json") or "{}"
+            )
+            items.append(item)
+        return items
 
 class TradeConfigRepository:
     DEFAULT_CONFIG = {
@@ -3576,6 +3806,8 @@ class AITradeSuggestionRepository:
         return "|".join((
             str(suggestion.get("direction") or "").lower(),
             str(suggestion.get("period") or "").upper(),
+            str(suggestion.get("setup_type") or "").lower(),
+            str(suggestion.get("entry_mode") or "").lower(),
             f"{float(suggestion.get('entry_price') or 0):.8f}",
             f"{float(suggestion.get('stop_loss') or 0):.8f}",
             f"{float(suggestion.get('take_profit') or 0):.8f}",
@@ -3683,6 +3915,9 @@ class AISignalSourceRepository:
     def _row_to_dict(row) -> Dict:
         if row is None:
             return {}
+        config = json.loads(row["config_json"] or "{}")
+        config.setdefault("signal_source_version", "1.0")
+        config.setdefault("analysis_template", "custom")
         return {
             "signal_source_id": row["signal_source_id"],
             "user_id": int(row["user_id"]),
@@ -3690,7 +3925,7 @@ class AISignalSourceRepository:
             "symbol": row["symbol"],
             "period": row["period"],
             "market_data_account_id": int(row["market_data_account_id"] or 0),
-            "config": json.loads(row["config_json"] or "{}"),
+            "config": config,
             "enabled": bool(row["enabled"]),
             "share_runtime_data": bool(row["share_runtime_data"]),
             "created_at": int(row["created_at"]),
@@ -3851,6 +4086,11 @@ class AISignalSourceRepository:
     def create(self, user_id: int, data: Dict) -> Dict:
         now = _now_ts()
         source_id = str(data.get("signal_source_id") or uuid.uuid4().hex[:12])
+        config = dict(data.get("config") or {})
+        # New sources use the structured 2.0 protocol by default. Existing
+        # records without this field remain 1.0 and keep their custom prompt.
+        config.setdefault("signal_source_version", "2.0")
+        config.setdefault("analysis_template", "auto_structure")
         self.storage.execute(
             """
             INSERT INTO ai_signal_sources(
@@ -3862,7 +4102,7 @@ class AISignalSourceRepository:
                 source_id, int(user_id), str(data.get("name") or "AI 信号源").strip(),
                 str(data.get("symbol") or "").strip(), str(data.get("period") or "M5").upper(),
                 int(data.get("market_data_account_id") or 0),
-                json.dumps(data.get("config") or {}, ensure_ascii=False),
+                json.dumps(config, ensure_ascii=False),
                 int(bool(data.get("enabled", True))),
                 int(bool(data.get("share_runtime_data", False))), now, now,
             ),
@@ -3893,6 +4133,50 @@ class AISignalSourceRepository:
             ),
         )
         return self.get(user_id, signal_source_id) or {}
+
+    def set_analysis_paused(
+        self, user_id: int, signal_source_id: str, paused: bool,
+    ) -> Dict:
+        """Pause/resume analysis without changing the locked source config."""
+        current = self.get(user_id, signal_source_id)
+        if current is None:
+            raise ValueError("AI 信号源不存在")
+        config = dict(current.get("config") or {})
+        config["analysis_paused"] = bool(paused)
+        self.storage.execute(
+            "UPDATE ai_signal_sources SET config_json = ?, updated_at = ? "
+            "WHERE user_id = ? AND signal_source_id = ?",
+            (json.dumps(config, ensure_ascii=False), _now_ts(), int(user_id), str(signal_source_id)),
+        )
+        return self.get(user_id, signal_source_id) or {}
+
+    def deployment_impact(self, user_id: int, signal_source_id: str) -> List[Dict]:
+        """List deployed strategies/users that consume a source directly or shared."""
+        source = self.get(user_id, signal_source_id)
+        if not source:
+            return []
+        source_id = str(signal_source_id)
+        share_id = f"{int(source['user_id'])}:ai:{source_id}"
+        rows = self.storage.fetchall(
+            """
+            SELECT d.deployment_id, d.strategy_id, d.execution_mode, d.status AS deployment_status,
+                   d.account_id, a.account_name, u.id AS user_id, u.username,
+                   JSON_UNQUOTE(JSON_EXTRACT(s.config_json, '$.strategy_name')) AS strategy_name
+            FROM strategy_deployments d
+            JOIN user_strategy_configs s ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
+            JOIN trading_accounts a ON a.id = d.account_id
+            JOIN users u ON u.id = d.user_id
+            WHERE d.status IN ('active', 'paused', 'completed')
+              AND (
+                JSON_SEARCH(s.config_json, 'one', ?, NULL, '$.signal_sources[*].signal_source_id') IS NOT NULL
+                OR JSON_SEARCH(s.config_json, 'one', ?, NULL, '$.signal_sources[*].params.ai_signal_source_id') IS NOT NULL
+                OR JSON_SEARCH(s.config_json, 'one', ?, NULL, '$.signal_sources[*].params.shared_runtime_id') IS NOT NULL
+              )
+            ORDER BY u.username, a.account_name, d.execution_mode
+            """,
+            (source_id, source_id, share_id),
+        )
+        return [dict(row) for row in rows]
 
     def copy(self, user_id: int, signal_source_id: str) -> Dict:
         source = self.get(user_id, signal_source_id)
@@ -5388,6 +5672,7 @@ class RuntimeStateRepository:
         self,
         entity_type: str,
         statuses: Optional[List[str]] = None,
+        limit: Optional[int] = None,
     ) -> List[Dict]:
         params: List = [self.user_id, self.account_id, entity_type]
         sql = """
@@ -5399,7 +5684,11 @@ class RuntimeStateRepository:
             placeholders = ",".join("?" for _ in statuses)
             sql += f" AND status IN ({placeholders})"
             params.extend(statuses)
-        sql += " ORDER BY created_at, entity_id"
+        if limit is not None:
+            sql += " ORDER BY created_at DESC, entity_id DESC LIMIT ?"
+            params.append(max(1, int(limit)))
+        else:
+            sql += " ORDER BY created_at, entity_id"
         return [
             json.loads(row["payload_json"])
             for row in self.storage.fetchall(sql, tuple(params))

@@ -19,6 +19,14 @@ MANAGEMENT_RULE_TYPES = {
     "partial_take_profit", "reverse_signal", "max_holding_bars",
 }
 PERIODS = {"M1", "M5", "M15", "H1", "H4"}
+SETUP_FAMILIES = {
+    "range", "reversal", "breakout", "trend", "trend_follow",
+    "pullback", "mean_reversion", "factor", "manual", "generic",
+}
+SIGNAL_SOURCES = {
+    "ai_entry", "pivot", "key_level", "moving_average",
+    "alpha_factor", "manual",
+}
 
 
 def default_position_management_config() -> Dict:
@@ -48,6 +56,7 @@ def default_position_management_config() -> Dict:
         "min_risk_reward": 1.0,
         "min_stop_distance": 0.0,
         "max_stop_distance": 0.0,
+        "setup_profiles": [],
     }
 
 
@@ -144,7 +153,106 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
     if (normalized["max_stop_distance"] > 0
             and normalized["max_stop_distance"] < normalized["min_stop_distance"]):
         raise ValueError("最大止损距离不能小于最小止损距离")
+    profiles = []
+    base_config = {
+        key: copy.deepcopy(value)
+        for key, value in normalized.items() if key != "setup_profiles"
+    }
+    for index, raw in enumerate((config or {}).get("setup_profiles") or []):
+        if not isinstance(raw, dict):
+            continue
+        match = raw.get("match") or {}
+        setup_types = sorted({
+            str(item).strip().lower() for item in match.get("setup_types") or []
+            if str(item).strip()
+        })
+        setup_families = sorted({
+            str(item).strip().lower() for item in match.get("setup_families") or []
+            if str(item).strip().lower() in SETUP_FAMILIES
+        })
+        signal_sources = sorted({
+            str(item).strip().lower() for item in match.get("signal_sources") or []
+            if str(item).strip().lower() in SIGNAL_SOURCES
+        })
+        if not setup_types and not setup_families and not signal_sources:
+            raise ValueError(f"场景规则 {index + 1} 至少需要一个匹配条件")
+        overrides = copy.deepcopy(raw.get("overrides") or {})
+        allowed_override_keys = {
+            "initial_stop_rules", "initial_take_profit_rules",
+            "management_rules", "min_risk_reward",
+            "min_stop_distance", "max_stop_distance",
+        }
+        overrides = {
+            key: value for key, value in overrides.items()
+            if key in allowed_override_keys
+        }
+        merged = copy.deepcopy(base_config)
+        merged.update(overrides)
+        validated = normalize_position_management_config({
+            **merged, "setup_profiles": [],
+        })
+        normalized_overrides = {
+            key: copy.deepcopy(validated[key]) for key in overrides
+        }
+        profiles.append({
+            "profile_id": str(raw.get("profile_id") or uuid.uuid4().hex[:12]),
+            "name": str(raw.get("name") or f"场景规则 {index + 1}").strip(),
+            "enabled": bool(raw.get("enabled", True)),
+            "priority": max(0, min(1000, int(raw.get("priority", 100)))),
+            "inherit_default": bool(raw.get("inherit_default", True)),
+            "parameter_mode": (
+                "custom" if str(raw.get("parameter_mode") or "").lower() == "custom"
+                else "recommended"
+            ),
+            "match": {
+                "setup_types": setup_types,
+                "setup_families": setup_families,
+                "signal_sources": signal_sources,
+            },
+            "overrides": normalized_overrides,
+        })
+    normalized["setup_profiles"] = profiles
     return normalized
+
+
+def resolve_position_management_config(
+    config: Dict, setup_context: Optional[Dict] = None,
+) -> tuple[Dict, Optional[Dict]]:
+    """Resolve exact setup, family, source, then the unchanged default rules."""
+    normalized = normalize_position_management_config(config)
+    context = setup_context or {}
+    setup_type = str(context.get("setup_type") or "generic_entry").lower()
+    setup_family = str(context.get("setup_family") or "generic").lower()
+    signal_source = str(context.get("signal_source") or "").lower()
+    candidates = []
+    for profile in normalized.get("setup_profiles") or []:
+        if not profile.get("enabled", True):
+            continue
+        match = profile.get("match") or {}
+        rank = 0
+        if setup_type in match.get("setup_types", []):
+            rank = 300
+        elif setup_family in match.get("setup_families", []):
+            rank = 200
+        elif signal_source and signal_source in match.get("signal_sources", []):
+            rank = 100
+        if rank:
+            candidates.append((rank, int(profile.get("priority", 0)), profile))
+    selected = max(candidates, key=lambda item: (item[0], item[1]))[2] if candidates else None
+    resolved = {
+        key: copy.deepcopy(value)
+        for key, value in normalized.items() if key != "setup_profiles"
+    }
+    if selected:
+        if not selected.get("inherit_default", True):
+            # Full-independent profiles were validated against the base for
+            # required fields; fields explicitly supplied remain authoritative.
+            resolved = {
+                key: copy.deepcopy(value)
+                for key, value in normalized.items() if key != "setup_profiles"
+            }
+        resolved.update(copy.deepcopy(selected.get("overrides") or {}))
+    return resolved, copy.deepcopy(selected)
 
 
 @dataclass

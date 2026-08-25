@@ -260,10 +260,10 @@
             </div>
             <div class="report-metrics">
               <article><span>累计收益</span><strong :class="paperReport.summary.net_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(paperReport.summary.net_profit) }}</strong></article>
-              <article><span>胜率</span><strong>{{ paperReport.summary.win_rate }}%</strong></article>
-              <article><span>收益因子</span><strong>{{ paperReport.summary.profit_factor ?? '∞' }}</strong></article>
-              <article><span>最大回撤</span><strong>{{ paperReport.summary.max_drawdown_pct }}%</strong></article>
-              <article><span>成交次数</span><strong>{{ paperReport.summary.trade_count }}</strong></article>
+              <article><span>持仓胜率</span><strong>{{ paperReport.summary.position_win_rate }}%</strong></article>
+              <article><span>持仓收益因子</span><strong>{{ paperReport.summary.position_profit_factor ?? '∞' }}</strong></article>
+              <article><span>平均持仓 R</span><strong :class="paperReport.summary.average_position_r >= 0 ? 'positive' : 'negative'">{{ Number(paperReport.summary.average_position_r || 0).toFixed(2) }}R</strong></article>
+              <article><span>已平仓 / 成交</span><strong>{{ paperReport.summary.closed_position_count }} / {{ paperReport.summary.deal_count }}</strong></article>
               <article><span>拒单次数</span><strong>{{ paperReport.summary.rejected_order_count }}</strong></article>
             </div>
             <div v-if="paperReport.backtest_benchmark" class="benchmark-panel">
@@ -277,6 +277,37 @@
                 <article><span>最大回撤</span><strong>{{ paperReport.summary.max_drawdown_pct }}%</strong><small>回测 {{ paperReport.backtest_benchmark.max_drawdown_pct }}% · 偏差 {{ signedDelta(paperReport.comparison.max_drawdown_pct) }}pp</small></article>
                 <article><span>收益因子</span><strong>{{ paperReport.summary.profit_factor ?? '∞' }}</strong><small>回测 {{ paperReport.backtest_benchmark.profit_factor ?? '∞' }} · 偏差 {{ paperReport.comparison.profit_factor === null ? '--' : signedDelta(paperReport.comparison.profit_factor) }}</small></article>
                 <article><span>成交次数</span><strong>{{ paperReport.summary.trade_count }}</strong><small>回测 {{ paperReport.backtest_benchmark.trade_count }} · 偏差 {{ signedDelta(paperReport.comparison.trade_count) }}</small></article>
+              </div>
+            </div>
+            <div class="setup-performance-panel">
+              <div class="benchmark-title">
+                <div><span>SETUP PERFORMANCE</span><h4>按交易形态评估</h4></div>
+                <small>
+                  已归因 {{ paperReport.summary.setup_attributed_position_count || 0 }} / {{ paperReport.summary.closed_position_count || 0 }} 个已平仓持仓
+                </small>
+              </div>
+              <div v-if="!paperReport.by_setup?.length" class="setup-empty">
+                暂无带 Setup 归因的已平仓持仓。新订单完成平仓后将在这里开始统计。
+              </div>
+              <div v-else class="setup-performance-table">
+                <article class="setup-performance-head">
+                  <span>Setup</span><span>样本</span><span>胜率</span><span>平均 R</span><span>收益因子</span><span>净收益</span><span>连续亏损</span>
+                </article>
+                <article v-for="item in paperReport.by_setup" :key="item.name">
+                  <strong>{{ setupLabel(item.name) }}</strong>
+                  <span>{{ item.position_count }} 个 <v-chip size="x-small" :color="sampleColor(item.sample_status)" variant="tonal">{{ sampleLabel(item.sample_status) }}</v-chip></span>
+                  <span>{{ item.win_rate }}%</span>
+                  <span :class="item.average_r >= 0 ? 'positive' : 'negative'">{{ Number(item.average_r).toFixed(2) }}R</span>
+                  <span>{{ item.profit_factor ?? '∞' }}</span>
+                  <span :class="item.net_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(item.net_profit) }}</span>
+                  <span>{{ item.max_consecutive_losses }}</span>
+                </article>
+              </div>
+              <div v-if="paperReport.by_setup_direction?.length" class="setup-direction-grid">
+                <div v-for="item in paperReport.by_setup_direction" :key="item.name">
+                  <b>{{ setupDirectionLabel(item.name) }}</b>
+                  <span>{{ item.position_count }} 个 · 胜率 {{ item.win_rate }}% · 平均 {{ Number(item.average_r).toFixed(2) }}R</span>
+                </div>
               </div>
             </div>
             <div class="report-breakdowns">
@@ -296,6 +327,7 @@
                     <b :class="position.direction === 'buy' ? 'positive' : 'negative'">{{ position.direction === 'buy' ? '买入' : '卖出' }}</b>
                     <strong>{{ position.symbol }} · {{ position.remaining_volume || position.volume }} / {{ position.volume }} 手</strong>
                     <span>{{ strategyName(position.strategy_id) }}</span>
+                    <span v-if="position.setup_type">{{ setupLabel(position.setup_type) }} · {{ position.setup_profile_name || '默认持仓方案' }}</span>
                   </div>
                   <div class="paper-position-actions">
                     <v-chip size="x-small" :color="Number(position.stop_loss) && Number(position.take_profit) ? 'success' : 'warning'" variant="tonal">{{ paperProtectionLabel(position) }}</v-chip>
@@ -323,27 +355,32 @@
               </div>
             </div>
             <div class="runtime-table-card">
-              <div class="runtime-section-title"><h3>最近成交</h3><span>最多显示 50 笔</span></div>
+              <div class="runtime-section-title"><h3>最近成交</h3><span>最多显示 100 笔</span></div>
               <div v-if="!paperDetail.trades.length" class="runtime-empty compact">暂无成交</div>
-              <div v-for="trade in paperDetail.trades.slice(0, 50)" :key="trade.trade_id" class="runtime-row trade-row">
+              <div v-for="trade in paperDetail.trades.slice(0, 100)" :key="trade.trade_id" class="runtime-row trade-row">
                 <span>{{ formatTime(trade.closed_at) }}</span>
-                <b>{{ trade.symbol }}</b>
-                <span>{{ exitReasonLabel(trade.exit_reason) }}</span>
+                <b>{{ trade.symbol }} · {{ trade.direction === 'buy' ? '买入' : '卖出' }}</b>
+                <span>持仓 {{ trade.position_id || '--' }}</span>
+                <span>开仓 {{ price(trade.entry_price) }} · 初始止损 {{ price(trade.initial_stop_loss) }} · 初始止盈 {{ price(trade.initial_take_profit) }}</span>
+                <span>{{ trade.setup_type ? `${setupLabel(trade.setup_type)} · ` : '' }}{{ trade.execution_reason || exitReasonLabel(trade.exit_reason) }}<template v-if="trade.realized_r"> · {{ Number(trade.realized_r).toFixed(2) }}R</template></span>
+                <small class="reject-reason">{{ trade.open_reason || '策略信号触发开仓' }}</small>
                 <strong :class="trade.net_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(trade.net_profit) }}</strong>
               </div>
             </div>
           </section>
 
           <section class="runtime-table-card orders-card">
-            <div class="runtime-section-title"><h3>模拟订单流水</h3><span>包含拒单和取消订单</span></div>
+            <div class="runtime-section-title"><h3>模拟订单流水</h3><span>最近 100 条 · 包含拒单和取消订单</span></div>
             <div v-if="!paperDetail.orders.length" class="runtime-empty compact">暂无订单</div>
             <div v-for="order in paperDetail.orders.slice(0, 100)" :key="order.order_id" class="runtime-row order-row">
               <span>{{ formatTime(order.requested_at) }}</span>
               <b :class="order.direction === 'buy' ? 'positive' : 'negative'">{{ order.direction === 'buy' ? '买入' : '卖出' }}</b>
-              <span>{{ order.symbol }} · {{ order.requested_volume }} 手</span>
+              <span>{{ order.symbol }} · {{ order.requested_volume }} 手 · 持仓 {{ order.position_id || '成交后生成' }}</span>
+              <span>初始止损 {{ price(order.initial_stop_loss) }} · 初始止盈 {{ price(order.initial_take_profit) }}</span>
+              <span v-if="order.setup_type">{{ setupLabel(order.setup_type) }} · {{ order.setup_profile_name || '默认持仓方案' }}</span>
               <span>{{ order.filled_price ?? order.requested_price }}</span>
               <v-chip size="x-small" variant="tonal" :color="orderStatus(order.status).color">{{ orderStatus(order.status).label }}</v-chip>
-              <span class="reject-reason">{{ order.rejection_reason || '--' }}</span>
+              <span class="reject-reason">{{ order.open_reason || order.rejection_reason || '--' }}</span>
             </div>
           </section>
 
@@ -420,14 +457,29 @@
             <div class="runtime-table-card">
               <div class="runtime-section-title"><h3>最近 MT5 成交</h3><span>最多 100 笔</span></div>
               <div v-if="!liveDetail.trades.length" class="runtime-empty compact">暂无成交上报</div>
-              <div v-for="trade in liveDetail.trades" :key="trade.ticket" class="runtime-row trade-row"><span>{{ trade.time || '--' }}</span><b :class="trade.type === 0 ? 'positive' : 'negative'">{{ trade.type_text }} · {{ trade.symbol }}</b><span>{{ trade.entry_text }} · {{ trade.order_source }}</span><strong :class="Number(trade.profit) >= 0 ? 'positive' : 'negative'">{{ signedMoney(trade.profit) }}</strong></div>
+              <div v-for="trade in liveDetail.trades" :key="trade.ticket" class="runtime-row trade-row">
+                <span>{{ trade.time || '--' }}</span>
+                <b :class="trade.type === 0 ? 'positive' : 'negative'">{{ trade.type_text }} · {{ trade.symbol }}</b>
+                <span>Position {{ trade.mt5_position_id || '--' }} · {{ trade.entry_text }} · {{ trade.order_source }}</span>
+                <span v-if="trade.strategy_triggered">{{ trade.setup_type ? `${setupLabel(trade.setup_type)} · ` : '' }}{{ trade.execution_reason || '策略成交' }}</span>
+                <small v-if="trade.open_reason" class="reject-reason">{{ trade.open_reason }} · 初始 SL {{ price(trade.initial_stop_loss) }} · TP {{ price(trade.initial_take_profit) }}</small>
+                <strong :class="Number(trade.profit) >= 0 ? 'positive' : 'negative'">{{ signedMoney(trade.profit) }}</strong>
+              </div>
             </div>
           </section>
 
           <section class="runtime-table-card orders-card">
             <div class="runtime-section-title"><h3>策略下单与执行回报</h3><span>服务端指令在 MT5 的实际成交情况</span></div>
             <div v-if="!liveDetail.execution_reports.length" class="runtime-empty compact">暂无策略指令执行回报</div>
-            <div v-for="report in liveDetail.execution_reports" :key="report.id" class="runtime-row order-row"><span>{{ formatTime(report.reported_at) }}</span><b :class="['b', 'buy'].includes(report.action) ? 'positive' : 'negative'">{{ ['b', 'buy'].includes(report.action) ? '买入' : '卖出' }}</b><span>{{ report.symbol }} · {{ report.executed_volume || report.requested_volume }} 手</span><span>{{ price(report.executed_price || report.requested_price) }}</span><v-chip size="x-small" :color="report.success ? 'success' : 'error'" variant="tonal">{{ report.success ? '已成交' : '失败' }}</v-chip><span class="reject-reason">{{ report.error_message || `滑点 ${Number(report.slippage || 0).toFixed(5)}` }}</span></div>
+            <div v-for="report in liveDetail.execution_reports" :key="report.id" class="runtime-row order-row">
+              <span>{{ formatTime(report.reported_at) }}</span>
+              <b :class="['b', 'buy'].includes(report.action) ? 'positive' : 'negative'">{{ ['b', 'buy'].includes(report.action) ? '买入' : '卖出' }}</b>
+              <span>{{ report.symbol }} · {{ report.executed_volume || report.requested_volume }} 手 · Position {{ report.mt5_position_id || '--' }}</span>
+              <span>{{ price(report.executed_price || report.requested_price) }} · 初始 SL {{ price(report.initial_stop_loss) }} · TP {{ price(report.initial_take_profit) }}</span>
+              <v-chip size="x-small" :color="report.success ? 'success' : 'error'" variant="tonal">{{ report.success ? '已成交' : '失败' }}</v-chip>
+              <span v-if="report.setup_type">{{ setupLabel(report.setup_type) }} · {{ report.setup_profile_name || '默认持仓方案' }}</span>
+              <span class="reject-reason">{{ report.open_reason || report.error_message || `滑点 ${Number(report.slippage || 0).toFixed(5)}` }}</span>
+            </div>
           </section>
         </v-card-text>
       </v-card>
@@ -702,6 +754,27 @@ function deploymentHealthMeta(deployment) {
   return { color: 'success', alert: false, reason: '' }
 }
 function exitReasonLabel(reason) { return { take_profit: '止盈', stop_loss: '止损' }[reason] || reason }
+function setupLabel(value) {
+  return {
+    range_reversal: '箱体反转',
+    range_breakout: '箱体突破',
+    trend_pullback: '趋势回调',
+    trend_breakout: '趋势突破',
+    triangle_breakout: '三角突破',
+    reversal: '转折入场',
+    generic_entry: '通用入场',
+  }[value] || value || '通用入场'
+}
+function setupDirectionLabel(value) {
+  const [setup, direction] = String(value || '').split('|')
+  return `${setupLabel(setup)} · ${direction === 'buy' ? '买入' : direction === 'sell' ? '卖出' : direction || '未知方向'}`
+}
+function sampleLabel(value) {
+  return { insufficient: '样本不足', preliminary: '初步观察', reliable: '相对可靠' }[value] || value
+}
+function sampleColor(value) {
+  return { insufficient: 'warning', preliminary: 'info', reliable: 'success' }[value] || 'grey'
+}
 function strategyName(strategyId) {
   return paperContext.strategies.find(item => item.strategy_id === strategyId)?.strategy_name || strategyId
 }
@@ -1156,6 +1229,7 @@ onBeforeUnmount(() => {
 .report-metrics { display: grid; grid-template-columns: repeat(6,1fr); gap: 8px; margin-top: 14px; }.report-metrics article { padding: 12px; border-radius: 10px; background: rgba(255,255,255,.1); }.report-metrics span,.report-metrics strong { display:block; }.report-metrics span { color: rgba(255,255,255,.62); font-size:.62rem; }.report-metrics strong { margin-top:4px; font-size:.9rem; }
 .report-breakdowns { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:10px; }.report-breakdowns>div { padding:12px; border-radius:10px; background:rgba(255,255,255,.07); }.report-breakdowns h4 { margin:0 0 7px; font-size:.72rem; }.report-breakdowns p { display:flex; justify-content:space-between; gap:8px; margin:5px 0; color:rgba(255,255,255,.72); font-size:.62rem; }
 .benchmark-panel { margin-top:12px; padding:14px; border-radius:11px; background:rgba(255,255,255,.08); }.benchmark-title { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; }.benchmark-title span { color:#d7b36f; font-size:.58rem; font-weight:800; letter-spacing:.12em; }.benchmark-title h4 { margin:2px 0; }.benchmark-title small { color:rgba(255,255,255,.55); font-size:.6rem; }.benchmark-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:7px; margin-top:10px; }.benchmark-grid article { padding:10px; border-radius:8px; background:rgba(255,255,255,.07); }.benchmark-grid span,.benchmark-grid strong,.benchmark-grid small { display:block; }.benchmark-grid span { color:rgba(255,255,255,.57); font-size:.59rem; }.benchmark-grid strong { margin:3px 0; font-size:.8rem; }.benchmark-grid small { color:rgba(255,255,255,.62); font-size:.56rem; line-height:1.45; }
+.setup-performance-panel { margin-top:12px; padding:14px; border-radius:11px; background:rgba(255,255,255,.08); }.setup-empty { margin-top:10px; padding:14px; border:1px dashed rgba(255,255,255,.2); border-radius:8px; color:rgba(255,255,255,.62); font-size:.65rem; text-align:center; }.setup-performance-table { margin-top:10px; overflow-x:auto; }.setup-performance-table article { display:grid; grid-template-columns:minmax(120px,1.4fr) minmax(125px,1.2fr) repeat(5,minmax(72px,.8fr)); gap:8px; align-items:center; min-width:760px; padding:9px 8px; border-top:1px solid rgba(255,255,255,.1); font-size:.63rem; }.setup-performance-table article:first-child { border-top:0; }.setup-performance-table strong { color:#fff; }.setup-performance-table span { color:rgba(255,255,255,.72); }.setup-performance-table .setup-performance-head { color:rgba(255,255,255,.48); font-weight:700; }.setup-direction-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:7px; margin-top:9px; }.setup-direction-grid div { padding:9px 10px; border-radius:8px; background:rgba(255,255,255,.06); }.setup-direction-grid b,.setup-direction-grid span { display:block; }.setup-direction-grid b { font-size:.66rem; }.setup-direction-grid span { margin-top:3px; color:rgba(255,255,255,.6); font-size:.58rem; }
 .runtime-section-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }.runtime-section-title h3 { margin: 0; color: #31554b; font-size: .84rem; }.runtime-section-title span { color: #89948f; font-size: .65rem; }
 .equity-chart { width: 100%; height: 280px; }
 .runtime-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }.runtime-grid .runtime-table-card { margin-top: 13px; }
@@ -1177,6 +1251,7 @@ onBeforeUnmount(() => {
 .runtime-empty { display: grid; place-items: center; min-height: 130px; color: #919c97; font-size: .72rem; }.runtime-empty.compact { min-height: 62px; }
 .empty-state { padding: 65px 20px; color: #85918b; text-align: center; }
 .empty-state h3 { margin: 12px 0 5px; color: #4a625b; }.empty-state p { margin: 0; }
-@media(max-width:1000px){.content-grid{grid-template-columns:1fr}.paper-card{position:static}.account-details{grid-template-columns:1fr 1fr}.deployment-workbench{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}.report-metrics{grid-template-columns:repeat(3,1fr)}.report-breakdowns{grid-template-columns:1fr}.benchmark-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:1000px){.content-grid{grid-template-columns:1fr}.paper-card{position:static}.account-details{grid-template-columns:1fr 1fr}.deployment-workbench{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}.report-metrics{grid-template-columns:repeat(3,1fr)}.report-breakdowns{grid-template-columns:1fr}.benchmark-grid{grid-template-columns:repeat(2,1fr)}.setup-direction-grid{grid-template-columns:1fr}}
 @media(max-width:650px){.accounts-page{padding:15px}.account-hero{align-items:flex-start;flex-direction:column;padding:25px}.metric-grid,.runtime-metrics{grid-template-columns:1fr 1fr}.account-topline{align-items:flex-start;flex-direction:column}.balance-row,.account-details,.paper-setting-grid{grid-template-columns:1fr}.account-chips{flex-wrap:wrap}.runtime-body{padding:14px!important}.deployment-form,.active-deployment-strip{grid-template-columns:1fr}.order-row{grid-template-columns:1fr 45px 70px}.order-row>*:nth-child(n+4):not(:last-child){display:none}.trade-row{grid-template-columns:1fr auto}.trade-row>*:nth-child(2),.trade-row>*:nth-child(3){display:none}}
+.deployment-form :deep(.v-field__input),.deployment-form :deep(.v-field__input input),.deployment-form :deep(.v-label){color:#254b40!important}.deployment-form :deep(.v-field__input input::placeholder){color:#71817a!important;opacity:1}.strategy-select-value span{color:#254b40}.strategy-select-value small{color:#6b7b74}.strategy-select-item :deep(.v-list-item-title),.strategy-select-item :deep(.v-list-item-subtitle){color:#254b40!important}.strategy-select-item :deep(.v-list-item-subtitle){color:#6f7e77!important}.deployment-form :deep(.v-field){border-color:#d6e4dc!important}.deployment-form :deep(.v-field--focused){border-color:#80b59f!important}
 </style>

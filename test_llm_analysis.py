@@ -7,8 +7,10 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 from market.llm_analyzer import LLMAnalyzer
 from market.models import LLMAnalysisResult, TradingStrategy
@@ -106,6 +108,68 @@ class _RepoBackedStore(_Store):
 class LLMAnalysisTestCase(unittest.TestCase):
     def test_stale_threshold_allows_the_ea_kline_sync_window(self):
         self.assertEqual(LLMService.STALE_THRESHOLD, 360)
+
+    def test_ai_plan_invalidates_on_adverse_structure_failure(self):
+        suggestion = {
+            "signal_source_id": "ai-m1", "period": "M1",
+            "direction": "buy", "entry_price": 100,
+            "stop_loss": 90, "take_profit": 120,
+            "setup_type": "range_reversal", "entry_mode": "touch_or_near",
+            "activation_status": "active", "status": "active",
+            "plan_id": "plan-1", "valid_from": int(time.time()) - 60,
+            "expires_at": int(time.time()) + 600,
+        }
+        result = SimpleNamespace(
+            trade_suggestions=[suggestion], data_stale=False,
+            analyzed_at=datetime.now().isoformat(), trend_analysis={},
+            overall_trend={},
+        )
+        store = SimpleNamespace(
+            get_analysis_result=lambda _symbol: result,
+            get_analysis_result_for_source=lambda *_args: result,
+            check_entry_alert_cooldown=lambda *_args: True,
+            cleanup_entry_alerts=lambda: None,
+        )
+        service = object.__new__(LLMService)
+        service.llm_store = store
+
+        matched = service.check_entry_price_nearby(
+            "GOLD_", 97, threshold=0.05, signal_source_id="ai-m1"
+        )
+
+        self.assertEqual(matched, [])
+        self.assertEqual(suggestion["status"], "invalidated")
+
+    def test_ai_plan_does_not_chase_beyond_half_entry_tolerance(self):
+        suggestion = {
+            "signal_source_id": "ai-m1", "period": "M1",
+            "direction": "buy", "entry_price": 100,
+            "stop_loss": 99, "take_profit": 102,
+            "setup_type": "trend_pullback", "entry_mode": "touch_or_near",
+            "activation_status": "active", "status": "active",
+            "plan_id": "plan-2", "valid_from": int(time.time()) - 60,
+            "expires_at": int(time.time()) + 600,
+        }
+        result = SimpleNamespace(
+            trade_suggestions=[suggestion], data_stale=False,
+            analyzed_at=datetime.now().isoformat(), trend_analysis={},
+            overall_trend={},
+        )
+        service = object.__new__(LLMService)
+        service.llm_store = SimpleNamespace(
+            get_analysis_result=lambda _symbol: result,
+            get_analysis_result_for_source=lambda *_args: result,
+            check_entry_alert_cooldown=lambda *_args: True,
+            cleanup_entry_alerts=lambda: None,
+        )
+
+        matched = service.check_entry_price_nearby(
+            "GOLD_", 100.06, threshold=0.001,
+            signal_source_id="ai-m1",
+        )
+
+        self.assertEqual(matched, [])
+        self.assertEqual(suggestion["status"], "active")
 
     def test_analysis_run_retains_periods_and_sources_that_were_not_due(self):
         previous = LLMAnalysisResult(

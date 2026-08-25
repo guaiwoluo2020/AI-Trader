@@ -14,6 +14,9 @@ from typing import Dict, List, Optional, Tuple
 
 from market.models import PositionManagementPolicy, StrategyLifecycle, TradingStrategy
 from market.services.position_manager import PositionManager
+from market.services.position_attribution import (
+    build_position_attribution, close_position_attribution,
+)
 from market.services.strategy.transient_decision_store import transient_decision_store
 from membership import MembershipService
 from sqlite_storage import (
@@ -494,6 +497,172 @@ class PaperTradingService:
                     created += 1
         return created
 
+    def _paper_loss_streak_guard(
+        self, user_id: int, account_id: int, deployment: Dict,
+        symbol: str, strategy: TradingStrategy, action: str, signal,
+    ) -> Dict:
+        """Protect one paper deployment/setup/direction and consume AI plans once."""
+        setup_type = str(
+            getattr(signal, "setup_type", "") or "generic_entry"
+        )
+        setup_family = str(getattr(signal, "setup_family", "") or "generic")
+        plan_id = str(getattr(signal, "ai_plan_id", "") or "")
+        plan_valid_from = int(
+            getattr(signal, "ai_plan_valid_from", 0) or 0
+        )
+        plan_instance_id = (
+            f"{plan_id}:{plan_valid_from}"
+            if plan_id and plan_valid_from else plan_id
+        )
+
+        # One source analysis may be used once by each deployment. Persisted
+        # order attribution makes this survive service restarts and also keeps
+        # separate paper accounts independent from one another.
+        if plan_instance_id:
+            previous_orders = self.storage.fetchall(
+                "SELECT position_attribution_json FROM paper_orders "
+                "WHERE user_id = ? AND account_id = ? AND deployment_id = ? "
+                "AND direction = ? ORDER BY requested_at DESC LIMIT 200",
+                (
+                    int(user_id), int(account_id), deployment["deployment_id"],
+                    action,
+                ),
+            )
+            for order in previous_orders:
+                order = dict(order)
+                try:
+                    attribution = json.loads(
+                        order.get("position_attribution_json") or "{}"
+                    )
+                except (TypeError, ValueError):
+                    attribution = {}
+                if str(attribution.get("ai_plan_instance_id") or "") == plan_instance_id:
+                    return {
+                        "allowed": False,
+                        "scope": "paper_setup",
+                        "setup_type": setup_type,
+                        "setup_family": setup_family,
+                        "plan_instance_id": plan_instance_id,
+                        "reason": "本次AI分析的该交易建议已经触发过，不重复开仓",
+                    }
+
+        candidates = self.storage.fetchall(
+            """
+            SELECT t.net_profit, t.closed_at, t.position_attribution_json
+            FROM paper_trades t
+            JOIN paper_orders o ON o.order_id = t.order_id
+            WHERE t.user_id = ? AND t.account_id = ?
+              AND t.deployment_id = ? AND t.symbol = ?
+              AND o.direction = ?
+              AND t.exit_reason NOT IN ('partial_take_profit', 'signal_take_profit')
+            ORDER BY t.closed_at DESC, t.created_at DESC
+            LIMIT 100
+            """,
+            (
+                int(user_id), int(account_id), deployment["deployment_id"],
+                symbol, action,
+            ),
+        )
+        rows = []
+        for row in candidates:
+            row = dict(row)
+            try:
+                attribution = json.loads(
+                    row.get("position_attribution_json") or "{}"
+                )
+            except (TypeError, ValueError):
+                attribution = {}
+            if str(attribution.get("setup_type") or "") != setup_type:
+                continue
+            item = dict(row)
+            item["position_attribution"] = attribution
+            rows.append(item)
+            if len(rows) >= 20:
+                break
+
+        streak = 0
+        for row in rows:
+            if float(row.get("net_profit") or 0) < 0:
+                streak += 1
+            else:
+                break
+        if not rows or streak == 0:
+            return {
+                "allowed": True, "loss_streak": streak,
+                "scope": "paper_setup", "setup_type": setup_type,
+            }
+
+        latest = rows[0]
+        last_loss_at = int(latest.get("closed_at") or 0)
+        last_attribution = latest.get("position_attribution") or {}
+        last_plan_id = str(last_attribution.get("ai_plan_id") or "")
+        period = str(getattr(signal, "source_period", "M1") or "M1").upper()
+        bar_seconds = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}.get(period, 60)
+        now = int(time.time())
+        if plan_id and plan_valid_from <= last_loss_at:
+            return {
+                "allowed": False, "loss_streak": streak,
+                "scope": "paper_setup", "setup_type": setup_type,
+                "paused_direction": action,
+                "reason": (
+                    f"{setup_type} · {action} 上一笔亏损退出，"
+                    "等待该信号源生成下一份AI分析后再评估"
+                ),
+            }
+        if streak < 2:
+            return {
+                "allowed": True, "loss_streak": streak,
+                "scope": "paper_setup", "setup_type": setup_type,
+                "reset_by": "new_analysis" if plan_id else "not_required",
+            }
+        if streak == 2:
+            release_at = last_loss_at + bar_seconds * 5
+            if now < release_at:
+                return {
+                    "allowed": False, "loss_streak": streak, "scope": "paper_setup",
+                    "setup_type": setup_type,
+                    "release_at": release_at,
+                    "reason": f"连续止损 {streak} 次，冷却 5 根 {period} K线后再评估",
+                }
+            return {"allowed": True, "loss_streak": streak, "scope": "paper_setup", "setup_type": setup_type, "cooldown_completed": True}
+
+        if not plan_id:
+            release_at = last_loss_at + bar_seconds * 20
+            if now < release_at:
+                return {
+                    "allowed": False, "loss_streak": streak,
+                    "scope": "paper_setup", "setup_type": setup_type,
+                    "paused_direction": action, "release_at": release_at,
+                    "reason": (
+                        f"{setup_type} · {action} 连续亏损 {streak} 次，"
+                        f"非AI信号冷却 20 根 {period} K线后恢复"
+                    ),
+                }
+            return {
+                "allowed": True, "loss_streak": streak,
+                "scope": "paper_setup", "setup_type": setup_type,
+                "cooldown_completed": True,
+            }
+
+        new_structure_plan = bool(
+            plan_id and plan_id != last_plan_id
+            and plan_valid_from > last_loss_at
+        )
+        if new_structure_plan:
+            return {
+                "allowed": True, "loss_streak": streak, "scope": "paper_setup",
+                "setup_type": setup_type, "reset_by": "new_structure_plan",
+            }
+        return {
+            "allowed": False, "loss_streak": streak, "scope": "paper_setup",
+            "setup_type": setup_type,
+            "paused_direction": action,
+            "reason": (
+                f"{setup_type} · {action} 连续止损 {streak} 次，已暂停该Setup方向；"
+                "等待结构和价格不同的新AI交易计划后恢复"
+            ),
+        }
+
     def process_strategy_signals(
         self, user_id: int, symbol: str, current_price: float, strategy_service,
         quote_account_id: Optional[int] = None,
@@ -587,6 +756,11 @@ class PaperTradingService:
                 ),
                 risk_checker=lambda s, volume, risk, st, aid=account_id, px=current_price: (
                     self._paper_risk_check(aid, s, volume, px)
+                ),
+                entry_guard=lambda s, st, action, signal, aid=account_id, dep=deployment: (
+                    self._paper_loss_streak_guard(
+                        user_id, aid, dep, s, st, action, signal
+                    )
                 ),
                 position_policy=PositionManagementPolicy.from_dict(policy_snapshot),
                 audit_no_action=True,
@@ -688,6 +862,22 @@ class PaperTradingService:
         account = self._paper_account(user_id, account_id)
         self._expire_deployments(user_id, account_id)
         settings = self._settings(account_id)
+        # 决策快照保存在运行态仓储中；订单/成交通过 decision_id 读取开仓原因，
+        # 不把会变化的策略配置反向当作历史原因。
+        decision_reasons = {}
+        try:
+            runtime = RuntimeStateRepository(user_id, account_id, self.storage)
+            for payload in runtime.list_entities("strategy_decision"):
+                decision_id = str(payload.get("decision_id") or "")
+                if decision_id:
+                    decision_reasons[decision_id] = str(
+                        payload.get("decision_reason")
+                        or payload.get("signal_summary", {}).get("summary")
+                        or "策略信号触发开仓"
+                    )
+        except Exception:
+            # 历史运行态缺失不应影响模拟账户详情页面。
+            decision_reasons = {}
         deployments = [dict(row) for row in self.storage.fetchall(
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name
@@ -704,22 +894,109 @@ class PaperTradingService:
             (account_id,),
         )]
         for position in positions:
+            position["position_attribution"] = json.loads(
+                position.get("position_attribution_json") or "{}"
+            )
+            attribution = position["position_attribution"]
+            position["setup_type"] = attribution.get("setup_type", "")
+            position["setup_profile_name"] = attribution.get(
+                "setup_profile_name", ""
+            )
+            position["open_reason"] = attribution.get("entry_reason", "")
             position["management_events"] = self.position_events.list_for_position(
                 user_id, account_id, position["position_id"]
             )
+        orders = [dict(row) for row in self.storage.fetchall(
+            """
+            SELECT o.*, p.position_id AS linked_position_id,
+                   COALESCE(p.entry_price, o.filled_price, o.requested_price) AS execution_entry_price
+            FROM paper_orders o
+            LEFT JOIN paper_positions p ON p.order_id = o.order_id
+            WHERE o.account_id = ?
+            ORDER BY o.requested_at DESC, o.order_id DESC LIMIT 100
+            """,
+            (account_id,),
+        )]
+        for order in orders:
+            order["position_attribution"] = json.loads(
+                order.get("position_attribution_json") or "{}"
+            )
+            attribution = order["position_attribution"]
+            order["position_id"] = order.get("linked_position_id") or ""
+            order["open_reason"] = (
+                attribution.get("entry_reason")
+                or
+                decision_reasons.get(str(order.get("decision_id") or ""))
+                or ("模拟风控拒绝：" + str(order.get("rejection_reason")))
+                if order.get("status") == "rejected" and order.get("rejection_reason")
+                else (
+                    attribution.get("entry_reason")
+                    or decision_reasons.get(
+                        str(order.get("decision_id") or ""), "策略信号触发开仓"
+                    )
+                )
+            )
+            order["setup_type"] = attribution.get("setup_type", "")
+            order["setup_profile_name"] = attribution.get("setup_profile_name", "")
+            order["initial_stop_loss"] = float(
+                attribution.get("initial_stop_loss") or order.get("stop_loss") or 0
+            )
+            order["initial_take_profit"] = float(
+                attribution.get("initial_take_profit") or order.get("take_profit") or 0
+            )
+        trades = [dict(row) for row in self.storage.fetchall(
+            """
+            SELECT t.*, o.stop_loss AS initial_stop_loss,
+                   o.take_profit AS initial_take_profit,
+                   o.decision_id AS open_decision_id
+            FROM paper_trades t
+            LEFT JOIN paper_orders o ON o.order_id = t.order_id
+            WHERE t.account_id = ?
+            ORDER BY t.closed_at DESC, t.trade_id DESC LIMIT 100
+            """,
+            (account_id,),
+        )]
+        for trade in trades:
+            trade["position_attribution"] = json.loads(
+                trade.get("position_attribution_json") or "{}"
+            )
+            attribution = trade["position_attribution"]
+            trade["position_id"] = trade.get("position_id") or ""
+            trade["open_reason"] = (
+                attribution.get("entry_reason")
+                or decision_reasons.get(
+                    str(trade.get("open_decision_id") or ""), "策略信号触发开仓"
+                )
+            )
+            trade["setup_type"] = attribution.get("setup_type", "")
+            trade["setup_profile_name"] = attribution.get("setup_profile_name", "")
+            trade["initial_stop_loss"] = float(
+                attribution.get("initial_stop_loss")
+                or trade.get("initial_stop_loss") or 0
+            )
+            trade["initial_take_profit"] = float(
+                attribution.get("initial_take_profit")
+                or trade.get("initial_take_profit") or 0
+            )
+            trade["realized_r"] = float(attribution.get("realized_r") or 0)
+            reason = str(trade.get("exit_reason") or "")
+            trade["close_reason"] = reason
+            trade["execution_reason"] = {
+                "stop_loss": "触发持仓止损",
+                "take_profit": "触发持仓止盈",
+                "partial_take_profit": "达到分批止盈条件",
+                "signal_take_profit": "达到 AI 止盈计划",
+                "trailing_stop": "触发移动止损",
+                "reverse_signal": "出现反向信号",
+                "max_holding_bars": "达到最大持仓时间",
+            }.get(reason, reason or "持仓平仓")
         return {
             "account": self._account_dict(account),
             "settings": settings,
             "deployments": deployments,
-            "orders": [dict(row) for row in self.storage.fetchall(
-                "SELECT * FROM paper_orders WHERE account_id = ? ORDER BY requested_at DESC LIMIT 200",
-                (account_id,),
-            )],
+            "orders": orders,
             "positions": positions,
-            "trades": [dict(row) for row in self.storage.fetchall(
-                "SELECT * FROM paper_trades WHERE account_id = ? ORDER BY closed_at DESC LIMIT 200",
-                (account_id,),
-            )],
+            "trades": trades,
             "runtime_logs": [
                 {
                     **dict(row),
@@ -761,16 +1038,22 @@ class PaperTradingService:
             if deployment:
                 started_at = int(deployment["strategy_version_at"] or 0)
         params: List = [account_id]
-        where = "account_id = ?"
+        where = "t.account_id = ?"
         if strategy_id:
-            where += " AND strategy_id = ?"
+            where += " AND t.strategy_id = ?"
             params.append(strategy_id)
         if started_at:
-            where += " AND opened_at >= ?"
+            where += " AND t.opened_at >= ?"
             params.append(int(started_at))
         trades = [dict(row) for row in self.storage.fetchall(
-            f"SELECT * FROM paper_trades WHERE {where} ORDER BY closed_at", params
+            f"""SELECT t.*, o.stop_loss AS opening_stop_loss,
+                       o.take_profit AS opening_take_profit
+                FROM paper_trades t
+                LEFT JOIN paper_orders o ON o.order_id = t.order_id
+                WHERE {where} ORDER BY t.closed_at""",
+            params,
         )]
+        position_outcomes = self._position_trade_outcomes(trades)
         order_where = "account_id = ?"
         order_params: List = [account_id]
         if strategy_id:
@@ -789,6 +1072,14 @@ class PaperTradingService:
         gross_profit, gross_loss = sum(wins), abs(sum(losses))
         initial = float(account.initial_balance)
         net_profit = sum(profits)
+        position_profits = [
+            float(item.get("net_profit") or 0) for item in position_outcomes
+        ]
+        position_wins = [value for value in position_profits if value > 0]
+        position_losses = [value for value in position_profits if value < 0]
+        position_r_values = [
+            float(item.get("realized_r") or 0) for item in position_outcomes
+        ]
         equity_rows = [dict(row) for row in self.storage.fetchall(
             "SELECT point_time AS time, equity, balance FROM paper_equity_points "
             "WHERE account_id = ? AND point_time >= ? ORDER BY point_time",
@@ -813,9 +1104,25 @@ class PaperTradingService:
         by_strategy = self._group_trade_stats(trades, "strategy_id")
         by_symbol = self._group_trade_stats(trades, "symbol")
         by_exit = self._group_trade_stats(trades, "exit_reason")
+        attributed_outcomes = [
+            item for item in position_outcomes if item.get("setup_type")
+        ]
+        by_setup = self._group_position_outcomes(
+            attributed_outcomes, "setup_type"
+        )
+        by_setup_family = self._group_position_outcomes(
+            attributed_outcomes, "setup_family"
+        )
+        by_setup_profile = self._group_position_outcomes(
+            attributed_outcomes, "setup_profile_name"
+        )
+        by_setup_direction = self._group_position_outcomes(
+            attributed_outcomes, "setup_direction"
+        )
         rejected = sum(item["status"] == "rejected" for item in orders)
         summary = {
             "trade_count": len(trades),
+            "deal_count": len(trades),
             "win_count": len(wins),
             "loss_count": len(losses),
             "win_rate": round(len(wins) / len(trades) * 100, 2) if trades else 0,
@@ -828,6 +1135,23 @@ class PaperTradingService:
             "commission": round(sum(float(item["commission"]) for item in trades), 2),
             "order_count": len(orders),
             "rejected_order_count": rejected,
+            "closed_position_count": len(position_outcomes),
+            "position_win_count": len(position_wins),
+            "position_loss_count": len(position_losses),
+            "position_win_rate": round(
+                len(position_wins) / len(position_outcomes) * 100, 2
+            ) if position_outcomes else 0,
+            "position_profit_factor": (
+                round(sum(position_wins) / abs(sum(position_losses)), 2)
+                if position_losses else None
+            ),
+            "average_position_r": round(
+                statistics.mean(position_r_values), 3
+            ) if position_r_values else 0,
+            "setup_attributed_position_count": len(attributed_outcomes),
+            "setup_unattributed_position_count": (
+                len(position_outcomes) - len(attributed_outcomes)
+            ),
         }
         benchmark = self._backtest_benchmark(account_id, strategy_id)
         comparison = self._compare_to_backtest(summary, benchmark)
@@ -843,6 +1167,10 @@ class PaperTradingService:
             "by_strategy": by_strategy,
             "by_symbol": by_symbol,
             "by_exit_reason": by_exit,
+            "by_setup": by_setup,
+            "by_setup_family": by_setup_family,
+            "by_setup_profile": by_setup_profile,
+            "by_setup_direction": by_setup_direction,
             "equity_curve": equity_rows,
         }
 
@@ -904,6 +1232,149 @@ class PaperTradingService:
             "win_rate": round(sum(value > 0 for value in values) / len(values) * 100, 2),
             "net_profit": round(sum(values), 2),
         } for name, values in groups.items()]
+
+    @staticmethod
+    def _position_trade_outcomes(trades: List[Dict]) -> List[Dict]:
+        """Collapse partial exits into one completed-position outcome.
+
+        Setup quality must be measured per position. Counting every partial
+        take-profit as a separate winning trade inflates both the sample size
+        and win rate, which is exactly the wrong signal for strategy tuning.
+        """
+        grouped: Dict[str, List[Dict]] = {}
+        for trade in trades:
+            key = str(trade.get("position_id") or trade.get("trade_id") or "")
+            grouped.setdefault(key, []).append(trade)
+
+        outcomes = []
+        for position_id, items in grouped.items():
+            ordered = sorted(
+                items,
+                key=lambda item: (
+                    int(item.get("closed_at") or 0),
+                    str(item.get("trade_id") or ""),
+                ),
+            )
+            attribution = {}
+            for item in reversed(ordered):
+                raw = item.get("position_attribution")
+                if not isinstance(raw, dict):
+                    try:
+                        raw = json.loads(
+                            item.get("position_attribution_json") or "{}"
+                        )
+                    except (TypeError, ValueError):
+                        raw = {}
+                if raw:
+                    attribution = raw
+                    break
+            total_volume = sum(float(item.get("volume") or 0) for item in ordered)
+            net_profit = sum(float(item.get("net_profit") or 0) for item in ordered)
+            gross_profit = sum(float(item.get("gross_profit") or 0) for item in ordered)
+            commission = sum(float(item.get("commission") or 0) for item in ordered)
+            initial_risk = float(attribution.get("initial_risk") or 0)
+            if initial_risk <= 0:
+                entry_price = float(ordered[0].get("entry_price") or 0)
+                opening_stop = float(ordered[0].get("opening_stop_loss") or 0)
+                if entry_price > 0 and opening_stop > 0:
+                    initial_risk = abs(entry_price - opening_stop)
+            symbol = str(ordered[-1].get("symbol") or "")
+            _, contract_size = market_spec(symbol)
+            risk_amount = initial_risk * total_volume * contract_size
+            realized_r = (
+                net_profit / risk_amount if risk_amount > 0
+                else float(attribution.get("realized_r") or 0)
+            )
+            setup_type = str(attribution.get("setup_type") or "")
+            direction = str(ordered[-1].get("direction") or "")
+            outcomes.append({
+                "position_id": position_id,
+                "strategy_id": str(ordered[-1].get("strategy_id") or ""),
+                "symbol": symbol,
+                "direction": direction,
+                "setup_type": setup_type,
+                "setup_family": str(attribution.get("setup_family") or ""),
+                "setup_profile_id": str(attribution.get("setup_profile_id") or ""),
+                "setup_profile_name": str(attribution.get("setup_profile_name") or ""),
+                "setup_direction": (
+                    f"{setup_type}|{direction}" if setup_type else ""
+                ),
+                "entry_mode": str(attribution.get("entry_mode") or ""),
+                "exit_reason": str(
+                    attribution.get("exit_reason")
+                    or ordered[-1].get("exit_reason") or ""
+                ),
+                "net_profit": net_profit,
+                "gross_profit": gross_profit,
+                "commission": commission,
+                "realized_r": realized_r,
+                "opened_at": min(int(item.get("opened_at") or 0) for item in ordered),
+                "closed_at": max(int(item.get("closed_at") or 0) for item in ordered),
+            })
+        return sorted(outcomes, key=lambda item: item["closed_at"])
+
+    @staticmethod
+    def _group_position_outcomes(
+        outcomes: List[Dict], key: str,
+    ) -> List[Dict]:
+        groups: Dict[str, List[Dict]] = {}
+        for outcome in outcomes:
+            name = str(outcome.get(key) or "unknown")
+            groups.setdefault(name, []).append(outcome)
+
+        results = []
+        for name, values in groups.items():
+            profits = [float(item.get("net_profit") or 0) for item in values]
+            r_values = [float(item.get("realized_r") or 0) for item in values]
+            wins = [value for value in profits if value > 0]
+            losses = [value for value in profits if value < 0]
+            win_r = [value for value in r_values if value > 0]
+            loss_r = [value for value in r_values if value < 0]
+            consecutive_losses = 0
+            maximum_consecutive_losses = 0
+            for value in profits:
+                if value < 0:
+                    consecutive_losses += 1
+                    maximum_consecutive_losses = max(
+                        maximum_consecutive_losses, consecutive_losses
+                    )
+                else:
+                    consecutive_losses = 0
+            count = len(values)
+            gross_win = sum(wins)
+            gross_loss = abs(sum(losses))
+            sample_status = (
+                "insufficient" if count < 10
+                else "preliminary" if count < 30
+                else "reliable"
+            )
+            results.append({
+                "name": name,
+                "position_count": count,
+                "win_count": len(wins),
+                "loss_count": len(losses),
+                "win_rate": round(len(wins) / count * 100, 2) if count else 0,
+                "net_profit": round(sum(profits), 2),
+                "average_profit": round(statistics.mean(profits), 2) if profits else 0,
+                "profit_factor": (
+                    round(gross_win / gross_loss, 2) if gross_loss else None
+                ),
+                "total_r": round(sum(r_values), 3),
+                "average_r": round(statistics.mean(r_values), 3) if r_values else 0,
+                "average_win_r": round(statistics.mean(win_r), 3) if win_r else 0,
+                "average_loss_r": round(statistics.mean(loss_r), 3) if loss_r else 0,
+                "payoff_ratio_r": (
+                    round(statistics.mean(win_r) / abs(statistics.mean(loss_r)), 2)
+                    if win_r and loss_r and statistics.mean(loss_r) != 0 else None
+                ),
+                "max_consecutive_losses": maximum_consecutive_losses,
+                "commission": round(sum(float(item.get("commission") or 0) for item in values), 2),
+                "sample_status": sample_status,
+            })
+        return sorted(
+            results,
+            key=lambda item: (-item["position_count"], item["name"]),
+        )
 
     def _paper_volume(self, account_id, symbol, risk_points, strategy) -> float:
         if strategy.volume_mode == "fixed":
@@ -1053,6 +1524,16 @@ class PaperTradingService:
         policy_snapshot = management.get("policy_snapshot") or strategy.get(
             "position_management_policy_snapshot", {}
         )
+        attribution = build_position_attribution(
+            summary,
+            decision_id=str(decision.get("decision_id") or ""),
+            strategy_id=str(decision.get("strategy_id") or ""),
+            strategy_name=str(decision.get("strategy_name") or ""),
+            direction=str(decision.get("action") or ""),
+            entry_reason=str(decision.get("decision_reason") or ""),
+            initial_stop_loss=sl,
+            initial_take_profit=tp,
+        )
         requested_volume = max(0.01, float(decision.get("volume", 0.01)))
         if requested_volume > float(account_limits["max_single_volume"]):
             reason = "超过账户单笔最大手数"
@@ -1069,8 +1550,9 @@ class PaperTradingService:
                     requested_price, stop_loss, take_profit, confidence,
                     signal_source_id, exit_mode, trailing_activation_r,
                     trailing_distance_r, position_policy_snapshot_json,
+                    position_attribution_json,
                     rejection_reason, requested_at, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order_id, user_id, account_id, deployment["deployment_id"],
@@ -1080,6 +1562,7 @@ class PaperTradingService:
                     float(decision.get("confidence_score", 0)), source_id,
                     "position_manager", 1.0, 1.0,
                     json.dumps(policy_snapshot, ensure_ascii=False),
+                    json.dumps(attribution, ensure_ascii=False),
                     reason, now, now, now,
                 ),
             )
@@ -1177,8 +1660,9 @@ class PaperTradingService:
                         partial_levels_done_json, signal_source_id, exit_mode,
                         trailing_activation_r, trailing_distance_r, initial_risk,
                         favorable_price, position_policy_snapshot_json,
+                        position_attribution_json,
                         opened_at, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         position_id, user_id, account_id, order["order_id"],
@@ -1191,6 +1675,7 @@ class PaperTradingService:
                         order["trailing_activation_r"], order["trailing_distance_r"],
                         abs(fill_price - float(order["stop_loss"])), fill_price,
                         order["position_policy_snapshot_json"],
+                        order["position_attribution_json"],
                         now, now, now,
                     ),
                 )
@@ -1371,6 +1856,12 @@ class PaperTradingService:
                             ) * multiplier * close_volume * contract_size
                             commission = close_volume * settings["commission_per_lot"]
                             net = gross - commission
+                            risk_amount = float(position["initial_risk"] or 0) * close_volume * contract_size
+                            trade_attribution = close_position_attribution(
+                                json.loads(position["position_attribution_json"] or "{}"),
+                                "partial_take_profit",
+                                net / risk_amount if risk_amount > 0 else 0,
+                            )
                             balance += gross - commission
                             trade_id = uuid.uuid4().hex[:12]
                             done = set(position_state["partial_levels_done"])
@@ -1382,7 +1873,8 @@ class PaperTradingService:
                                     deployment_id, strategy_id, symbol, direction, volume,
                                     entry_price, exit_price, gross_profit, commission,
                                     net_profit, exit_reason, opened_at, closed_at, created_at
-                                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    , position_attribution_json
+                                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 (
                                     trade_id, user_id, account_id, position["order_id"],
@@ -1391,6 +1883,7 @@ class PaperTradingService:
                                     close_volume, position["entry_price"], mark,
                                     gross, commission, net, "partial_take_profit",
                                     position["opened_at"], now, now,
+                                    json.dumps(trade_attribution, ensure_ascii=False),
                                 ),
                             )
                             conn.execute(
@@ -1430,6 +1923,11 @@ class PaperTradingService:
                     close_commission = close_volume * settings["commission_per_lot"]
                     total_commission = float(position["open_commission"]) + close_commission
                     net = gross - total_commission
+                    risk_amount = float(position["initial_risk"] or 0) * close_volume * contract_size
+                    trade_attribution = close_position_attribution(
+                        json.loads(position["position_attribution_json"] or "{}"),
+                        reason, net / risk_amount if risk_amount > 0 else 0,
+                    )
                     balance += gross - close_commission
                     trade_id = uuid.uuid4().hex[:12]
                     conn.execute(
@@ -1448,7 +1946,8 @@ class PaperTradingService:
                             deployment_id, strategy_id, symbol, direction, volume,
                             entry_price, exit_price, gross_profit, commission,
                             net_profit, exit_reason, opened_at, closed_at, created_at
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            , position_attribution_json
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             trade_id, user_id, account_id, position["order_id"],
@@ -1457,6 +1956,7 @@ class PaperTradingService:
                             close_volume, position["entry_price"], exit_price,
                             gross, total_commission, net, reason,
                             position["opened_at"], now, now,
+                            json.dumps(trade_attribution, ensure_ascii=False),
                         ),
                     )
                     result["closed"] += 1
@@ -1521,7 +2021,7 @@ class PaperTradingService:
             WHERE user_id = ? AND account_id = ?
               AND status IN ('filled', 'rejected')
             ORDER BY updated_at DESC
-            LIMIT 200
+            LIMIT 1000
             """,
             (user_id, account_id),
         )

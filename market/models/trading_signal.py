@@ -45,6 +45,9 @@ class TradingSignal:
     strategy_id: str = ""             # 归属策略ID，空值兼容历史公共信号
     strategy_name: str = ""           # 归属策略名称
     signal_source_id: str = ""        # 归属信号源实例ID
+    setup_family: str = "generic"      # 通用持仓管理场景族
+    setup_type: str = "generic_entry"  # 具体交易形态
+    entry_mode: str = "touch_or_near"  # touch_or_near/breakout/confirmation
 
     # ==================== 触发信息 ====================
     trigger_price: float = 0.0        # 触发价格
@@ -68,6 +71,20 @@ class TradingSignal:
 
     # AI Entry信号
     ai_analysis_period: Optional[str] = None
+    ai_trend: str = ""
+    ai_trend_confidence: int = 0
+    ai_trend_reason: str = ""
+    ai_overall_trend: Dict = field(default_factory=dict)
+    ai_market_structure: Dict = field(default_factory=dict)
+    ai_background_analysis: Dict = field(default_factory=dict)
+    ai_trade_horizon: Dict = field(default_factory=dict)
+    ai_original_entry: float = 0.0
+    ai_plan_id: str = ""
+    ai_setup_type: str = ""
+    ai_entry_mode: str = ""
+    ai_plan_status: str = ""
+    ai_plan_valid_from: int = 0
+    ai_plan_expires_at: int = 0
 
     # MovingAverage信号
     fast_ma: Optional[float] = None
@@ -148,6 +165,9 @@ class TradingSignal:
             "strategy_id": self.strategy_id,
             "strategy_name": self.strategy_name,
             "signal_source_id": self.signal_source_id,
+            "setup_family": self.setup_family,
+            "setup_type": self.setup_type,
+            "entry_mode": self.entry_mode,
             "trigger_price": self.trigger_price,
             "trigger_time": self.trigger_time.isoformat() if self.trigger_time else None,
             "trigger_reason": self.trigger_reason,
@@ -160,6 +180,20 @@ class TradingSignal:
             "key_level": self.key_level,
             "distance_pct": self.distance_pct,
             "ai_analysis_period": self.ai_analysis_period,
+            "ai_trend": self.ai_trend,
+            "ai_trend_confidence": self.ai_trend_confidence,
+            "ai_trend_reason": self.ai_trend_reason,
+            "ai_overall_trend": self.ai_overall_trend,
+            "ai_market_structure": self.ai_market_structure,
+            "ai_background_analysis": self.ai_background_analysis,
+            "ai_trade_horizon": self.ai_trade_horizon,
+            "ai_original_entry": self.ai_original_entry,
+            "ai_plan_id": self.ai_plan_id,
+            "ai_setup_type": self.ai_setup_type,
+            "ai_entry_mode": self.ai_entry_mode,
+            "ai_plan_status": self.ai_plan_status,
+            "ai_plan_valid_from": self.ai_plan_valid_from,
+            "ai_plan_expires_at": self.ai_plan_expires_at,
             "fast_ma": self.fast_ma,
             "slow_ma": self.slow_ma,
             "status": self.status,
@@ -198,6 +232,9 @@ class TradingSignal:
             strategy_id=data.get('strategy_id', ''),
             strategy_name=data.get('strategy_name', ''),
             signal_source_id=data.get('signal_source_id', ''),
+            setup_family=str(data.get('setup_family') or 'generic'),
+            setup_type=str(data.get('setup_type') or 'generic_entry'),
+            entry_mode=str(data.get('entry_mode') or 'touch_or_near'),
             trigger_price=data.get('trigger_price', 0.0),
             trigger_time=trigger_time,
             trigger_reason=data.get('trigger_reason', ''),
@@ -210,6 +247,20 @@ class TradingSignal:
             key_level=data.get('key_level'),
             distance_pct=data.get('distance_pct'),
             ai_analysis_period=data.get('ai_analysis_period'),
+            ai_trend=data.get('ai_trend', ''),
+            ai_trend_confidence=int(data.get('ai_trend_confidence', 0) or 0),
+            ai_trend_reason=data.get('ai_trend_reason', ''),
+            ai_overall_trend=data.get('ai_overall_trend') or {},
+            ai_market_structure=data.get('ai_market_structure') or {},
+            ai_background_analysis=data.get('ai_background_analysis') or {},
+            ai_trade_horizon=data.get('ai_trade_horizon') or {},
+            ai_original_entry=float(data.get('ai_original_entry', 0) or 0),
+            ai_plan_id=str(data.get('ai_plan_id') or ''),
+            ai_setup_type=str(data.get('ai_setup_type') or ''),
+            ai_entry_mode=str(data.get('ai_entry_mode') or ''),
+            ai_plan_status=str(data.get('ai_plan_status') or ''),
+            ai_plan_valid_from=int(data.get('ai_plan_valid_from', 0) or 0),
+            ai_plan_expires_at=int(data.get('ai_plan_expires_at', 0) or 0),
             fast_ma=data.get('fast_ma'),
             slow_ma=data.get('slow_ma'),
             signal_id=data.get('signal_id', ''),

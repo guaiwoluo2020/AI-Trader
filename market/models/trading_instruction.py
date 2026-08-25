@@ -29,6 +29,8 @@ class TradingInstruction:
     # 来源追踪
     order_id: Optional[str] = None  # 来源订单ID（如果是确认订单转入）
     exit_mode: str = "fixed_rr"
+    decision_id: str = ""
+    position_attribution: Dict = field(default_factory=dict)
 
     # 自动生成字段
     instruction_id: str = ""
@@ -58,6 +60,7 @@ class TradingInstruction:
             "tp": self.tp,
             "description": self.description,
             "exit_mode": self.exit_mode,
+            "decision_id": self.decision_id,
         }
 
     def to_full_dict(self) -> Dict:
@@ -75,6 +78,8 @@ class TradingInstruction:
             "source": self.source,
             "order_id": self.order_id,
             "exit_mode": self.exit_mode,
+            "decision_id": self.decision_id,
+            "position_attribution": self.position_attribution,
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "sent_at": self.sent_at.isoformat() if self.sent_at else None,
@@ -110,6 +115,8 @@ class TradingInstruction:
             source=data.get('source', ''),
             order_id=data.get('order_id'),
             exit_mode=data.get('exit_mode', 'fixed_rr'),
+            decision_id=str(data.get('decision_id', '') or ''),
+            position_attribution=dict(data.get('position_attribution') or {}),
             instruction_id=data.get('instruction_id', ''),
             status=data.get('status', 'pending'),
             created_at=created_at,
@@ -132,4 +139,6 @@ class TradingInstruction:
             source=f"pending_order_{order.source}",
             order_id=order.order_id,
             exit_mode=order.exit_mode,
+            decision_id=order.decision_id,
+            position_attribution=dict(order.position_attribution or {}),
         )

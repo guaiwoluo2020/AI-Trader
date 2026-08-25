@@ -41,6 +41,7 @@ from sqlite_storage import (
     RuntimeStateRepository,
     SharedAIRuntimeRepository,
     StrategyDeploymentRepository,
+    TradeExecutionRepository,
     TradingAccountRepository,
 )
 
@@ -197,7 +198,9 @@ class TradingServer:
         self._main_loop = None
 
         # ==================== 决策历史 ====================
-        self._decision_history: deque = deque(maxlen=200)
+        # 有效决策保留更长审计窗口；无动作决策由 transient_decision_store 内存聚合，
+        # 不进入这里，也不占用持久化历史额度。
+        self._decision_history: deque = deque(maxlen=1000)
         if self._runtime_repository:
             for item in self._runtime_repository.list_entities(
                 "strategy_decision"
@@ -366,6 +369,178 @@ class TradingServer:
 
     # ==================== 价格处理与决策 ====================
 
+    def _live_loss_streak_guard(self, symbol, strategy, action, signal) -> Dict:
+        """Protect one live strategy/setup/direction and consume AI plans once."""
+        if not self.user_id or not self.account_id or not self._runtime_repository:
+            return {"allowed": True, "loss_streak": 0, "scope": "live"}
+        storage = self._runtime_repository.storage
+        setup_type = str(
+            getattr(signal, "setup_type", "") or "generic_entry"
+        )
+        setup_family = str(getattr(signal, "setup_family", "") or "generic")
+        plan_id = str(getattr(signal, "ai_plan_id", "") or "")
+        plan_valid_from = int(
+            getattr(signal, "ai_plan_valid_from", 0) or 0
+        )
+        plan_instance_id = (
+            f"{plan_id}:{plan_valid_from}"
+            if plan_id and plan_valid_from else plan_id
+        )
+
+        if plan_instance_id:
+            consumed_payloads = storage.fetchall(
+                "SELECT payload_json FROM runtime_entities WHERE user_id = ? "
+                "AND account_id = ? AND entity_type = 'trading_instruction' "
+                "ORDER BY updated_at DESC LIMIT 500",
+                (int(self.user_id), int(self.account_id)),
+            )
+            consumed_payloads.extend(storage.fetchall(
+                "SELECT position_attribution_json AS payload_json "
+                "FROM trade_execution_reports WHERE user_id = ? AND account_id = ? "
+                "ORDER BY reported_at DESC LIMIT 500",
+                (int(self.user_id), int(self.account_id)),
+            ))
+            for item in consumed_payloads:
+                try:
+                    payload = json.loads(item.get("payload_json") or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                attribution = (
+                    payload.get("position_attribution") or payload
+                    if isinstance(payload, dict) else {}
+                )
+                if (
+                    str(attribution.get("strategy_id") or "") == strategy.strategy_id
+                    and str(attribution.get("ai_plan_instance_id") or "")
+                    == plan_instance_id
+                ):
+                    return {
+                        "allowed": False, "scope": "live_setup",
+                        "setup_type": setup_type, "setup_family": setup_family,
+                        "plan_instance_id": plan_instance_id,
+                        "reason": "本次AI分析的该交易建议已在此实盘账户触发过，不重复开仓",
+                    }
+
+        candidates = storage.fetchall(
+            """
+            SELECT profit, swap, commission, received_at, mt5_position_id,
+                   position_attribution_json
+            FROM live_trade_deals
+            WHERE user_id = ? AND account_id = ? AND symbol = ?
+              AND entry_type IN (1, 2, 3)
+            ORDER BY received_at DESC, id DESC
+            LIMIT 500
+            """,
+            (int(self.user_id), int(self.account_id), symbol),
+        )
+        grouped = {}
+        for row in candidates:
+            try:
+                attribution = json.loads(
+                    row.get("position_attribution_json") or "{}"
+                )
+            except (TypeError, ValueError):
+                attribution = {}
+            if (
+                str(attribution.get("strategy_id") or "") != strategy.strategy_id
+                or str(attribution.get("setup_type") or "") != setup_type
+                or str(attribution.get("direction") or "") != action
+            ):
+                continue
+            position_id = str(row.get("mt5_position_id") or "")
+            item = grouped.setdefault(position_id, {
+                "net_profit": 0.0,
+                "closed_at": int(row.get("received_at") or 0),
+                "position_attribution": attribution,
+            })
+            item["net_profit"] += sum(
+                float(row.get(key) or 0)
+                for key in ("profit", "swap", "commission")
+            )
+            item["closed_at"] = max(
+                item["closed_at"], int(row.get("received_at") or 0)
+            )
+        rows = sorted(
+            grouped.values(), key=lambda item: item["closed_at"], reverse=True
+        )[:20]
+        streak = 0
+        for row in rows:
+            if float(row.get("net_profit") or 0) < 0:
+                streak += 1
+            else:
+                break
+        if not rows or streak == 0:
+            return {
+                "allowed": True, "loss_streak": streak,
+                "scope": "live_setup", "setup_type": setup_type,
+            }
+        last_loss_at = int(rows[0].get("closed_at") or 0)
+        last_attribution = rows[0].get("position_attribution") or {}
+        last_plan_id = str(last_attribution.get("ai_plan_id") or "")
+        period = str(getattr(signal, "source_period", "M1") or "M1").upper()
+        bar_seconds = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}.get(period, 60)
+        now = int(time.time())
+        if plan_id and plan_valid_from <= last_loss_at:
+            return {
+                "allowed": False, "loss_streak": streak,
+                "scope": "live_setup", "setup_type": setup_type,
+                "paused_direction": action,
+                "reason": (
+                    f"实盘 {setup_type} · {action} 上一笔亏损退出，"
+                    "等待该信号源生成下一份AI分析后再评估"
+                ),
+            }
+        if streak < 2:
+            return {
+                "allowed": True, "loss_streak": streak,
+                "scope": "live_setup", "setup_type": setup_type,
+                "reset_by": "new_analysis" if plan_id else "not_required",
+            }
+        if streak == 2 and now < last_loss_at + bar_seconds * 5:
+            return {
+                "allowed": False, "loss_streak": streak, "scope": "live_setup",
+                "setup_type": setup_type,
+                "release_at": last_loss_at + bar_seconds * 5,
+                "reason": f"实盘 {setup_type} · {action} 连续亏损 {streak} 次，冷却 5 根 {period} K线后再评估",
+            }
+        if streak >= 3:
+            if not plan_id:
+                release_at = last_loss_at + bar_seconds * 20
+                if now < release_at:
+                    return {
+                        "allowed": False, "loss_streak": streak,
+                        "scope": "live_setup", "setup_type": setup_type,
+                        "paused_direction": action, "release_at": release_at,
+                        "reason": (
+                            f"实盘 {setup_type} · {action} 连续亏损 {streak} 次，"
+                            f"非AI信号冷却 20 根 {period} K线后恢复"
+                        ),
+                    }
+                return {
+                    "allowed": True, "loss_streak": streak,
+                    "scope": "live_setup", "setup_type": setup_type,
+                    "cooldown_completed": True,
+                }
+            new_structure = bool(
+                plan_id and plan_id != last_plan_id
+                and plan_valid_from > last_loss_at
+            )
+            if not new_structure:
+                return {
+                    "allowed": False, "loss_streak": streak, "scope": "live_setup",
+                    "setup_type": setup_type,
+                    "paused_direction": action,
+                    "reason": (
+                        f"实盘 {setup_type} · {action} 连续亏损 {streak} 次，"
+                        "已暂停该Setup方向；等待结构和价格不同的新AI计划"
+                    ),
+                }
+        return {
+            "allowed": True, "loss_streak": streak,
+            "scope": "live_setup", "setup_type": setup_type,
+            "cooldown_completed": True,
+        }
+
     def process_price(self, symbol: str, current_price: float) -> Dict:
         """
         处理价格变动，生成决策
@@ -442,6 +617,7 @@ class TradingServer:
                 continue
             decision = self.strategy_service.make_decision(
                 symbol, current_price, force_signals=signals, strategy=strategy,
+                entry_guard=self._live_loss_streak_guard,
                 audit_no_action=True,
             )
             if decision is not None:
@@ -533,8 +709,6 @@ class TradingServer:
                 int(self.user_id or 0), strategy.position_management_policy_id
             )
         )
-        if policy is None:
-            return
         pivots = [
             item.to_dict()
             for period in self.pivot_store.get_all_periods(symbol)
@@ -555,6 +729,18 @@ class TradingServer:
                 continue
             ticket = int(position.ticket)
             is_new_position = ticket not in self._managed_position_state
+            attribution = {}
+            if is_new_position and self.user_id and self.account_id:
+                execution = TradeExecutionRepository().find_for_position(
+                    int(self.user_id), int(self.account_id), ticket,
+                )
+                if execution:
+                    try:
+                        attribution = json.loads(
+                            execution.get("position_attribution_json") or "{}"
+                        )
+                    except (TypeError, ValueError):
+                        attribution = {}
             state = self._managed_position_state.setdefault(ticket, {
                 "direction": position.direction,
                 "entry_price": float(position.price_open),
@@ -566,8 +752,13 @@ class TradingServer:
                 "favorable_price": float(position.price_open),
                 "holding_bars": 0,
                 "opened_at": position.opened_at or datetime.now(),
+                "position_attribution": attribution,
+                "position_policy_snapshot": attribution.get(
+                    "position_policy_snapshot", {}
+                ),
             })
             if is_new_position:
+                policy_snapshot = attribution.get("position_policy_snapshot") or {}
                 self._position_event_repository.record(
                     int(self.user_id or 0), int(self.account_id or 0), str(ticket),
                     "initial_plan", "实盘持仓已纳入持仓管理，记录初始止损止盈保护",
@@ -577,11 +768,23 @@ class TradingServer:
                     take_profit=float(position.tp or 0),
                     volume=float(position.volume),
                     payload={
-                        "policy_id": policy.policy_id,
-                        "policy_name": policy.name,
+                        "policy_id": str(
+                            attribution.get("position_policy_id")
+                            or policy_snapshot.get("policy_id")
+                            or (policy.policy_id if policy else "")
+                        ),
+                        "policy_name": str(
+                            attribution.get("position_policy_name")
+                            or policy_snapshot.get("name")
+                            or (policy.name if policy else "")
+                        ),
                         "initial_risk": abs(
                             float(position.price_open) - float(position.sl or 0)
                         ),
+                        "setup_type": attribution.get("setup_type", ""),
+                        "setup_family": attribution.get("setup_family", ""),
+                        "setup_profile_id": attribution.get("setup_profile_id", ""),
+                        "setup_profile_name": attribution.get("setup_profile_name", ""),
                     },
                 )
             state["volume"] = float(position.volume)
@@ -592,8 +795,14 @@ class TradingServer:
                 max(state["favorable_price"], current_price)
                 if position.is_buy else min(state["favorable_price"], current_price)
             )
+            snapshot_config = (
+                state.get("position_policy_snapshot") or {}
+            ).get("config")
+            active_config = snapshot_config or (policy.config if policy else {})
+            if not active_config:
+                continue
             action = manager.evaluate(
-                policy.config, state,
+                active_config, state,
                 {"price": current_price, "time": int(datetime.now().timestamp())},
                 pivots=pivots,
                 reverse_signal=(
@@ -901,7 +1110,7 @@ class TradingServer:
                 symbol=decision.symbol,
                 status=decision.status,
             )
-            self._runtime_repository.trim_entities("strategy_decision", 200)
+            self._runtime_repository.trim_entities("strategy_decision", 1000)
 
     def _record_ai_plan_evaluations(self, updates: List[Dict]) -> None:
         """Persist one conclusion per deployment when an AI price plan changes."""
@@ -925,11 +1134,19 @@ class TradingServer:
                 if not deployments:
                     continue
                 params = binding.get("params") or {}
-                suggestion = max(
-                    suggestions,
-                    key=lambda item: float(item.get("confidence") or 0),
-                    default=None,
-                )
+                def plan_rank(item):
+                    confidence = float(item.get("confidence") or 0)
+                    entry = float(item.get("entry_price") or 0)
+                    distance = (
+                        abs(current_price - entry) / entry
+                        if current_price > 0 and entry > 0 else float("inf")
+                    )
+                    # Confidence remains primary; when buy/sell plans have
+                    # equal confidence, explain the plan closest to the live
+                    # quote instead of whichever item the model returned first.
+                    return confidence, -distance
+
+                suggestion = max(suggestions, key=plan_rank, default=None)
                 reason, confidence, entry, stop_loss, take_profit = self._ai_plan_conclusion(
                     suggestion,
                     current_price,
@@ -972,7 +1189,7 @@ class TradingServer:
                         "strategy_decision", decision.decision_id, decision.to_dict(),
                         symbol=symbol, status=decision.status,
                     )
-                    runtime.trim_entities("strategy_decision", 200)
+                    runtime.trim_entities("strategy_decision", 1000)
                     transient_decision_store.clear_for_strategy(
                         int(self.user_id or 0), int(deployment["account_id"]),
                         strategy.strategy_id, symbol,
@@ -992,8 +1209,6 @@ class TradingServer:
         entry = float(suggestion.get("entry_price") or 0)
         stop_loss = float(suggestion.get("stop_loss") or 0)
         take_profit = float(suggestion.get("take_profit") or 0)
-        if confidence < minimum_confidence:
-            return (f"AI计划已{change_type}，但置信度 {confidence:.0f}% 低于策略要求 {minimum_confidence}%，暂不执行。", confidence, entry, stop_loss, take_profit)
         risk = abs(entry - stop_loss)
         reward = abs(take_profit - entry)
         ratio = reward / risk if risk > 0 else 0
@@ -1041,7 +1256,11 @@ class TradingServer:
             # audits directly. Reload so an already-running web engine sees
             # those decisions without needing a restart.
             persisted = []
-            for item in self._runtime_repository.list_entities("strategy_decision"):
+            # 执行中心只取最近决策，避免每个请求反序列化账户全部运行态。
+            recent_limit = max(100, min(500, int(count or 20) * 20))
+            for item in self._runtime_repository.list_entities(
+                "strategy_decision", limit=recent_limit
+            ):
                 try:
                     persisted.append(TradingDecision.from_dict(item))
                 except (TypeError, ValueError):
@@ -1072,7 +1291,7 @@ class TradingServer:
             end = datetime.fromisoformat(date_to)
             decisions = [d for d in decisions if d.created_at and d.created_at <= end]
         decisions.sort(key=lambda item: item.created_at or datetime.min)
-        return [d.to_dict() for d in reversed(decisions[-max(1, min(count, 200)):])]
+        return [d.to_dict() for d in reversed(decisions[-max(1, min(count, 1000)):])]
 
     def get_dashboard_overview(self, account) -> Dict:
         """Build one account-scoped operational snapshot for the dashboard."""

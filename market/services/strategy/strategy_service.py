@@ -11,9 +11,11 @@ import threading
 
 from ...models import (
     PositionManagementPolicy, TradingSignal, TradingStrategy, TradingDecision,
+    SignalSource,
 )
 from ...models import ConsistencyRequirement, ConflictResolution
 from ...store import StrategyStore
+from ..position_attribution import build_position_attribution
 from sqlite_storage import PositionManagementPolicyRepository
 from ..signal import SignalService
 from ..position_manager import PositionManager
@@ -202,6 +204,15 @@ class StrategyService:
         direction_signals = up_signals if direction == "buy" else down_signals
         direction_confidence = aggregate_confidence(direction_signals)
 
+        def confidence_gate(candidate_signals: List[TradingSignal]) -> bool:
+            """AI price plans are gated by trigger conditions, not confidence."""
+            if candidate_signals and all(
+                signal.source == SignalSource.AI_ENTRY
+                for signal in candidate_signals
+            ):
+                return any(signal.is_entry_trigger for signal in candidate_signals)
+            return direction_confidence >= strategy.min_confidence
+
         # 检查一致性要求
         action = "none"
         has_skipped_conflict = (
@@ -211,19 +222,19 @@ class StrategyService:
         )
         if direction and not has_skipped_conflict:
             if strategy.consistency_requirement == ConsistencyRequirement.ANY:
-                if direction_confidence >= strategy.min_confidence:
+                if confidence_gate(direction_signals):
                     action = direction
             elif strategy.consistency_requirement == ConsistencyRequirement.MAJORITY:
                 if (
                     consistency >= self.MAJORITY_THRESHOLD
-                    and direction_confidence >= strategy.min_confidence
+                    and confidence_gate(direction_signals)
                 ):
                     action = direction
             elif strategy.consistency_requirement == ConsistencyRequirement.ALL:
                 if (
                     directional_count == total_sources
                     and len(ready_signals) == total_sources
-                    and direction_confidence >= strategy.min_confidence
+                    and confidence_gate(direction_signals)
                 ):
                     action = direction
 
@@ -248,10 +259,15 @@ class StrategyService:
             "buy_confidence": aggregate_confidence(up_signals),
             "sell_confidence": aggregate_confidence(down_signals),
             "consistency": round(consistency, 2),
+            "directional_count": directional_count,
+            "consistency_requirement": strategy.consistency_requirement,
             "majority_threshold": self.MAJORITY_THRESHOLD,
             "direction": direction,
             "action": action,
             "triggered": triggered,
+            "ai_only": bool(ready_signals) and all(
+                signal.source == SignalSource.AI_ENTRY for signal in ready_signals
+            ),
             "buy_signals": [s.signal_id for s in up_signals],
             "sell_signals": [s.signal_id for s in down_signals],
             "sideways_signals": [s.signal_id for s in sideways_signals],
@@ -291,6 +307,7 @@ class StrategyService:
                      volume_calculator: Callable = None,
                      position_checker: Callable = None,
                      risk_checker: Callable = None,
+                     entry_guard: Callable = None,
                      position_policy: PositionManagementPolicy = None,
                      position_context: Optional[Dict] = None,
                      audit_no_action: bool = False) -> Optional[TradingDecision]:
@@ -384,8 +401,40 @@ class StrategyService:
             "selected_signal_source": best_signal.source,
             "selected_signal_period": best_signal.source_period,
             "selected_signal_source_id": best_signal.signal_source_id,
+            "selected_setup_type": str(
+                getattr(best_signal, "setup_type", "") or "generic_entry"
+            ),
+            "selected_setup_family": str(
+                getattr(best_signal, "setup_family", "") or "generic"
+            ),
+            "selected_entry_mode": str(
+                getattr(best_signal, "entry_mode", "") or "touch_or_near"
+            ),
+            "selected_ai_plan_id": str(
+                getattr(best_signal, "ai_plan_id", "") or ""
+            ),
+            "selected_ai_plan_valid_from": int(
+                getattr(best_signal, "ai_plan_valid_from", 0) or 0
+            ),
+            "selected_ai_plan_expires_at": int(
+                getattr(best_signal, "ai_plan_expires_at", 0) or 0
+            ),
             "contributing_sources": sorted({s.source for s in directional_signals}),
         }
+
+        if entry_guard is not None:
+            try:
+                guard = entry_guard(symbol, strategy, action, best_signal) or {}
+            except Exception as exc:
+                print(f"[StrategyService] 连续亏损保护检查失败，保持原交易流程: {exc}")
+                guard = {"allowed": True, "error": str(exc)}
+            analysis["loss_streak_guard"] = guard
+            if not guard.get("allowed", True):
+                return self._no_action_decision(
+                    symbol, strategy, signals, analysis, execution_mode,
+                    str(guard.get("reason") or "连续亏损保护已阻止本次入场"),
+                    audit_no_action, cooldown_key, decision_time,
+                )
 
         # 持仓管理器先生成初始保护方案，后续仓位管理继续使用同一快照。
         entry_price = current_price
@@ -429,12 +478,19 @@ class StrategyService:
                     )
                 )
         try:
+            setup_context = {
+                "signal_source": str(best_signal.source or ""),
+                "setup_family": str(getattr(best_signal, "setup_family", "") or "generic"),
+                "setup_type": str(getattr(best_signal, "setup_type", "") or "generic_entry"),
+                "entry_mode": str(getattr(best_signal, "entry_mode", "") or "touch_or_near"),
+            }
             plan = self.position_manager.create_plan(
                 position_policy, action, entry_price,
                 signal_stop_loss=best_signal.suggested_sl,
                 signal_take_profit=best_signal.suggested_tp,
                 pivots=pivots or [], atr=float(context.get("atr", 0)),
                 current_time=int(context.get("time", 0) or 0),
+                setup_context=setup_context,
             )
         except ValueError as exc:
             print(f"[StrategyService] 持仓管理方案无法生成开仓计划: {exc}")
@@ -447,12 +503,20 @@ class StrategyService:
             "take_profit_rule": plan.take_profit_rule,
             "initial_risk": plan.initial_risk,
             "explanation": plan.explanation,
+            "setup_context": setup_context,
+            "applied_setup_profile": plan.policy_snapshot.get(
+                "applied_setup_profile"
+            ),
         }
 
         has_fixed_take_profit = bool(tp and tp > 0)
         if not sl or sl == 0:
-            print(f"[StrategyService] 无效的止损止盈: sl={sl}, tp={tp}")
-            return None
+            reason = f"持仓管理未生成有效止损: SL={sl}, TP={tp}"
+            print(f"[StrategyService] {reason}")
+            return self._rejected_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                entry_price, sl, tp, 0, 0, 0, reason, decision_time,
+            )
 
         # 计算风险
         risk_points = abs(entry_price - sl)
@@ -464,8 +528,16 @@ class StrategyService:
 
         # 检查风险回报比
         if has_fixed_take_profit and rr_ratio < strategy.min_risk_reward:
-            print(f"[StrategyService] 风险回报比 {rr_ratio:.2f} 低于最小要求 {strategy.min_risk_reward}")
-            return None
+            reason = (
+                f"风险回报比 {rr_ratio:.2f} 低于策略最小要求 "
+                f"{strategy.min_risk_reward:.2f}"
+            )
+            print(f"[StrategyService] {reason}")
+            return self._rejected_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                entry_price, sl, tp, risk_points, reward_points, rr_ratio,
+                reason, decision_time,
+            )
 
         # 动态止损范围（根据价格调整）
         # 最小止损 = 价格的 0.05% 或 5 点（取较大）
@@ -484,8 +556,42 @@ class StrategyService:
 
         # 检查止损点数
         if risk_points < dynamic_min_sl or risk_points > dynamic_max_sl:
-            print(f"[StrategyService] 止损点数 {risk_points:.2f} 不在动态范围 [{dynamic_min_sl:.2f}, {dynamic_max_sl:.2f}] (价格={entry_price:.2f})")
-            return None
+            reason = (
+                f"止损距离 {risk_points:.2f} 不在动态范围 "
+                f"[{dynamic_min_sl:.2f}, {dynamic_max_sl:.2f}]"
+            )
+            print(f"[StrategyService] {reason} (价格={entry_price:.2f})")
+            return self._rejected_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                entry_price, sl, tp, risk_points, reward_points, rr_ratio,
+                reason, decision_time,
+            )
+
+        # These strategy-level bounds existed in the data model but were not
+        # enforced by the live decision path. Enforce them only when positive;
+        # zero keeps legacy strategies' old behaviour.
+        if strategy.min_sl_points > 0 and risk_points < strategy.min_sl_points:
+            reason = (
+                f"止损距离 {risk_points:.2f} 小于策略最小止损点数 "
+                f"{strategy.min_sl_points:.2f}"
+            )
+            print(f"[StrategyService] {reason}")
+            return self._rejected_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                entry_price, sl, tp, risk_points, reward_points, rr_ratio,
+                reason, decision_time,
+            )
+        if strategy.max_sl_points > 0 and risk_points > strategy.max_sl_points:
+            reason = (
+                f"止损距离 {risk_points:.2f} 超过策略最大止损点数 "
+                f"{strategy.max_sl_points:.2f}"
+            )
+            print(f"[StrategyService] {reason}")
+            return self._rejected_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                entry_price, sl, tp, risk_points, reward_points, rr_ratio,
+                reason, decision_time,
+            )
 
         # 计算手数
         volume = (
@@ -588,6 +694,39 @@ class StrategyService:
 
         return decision
 
+    def _rejected_decision(
+        self, symbol: str, strategy: TradingStrategy, signals: List[TradingSignal],
+        analysis: Dict, execution_mode: str, entry_price: float,
+        sl: float, tp: float, risk_points: float, reward_points: float,
+        rr_ratio: float, reason: str, decision_time: Optional[datetime],
+    ) -> TradingDecision:
+        """Keep risk rejections auditable instead of silently dropping them."""
+        action = analysis.get("action") or analysis.get("direction") or "none"
+        confidence = (
+            analysis.get("buy_confidence", 0)
+            if action == "buy" else analysis.get("sell_confidence", 0)
+        )
+        return TradingDecision(
+            symbol=symbol,
+            strategy_id=strategy.strategy_id,
+            strategy_name=strategy.strategy_name,
+            execution_mode=execution_mode,
+            action=action,
+            decision_type="rejected",
+            signals=[s.to_dict() for s in signals],
+            signal_summary=analysis,
+            entry_price=entry_price,
+            sl=round(sl, 2) if sl else 0,
+            tp=round(tp, 2) if tp else 0,
+            risk_points=round(risk_points, 2),
+            reward_points=round(reward_points, 2),
+            risk_reward_ratio=round(rr_ratio, 2),
+            decision_reason=f"风控拦截: {reason}",
+            confidence_score=float(confidence or 0),
+            status="rejected",
+            created_at=decision_time,
+        )
+
     def _no_action_decision(
         self, symbol: str, strategy: TradingStrategy, signals: List[TradingSignal],
         analysis: Dict, execution_mode: str, reason: str, enabled: bool,
@@ -597,6 +736,20 @@ class StrategyService:
         if not enabled:
             return None
         now = decision_time or datetime.now()
+        directional_confidence = max(
+            float(analysis.get("buy_confidence", 0) or 0),
+            float(analysis.get("sell_confidence", 0) or 0),
+        )
+        # A sideways/structure signal is still an analyzed signal. When no
+        # buy/sell direction is formed, buy/sell confidence is naturally 0;
+        # displaying that as the decision confidence incorrectly suggests
+        # that the AI returned no confidence at all. Preserve the strongest
+        # reported signal confidence for the no-action explanation.
+        if directional_confidence <= 0 and signals:
+            directional_confidence = max(
+                (float(signal.confidence or 0) for signal in signals),
+                default=0.0,
+            )
         return TradingDecision(
             symbol=symbol,
             strategy_id=strategy.strategy_id,
@@ -607,10 +760,7 @@ class StrategyService:
             signals=[signal.to_dict() for signal in signals],
             signal_summary=analysis,
             decision_reason=reason,
-            confidence_score=max(
-                float(analysis.get("buy_confidence", 0) or 0),
-                float(analysis.get("sell_confidence", 0) or 0),
-            ),
+            confidence_score=directional_confidence,
             status="skipped",
             created_at=now,
         )
@@ -621,18 +771,35 @@ class StrategyService:
             return (
                 f"{analysis.get('total_count', 0)} 个已配置信号源均未提供可用方向"
             )
+        if analysis.get("ai_only") and not analysis.get("buy_count") and not analysis.get("sell_count"):
+            return "AI 判断为震荡，当前价格尚未触及可执行入场价，等待边界反转或突破确认"
+        if analysis.get("ai_only") and not analysis.get("triggered"):
+            return "AI 方向已形成，但当前价格尚未触及入场价或突破确认条件"
         if analysis.get("buy_count") and analysis.get("sell_count"):
             return "买入与卖出信号冲突，策略不执行"
         direction = analysis.get("direction")
         confidence = analysis.get(
             "buy_confidence" if direction == "buy" else "sell_confidence", 0,
         )
-        if direction and float(confidence or 0) < strategy.min_confidence:
+        ai_only = bool(analysis.get("ai_only"))
+        if direction and float(confidence or 0) < strategy.min_confidence and not ai_only:
             return (
                 f"{direction} 方向置信度 {float(confidence):.0f}% 低于策略要求 "
                 f"{strategy.min_confidence}%"
             )
-        return "信号一致性未达到策略要求"
+        required = strategy.consistency_requirement
+        if required == ConsistencyRequirement.MAJORITY:
+            threshold = int(StrategyService.MAJORITY_THRESHOLD * max(1, analysis.get("total_count", 0)) + 0.999)
+            return (
+                f"信号一致性未达到多数要求：当前 {analysis.get('directional_count', 0)} "
+                f"个方向信号 / 至少需要 {threshold} 个"
+            )
+        if required == ConsistencyRequirement.ALL:
+            return (
+                f"信号一致性未达到全部一致要求：当前 {analysis.get('directional_count', 0)} "
+                f"个方向信号 / 共 {analysis.get('total_count', 0)} 个"
+            )
+        return "当前没有满足入场触发条件的方向信号"
 
     def _select_best_signal(self, signals: List[TradingSignal],
                            action: str, strategy: TradingStrategy) -> Optional[TradingSignal]:
@@ -753,6 +920,16 @@ class StrategyService:
             if hasattr(self.strategy_store, "get_strategy_by_id") else None
         )
         description = f"AIT|{decision.strategy_id}|{source_id}"
+        position_attribution = build_position_attribution(
+            decision.signal_summary,
+            decision_id=decision.decision_id,
+            strategy_id=decision.strategy_id,
+            strategy_name=decision.strategy_name,
+            direction=decision.action,
+            entry_reason=decision.decision_reason,
+            initial_stop_loss=decision.sl,
+            initial_take_profit=decision.tp,
+        )
 
         # 创建订单
         order_id = self._pending_order_service.create_order(
@@ -771,6 +948,8 @@ class StrategyService:
             exit_mode="position_manager",
             trailing_activation_r=1.0,
             trailing_distance_r=1.0,
+            decision_id=decision.decision_id,
+            position_attribution=position_attribution,
         )
 
         decision.order_id = order_id

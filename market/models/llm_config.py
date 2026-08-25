@@ -64,6 +64,69 @@ DEFAULT_ANALYSIS_PROMPT_TEMPLATE = """你是一位专业的金融分析师。请
 }
 """
 
+# 2.0 信号源使用固定的结构识别协议，不再依赖用户自由描述或候选提示词。
+STRUCTURE_ANALYSIS_PROMPT_TEMPLATE = """你是 AI Trader 的结构化行情分析器。请仅依据主品种、主周期 K 线和系统计算的结构特征，选择一个最匹配的主模板，并返回严格 JSON。
+
+## 分析原则
+1. 先判断较长窗口的背景结构，再判断最近一段由有效拐点和重复触碰形成的局部结构。局部结构的实际长度由 K 线决定，不得假定固定根数。
+2. 如果长期上涨但最近高点和低点分别多次触碰、价格在边界内运行，主模板选择 range（上涨背景中的箱体整理）。
+3. 如果有效低点持续抬高，选择 uptrend_pullback；有效高点持续降低，选择 downtrend_rebound。
+4. 如果高点逐步降低、低点逐步抬高且上下边界收窄，选择 converging_triangle；如果高点逐步抬高、低点逐步降低且边界扩大，选择 diverging_triangle。
+5. 三角形主要等待突破和回踩，不得仅凭触碰边界直接追单；突破必须有收盘确认。
+6. 结构不清晰、候选分数接近或数据不足时选择 none，不要强行生成交易建议。
+7. range 同时支持两类交易：箱体内反转（下沿附近买入、上沿附近卖出）和有效突破。只要箱体上下沿都有效，必须同时给出下沿买入和上沿卖出两条未来计划，不要因为当前价格只靠近一侧而省略另一侧。向上突破箱体上沿后可做多，向下跌破箱体下沿后可做空；突破必须有收盘确认，或明确的突破幅度/回踩确认，不能把影线刺破当成有效突破。
+8. 箱体突破做多时，止损放在箱体上沿下方的波动缓冲区；突破做空时，止损放在箱体下沿上方的波动缓冲区。缓冲区应使用 max(最小价格距离, ATR × 缓冲系数)，不能使用脱离品种精度的固定点数。
+9. 箱体突破的止盈优先按箱体高度投射：上破目标约为上沿 + 箱体高度，下破目标约为下沿 - 箱体高度；若结构或风险收益比不足，返回空建议。
+10. 每条建议必须标明 setup_type：range_reversal（箱体反转）或 range_breakout（箱体突破），趋势模板使用 trend_pullback/trend_rebound；同时填写 entry_mode（touch_or_near 或 breakout）、confirmation（none、close_confirmed、retest_confirmed）和 activation_status（active 或 pending_confirmation）。箱体突破在未确认前必须是 pending_confirmation，不能当作立即开仓建议。
+11. 主周期为 M1 时，系统会自动提供同品种 M5、M15 作为背景行情；主周期为 M5 时自动提供 M15、H1。背景只用于方向过滤：背景上涨时优先下沿买入和向上突破，背景下跌时优先上沿卖出和向下突破，背景震荡时允许双向箱体反转。不得为背景周期单独输出建议。
+12. range 的四类计划应同时存在：下沿反转买入、上沿反转卖出、上破确认买入、下破确认卖出。前两项可以 active；后两项在没有收盘确认或回踩确认前必须 pending_confirmation。
+
+## 主行情 K线
+{{market_data}}
+
+## 当前价格
+{{current_price}}
+
+## 系统计算的候选结构特征
+{{structure_features}}
+
+## 系统预计算的高周期背景
+{{background_features}}
+
+该结果由系统根据下方高周期原始K线预计算。你必须结合原始K线复核；如不同意，应在 background_analysis.reason 中明确说明证据，不能无理由覆盖。
+
+## 可选参考行情
+{{reference_market_data}}
+
+## 输出格式（只能输出 JSON）
+{
+  "实际主品种": {
+    "market_structure": {
+      "template_type": "range|uptrend_pullback|downtrend_rebound|converging_triangle|diverging_triangle|breakout_retest|none",
+      "template_confidence": 0,
+      "background_structure": "uptrend|downtrend|range|none",
+      "primary_structure": "range|uptrend|downtrend|breakout|none",
+      "structure_started_at": "时间或空字符串",
+      "structure_bar_count": 0,
+      "range": {"upper": 0, "lower": 0, "touch_upper": 0, "touch_lower": 0},
+      "trendline": {"type": "rising_support|falling_resistance|triangle_upper|triangle_lower|none", "anchor_points": [], "slope": 0, "current_level": 0, "invalidation": 0},
+      "triangle": {"upper_slope": 0, "lower_slope": 0, "width_slope": 0, "apex_distance_bars": 0, "breakout_confirmed": false}
+    },
+    "background_analysis": {
+      "periods": {"M5": {"structure": "uptrend|downtrend|range|converging_triangle|diverging_triangle|mixed", "confidence": 0, "reason": "高周期K线证据"}},
+      "combined": "uptrend|downtrend|range|uptrend_with_local_range|downtrend_with_local_range|conflict|mixed",
+      "confidence": 0,
+      "reason": "综合背景结论"
+    },
+    "trade_horizon": {"bars": 0, "minutes": 0, "reason": "依据调度周期和局部结构"},
+    "trend_analysis": {"主周期": {"trend": "趋势类型", "confidence": 0, "reason": "理由"}},
+    "overall_trend": {"direction": "up|down|sideways", "strength": 0, "summary": "总结"},
+    "key_levels": {"resistance": [], "support": []},
+    "trade_suggestions": [{"signal_source_id": "当前信号源ID", "period": "主周期", "setup_type": "range_reversal|range_breakout|trend_pullback|trend_rebound|triangle_breakout|none", "entry_mode": "touch_or_near|breakout", "confirmation": "none|close_confirmed|retest_confirmed", "activation_status": "active|pending_confirmation", "direction": "buy|sell", "confidence": 0, "entry_price": 0, "stop_loss": 0, "take_profit": 0, "reason": "结构化理由"}]
+  }
+}
+"""
+
 
 @dataclass
 class LLMConfig:

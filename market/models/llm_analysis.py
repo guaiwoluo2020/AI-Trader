@@ -16,6 +16,8 @@ class LLMAnalysisResult:
     trend_analysis: Dict = field(default_factory=dict)
     overall_trend: Optional[Dict] = None
     key_levels: Optional[Dict] = None
+    market_structure: Optional[Dict] = None
+    trade_horizon: Optional[Dict] = None
     trade_suggestions: List[Dict] = field(default_factory=list)
     analyzed_at: Optional[str] = None
     data_stale: bool = False
@@ -28,6 +30,8 @@ class LLMAnalysisResult:
             "trend_analysis": self.trend_analysis,
             "overall_trend": self.overall_trend,
             "key_levels": self.key_levels,
+            "market_structure": self.market_structure,
+            "trade_horizon": self.trade_horizon,
             "trade_suggestions": self.trade_suggestions,
             "analyzed_at": self.analyzed_at,
             "data_stale": self.data_stale,
@@ -42,6 +46,8 @@ class LLMAnalysisResult:
             trend_analysis=data.get("trend_analysis", {}),
             overall_trend=data.get("overall_trend"),
             key_levels=data.get("key_levels"),
+            market_structure=data.get("market_structure"),
+            trade_horizon=data.get("trade_horizon"),
             trade_suggestions=data.get("trade_suggestions", []),
             analyzed_at=datetime.now().isoformat(),
             data_stale=False,
@@ -56,6 +62,8 @@ class LLMAnalysisResult:
             trend_analysis=data.get("trend_analysis") or {},
             overall_trend=data.get("overall_trend"),
             key_levels=data.get("key_levels"),
+            market_structure=data.get("market_structure"),
+            trade_horizon=data.get("trade_horizon"),
             trade_suggestions=data.get("trade_suggestions") or [],
             analyzed_at=data.get("analyzed_at"),
             data_stale=bool(data.get("data_stale", False)),

@@ -285,6 +285,7 @@ class TradingAccountRepositoryTests(unittest.TestCase):
         buy = reports.record(self.user.user_id, first.account_id, {
             "instruction_id": "buy-1", "symbol": "GOLD_", "action": "b",
             "success": True, "requested_price": 3300, "executed_price": 3300.5,
+            "mt5_position_id": 900001,
         })
         sell = reports.record(self.user.user_id, first.account_id, {
             "instruction_id": "sell-1", "symbol": "GOLD_", "action": "s",
@@ -300,6 +301,7 @@ class TradingAccountRepositoryTests(unittest.TestCase):
             self.user.user_id, first.account_id
         )
         self.assertEqual(buy["slippage"], 0.5)
+        self.assertEqual(buy["mt5_position_id"], 900001)
         self.assertEqual(sell["slippage"], 1.0)
         self.assertEqual(len(first_reports), 2)
         self.assertEqual(

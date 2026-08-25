@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -239,6 +240,7 @@ class LLMGovernanceService:
         self.storage = storage or get_storage()
         self.configs = LLMConfigRepository(self.storage)
         self.access = LLMAccessRepository(self.storage)
+        self.last_reconciliation: Dict = {"changed": 0, "fallback_model": "", "pending": False}
         self._seed()
 
     def _seed(self) -> None:
@@ -348,7 +350,104 @@ class LLMGovernanceService:
                 """,
                 (model_id, model_id, now, now),
             )
+        self.last_reconciliation = self.reconcile_model_references(
+            preferred_model=config.model, available_ids=set(ids)
+        )
         return self.list_models()
+
+    def reconcile_model_references(
+        self, preferred_model: str = "", available_ids: Optional[set] = None,
+    ) -> Dict:
+        """Repair current model references after a provider/catalog change."""
+        available = set(available_ids or {
+            row["model_id"] for row in self.storage.fetchall(
+                "SELECT model_id FROM llm_models WHERE available = 1"
+            )
+        })
+        if not available:
+            return {"changed": 0, "fallback_model": "", "pending": True}
+        enabled = {
+            row["model_id"] for row in self.storage.fetchall(
+                "SELECT model_id FROM llm_models WHERE available = 1 AND enabled = 1"
+            )
+        }
+        preferred = str(preferred_model or "").strip()
+        valid = available & enabled
+        fallback = preferred if preferred in valid else (
+            next(iter(sorted(valid)), None) or
+            (preferred if preferred in available else next(iter(sorted(available))))
+        )
+        if fallback not in enabled:
+            self.storage.execute("UPDATE llm_models SET enabled = 1 WHERE model_id = ?", (fallback,))
+
+        def pick(value):
+            value = str(value or "").strip()
+            return value if value in valid else fallback
+
+        changed = 0
+        # User/provider defaults.
+        for table, key in (("user_llm_configs", "user_id"), ("llm_provider_configs", "provider_id")):
+            for row in self.storage.fetchall(f"SELECT {key}, model FROM {table}"):
+                new_model = pick(row["model"])
+                if new_model != str(row["model"] or ""):
+                    self.storage.execute(
+                        f"UPDATE {table} SET model = ?, updated_at = ? WHERE {key} = ?",
+                        (new_model, int(time.time()), row[key]),
+                    )
+                    changed += 1
+
+        # Scene allowlists and defaults.
+        for scene in self.list_scenes():
+            old_models = list(scene.get("model_ids") or [])
+            models = list(dict.fromkeys(pick(model) for model in old_models)) or [fallback]
+            default = pick(scene.get("default_model_id"))
+            if default not in models:
+                default = models[0]
+            if models == old_models and default == scene.get("default_model_id"):
+                continue
+            self.storage.execute(
+                "UPDATE llm_scene_policies SET default_model_id = ?, updated_at = ? WHERE scene_code = ?",
+                (default, int(time.time()), scene["scene_code"]),
+            )
+            self.storage.execute("DELETE FROM llm_scene_models WHERE scene_code = ?", (scene["scene_code"],))
+            for model in models:
+                self.storage.execute(
+                    "INSERT INTO llm_scene_models(scene_code, model_id) VALUES(?, ?)",
+                    (scene["scene_code"], model),
+                )
+            changed += 1
+
+        # Live JSON-backed AI source and strategy bindings.
+        for table, keys in (("ai_signal_sources", ["signal_source_id"]), ("user_strategy_configs", ["user_id", "strategy_id"])):
+            rows = self.storage.fetchall(f"SELECT {', '.join(keys)}, config_json FROM {table}")
+            for row in rows:
+                try:
+                    data = json.loads(row["config_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                touched = False
+                if table == "ai_signal_sources":
+                    if isinstance(data, dict) and data.get("model"):
+                        new_model = pick(data["model"])
+                        touched = new_model != data["model"]
+                        data["model"] = new_model
+                else:
+                    for source in data.get("signal_sources") or []:
+                        params = source.get("params") if isinstance(source, dict) else None
+                        if isinstance(params, dict) and params.get("model"):
+                            new_model = pick(params["model"])
+                            if new_model != params["model"]:
+                                params["model"] = new_model
+                                touched = True
+                if not touched:
+                    continue
+                where = " AND ".join(f"{key} = ?" for key in keys)
+                self.storage.execute(
+                    f"UPDATE {table} SET config_json = ?, updated_at = ? WHERE {where}",
+                    [json.dumps(data, ensure_ascii=False), int(time.time()), *(row[key] for key in keys)],
+                )
+                changed += 1
+        return {"changed": changed, "fallback_model": fallback, "pending": False}
 
     def list_models(self) -> List[Dict]:
         return [dict(row) | {
@@ -653,5 +752,6 @@ class LLMGovernanceService:
             "models": self.list_models(),
             "scenes": self.list_scenes(),
             "scene_model_warnings": self.scene_model_warnings(),
+            "last_reconciliation": self.last_reconciliation,
             "free_daily_limit": FREE_DAILY_LIMIT,
         }

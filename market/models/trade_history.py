@@ -29,6 +29,7 @@ class TradeDeal:
     commission: float
     time: datetime
     comment: str
+    position_id: int = 0
 
     @property
     def is_buy(self) -> bool:
@@ -97,6 +98,7 @@ class TradeDeal:
         return {
             "ticket": self.ticket,
             "order": self.order,
+            "position_id": self.position_id,
             "symbol": self.symbol,
             "type": self.deal_type,
             "type_text": self.deal_type_text,
@@ -140,5 +142,6 @@ class TradeDeal:
             swap=float(data.get('swap', 0)),
             commission=float(data.get('commission', 0)),
             time=deal_time,
-            comment=data.get('comment', '')
+            comment=data.get('comment', ''),
+            position_id=int(data.get('position_id', data.get('mt5_position_id', 0)) or 0),
         )

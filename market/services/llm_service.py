@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 from ..models import LLMConfig, LLMAnalysisResult
 from ..models.llm_config import (
     DEFAULT_ANALYSIS_PROMPT_TEMPLATE, DEFAULT_SYSTEM_PROMPT,
+    STRUCTURE_ANALYSIS_PROMPT_TEMPLATE,
 )
 from ..store import LLMStore
 from .kline_service import KlineService
@@ -25,7 +26,9 @@ from sqlite_storage import (
     AISignalSourceRepository, AITradeSuggestionRepository,
     SharedAIRuntimeRepository,
 )
-from llm_governance import AI_SIGNAL_ANALYSIS, LLMGovernanceService
+from llm_governance import (
+    AI_SIGNAL_ANALYSIS, LLMGovernanceService, LLMQuotaExceeded,
+)
 
 
 class LLMRequestError(RuntimeError):
@@ -50,6 +53,8 @@ class LLMService:
     # circuit breaker so a provider quota error cannot fan out across sources.
     _provider_blocked_until: Dict[str, float] = {}
     _provider_block_lock = threading.RLock()
+    _quota_alert_last_sent: Dict[str, float] = {}
+    _quota_alert_lock = threading.RLock()
 
     @staticmethod
     def _provider_key(config) -> str:
@@ -204,6 +209,32 @@ class LLMService:
         """Notify the account runtime when an AI source publishes a new plan."""
         self._plan_update_handler = handler
 
+    def _notify_quota_exhausted(self, source_ids: List[str], error: Exception) -> None:
+        """Send one daily quota alert for this user; never block analysis cleanup."""
+        key = str(getattr(self.llm_store, "user_id", "0"))
+        now = time.time()
+        with self._quota_alert_lock:
+            last_sent = float(self._quota_alert_last_sent.get(key, 0))
+            if now - last_sent < 24 * 3600:
+                return
+            self._quota_alert_last_sent[key] = now
+        try:
+            from email_verification import EmailVerificationService
+            EmailVerificationService().send_admin_alert(
+                "AI Trader · AI行情分析额度不足",
+                (
+                    "AI行情分析未执行：用户的免费大模型调用额度已用完。\n\n"
+                    f"用户ID：{key}\n"
+                    f"信号源：{', '.join(source_ids) or '未知'}\n"
+                    f"原因：{error}\n\n"
+                    "请在管理后台检查用户额度或模型调用配置。"
+                ),
+            )
+            print(f"[LLMService] 已向管理员发送额度不足告警: user={key}")
+        except Exception as notify_error:
+            # 邮件故障不能影响行情分析调度主流程。
+            print(f"[LLMService] 发送额度不足告警失败: {notify_error}")
+
     @staticmethod
     def _suggestion_signature(items: List[Dict]) -> tuple:
         """Compare material plan fields, not model wording or list order."""
@@ -306,6 +337,8 @@ class LLMService:
         for source in self._ai_signal_source_repo.list(
             self.llm_store.user_id, enabled_only=True
         ):
+            if bool((source.get("config") or {}).get("analysis_paused")):
+                continue
             if int(source.get("market_data_account_id") or 0) != int(
                 getattr(self.llm_store, "_account_id", 0) or 0
             ):
@@ -342,6 +375,11 @@ class LLMService:
         )
         current["kline_count"] = max(current["kline_count"], kline_count)
         symbol_plan["periods"][period] = current
+        references = list(params.get("reference_market_data") or [])
+        if str(params.get("signal_source_version") or "1.0") == "2.0":
+            references = self._with_automatic_background_periods(
+                source["symbol"], period, references, kline_count
+            )
         symbol_plan["strategies"].append({
             # The runtime profile belongs to the AI source, not to a strategy.
             "strategy_id": "",
@@ -351,17 +389,49 @@ class LLMService:
             # Confidence is evaluated by each strategy binding, not the source.
             "min_confidence": 0,
             "analysis_interval_minutes": interval // 60,
+            "forecast_horizon_bars": int(params.get("forecast_horizon_bars", 0) or 0),
             "kline_count": kline_count,
             "model": str(params.get("model") or ""),
             "system_prompt": str(params.get("system_prompt") or ""),
             "analysis_prompt_template": str(params.get("analysis_prompt_template") or ""),
+            "signal_source_version": str(params.get("signal_source_version") or "1.0"),
+            "analysis_template": str(params.get("analysis_template") or "custom"),
             "share_runtime_data": bool(source.get("share_runtime_data")),
             "reference_runtime_ids": list(params.get("reference_runtime_ids") or []),
-            "reference_market_data": list(params.get("reference_market_data") or []),
+            "reference_market_data": references,
             "signal_params": params,
             "symbol": source["symbol"],
             "strategy_lifecycle": "independent",
         })
+
+    @staticmethod
+    def _with_automatic_background_periods(
+        symbol: str, period: str, references: List[Dict], kline_count: int,
+    ) -> List[Dict]:
+        """Add higher-timeframe context for 2.0 without changing its output period."""
+        background_map = {
+            "M1": ("M5", "M15"),
+            "M5": ("M15", "H1"),
+            "M15": ("H1", "H4"),
+            "H1": ("H4",),
+        }
+        result = [dict(item) for item in (references or []) if isinstance(item, dict)]
+        existing = {
+            (str(item.get("symbol") or "").upper(), str(item.get("period") or "").upper())
+            for item in result
+        }
+        for background_period in background_map.get(str(period).upper(), ()):
+            key = (str(symbol).upper(), background_period)
+            if key in existing:
+                continue
+            result.append({
+                "symbol": symbol,
+                "period": background_period,
+                "kline_count": max(50, min(100, int(kline_count or 100))),
+                "purpose": "automatic_background_filter",
+            })
+            existing.add(key)
+        return result
 
     def _paper_deployed_strategies(self, available_symbols) -> List:
         repo = getattr(self.llm_store, "_repo", None)
@@ -461,6 +531,7 @@ class LLMService:
             ),
             "min_risk_reward": strategy.min_risk_reward,
             "analysis_interval_minutes": interval // 60,
+            "forecast_horizon_bars": int(params.get("forecast_horizon_bars", 0) or 0),
             "kline_count": max(
                 AI_SIGNAL_KLINE_MIN_COUNT,
                 min(AI_SIGNAL_KLINE_MAX_COUNT, int(params.get("kline_count", 100))),
@@ -470,6 +541,8 @@ class LLMService:
             "analysis_prompt_template": str(
                 params.get("analysis_prompt_template") or ""
             ),
+            "signal_source_version": str(params.get("signal_source_version") or "1.0"),
+            "analysis_template": str(params.get("analysis_template") or "custom"),
             "share_runtime_data": runtime_shared,
             "reference_runtime_ids": list(
                 params.get("reference_runtime_ids") or []
@@ -529,6 +602,8 @@ class LLMService:
                     profile["analysis_prompt_template"] = str(
                         params.get("analysis_prompt_template") or ""
                     )
+                if not profile.get("signal_source_version"):
+                    profile["signal_source_version"] = str(params.get("signal_source_version") or "1.0")
                 return
 
     def _load_env_config(self):
@@ -689,6 +764,208 @@ class LLMService:
 
     # ==================== Prompt 构建 ====================
 
+    @staticmethod
+    def _period_minutes(period: str) -> int:
+        return {"M1": 1, "M5": 5, "M15": 15, "H1": 60, "H4": 240}.get(str(period).upper(), 5)
+
+    @classmethod
+    def _observation_layers(cls, available_bars: int, period: str, interval_minutes: int, horizon_bars: int = 0) -> Dict:
+        """Create observation layers from available data and source cadence."""
+        available = max(0, int(available_bars))
+        bar_minutes = cls._period_minutes(period)
+        auto_horizon = max(3, min(48, int(round(max(interval_minutes * 2, bar_minutes * 6) / bar_minutes))))
+        horizon = max(3, min(48, int(horizon_bars or auto_horizon)))
+        raw = [horizon * 2, horizon * 4, horizon * 12, available]
+        layers = []
+        seen = set()
+        for value, name, purpose in zip(raw, ("execution", "local_structure", "background", "full_context"), ("未来交易观察", "局部结构识别", "背景趋势识别", "完整上下文")):
+            bars = min(available, max(10, int(value)))
+            if bars >= 10 and bars not in seen:
+                layers.append({"name": name, "bars": bars, "purpose": purpose})
+                seen.add(bars)
+        return {"period": str(period).upper(), "bar_minutes": bar_minutes, "analysis_interval_minutes": int(interval_minutes), "forecast_horizon_bars": horizon, "forecast_horizon_minutes": horizon * bar_minutes, "layers": layers}
+
+    @staticmethod
+    def _structure_features(klines: List[Dict], period: str = "M5", interval_minutes: int = 5, horizon_bars: int = 0) -> Dict:
+        """Compute common and structure-specific evidence for source 2.0."""
+        rows = list(klines or [])
+        if len(rows) < 10:
+            return {"status": "insufficient_data", "bar_count": len(rows)}
+        layers = LLMService._observation_layers(len(rows), period, interval_minutes, horizon_bars)
+        candidates = []
+        for layer in layers["layers"]:
+            window = rows[-layer["bars"]:]
+            closes = [float(x.get("close", 0) or 0) for x in window]
+            highs = [float(x.get("high", 0) or 0) for x in window]
+            lows = [float(x.get("low", 0) or 0) for x in window]
+            ranges = [max(0.0, h - l) for h, l in zip(highs, lows)]
+            atr = sum(ranges[-min(14, len(ranges)):]) / max(1, min(14, len(ranges)))
+            upper = sorted(highs)[max(0, int(len(highs) * .90) - 1)]
+            lower = sorted(lows)[min(len(lows) - 1, int(len(lows) * .10))]
+            width = max(upper - lower, 1e-12)
+            tolerance = max(atr * .75, width * .03, 1e-12)
+            pivot_highs, pivot_lows = [], []
+            for index in range(2, len(window) - 2):
+                if highs[index] >= max(highs[index - 2:index + 3]) and highs[index] > highs[index - 1]:
+                    pivot_highs.append(highs[index])
+                if lows[index] <= min(lows[index - 2:index + 3]) and lows[index] < lows[index - 1]:
+                    pivot_lows.append(lows[index])
+            touches_high = sum(abs(x - upper) <= tolerance for x in pivot_highs)
+            touches_low = sum(abs(x - lower) <= tolerance for x in pivot_lows)
+            inside = sum(lower - tolerance <= x <= upper + tolerance for x in closes) / len(closes)
+            slope = (closes[-1] - closes[0]) / max(1, len(closes) - 1)
+            first = max(1, closes[0])
+            change_pct = (closes[-1] - closes[0]) / first * 100
+            traveled = sum(
+                abs(closes[index] - closes[index - 1])
+                for index in range(1, len(closes))
+            )
+            efficiency_ratio = (
+                abs(closes[-1] - closes[0]) / traveled if traveled > 0 else 0
+            )
+            higher_highs = sum(pivot_highs[i] > pivot_highs[i - 1] for i in range(1, len(pivot_highs)))
+            higher_lows = sum(pivot_lows[i] > pivot_lows[i - 1] for i in range(1, len(pivot_lows)))
+            lower_highs = sum(pivot_highs[i] < pivot_highs[i - 1] for i in range(1, len(pivot_highs)))
+            lower_lows = sum(pivot_lows[i] < pivot_lows[i - 1] for i in range(1, len(pivot_lows)))
+            upper_slope = ((pivot_highs[-1] - pivot_highs[0]) / max(1, len(pivot_highs) - 1)) if len(pivot_highs) >= 2 else 0
+            lower_slope = ((pivot_lows[-1] - pivot_lows[0]) / max(1, len(pivot_lows) - 1)) if len(pivot_lows) >= 2 else 0
+            half = max(2, len(window) // 2)
+            first_width = max(max(highs[:half]) - min(lows[:half]), 1e-12)
+            last_width = max(max(highs[-half:]) - min(lows[-half:]), 1e-12)
+            width_slope = (last_width - first_width) / max(1, len(window) // 2)
+            triangle_type = "none"
+            if len(pivot_highs) >= 2 and len(pivot_lows) >= 2:
+                if upper_slope < 0 and lower_slope > 0 and width_slope < 0:
+                    triangle_type = "converging"
+                elif upper_slope > 0 and lower_slope < 0 and width_slope > 0:
+                    triangle_type = "diverging"
+            previous_upper = max(highs[:-1]) if len(highs) > 2 else upper
+            previous_lower = min(lows[:-1]) if len(lows) > 2 else lower
+            breakout = "up" if closes[-1] > previous_upper + tolerance else "down" if closes[-1] < previous_lower - tolerance else "none"
+            candidates.append({
+                "layer": layer["name"], "bars": layer["bars"],
+                "common": {"atr": round(atr, 8), "change_pct": round(change_pct, 4), "slope": round(slope, 8), "efficiency_ratio": round(efficiency_ratio, 4), "pivot_high_count": len(pivot_highs), "pivot_low_count": len(pivot_lows)},
+                "range_features": {"upper": upper, "lower": lower, "width_atr": round(width / atr, 4) if atr else 0, "touch_upper": touches_high, "touch_lower": touches_low, "inside_ratio": round(inside, 4)},
+                "trend_features": {"higher_highs": higher_highs, "higher_lows": higher_lows, "lower_highs": lower_highs, "lower_lows": lower_lows, "trendline_slope": round(slope, 8)},
+                "breakout_features": {"state": breakout, "confirmation_bars": 0 if breakout == "none" else 1},
+                "triangle_features": {"type": triangle_type, "upper_slope": round(upper_slope, 8), "lower_slope": round(lower_slope, 8), "width_slope": round(width_slope, 8), "apex_distance_bars": int(width / max(abs(width_slope), 1e-12)) if triangle_type == "converging" else 0},
+            })
+        return {"status": "ok", "bar_count": len(rows), "observation": layers, "candidates": candidates, "last_close": float(rows[-1].get("close", 0) or 0)}
+
+    @staticmethod
+    def _classify_background_features(features: Dict) -> Dict:
+        """Turn deterministic K-line evidence into an auditable background label."""
+        candidates = list((features or {}).get("candidates") or [])
+        if not candidates:
+            return {
+                "structure": "mixed", "confidence": 0,
+                "reason": "高周期K线不足，无法预计算背景结构",
+            }
+        candidate = next(
+            (item for item in candidates if item.get("layer") == "background"),
+            candidates[-1],
+        )
+        common = candidate.get("common") or {}
+        range_features = candidate.get("range_features") or {}
+        trend = candidate.get("trend_features") or {}
+        triangle = candidate.get("triangle_features") or {}
+        change = float(common.get("change_pct") or 0)
+        efficiency = float(common.get("efficiency_ratio") or 0)
+        touches_upper = int(range_features.get("touch_upper") or 0)
+        touches_lower = int(range_features.get("touch_lower") or 0)
+        inside = float(range_features.get("inside_ratio") or 0)
+        higher = int(trend.get("higher_highs") or 0) + int(trend.get("higher_lows") or 0)
+        lower = int(trend.get("lower_highs") or 0) + int(trend.get("lower_lows") or 0)
+        triangle_type = str(triangle.get("type") or "none")
+
+        if triangle_type in {"converging", "diverging"}:
+            structure = f"{triangle_type}_triangle"
+            confidence = min(88, 60 + min(20, (higher + lower) * 3))
+            reason = (
+                f"高低点边界呈{'收敛' if triangle_type == 'converging' else '扩散'}，"
+                f"上沿斜率 {float(triangle.get('upper_slope') or 0):.4f}，"
+                f"下沿斜率 {float(triangle.get('lower_slope') or 0):.4f}"
+            )
+        elif touches_upper >= 2 and touches_lower >= 2 and inside >= 0.75:
+            structure = "range"
+            confidence = min(
+                90, 55 + min(18, (touches_upper + touches_lower) * 3)
+                + int(max(0, inside - 0.75) * 40),
+            )
+            reason = (
+                f"价格在箱体内比例 {inside:.0%}，"
+                f"上沿触碰 {touches_upper} 次、下沿触碰 {touches_lower} 次"
+            )
+        elif change > 0 and (
+            higher >= max(2, lower + 1) or efficiency >= 0.45
+        ):
+            structure = "uptrend"
+            confidence = min(90, 55 + min(16, higher * 4) + min(12, int(abs(change) * 3)) + int(efficiency * 10))
+            reason = f"背景涨幅 {change:.2f}%，高点/低点抬升证据 {higher} 项，方向效率 {efficiency:.0%}"
+        elif change < 0 and (
+            lower >= max(2, higher + 1) or efficiency >= 0.45
+        ):
+            structure = "downtrend"
+            confidence = min(90, 55 + min(16, lower * 4) + min(12, int(abs(change) * 3)) + int(efficiency * 10))
+            reason = f"背景跌幅 {change:.2f}%，高点/低点下移证据 {lower} 项，方向效率 {efficiency:.0%}"
+        else:
+            structure = "mixed"
+            confidence = max(35, min(60, 45 + abs(higher - lower) * 2))
+            reason = (
+                f"趋势与箱体证据均不足：涨跌幅 {change:.2f}%，"
+                f"抬升证据 {higher}，下移证据 {lower}，箱体内部比例 {inside:.0%}"
+            )
+        return {
+            "structure": structure,
+            "confidence": int(confidence),
+            "reason": reason,
+            "evidence": {
+                "bars": int(candidate.get("bars") or 0),
+                "change_pct": change,
+                "touch_upper": touches_upper,
+                "touch_lower": touches_lower,
+                "inside_ratio": inside,
+                "efficiency_ratio": efficiency,
+                "higher_structure_count": higher,
+                "lower_structure_count": lower,
+            },
+        }
+
+    @classmethod
+    def _combine_background_periods(cls, periods: Dict[str, Dict]) -> Dict:
+        """Combine short and long background periods without hiding conflicts."""
+        if not periods:
+            return {"periods": {}, "combined": "mixed", "confidence": 0, "reason": "没有可用高周期K线"}
+        ordered = sorted(
+            periods.items(), key=lambda item: cls._period_minutes(item[0])
+        )
+        structures = [item[1].get("structure", "mixed") for item in ordered]
+        directional = [
+            "up" if value == "uptrend" else "down" if value == "downtrend" else value
+            for value in structures
+        ]
+        longest = directional[-1]
+        shortest = directional[0]
+        if "up" in directional and "down" in directional:
+            combined = "conflict"
+            reason = "不同高周期趋势方向冲突，执行层不采用逆势箱体反转"
+        elif all(value == "up" for value in directional):
+            combined, reason = "uptrend", "所有可用高周期均为上涨背景"
+        elif all(value == "down" for value in directional):
+            combined, reason = "downtrend", "所有可用高周期均为下跌背景"
+        elif all(value == "range" for value in directional):
+            combined, reason = "range", "所有可用高周期均为震荡背景"
+        elif longest == "up" and shortest == "range":
+            combined, reason = "uptrend_with_local_range", "长周期上涨、较短背景周期箱体整理"
+        elif longest == "down" and shortest == "range":
+            combined, reason = "downtrend_with_local_range", "长周期下跌、较短背景周期箱体整理"
+        else:
+            combined, reason = "mixed", "高周期结构未形成一致背景"
+        confidence = int(sum(int(item.get("confidence") or 0) for item in periods.values()) / max(1, len(periods)))
+        if combined in {"conflict", "mixed"}:
+            confidence = min(confidence, 55)
+        return {"periods": periods, "combined": combined, "confidence": confidence, "reason": reason}
+
     def build_analysis_prompt(
         self,
         all_klines: Dict[str, Dict],
@@ -734,6 +1011,57 @@ class LLMService:
         template = analysis_prompt_template or getattr(
             config, "analysis_prompt_template", DEFAULT_ANALYSIS_PROMPT_TEMPLATE
         )
+        v2 = any(
+            str(profile.get("signal_source_version") or "1.0") == "2.0"
+            for symbol_plan in (analysis_plan or {}).values()
+            for profile in symbol_plan.get("strategies", [])
+        )
+        structure_sections = []
+        background_sections = []
+        if v2:
+            for symbol, klines_data in all_klines.items():
+                for period, klines in klines_data.items():
+                    if (str(symbol).upper(), str(period).upper()) in primary_keys:
+                        profile = next(
+                            (item for item in (analysis_plan or {}).get(symbol, {}).get("strategies", [])
+                             if str(item.get("symbol") or "").upper() == str(symbol).upper()),
+                            {},
+                        )
+                        structure_sections.append(
+                            f"### {symbol} / {period}\n" + json.dumps(
+                                self._structure_features(
+                                    klines, period,
+                                    int(profile.get("analysis_interval_minutes", 5) or 5),
+                                    int(profile.get("forecast_horizon_bars", 0) or 0),
+                                ), ensure_ascii=False
+                            )
+                        )
+            for symbol, symbol_plan in (analysis_plan or {}).items():
+                period_results = {}
+                for profile in symbol_plan.get("strategies", []):
+                    for reference in profile.get("reference_market_data") or []:
+                        if reference.get("purpose") != "automatic_background_filter":
+                            continue
+                        ref_symbol = str(reference.get("symbol") or symbol)
+                        ref_period = str(reference.get("period") or "").upper()
+                        rows = (all_klines.get(ref_symbol) or {}).get(ref_period) or []
+                        if not rows:
+                            continue
+                        period_results[ref_period] = self._classify_background_features(
+                            self._structure_features(
+                                rows, ref_period,
+                                int(profile.get("analysis_interval_minutes", 5) or 5),
+                                int(profile.get("forecast_horizon_bars", 0) or 0),
+                            )
+                        )
+                combined_background = self._combine_background_periods(period_results)
+                symbol_plan["background_analysis"] = combined_background
+                background_sections.append(
+                    f"### {symbol}\n" + json.dumps(
+                        combined_background, ensure_ascii=False
+                    )
+                )
+            template = STRUCTURE_ANALYSIS_PROMPT_TEMPLATE
         # The old placeholder is deliberately blank: a source is no longer
         # given strategy constraints, even when an old custom template has it.
         prompt = template.replace("{{strategy_context}}", "").replace(
@@ -741,6 +1069,8 @@ class LLMService:
         )
         current_price_text = self._current_price_context(all_klines, primary_keys)
         prompt = prompt.replace("{{current_price}}", current_price_text)
+        prompt = prompt.replace("{{structure_features}}", "\n\n".join(structure_sections))
+        prompt = prompt.replace("{{background_features}}", "\n\n".join(background_sections))
         if "{{current_price}}" not in template:
             prompt += "\n\n## 当前可交易参考价\n" + current_price_text
         reference_text = "\n\n".join(reference_sections)
@@ -1331,8 +1661,44 @@ class LLMService:
                         trend["confidence"] = self._normalize_confidence(
                             trend.get("confidence")
                         )
+            structure = analysis.get("market_structure") or {}
+            system_background = symbol_plan.get("background_analysis") or {}
+            model_background = analysis.get("background_analysis") or {}
+            # Preserve deterministic per-period evidence. The model may refine
+            # the combined label/reason after reviewing raw K-lines, but may
+            # not erase which inputs the system actually calculated.
+            analysis["background_analysis"] = {
+                "periods": system_background.get("periods") or {},
+                "combined": str(
+                    model_background.get("combined")
+                    or system_background.get("combined") or "mixed"
+                ),
+                "confidence": self._normalize_confidence(
+                    model_background.get("confidence")
+                    if model_background.get("confidence") is not None
+                    else system_background.get("confidence")
+                ),
+                "reason": str(
+                    model_background.get("reason")
+                    or system_background.get("reason") or ""
+                ),
+                "system_combined": str(system_background.get("combined") or "mixed"),
+                "system_confidence": int(system_background.get("confidence") or 0),
+            }
+            template_type = str(structure.get("template_type") or "").strip().lower()
+            triangle = template_type in {"converging_triangle", "diverging_triangle"}
+            breakout_confirmed = bool(
+                structure.get("triangle", {}).get("breakout_confirmed")
+                or structure.get("breakout_confirmed")
+                or template_type == "breakout_retest"
+            )
+            # 三角形必须先确认突破，none 结构不允许产生交易建议；这是后端
+            # 硬约束，避免模型在结构不完整时自由发单。
+            suggestions_input = analysis.get("trade_suggestions", [])
+            if template_type == "none" or (triangle and not breakout_confirmed):
+                suggestions_input = []
             normalized = []
-            for suggestion in analysis.get("trade_suggestions", []):
+            for suggestion in suggestions_input:
                 if not isinstance(suggestion, dict):
                     continue
                 period = self._canonical_period(suggestion.get("period"), symbol_plan)
@@ -1360,6 +1726,39 @@ class LLMService:
                     continue
                 profile = profiles[0]
                 source_suggestion = dict(suggestion)
+                setup_type = str(suggestion.get("setup_type") or "").strip().lower()
+                if not setup_type:
+                    if template_type == "range":
+                        setup_type = "range_reversal"
+                    elif template_type == "uptrend_pullback":
+                        setup_type = "trend_pullback"
+                    elif template_type == "downtrend_rebound":
+                        setup_type = "trend_rebound"
+                    elif template_type in {"converging_triangle", "diverging_triangle", "breakout_retest"}:
+                        setup_type = "triangle_breakout" if triangle else "range_breakout"
+                    else:
+                        setup_type = "none"
+                entry_mode = str(suggestion.get("entry_mode") or "").strip().lower()
+                if entry_mode not in {"touch_or_near", "breakout"}:
+                    entry_mode = "breakout" if setup_type in {
+                        "range_breakout", "triangle_breakout"
+                    } else "touch_or_near"
+                confirmation = str(suggestion.get("confirmation") or "none").strip().lower()
+                if confirmation not in {"none", "close_confirmed", "retest_confirmed"}:
+                    confirmation = "none"
+                activation_status = str(
+                    suggestion.get("activation_status") or ""
+                ).strip().lower()
+                if activation_status not in {"active", "pending_confirmation"}:
+                    activation_status = (
+                        "pending_confirmation"
+                        if entry_mode == "breakout" and confirmation == "none"
+                        else "active"
+                    )
+                # A breakout plan is never executable before a close/retest
+                # confirmation, even if the model forgot to mark it pending.
+                if entry_mode == "breakout" and confirmation == "none":
+                    activation_status = "pending_confirmation"
                 source_suggestion.update({
                     "signal_source_id": profile.get("signal_source_id", ""),
                     "period": period,
@@ -1369,12 +1768,152 @@ class LLMService:
                     "entry_price": entry,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
+                    "setup_type": setup_type,
+                    "entry_mode": entry_mode,
+                    "confirmation": confirmation,
+                    "activation_status": activation_status,
+                    "market_structure": analysis.get("market_structure") or {},
+                    "background_analysis": analysis.get("background_analysis") or {},
+                    "trade_horizon": analysis.get("trade_horizon") or {},
+                })
+                now_ts = int(time.time())
+                horizon = source_suggestion.get("trade_horizon") or {}
+                horizon_minutes = int(horizon.get("minutes") or 0)
+                if horizon_minutes <= 0:
+                    horizon_minutes = max(
+                        30,
+                        int(profile.get("analysis_interval_minutes", 5) or 5) * 3,
+                    )
+                fingerprint_payload = "|".join((
+                    str(profile.get("signal_source_id") or ""), period,
+                    setup_type, direction, entry_mode,
+                    f"{entry:.8f}", f"{stop_loss:.8f}", f"{take_profit:.8f}",
+                ))
+                source_suggestion.update({
+                    "plan_id": hashlib.sha256(
+                        fingerprint_payload.encode("utf-8")
+                    ).hexdigest()[:20],
+                    "valid_from": now_ts,
+                    "expires_at": now_ts + horizon_minutes * 60,
+                    "status": (
+                        "pending_confirmation"
+                        if activation_status == "pending_confirmation"
+                        else "active"
+                    ),
+                    "triggered_at": 0,
+                    "invalidated_reason": "",
                 })
                 # Model output is source-owned. A binding strategy applies its
                 # own confidence, risk and position-management rules later.
                 source_suggestion.pop("strategy_id", None)
                 source_suggestion.pop("strategy_name", None)
                 normalized.append(source_suggestion)
+
+            # A valid range is a two-sided plan. If the model returned only
+            # one reversal side, synthesize the missing boundary plan from
+            # the same box and risk distance so the strategy can evaluate
+            # both future directions on subsequent Ticks.
+            if template_type == "range" and normalized:
+                box = structure.get("range") or {}
+                try:
+                    upper = float(box.get("upper") or 0)
+                    lower = float(box.get("lower") or 0)
+                except (TypeError, ValueError):
+                    upper = lower = 0.0
+                directions = {str(item.get("direction") or "").lower() for item in normalized}
+                if upper > lower > 0:
+                    base = normalized[0]
+                    entry = float(base.get("entry_price") or 0)
+                    stop = float(base.get("stop_loss") or 0)
+                    risk = abs(entry - stop) if entry > 0 and stop > 0 else max((upper - lower) * 0.2, 0.00000001)
+                    source_id = str(base.get("signal_source_id") or "")
+                    period = str(base.get("period") or "")
+                    confidence = int(base.get("confidence") or 0)
+                    if "buy" not in directions:
+                        normalized.append({
+                            **base, "direction": "buy", "entry_price": lower,
+                            "stop_loss": lower - risk, "take_profit": upper,
+                            "setup_type": "range_reversal", "entry_mode": "touch_or_near",
+                            "confirmation": "none", "activation_status": "active",
+                            "reason": f"箱体下沿 {lower:g} 反转买入计划，止损放在下沿下方，止盈看向上沿。",
+                            "signal_source_id": source_id, "period": period,
+                            "confidence": confidence,
+                        })
+                    if "sell" not in directions:
+                        normalized.append({
+                            **base, "direction": "sell", "entry_price": upper,
+                            "stop_loss": upper + risk, "take_profit": lower,
+                            "setup_type": "range_reversal", "entry_mode": "touch_or_near",
+                            "confirmation": "none", "activation_status": "active",
+                            "reason": f"箱体上沿 {upper:g} 反转卖出计划，止损放在上沿上方，止盈看向下沿。",
+                            "signal_source_id": source_id, "period": period,
+                            "confidence": confidence,
+                        })
+                    # Keep both pending breakout plans alongside the reversal
+                    # plans. They activate only after close/retest confirmation.
+                    breakout_directions = {
+                        str(item.get("direction") or "").lower()
+                        for item in normalized
+                        if item.get("setup_type") == "range_breakout"
+                    }
+                    buffer = max((upper - lower) * 0.01, risk * 0.5, 1e-8)
+                    if "buy" not in breakout_directions:
+                        normalized.append({
+                            **base, "direction": "buy", "entry_price": upper + buffer,
+                            "stop_loss": upper - buffer, "take_profit": upper + (upper - lower),
+                            "setup_type": "range_breakout", "entry_mode": "breakout",
+                            "confirmation": "none", "activation_status": "pending_confirmation",
+                            "reason": f"若收盘有效突破箱体上沿 {upper:g}，回踩确认后买入，止损回到上沿下方，止盈按箱体高度投射。",
+                            "signal_source_id": source_id, "period": period,
+                            "confidence": confidence,
+                        })
+                    if "sell" not in breakout_directions:
+                        normalized.append({
+                            **base, "direction": "sell", "entry_price": lower - buffer,
+                            "stop_loss": lower + buffer, "take_profit": lower - (upper - lower),
+                            "setup_type": "range_breakout", "entry_mode": "breakout",
+                            "confirmation": "none", "activation_status": "pending_confirmation",
+                            "reason": f"若收盘有效跌破箱体下沿 {lower:g}，反抽确认后卖出，止损回到下沿上方，止盈按箱体高度投射。",
+                            "signal_source_id": source_id, "period": period,
+                            "confidence": confidence,
+                        })
+
+            # Recompute lifecycle metadata after range completion so every
+            # synthesized side receives its own stable plan identity.
+            now_ts = int(time.time())
+            for item in normalized:
+                setup = str(item.get("setup_type") or "none").lower()
+                direction = str(item.get("direction") or "").lower()
+                mode = str(item.get("entry_mode") or "touch_or_near").lower()
+                try:
+                    item_entry = float(item.get("entry_price") or 0)
+                    item_stop = float(item.get("stop_loss") or 0)
+                    item_take = float(item.get("take_profit") or 0)
+                except (TypeError, ValueError):
+                    continue
+                horizon = item.get("trade_horizon") or {}
+                horizon_minutes = int(horizon.get("minutes") or 0)
+                if horizon_minutes <= 0:
+                    horizon_minutes = max(
+                        30,
+                        int(profile.get("analysis_interval_minutes", 5) or 5) * 3,
+                    )
+                fingerprint_payload = "|".join((
+                    str(item.get("signal_source_id") or ""),
+                    str(item.get("period") or "").upper(), setup, direction, mode,
+                    f"{item_entry:.8f}", f"{item_stop:.8f}", f"{item_take:.8f}",
+                ))
+                pending = str(item.get("activation_status") or "") == "pending_confirmation"
+                item.update({
+                    "plan_id": hashlib.sha256(
+                        fingerprint_payload.encode("utf-8")
+                    ).hexdigest()[:20],
+                    "valid_from": now_ts,
+                    "expires_at": now_ts + horizon_minutes * 60,
+                    "status": "pending_confirmation" if pending else "active",
+                    "triggered_at": 0,
+                    "invalidated_reason": "",
+                })
 
             analysis["trade_suggestions"] = normalized
         return response
@@ -1397,6 +1936,11 @@ class LLMService:
                 canonical = str(period).upper()
                 if not isinstance(trends.get(canonical), dict):
                     missing.append(f"{symbol}/{canonical}")
+            if any(
+                str(profile.get("signal_source_version") or "1.0") == "2.0"
+                for profile in symbol_plan.get("strategies", [])
+            ) and not isinstance((analysis or {}).get("market_structure"), dict):
+                missing.append(f"{symbol}/market_structure")
         if missing:
             raise LLMResponseFormatError(
                 "大模型响应缺少必需的趋势分析：" + "、".join(missing)
@@ -1426,6 +1970,10 @@ class LLMService:
                     model = scene_model
                 system_prompt = str(profile.get("system_prompt") or "").strip()
                 template = str(profile.get("analysis_prompt_template") or "").strip()
+                version = str(profile.get("signal_source_version") or "1.0")
+                if version == "2.0":
+                    system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+                    template = STRUCTURE_ANALYSIS_PROMPT_TEMPLATE
                 if not system_prompt or not template:
                     # Source records created before the dedicated prompt flow are
                     # intentionally not allowed to silently use a generic prompt.
@@ -1448,6 +1996,7 @@ class LLMService:
                     "model": model,
                     "system_prompt": system_prompt,
                     "analysis_prompt_template": template,
+                    "signal_source_version": version,
                     "reference_runtime_ids": references,
                     "plan": {
                         symbol: {
@@ -1541,7 +2090,7 @@ class LLMService:
             current.setdefault("trade_suggestions", []).extend(
                 analysis.get("trade_suggestions") or []
             )
-            for key in ("overall_trend", "key_levels", "analyzed_at"):
+            for key in ("market_structure", "trade_horizon", "overall_trend", "key_levels", "analyzed_at"):
                 if analysis.get(key) is not None:
                     current[key] = analysis[key]
 
@@ -1630,7 +2179,20 @@ class LLMService:
         matched = []
 
         result = self.llm_store.get_analysis_result(symbol)
+        # AI 信号源的行情账户可能与策略部署账户不同。部署账户缓存没有
+        # 分析时，按具体信号源回退到其绑定的行情账户运行快照。
+        if (not result or not result.trade_suggestions) and signal_source_id:
+            result = self.llm_store.get_analysis_result_for_source(
+                symbol, signal_source_id,
+            )
         if not result or not result.trade_suggestions:
+            return matched
+
+        # Never consume a plan from an analysis that has already gone stale.
+        # Ticks can continue arriving while the scheduler/LLM provider is
+        # unavailable; using the last range boundary after that point turns a
+        # valid historical plan into a late, usually adverse, entry.
+        if bool(getattr(result, "data_stale", False)):
             return matched
 
         for suggestion in result.trade_suggestions:
@@ -1642,23 +2204,148 @@ class LLMService:
             direction = suggestion.get('direction')
             stop_loss = suggestion.get('stop_loss')
             take_profit = suggestion.get('take_profit')
+            entry_mode = str(suggestion.get("entry_mode") or "touch_or_near").lower()
+            confirmation = str(suggestion.get("confirmation") or "none").lower()
+            activation_status = str(
+                suggestion.get("activation_status")
+                or ("pending_confirmation" if entry_mode == "breakout" else "active")
+            ).lower()
+            plan_status = str(
+                suggestion.get("status") or activation_status
+            ).lower()
+
+            now_ts = int(time.time())
+            try:
+                plan_expires_at = int(suggestion.get("expires_at") or 0)
+            except (TypeError, ValueError):
+                plan_expires_at = 0
+            if plan_expires_at and now_ts > plan_expires_at:
+                suggestion["status"] = "expired"
+                suggestion["invalidated_reason"] = "交易计划已超过有效期"
+                continue
+            if plan_status in {"expired", "invalidated", "triggered"}:
+                continue
+
+            # Higher-timeframe background is a hard filter for range-reversal
+            # entries. Breakout plans are handled by close/retest confirmation
+            # because a confirmed breakout can itself change the background.
+            setup_type = str(suggestion.get("setup_type") or "").lower()
+            structure = suggestion.get("market_structure") or {}
+            background_analysis = suggestion.get("background_analysis") or {}
+            background = str(
+                background_analysis.get("combined")
+                or structure.get("background_structure")
+                or (suggestion.get("overall_trend") or {}).get("direction")
+                or "none"
+            ).lower()
+            background_direction = (
+                "up" if "uptrend" in background
+                else "down" if "downtrend" in background
+                else background
+            )
+            countertrend_range = (
+                setup_type == "range_reversal"
+                and (
+                    background == "conflict"
+                    or (background_direction == "up" and direction == "sell")
+                    or (background_direction == "down" and direction == "buy")
+                )
+            )
+            if countertrend_range:
+                continue
 
             if not entry_price or entry_price <= 0:
                 continue
+
+            # A touch plan is invalid once price has already moved a material
+            # part of the way from entry toward its structural stop. Entering
+            # there would mean buying a failed support or selling a failed
+            # resistance before the formal stop is reached.
+            risk_distance = abs(float(entry_price) - float(stop_loss or 0))
+            adverse_distance = (
+                float(entry_price) - float(current_price)
+                if direction == "buy"
+                else float(current_price) - float(entry_price)
+            )
+            if (
+                (direction == "buy" and current_price <= stop_loss)
+                or (direction == "sell" and current_price >= stop_loss)
+                or (
+                    entry_mode != "breakout" and risk_distance > 0
+                    and adverse_distance >= risk_distance * 0.25
+                )
+            ):
+                suggestion["status"] = "invalidated"
+                suggestion["invalidated_reason"] = (
+                    "价格已向止损方向穿越入场位，原交易结构失效"
+                )
+                continue
+
+            # A plan is valid for a bounded number of bars, not indefinitely.
+            # Keep a generous floor for slow providers while tying the upper
+            # bound to the analysis period (three analysis windows).
+            analyzed_at = result.analyzed_at or ""
+            if analyzed_at:
+                try:
+                    analyzed_dt = datetime.fromisoformat(
+                        str(analyzed_at).replace("Z", "+00:00")
+                    )
+                    if analyzed_dt.tzinfo is not None:
+                        now_dt = datetime.now(analyzed_dt.tzinfo)
+                    else:
+                        now_dt = datetime.now()
+                    period_minutes = {
+                        "M1": 1, "M5": 5, "M15": 15,
+                        "H1": 60, "H4": 240,
+                    }.get(str(period or "").upper(), 5)
+                    max_age_seconds = max(30 * 60, period_minutes * 3 * 60)
+                    if (now_dt - analyzed_dt).total_seconds() > max_age_seconds:
+                        continue
+                except (TypeError, ValueError):
+                    # Legacy timestamps are not allowed to break tick
+                    # processing; the scheduler's data_stale flag remains the
+                    # fallback guard for those records.
+                    pass
 
             # 验证止损止盈
             if not stop_loss or not take_profit or stop_loss <= 0 or take_profit <= 0:
                 print(f"[LLMService] 跳过无效建议: {period} sl={stop_loss}, tp={take_profit}")
                 continue
 
+            # TICK only activates a normal near-entry plan. A breakout plan
+            # may reach its trigger price first, but must wait for the AI
+            # analysis to report a confirmed close or retest.
+            if entry_mode == "breakout" and (
+                activation_status != "active"
+                or confirmation not in {"close_confirmed", "retest_confirmed"}
+            ):
+                continue
+
             price_diff_pct = abs(current_price - entry_price) / entry_price
+
+            # Reaching a planned level is different from chasing after it.
+            # Once price has moved in the intended direction beyond half of
+            # the configured near-entry tolerance, wait for a return to the
+            # planned level or for a fresh analysis instead of paying up.
+            favorable_chase = (
+                current_price > entry_price
+                if direction == "buy" else current_price < entry_price
+            )
+            max_chase_pct = min(float(threshold) * 0.5, 0.0004)
+            if favorable_chase and price_diff_pct > max_chase_pct:
+                continue
 
             if price_diff_pct <= threshold:
                 # 检查冷却
-                can_alert = self.llm_store.check_entry_alert_cooldown(
-                    symbol, period, direction, entry_price, strategy_id,
-                    str(suggestion.get("signal_source_id") or ""),
-                    result.analyzed_at or "",
+                # Structured plans are deduplicated persistently at the
+                # account/deployment order guard. Do not suppress a second
+                # account bound to the same strategy in this user-level store.
+                can_alert = bool(suggestion.get("plan_id")) or (
+                    self.llm_store.check_entry_alert_cooldown(
+                        symbol, period, direction, entry_price, strategy_id,
+                        str(suggestion.get("signal_source_id") or ""),
+                        result.analyzed_at or "",
+                    )
                 )
 
                 if can_alert:
@@ -1674,8 +2361,23 @@ class LLMService:
                         "price_diff_pct": round(price_diff_pct * 100, 4),
                         "stop_loss": stop_loss,
                         "take_profit": take_profit,
+                        "setup_type": suggestion.get("setup_type"),
+                        "entry_mode": entry_mode,
+                        "confirmation": confirmation,
+                        "activation_status": activation_status,
+                        "plan_id": suggestion.get("plan_id"),
+                        "valid_from": suggestion.get("valid_from"),
+                        "expires_at": suggestion.get("expires_at"),
+                        # Trigger state is strategy-scoped. Do not mutate the
+                        # shared source plan or the first strategy would hide
+                        # it from other deployments bound to the same source.
+                        "status": "triggered",
+                        "triggered_at": now_ts,
                         "confidence": suggestion.get('confidence', 75),
                         "reason": suggestion.get('reason'),
+                        "trend": (result.trend_analysis or {}).get(str(period).upper()) or {},
+                        "overall_trend": result.overall_trend or {},
+                        "background_analysis": background_analysis,
                         "analyzed_at": result.analyzed_at
                     })
                     print(f"[LLMService] 价格接近AI入场价: {symbol} {period} "
@@ -1734,11 +2436,20 @@ class LLMService:
         )
         active_symbols = status["active"]
 
-        # 更新过期和休市品种状态
+        # 更新过期和休市品种状态。
+        #
+        # K 线目前由 EA 推送到进程内缓存。服务重启后，EA 可能仍认为自己
+        # 已完成初始化，不会再次发送全量 K 线；此时 ``closed`` 只表示
+        # “本进程尚未收到 K 线”，不能证明交易市场真的休市。若在这里把
+        # 已保存的 AI 分析标记为 stale/closed，分析卡片会永久显示过期，
+        # 后续 Tick 也会被信号规则拦截，直到 EA 人工重启。
+        # 只有已经初始化过 M1 的品种，才允许用本轮时效检查覆盖分析状态。
         for symbol in status["stale"]:
-            self.llm_store.update_market_status(symbol, "stale", data_stale=True)
+            if self.kline_service.is_initialized(symbol, "M1"):
+                self.llm_store.update_market_status(symbol, "stale", data_stale=True)
         for symbol in status["closed"]:
-            self.llm_store.update_market_status(symbol, "closed", data_stale=True)
+            if self.kline_service.is_initialized(symbol, "M1"):
+                self.llm_store.update_market_status(symbol, "closed", data_stale=True)
 
         if not active_symbols:
             stale_minutes = self.STALE_THRESHOLD // 60
@@ -1820,6 +2531,19 @@ class LLMService:
                     object_type="ai_market_analysis",
                     object_id=",".join(source_ids),
                 )
+            except LLMQuotaExceeded as exc:
+                message = str(exc)
+                failed_sources.append({
+                    "source_ids": source_ids,
+                    "message": message,
+                })
+                self._notify_quota_exhausted(source_ids, exc)
+                print(
+                    "[LLMService] AI行情分析额度不足，跳过当前信号源: "
+                    f"{','.join(source_ids) or 'unknown'}: {message}"
+                )
+                report("warning", "AI行情分析额度不足，已通知管理员")
+                continue
             except LLMRequestError as exc:
                 message = str(exc)
                 failed_sources.append({

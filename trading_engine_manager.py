@@ -5,6 +5,7 @@
 import os
 import threading
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
@@ -66,6 +67,7 @@ class TradingEngineManager:
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._next_paper_maintenance_at = time.monotonic() + 10
         self._next_data_retention_at = time.monotonic() + 60
+        self._last_data_retention_date = ""
 
     @staticmethod
     def _create_engine(user_id: int, account_id: int) -> TradingServer:
@@ -209,8 +211,15 @@ class TradingEngineManager:
             scheduler.submit(
                 ("paper", "maintenance"), self.paper_trading.run_maintenance
             )
-        if self._data_retention_enabled and now >= self._next_data_retention_at:
-            self._next_data_retention_at = now + 86400
+        current_wall = datetime.now()
+        retention_due = (
+            self._data_retention_enabled
+            and current_wall.hour == 2
+            and current_wall.minute == 0
+            and self._last_data_retention_date != current_wall.date().isoformat()
+        )
+        if retention_due:
+            self._last_data_retention_date = current_wall.date().isoformat()
             scheduler.submit(
                 ("system", "data_retention"),
                 self.data_retention.run_maintenance,

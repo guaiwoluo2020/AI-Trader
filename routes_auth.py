@@ -65,6 +65,7 @@ def create_auth_routes(
 
     def login_response(user: AuthUser) -> LoginResponse:
         auth_manager = get_auth_manager()
+        user = auth_manager.start_session(user)
         return LoginResponse(
             status="ok",
             token=auth_manager.create_token(user),
@@ -259,6 +260,29 @@ def create_auth_routes(
                 **summary,
             })
         return {"status": "ok", "users": users}
+
+    @router.post("/admin/users/{user_id}/view-token")
+    async def create_user_view_token(
+        user_id: int,
+        user: AuthUser = Depends(require_admin),
+    ):
+        """管理员生成一小时只读用户视图 Token，不改变目标用户登录状态。"""
+        target = user_repository.get_by_id(user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        auth_manager = get_auth_manager()
+        target_user = auth_manager._to_auth_user(target)
+        token = auth_manager.create_view_token(user, target_user)
+        return {
+            "status": "ok",
+            "token": token,
+            "expires_in": min(auth_manager.token_ttl_seconds, 60 * 60),
+            "user": {
+                **_user_info(target_user).model_dump(),
+                "view_only": True,
+                "impersonated_by": user.user_id,
+            },
+        }
 
     @router.put("/admin/users/{user_id}/quota")
     async def save_user_quota(

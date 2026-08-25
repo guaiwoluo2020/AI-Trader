@@ -141,11 +141,11 @@ class LLMAnalyzer:
 
     def check_entry_price_nearby(
         self, symbol: str, current_price: float, threshold: float = 0.0008,
-        strategy_id: str = "",
+        strategy_id: str = "", signal_source_id: str = "",
     ) -> list:
         """检查入场价是否接近"""
         return self.llm_service.check_entry_price_nearby(
-            symbol, current_price, threshold, strategy_id
+            symbol, current_price, threshold, strategy_id, signal_source_id
         )
 
     # ==================== WebSocket 管理 ====================

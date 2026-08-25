@@ -477,7 +477,7 @@
                   <td><v-text-field v-model="item.quotaDraft.max_datasets" :disabled="item.role === 'admin'" placeholder="等级默认" type="number" min="0" max="1000" density="compact" hide-details /></td>
                   <td><v-text-field v-model="item.quotaDraft.max_strategies" :disabled="item.role === 'admin'" placeholder="等级默认" type="number" min="0" max="1000" density="compact" hide-details /></td>
                   <td><v-text-field v-model="item.quotaDraft.max_signal_sources" :disabled="item.role === 'admin'" placeholder="等级默认" type="number" min="0" max="1000" density="compact" hide-details /></td>
-                  <td><v-btn size="small" color="primary" :disabled="item.role === 'admin'" :loading="quotaSaving === item.user_id" @click="saveUserQuota(item)">保存</v-btn></td>
+                  <td><div class="d-flex ga-1"><v-btn size="small" color="primary" :disabled="item.role === 'admin'" :loading="quotaSaving === item.user_id" @click="saveUserQuota(item)">保存</v-btn><v-btn size="small" variant="tonal" :disabled="item.role === 'admin'" @click="viewAsUser(item)">查看页面</v-btn></div></td>
                 </tr>
               </tbody>
             </v-table>
@@ -1279,7 +1279,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { marketAPI } from '@/api/market'
 import { accountAPI, authAPI } from '@/api/trading'
-import { authState } from '@/auth'
+import { authState, saveAdminSessionForView, setAuthSession } from '@/auth'
 
 export default {
   name: 'Settings',
@@ -1678,6 +1678,19 @@ export default {
         showError.value = true
       } finally {
         quotaSaving.value = null
+      }
+    }
+
+    const viewAsUser = async (item) => {
+      if (item.role === 'admin') return
+      try {
+        saveAdminSessionForView()
+        const data = await authAPI.createUserViewToken(item.user_id)
+        setAuthSession({ token: data.token, user: data.user })
+        window.location.href = '/'
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '进入用户查看模式失败'
+        showError.value = true
       }
     }
 
@@ -3509,6 +3522,7 @@ export default {
       quotaUsers,
       quotaSaving,
       saveUserQuota,
+      viewAsUser,
       invitations,
       invitationForm,
       invitationSaving,

@@ -44,6 +44,9 @@ class DataRetentionService:
             "alpha_research_signals": self._delete_alpha_signals(
                 current, terminal
             ),
+            "historical_klines": self._delete_in_batches(
+                "historical_klines", "timestamp < ?", (current - 7 * 86400,)
+            ),
         }
         return results
 

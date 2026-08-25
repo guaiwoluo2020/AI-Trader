@@ -10,6 +10,7 @@
       <v-spacer></v-spacer>
       <AccountSelector v-if="showAccountSelector" :account-types="accountSelectorTypes" class="mr-4" />
       <div class="user-badge">{{ currentUsername }}</div>
+      <v-btn v-if="authState.user?.view_only" size="small" color="warning" variant="flat" class="mr-2" @click="exitViewMode">退出用户查看</v-btn>
       <v-btn variant="text" @click="logout">退出登录</v-btn>
     </v-app-bar>
 
@@ -65,7 +66,7 @@
 <script>
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { authState, clearAuthSession } from './auth'
+import { authState, clearAuthSession, restoreAdminSession } from './auth'
 import AccountSelector from './components/AccountSelector.vue'
 import { useAccountContext } from './composables/useAccountContext'
 
@@ -128,6 +129,14 @@ export default {
     })))
     const showShell = computed(() => !route.meta.public)
     const currentUsername = computed(() => authState.user?.username || '未登录')
+    const exitViewMode = () => {
+      if (!restoreAdminSession()) {
+        clearAuthSession()
+        router.push('/login')
+        return
+      }
+      router.push('/settings')
+    }
     const accountRoutes = new Set(['Dashboard', 'TradeOrders', 'Positions'])
     const showAccountSelector = computed(() => accountRoutes.has(route.name))
     const accountSelectorTypes = computed(() => (
@@ -146,7 +155,7 @@ export default {
     watch(
       () => route.path,
       (path) => {
-        const activeGroup = menuGroups.find((group) =>
+        const activeGroup = menuGroups.value.find((group) =>
           group.items.some((item) => item.path === path)
         )
         if (activeGroup && !openedGroups.value.includes(activeGroup.value)) {
@@ -176,6 +185,8 @@ export default {
       menuGroups,
       showShell,
       currentUsername,
+      authState,
+      exitViewMode,
       showAccountSelector,
       accountSelectorTypes,
       toggleDrawer,

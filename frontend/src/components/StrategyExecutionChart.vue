@@ -1,88 +1,52 @@
 <template>
-  <section class="execution-chart-shell">
-    <div class="chart-head">
-      <div><span class="chart-kicker">MARKET EVENTS</span><strong>{{ symbol }} · {{ period }} K线</strong></div>
-      <div class="legend"><span><i class="buy" />买入</span><span><i class="sell" />卖出</span><span><i class="tp" />止盈</span><span><i class="sl" />止损</span><span><i class="close" />平仓</span></div>
-    </div>
-    <div v-if="!bars.length" class="empty"><v-icon icon="mdi-chart-candlestick" />暂无可用K线</div>
-    <div v-else ref="chartEl" class="chart" />
+  <section class="replay-shell">
+    <header class="replay-header"><div><span>MARKET REPLAY</span><strong>{{ symbol }} · {{ period }} K线交易回放</strong><small>北京时间 · 当前区间 {{ activeBars.length }} 根K线，{{ visibleEvents.length }} / {{ props.events.length }} 条交易事件</small></div><div class="replay-legend"><i class="buy-dot"/>买入<i class="sell-dot"/>卖出<i class="tp-dot"/>止盈<i class="sl-dot"/>止损<i class="close-dot"/>平仓</div></header>
+    <div v-if="bars.length" class="range-tools"><span>时间范围</span><v-btn-toggle v-model="selectedRange" density="compact" color="primary" mandatory divided><v-btn value="6h">6小时</v-btn><v-btn value="24h">24小时</v-btn><v-btn value="3d">3天</v-btn><v-btn value="all">全部</v-btn></v-btn-toggle></div>
+    <v-alert v-if="selectedRange==='all' && outOfRangeEventCount" type="warning" variant="tonal" density="compact" class="range-warning">另有 {{ outOfRangeEventCount }} 条交易事件超出服务器现有 K 线时间范围，补齐对应历史 K 线后会自动显示。</v-alert>
+    <div v-if="entryPositions.length" class="position-tools"><span>开仓 {{ entryPositions.length }} 次</span><v-btn size="x-small" :color="selectedPositionId ? undefined : 'primary'" :variant="selectedPositionId ? 'text' : 'tonal'" @click="selectedPositionId=''">全部事件</v-btn><v-btn v-for="position in entryPositions" :key="position.position_id" size="x-small" :color="selectedPositionId===position.position_id?'primary':undefined" :variant="selectedPositionId===position.position_id?'tonal':'outlined'" @click="selectedPositionId=position.position_id">{{ position.direction==='buy'?'买入':'卖出' }} · {{ position.timeLabel }}</v-btn></div>
+    <div v-if="!activeBars.length" class="replay-empty"><v-icon icon="mdi-chart-candlestick" size="34"/><span>暂无可用 K 线（服务返回 {{ props.bars.length }} 根）</span></div>
+    <div v-else ref="chartEl" class="replay-chart"/>
+    <v-card v-if="selectedDecision" class="decision-context" variant="tonal">
+      <div class="decision-context-head"><div><span class="context-kicker">DECISION CONTEXT</span><strong>{{ eventLabel(selectedEvent) }} · {{ formatEventTime(selectedEvent) }}</strong></div><v-chip size="x-small" :color="decisionStatusColor(selectedDecision.status)" variant="tonal">{{ decisionStatusLabel(selectedDecision.status) }}</v-chip></div>
+      <div class="context-grid"><div><label>行情与信号</label><p>{{ signalText(selectedDecision) }}</p></div><div><label>策略判断</label><p>{{ selectedDecision.decision_reason || selectedDecision.reason || '未记录策略理由' }}</p></div><div><label>风控检查</label><p>{{ checkText(selectedDecision.position_check) }}；{{ checkText(selectedDecision.risk_check) }}</p></div><div><label>执行结果</label><p>{{ executionText(selectedDecision) }}</p></div></div>
+      <div v-if="aiSignalDetails.length" class="ai-analysis-context"><div class="ai-analysis-title"><label>当时 AI 行情分析与交易建议</label><v-chip size="x-small" :color="aiTrendColor(aiSignalDetails[0])" variant="tonal">{{ aiTrendLabel(aiSignalDetails[0]) }}<span v-if="aiSignalDetails[0].ai_trend_confidence"> · {{ aiSignalDetails[0].ai_trend_confidence }}%</span></v-chip></div><div v-for="(signal,index) in aiSignalDetails" :key="`${signal.signal_id || index}`" class="ai-suggestion-row"><div class="ai-suggestion-reason"><div>{{ signal.trigger_reason || 'AI 未提供建议理由' }}</div><small v-if="signal.ai_trend_reason">行情判断：{{ signal.ai_trend_reason }}</small></div><div class="ai-price-pills"><span>入场 <b>{{ formatPrice(signal.ai_original_entry || signal.suggested_entry || selectedDecision.entry_price) }}</b></span><span>止损 <b class="negative">{{ formatPrice(signal.suggested_sl || selectedDecision.sl) }}</b></span><span>止盈 <b class="positive">{{ formatPrice(signal.suggested_tp || selectedDecision.tp) }}</b></span><span v-if="signal.risk_reward_ratio">盈亏比 <b>{{ Number(signal.risk_reward_ratio).toFixed(2) }}</b></span></div></div></div>
+    </v-card>
   </section>
 </template>
-
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
-
-const props = defineProps({
-  symbol: { type: String, default: '' },
-  period: { type: String, default: 'M5' },
-  bars: { type: Array, default: () => [] },
-  events: { type: Array, default: () => [] },
-})
-const chartEl = ref(null)
-let chart
-
-function timeValue(value) {
-  if (value == null || value === '') return 0
-  if (typeof value === 'number' || /^\d+$/.test(String(value))) return Number(value) * (Number(value) < 1e12 ? 1000 : 1)
-  const parsed = Date.parse(String(value).replace(' ', 'T'))
-  return Number.isNaN(parsed) ? 0 : parsed
-}
-function bucketFor(value) {
-  const target = timeValue(value)
-  if (!target) return null
-  return props.bars.reduce((best, bar) => {
-    const distance = Math.abs(timeValue(bar.timestamp || bar.time) - target)
-    return !best || distance < best.distance ? { bar, distance } : best
-  }, null)?.bar || null
-}
-function points(type) {
-  return props.events.filter(event => event.type === type).map(event => {
-    const bar = bucketFor(event.timestamp)
-    if (!bar) return null
-    return { name: event.reason || type, value: [String(bar.timestamp || bar.time), Number(event.price || 0)], event }
-  }).filter(Boolean)
-}
-function axisTime(value) {
-  return new Date(timeValue(value)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
-}
-async function render() {
-  if (!props.bars.length) { chart?.dispose(); chart = null; return }
-  await nextTick()
-  if (!chartEl.value) return
-  chart ||= echarts.init(chartEl.value)
-  const categories = props.bars.map(bar => String(bar.timestamp || bar.time))
-  const marker = (name, type, color, symbol, rotate = 0) => ({
-    name, type: 'scatter', data: points(type), symbol, symbolRotate: rotate, symbolSize: 13,
-    itemStyle: { color, borderColor: '#fff', borderWidth: 1 },
-    label: { show: true, formatter: name.slice(0, 2), color, fontSize: 9, position: rotate ? 'top' : 'bottom' }, z: 5,
-  })
-  chart.setOption({
-    animation: false,
-    legend: { top: 4, right: 8, data: ['K线', '买入', '卖出', '止盈', '止损', '平仓'], textStyle: { color: '#687871', fontSize: 10 } },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' }, backgroundColor: 'rgba(20,47,41,.94)', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
-    grid: { left: 54, right: 16, top: 36, bottom: 34 },
-    xAxis: { type: 'category', data: categories, axisLabel: { color: '#77847e', fontSize: 9, formatter: axisTime, hideOverlap: true }, axisLine: { lineStyle: { color: '#cbd8d1' } } },
-    yAxis: { scale: true, splitNumber: 5, axisLabel: { color: '#77847e', fontSize: 9 }, splitLine: { lineStyle: { color: '#e6ede9' } } },
-    dataZoom: [{ type: 'inside' }, { type: 'slider', bottom: 2, height: 16, showDetail: false, fillerColor: 'rgba(32,112,88,.12)' }],
-    series: [
-      { name: 'K线', type: 'candlestick', data: props.bars.map(bar => [Number(bar.open), Number(bar.close), Number(bar.low), Number(bar.high)]), itemStyle: { color: '#1b8a67', color0: '#d35d50', borderColor: '#1b8a67', borderColor0: '#d35d50' } },
-      marker('买入', 'buy', '#0f8060', 'triangle'), marker('卖出', 'sell', '#c84f43', 'triangle', 180),
-      marker('止盈', 'take_profit', '#c3913d', 'diamond'), marker('止损', 'stop_loss', '#8e4c9e', 'diamond'), marker('平仓', 'close', '#55717c', 'circle'),
-    ],
-  }, true)
-}
-function resize() { chart?.resize() }
-watch(() => [props.bars, props.events], render, { deep: true, immediate: true })
-onMounted(render); window.addEventListener('resize', resize)
-onBeforeUnmount(() => { window.removeEventListener('resize', resize); chart?.dispose() })
+const props=defineProps({symbol:{type:String,default:''},period:{type:String,default:'M5'},bars:{type:Array,default:()=>[]},events:{type:Array,default:()=>[]},decisions:{type:Array,default:()=>[]}})
+const chartEl=ref(null),selectedRange=ref('all'),selectedPositionId=ref(''),selectedEvent=ref(null);let chart
+const timeValue=v=>{if(v==null||v==='')return 0;if(typeof v==='number'||/^\d+$/.test(String(v))){const n=Number(v);return n<1e12?n*1000:n}const normalized=String(v).trim().replace(/\./g,'-').replace(' ','T');const p=Date.parse(normalized);return Number.isNaN(p)?0:p}
+const chinaTime=(value,options={})=>new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,...options})
+const bars=computed(()=> (props.bars||[]).map(b=>({time:timeValue(b.timestamp??b.time??b.datetime),open:Number(b.open??b.open_price),high:Number(b.high??b.high_price),low:Number(b.low??b.low_price),close:Number(b.close??b.close_price)})).filter(b=>b.time&&[b.open,b.high,b.low,b.close].every(Number.isFinite)))
+const rangeMs={"6h":6*60*60*1000,"24h":24*60*60*1000,"3d":3*24*60*60*1000}
+const activeBars=computed(()=>{if(selectedRange.value==='all'||!bars.value.length)return bars.value;const start=bars.value.at(-1).time-rangeMs[selectedRange.value];return bars.value.filter(bar=>bar.time>=start)})
+const barInterval=computed(()=>bars.value.length>1?Math.max(1,bars.value[1].time-bars.value[0].time):5*60*1000)
+const visibleEvents=computed(()=>{if(!activeBars.value.length)return[];const first=activeBars.value[0].time-barInterval.value,last=activeBars.value.at(-1).time+barInterval.value;return(props.events||[]).filter(event=>{const time=timeValue(event.timestamp);return time>=first&&time<=last})})
+const outOfRangeEventCount=computed(()=>Math.max(0,(props.events||[]).length-visibleEvents.value.length))
+const entryPositions=computed(()=>{const seen=new Set();return visibleEvents.value.filter(event=>['buy','sell'].includes(event.type)&&event.position_id&&!seen.has(String(event.position_id))&&(seen.add(String(event.position_id))||true)).map(event=>({position_id:String(event.position_id),direction:event.type,timeLabel:chinaTime(timeValue(event.timestamp),{hour:'2-digit',minute:'2-digit'})}))})
+const displayedEvents=computed(()=>selectedPositionId.value?visibleEvents.value.filter(event=>String(event.position_id)===selectedPositionId.value):visibleEvents.value)
+const bucketFor=timestamp=>{const target=timeValue(timestamp);return activeBars.value.reduce((best,bar)=>!best||Math.abs(bar.time-target)<Math.abs(best.time-target)?bar:best,null)}
+const eventChartPrice=(event,bar)=>event.type==='buy'||event.type==='stop_loss'?bar.low:event.type==='sell'||event.type==='take_profit'?bar.high:bar.close
+const eventPoints=(type,label)=> displayedEvents.value.filter(e=>e.type===type).map(e=>{const bar=bucketFor(e.timestamp);if(!bar)return null;const actualPrice=Number(e.price);return{name:`${e.reason||label}${Number.isFinite(actualPrice)?` · 实际价 ${actualPrice}`:''}`,value:[String(bar.time),eventChartPrice(e,bar)],actualPrice,event:e}}).filter(Boolean)
+const trajectoryPoints=computed(()=>!selectedPositionId.value?[]:[...displayedEvents.value].sort((a,b)=>timeValue(a.timestamp)-timeValue(b.timestamp)).map(event=>{const bar=bucketFor(event.timestamp);return bar?[String(bar.time),eventChartPrice(event,bar)]:null}).filter(Boolean))
+const render=async()=>{if(!activeBars.value.length){chart?.dispose();chart=null;return}await nextTick();if(!chartEl.value)return;chart ||= echarts.init(chartEl.value);const categories=activeBars.value.map(b=>String(b.time));const marker=(name,type,color,symbol,rotate=0,offset=[0,0])=>({name,type:'scatter',data:eventPoints(type,name),symbol,symbolRotate:rotate,symbolOffset:offset,symbolSize:15,itemStyle:{color,borderColor:'#fff',borderWidth:1},label:{show:true,formatter:name.slice(0,1),position:rotate?'top':'bottom',color,fontSize:10},z:8});chart.setOption({animation:false,legend:{top:6,right:10,data:['K线','买入','卖出','止盈','止损','平仓','持仓轨迹'],textStyle:{color:'#64736d',fontSize:11}},tooltip:{trigger:'axis',axisPointer:{type:'cross'},backgroundColor:'rgba(20,47,41,.94)',borderWidth:0,textStyle:{color:'#fff',fontSize:11}},grid:{left:64,right:24,top:42,bottom:42},xAxis:{type:'category',data:categories,boundaryGap:true,axisLine:{lineStyle:{color:'#cbd8d1'}},axisLabel:{color:'#77847e',fontSize:10,formatter:v=>chinaTime(Number(v),{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}),hideOverlap:true}},yAxis:{scale:true,splitNumber:6,axisLabel:{color:'#77847e',fontSize:10},splitLine:{lineStyle:{color:'#e6ede9'}}},dataZoom:[{type:'inside'},{type:'slider',bottom:4,height:18,showDetail:false,borderColor:'#d8e3dd',fillerColor:'rgba(32,112,88,.12)'}],series:[{name:'K线',type:'candlestick',data:activeBars.value.map(b=>[b.open,b.close,b.low,b.high]),itemStyle:{color:'#1b8a67',color0:'#d35d50',borderColor:'#1b8a67',borderColor0:'#d35d50'}},{name:'持仓轨迹',type:'line',data:trajectoryPoints.value,symbol:'circle',symbolSize:5,connectNulls:true,lineStyle:{color:'#2e6f91',width:2,type:'dashed'},itemStyle:{color:'#2e6f91'},z:7},marker('买入','buy','#0f8060','triangle',0,[0,10]),marker('卖出','sell','#c84f43','triangle',180,[0,-10]),marker('止盈','take_profit','#c3913d','diamond',0,[0,-10]),marker('止损','stop_loss','#8e4c9e','diamond',0,[0,10]),marker('平仓','close','#55717c','circle')]},true);chart.off('click');chart.on('click',params=>{if(params?.data?.event){selectedEvent.value=params.data.event;selectedPositionId.value=String(params.data.event.position_id||selectedPositionId.value||'')}})}
+const selectedDecision=computed(()=>selectedEvent.value?.decision||props.decisions.find(item=>String(item?.decision_id)===String(selectedEvent.value?.decision_id))||null)
+const eventLabel=e=>({buy:'开多/买入',sell:'开空/卖出',take_profit:'分批止盈',stop_loss:'止损',close:'平仓'}[e?.type]||'交易事件')
+const formatEventTime=e=>e?.timestamp?chinaTime(timeValue(e.timestamp)):''
+const signalText=d=>{const list=Array.isArray(d?.signals)?d.signals:[];if(!list.length)return d?.signal_summary?JSON.stringify(d.signal_summary):'未记录信号';return list.map(s=>`${s.source||s.name||'信号'} ${s.direction||s.action||''}${s.confidence!=null?`（${s.confidence}%）`:''}`).join('；')}
+const aiSignalDetails=computed(()=> (Array.isArray(selectedDecision.value?.signals)?selectedDecision.value.signals:[]).filter(signal=>String(signal?.source||'').toLowerCase()==='ai_entry'))
+const aiTrendLabel=signal=>({up:'上升趋势',down:'下降趋势',sideways:'横盘震荡',trend:'趋势'}[String(signal?.ai_trend||signal?.market_direction||'').toLowerCase()]||({buy:'上升趋势',sell:'下降趋势'}[String(signal?.action||'').toLowerCase()]||'行情方向未记录'))
+const aiTrendColor=signal=>({up:'success',down:'error',sideways:'warning',trend:'primary'}[String(signal?.ai_trend||signal?.market_direction||'').toLowerCase()]||'primary')
+const formatPrice=value=>{const number=Number(value);return Number.isFinite(number)&&number>0?number.toFixed(2):'--'}
+const checkText=v=>{if(v==null||v==='')return'未记录';if(typeof v==='object')return v.passed===false?(v.reason||'未通过'):'通过';return String(v)}
+const executionText=d=>d?.order_id?`订单 ${d.order_id} · ${d.status||'已提交'}${d.auto_executed?' · 自动执行':''}`:(d?.status||'未关联订单')
+const decisionStatusLabel=s=>({confirmed:'已成交',filled:'已成交',rejected:'已拒绝',skipped:'未执行',pending:'待处理'}[s]||s||'未知')
+const decisionStatusColor=s=>({confirmed:'success',filled:'success',rejected:'error',skipped:'grey',pending:'warning'}[s]||'primary')
+const resize=()=>chart?.resize();watch([()=>props.bars,()=>props.events,()=>props.decisions,selectedRange,selectedPositionId],render,{deep:true,immediate:true});watch(entryPositions,items=>{if(selectedPositionId.value&&!items.some(item=>item.position_id===selectedPositionId.value))selectedPositionId.value='';if(selectedEvent.value&&!visibleEvents.value.includes(selectedEvent.value))selectedEvent.value=null},{deep:true});onMounted(render);window.addEventListener('resize',resize);onBeforeUnmount(()=>{window.removeEventListener('resize',resize);chart?.dispose()})
 </script>
-
 <style scoped>
-.execution-chart-shell { border-top: 1px solid #e5ecea; background: #fbfdfc; }
-.chart-head { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 14px 4px; }
-.chart-head strong,.chart-head span { display:block; }.chart-head strong { color:#31564b; font-size:.78rem; }.chart-kicker { color:#b18443; font-size:.58rem; font-weight:800; letter-spacing:.12em; }
-.legend { display:flex; flex-wrap:wrap; gap:7px; color:#77847e; font-size:.62rem; }.legend span { display:inline-flex; gap:4px; align-items:center; }.legend i { width:7px; height:7px; border-radius:50%; }.buy{background:#0f8060}.sell{background:#c84f43}.tp{background:#c3913d}.sl{background:#8e4c9e}.close{background:#55717c}
-.chart { width:100%; height:330px; }.empty { min-height:130px; display:grid; place-items:center; color:#89958f; font-size:.74rem; }
-@media (max-width:700px){.chart-head{align-items:flex-start;flex-direction:column}.chart{height:280px}}
+.replay-shell{overflow:hidden;background:#fff}.replay-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px 7px;border-bottom:1px solid #edf1ef}.replay-header span,.replay-header strong,.replay-header small{display:block}.replay-header span{color:#b18443;font-size:.6rem;font-weight:800;letter-spacing:.12em}.replay-header strong{margin-top:2px;color:#31564b;font-size:.85rem}.replay-header small{margin-top:3px;color:#84908a;font-size:.65rem}.replay-legend{display:flex;align-items:center;flex-wrap:wrap;gap:6px;color:#77847e;font-size:.68rem}.replay-legend i{width:7px;height:7px;border-radius:50%}.buy-dot{background:#0f8060}.sell-dot{background:#c84f43}.tp-dot{background:#c3913d}.sl-dot{background:#8e4c9e}.close-dot{background:#55717c}.range-tools,.position-tools{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid #edf1ef;color:#687871;font-size:.7rem}.position-tools{overflow-x:auto}.replay-chart{width:100%;height:min(68vh,620px)}.decision-context{margin:12px 14px 16px;padding:12px 14px;background:#f4f8f5}.decision-context-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.decision-context-head strong{display:block;color:#31564b;font-size:.82rem}.context-kicker{display:block;color:#b18443;font-size:.58rem;font-weight:800;letter-spacing:.1em;margin-bottom:3px}.context-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:10px}.context-grid label{display:block;color:#7c8b84;font-size:.64rem;font-weight:700}.context-grid p{margin:4px 0 0;color:#40574e;font-size:.72rem;line-height:1.45;white-space:pre-wrap;word-break:break-word}.ai-analysis-context{margin-top:12px;padding-top:10px;border-top:1px solid #dce7e0}.ai-analysis-title{display:flex;align-items:center;justify-content:space-between;gap:8px}.ai-analysis-title label{color:#526b60;font-size:.68rem;font-weight:800}.ai-suggestion-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-top:8px;padding:9px 10px;border:1px solid #e0eae4;border-radius:8px;background:#fff}.ai-suggestion-reason{color:#40574e;font-size:.72rem;line-height:1.45;flex:1}.ai-price-pills{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}.ai-price-pills span{white-space:nowrap;color:#7b8982;font-size:.67rem}.ai-price-pills b{color:#31564b;margin-left:2px}.ai-price-pills .negative{color:#b64d43}.ai-price-pills .positive{color:#1b8062}.replay-empty{display:grid;place-items:center;min-height:300px;color:#8a9690;font-size:.75rem}.replay-empty span{margin-top:-80px}@media(max-width:900px){.context-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ai-suggestion-row{flex-direction:column}.ai-price-pills{justify-content:flex-start}}@media(max-width:700px){.replay-header{align-items:flex-start;flex-direction:column}.replay-chart{height:55vh}.context-grid{grid-template-columns:1fr}}
 </style>

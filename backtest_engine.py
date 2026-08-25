@@ -23,6 +23,9 @@ from market.models import (
     PositionManagementPolicy, SignalSource, TradingSignal, TradingStrategy,
 )
 from market.services.position_manager import PositionManager
+from market.services.position_attribution import (
+    build_position_attribution, close_position_attribution,
+)
 from market.services.llm_service import LLMService
 from market.services.signal.signal_rules import (
     build_ai_entry_signal,
@@ -415,8 +418,9 @@ class BacktestTaskRepository:
                 status, requested_volume, filled_volume, requested_price,
                 filled_price, stop_loss, take_profit, signal_source,
                 contributing_sources_json, confidence, rejection_reason,
-                requested_at, filled_at, canceled_at, created_at, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                requested_at, filled_at, canceled_at, position_attribution_json,
+                created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [(
                 item["order_id"], task_id, user_id, item["strategy_id"], item["symbol"],
@@ -426,6 +430,7 @@ class BacktestTaskRepository:
                 json.dumps(item["contributing_sources"], ensure_ascii=False),
                 item["confidence"], item.get("rejection_reason", ""),
                 item["requested_at"], item.get("filled_at"), item.get("canceled_at"),
+                json.dumps(item.get("position_attribution") or {}, ensure_ascii=False),
                 now, now,
             ) for item in ledger["orders"]],
         )
@@ -434,15 +439,18 @@ class BacktestTaskRepository:
             INSERT INTO backtest_positions(
                 position_id, task_id, order_id, user_id, symbol, direction,
                 status, volume, entry_price, stop_loss, take_profit, opened_at,
-                closed_at, close_price, close_reason, net_profit, created_at, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                closed_at, close_price, close_reason, net_profit,
+                position_attribution_json, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [(
                 item["position_id"], task_id, item["order_id"], user_id, item["symbol"],
                 item["direction"], item["status"], item["volume"], item["entry_price"],
                 item["stop_loss"], item["take_profit"], item["opened_at"],
                 item.get("closed_at"), item.get("close_price"),
-                item.get("close_reason", ""), item.get("net_profit", 0), now, now,
+                item.get("close_reason", ""), item.get("net_profit", 0),
+                json.dumps(item.get("position_attribution") or {}, ensure_ascii=False),
+                now, now,
             ) for item in ledger["positions"]],
         )
         conn.executemany(
@@ -451,7 +459,8 @@ class BacktestTaskRepository:
                 trade_id, task_id, order_id, position_id, user_id, symbol,
                 direction, volume, entry_price, exit_price, gross_profit,
                 commission, net_profit, exit_reason, opened_at, closed_at, created_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , position_attribution_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [(
                 item["trade_id"], task_id, item["order_id"], item["position_id"],
@@ -459,6 +468,7 @@ class BacktestTaskRepository:
                 item["entry_price"], item["exit_price"], item["gross_profit"],
                 item["commission"], item["net_profit"], item["exit_reason"],
                 item["opened_at"], item["closed_at"], now,
+                json.dumps(item.get("position_attribution") or {}, ensure_ascii=False),
             ) for item in ledger["trades"]],
         )
         conn.executemany(
@@ -1282,6 +1292,7 @@ class SimOrder:
     canceled_at: Optional[int] = None
     rejection_reason: str = ""
     position_policy_snapshot: Dict = None
+    position_attribution: Dict = None
 
     def reject(self, reason: str) -> None:
         self.status = "rejected"
@@ -1309,6 +1320,7 @@ class SimOrder:
             "requested_at": self.requested_at,
             "filled_at": self.filled_at,
             "canceled_at": self.canceled_at,
+            "position_attribution": self.position_attribution or {},
         }
 
 
@@ -1343,6 +1355,7 @@ class SimPosition:
     net_profit: float = 0.0
     position_policy_snapshot: Dict = None
     holding_bars: int = 0
+    position_attribution: Dict = None
 
     def to_record(self) -> Dict:
         return {
@@ -1364,6 +1377,7 @@ class SimPosition:
             "signal_source_id": self.signal_source_id,
             "exit_mode": self.exit_mode,
             "partial_levels_done": self.partial_levels_done or [],
+            "position_attribution": self.position_attribution or {},
         }
 
 
@@ -1863,6 +1877,16 @@ class M1BacktestEngine:
         policy_snapshot = management.get("policy_snapshot") or strategy.get(
             "position_management_policy_snapshot"
         )
+        attribution = build_position_attribution(
+            summary,
+            decision_id=str(decision.decision_id or ""),
+            strategy_id=str(decision.strategy_id or ""),
+            strategy_name=str(decision.strategy_name or ""),
+            direction=str(decision.action or ""),
+            entry_reason=str(decision.decision_reason or ""),
+            initial_stop_loss=float(decision.sl),
+            initial_take_profit=float(decision.tp),
+        )
         order = SimOrder(
             order_id=uuid.uuid4().hex[:16],
             strategy_id=str(strategy.get("strategy_id", "")),
@@ -1880,6 +1904,7 @@ class M1BacktestEngine:
             signal_source_id=source_id,
             exit_mode="position_manager",
             position_policy_snapshot=policy_snapshot,
+            position_attribution=attribution,
         )
         if decision.status == "rejected":
             order.reject(decision.decision_reason or "共享策略风控未通过")
@@ -1936,6 +1961,7 @@ class M1BacktestEngine:
             remaining_volume=volume,
             partial_levels_done=[],
             position_policy_snapshot=order.position_policy_snapshot,
+            position_attribution=order.position_attribution,
         ), balance - commission
 
     def _maybe_close(
@@ -2017,6 +2043,12 @@ class M1BacktestEngine:
             "gross_profit": round(gross, 2),
             "commission": round(open_commission + close_commission, 2),
             "net_profit": round(net, 2),
+            "position_attribution": close_position_attribution(
+                position.position_attribution,
+                reason,
+                net / (position.initial_risk * closed_volume * contract_size)
+                if position.initial_risk > 0 and closed_volume > 0 else 0,
+            ),
         }
         return trade, new_balance
 

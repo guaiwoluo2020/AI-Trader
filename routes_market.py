@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
+from calendar import timegm
 import asyncio
 import json
 import time
@@ -20,6 +21,7 @@ from market.services import PivotService
 from market.models.llm_config import (
     DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
     DEFAULT_SYSTEM_PROMPT,
+    STRUCTURE_ANALYSIS_PROMPT_TEMPLATE,
 )
 from llm_governance import (
     AI_SIGNAL_ANALYSIS, AI_SIGNAL_PROMPT_GENERATION,
@@ -28,6 +30,7 @@ from llm_governance import (
 from market.services.llm_service import LLMRequestError
 from membership import MembershipService
 from sqlite_storage import (
+    get_storage,
     LLMAccessRepository,
     LLMConfigRepository,
     AISignalSourceRepository,
@@ -40,6 +43,7 @@ from sqlite_storage import (
     TradeConfigRepository,
     TradeExecutionRepository,
     PositionManagementEventRepository,
+    RuntimeStateRepository,
     TradingAccountRepository,
     UserRepository,
 )
@@ -50,6 +54,56 @@ from web_account_context import resolve_web_engine
 from user_quotas import UserQuotaService
 from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
+
+
+def _historical_kline_timestamp(value):
+    """统一 EA K 线时间为 epoch 秒，便于跨时区回放查询。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        number = int(value)
+        return number // 1000 if number >= 10**12 else number
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y.%m.%d %H:%M"):
+        try:
+            return timegm(datetime.strptime(text, fmt).timetuple())
+        except ValueError:
+            continue
+    return None
+
+
+def _persist_historical_klines(identity, symbol, period, klines):
+    rows = []
+    now = int(time.time())
+    for item in klines or []:
+        if not isinstance(item, dict):
+            continue
+        timestamp = _historical_kline_timestamp(item.get("timestamp") or item.get("time"))
+        if timestamp is None:
+            continue
+        try:
+            rows.append((identity.user_id, identity.account_id, symbol, period, timestamp,
+                         float(item.get("open", 0)), float(item.get("high", 0)),
+                         float(item.get("low", 0)), float(item.get("close", 0)),
+                         float(item.get("volume", 0) or 0), now))
+        except (TypeError, ValueError):
+            continue
+    if not rows:
+        return
+    storage = get_storage()
+    storage.executemany(
+        """
+        INSERT INTO historical_klines
+          (user_id, account_id, symbol, period, timestamp, open_price, high_price,
+           low_price, close_price, volume, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          open_price=VALUES(open_price), high_price=VALUES(high_price),
+          low_price=VALUES(low_price), close_price=VALUES(close_price),
+          volume=VALUES(volume), updated_at=VALUES(updated_at)
+        """, rows,
+    )
+    # 上传时顺便执行轻量清理；即使没有行情上传，下一次上传也会清理。
 from market.system_log import get_system_log_broadcaster
 from shared_notifications import SharedReferenceNotificationService
 from instrument_price_store import get_instrument_price_store
@@ -501,6 +555,7 @@ def create_market_routes(
 
             # 保存K线数据
             result = kline_service.process_kline_data(symbol, period, klines, is_full)
+            _persist_historical_klines(identity, symbol, period, klines)
             if staleness and staleness.get("is_stale"):
                 result.update({
                     "stale": True,
@@ -563,6 +618,7 @@ def create_market_routes(
                     continue
 
                 result = kline_service.process_kline_data(symbol, period, klines, is_full)
+                _persist_historical_klines(identity, symbol, period, klines)
                 results[period] = result
 
                 if is_full:
@@ -1484,7 +1540,7 @@ def create_market_routes(
         status: Optional[str] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
-        count: int = Query(50, ge=1, le=200),
+        count: int = Query(50, ge=1, le=1000),
         account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
@@ -1510,6 +1566,9 @@ def create_market_routes(
     @protected_router.get("/strategy/{strategy_id}/execution-overview")
     async def get_strategy_execution_overview(
         strategy_id: str,
+        include_chart: bool = Query(False),
+        start_ts: Optional[int] = Query(None, ge=0),
+        end_ts: Optional[int] = Query(None, ge=0),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """Return deployment-scoped decision history for a single strategy.
@@ -1527,15 +1586,24 @@ def create_market_routes(
         account_views = []
         for deployment in deployments:
             account_id = int(deployment["account_id"])
-            if deployment.get("execution_mode") == "paper":
-                engine_manager.paper_trading.reconcile_decision_statuses(
-                    user.user_id, account_id,
-                )
             engine = engine_manager.get_engine(user.user_id, account_id)
+            # 执行中心首屏只展示最近 10 条决策；历史回放按时间范围另行加载，
+            # 避免把账户全部运行态、上千根 K 线和成交事件一次性拼进响应。
             decisions = engine.get_decision_history(
                 strategy_id=strategy_id, count=10,
             )
+            if not include_chart:
+                # 策略执行中心只展示部署和最近决策；K 线交易回放页显式请求
+                # include_chart=true 后再加载 K 线及成交轨迹，避免首屏超时。
+                account_views.append({
+                    **deployment,
+                    "symbol": str(deployment.get("symbol") or strategy.symbol or ""),
+                    "chart": None,
+                    "decisions": decisions,
+                })
+                continue
             symbol = str(deployment.get("symbol") or strategy.symbol or "")
+            configured_symbol = symbol
             strategy_config = getattr(strategy, "config", None) or {}
             source_periods = [
                 str(item.get("period") or "").upper()
@@ -1547,16 +1615,166 @@ def create_market_routes(
             )).upper()
             if period not in {"M1", "M5", "M15", "H1", "H4"}:
                 period = "M5"
-            bars = engine.kline_service.get_klines(symbol, period, 288)
+            def load_chart_bars(source_engine, requested_symbol):
+                """在当前账户优先读取，必要时兼容 MT5 经纪商后缀。"""
+                historical = get_storage().fetchall(
+                    """
+                    SELECT timestamp, open_price AS open, high_price AS high,
+                           low_price AS low, close_price AS close, volume
+                    FROM historical_klines
+                    WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
+                      AND timestamp >= ?
+                      AND (? IS NULL OR timestamp >= ?)
+                      AND (? IS NULL OR timestamp <= ?)
+                    ORDER BY timestamp
+                    """,
+                    (user.user_id, account_id, requested_symbol, period, int(time.time()) - 7 * 86400,
+                     start_ts, start_ts, end_ts, end_ts),
+                )
+                if historical:
+                    return [dict(item) for item in historical], requested_symbol
+                direct = source_engine.kline_service.get_all_klines(
+                    requested_symbol, period
+                )
+                if start_ts is not None or end_ts is not None:
+                    direct = [
+                        item for item in direct
+                        if (start_ts is None or (_historical_kline_timestamp(item.get("timestamp") or item.get("time")) or 0) >= start_ts)
+                        and (end_ts is None or (_historical_kline_timestamp(item.get("timestamp") or item.get("time")) or 0) <= end_ts)
+                    ]
+                if direct:
+                    return direct, requested_symbol
+                store = getattr(source_engine.kline_service, "store", None)
+                stored = getattr(store, "_klines", {})
+                requested = str(requested_symbol).rstrip("#").lower()
+                requested_base = requested[:-1] if requested.endswith("m") else requested
+                for actual_symbol in stored.keys():
+                    normalized = str(actual_symbol).rstrip("#").lower()
+                    normalized_base = normalized[:-1] if normalized.endswith("m") else normalized
+                    if normalized == requested or normalized_base == requested_base:
+                        candidate = source_engine.kline_service.get_all_klines(
+                            actual_symbol, period
+                        )
+                        if candidate:
+                            return candidate, actual_symbol
+                return [], requested_symbol
+
+            def parse_mt5_wall_time(value):
+                """Parse a broker wall-clock K-line time without using server TZ."""
+                if value is None or value == "":
+                    return None
+                if isinstance(value, (int, float)):
+                    numeric = int(value)
+                    return numeric if numeric >= 10**9 else None
+                text = str(value).strip()
+                for fmt in (
+                    "%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M:%S",
+                    "%Y-%m-%d %H:%M", "%Y.%m.%d %H:%M",
+                ):
+                    try:
+                        # timegm treats this as a wall-clock value, rather than
+                        # silently applying the Linux server's timezone.
+                        return timegm(datetime.strptime(text, fmt).timetuple())
+                    except ValueError:
+                        continue
+                return None
+
+            def normalize_chart_bar_times(chart_bars):
+                """Align MT5 K-line timestamps to UTC for comparison with fills.
+
+                EA K-lines are sent as broker-local wall-clock strings, whereas
+                paper/live fill records are UTC epoch values. Infer the active
+                broker offset from the latest bar (which is continually pushed),
+                then return UTC epochs. This prevents valid fills being filtered
+                out solely because the broker is not on Beijing time.
+                """
+                parsed = [
+                    parse_mt5_wall_time(item.get("timestamp") or item.get("time"))
+                    for item in chart_bars if isinstance(item, dict)
+                ]
+                parsed = [value for value in parsed if value is not None]
+                if not parsed:
+                    return chart_bars, 0
+                offset_hours = int(round((max(parsed) - time.time()) / 3600))
+                offset_hours = max(-12, min(14, offset_hours))
+                normalized = []
+                for item in chart_bars:
+                    if not isinstance(item, dict):
+                        continue
+                    bar = dict(item)
+                    raw_timestamp = bar.get("timestamp") or bar.get("time")
+                    epoch = parse_mt5_wall_time(raw_timestamp)
+                    if epoch is not None:
+                        bar["mt5_timestamp"] = raw_timestamp
+                        bar["timestamp"] = epoch - offset_hours * 3600
+                    normalized.append(bar)
+                return normalized, offset_hours
+
+            bars, chart_symbol = load_chart_bars(engine, symbol)
+            # 模拟盘不接收 EA 行情。若部署账户没有 K 线，使用同一用户
+            # 当前 MT5 行情账户的 K 线作为图表背景；订单事件仍来自部署账户。
+            if not bars:
+                market_engine = engine_manager.get_engine_for_user(user.user_id)
+                if market_engine is not engine:
+                    bars, chart_symbol = load_chart_bars(market_engine, symbol)
+            bars, mt5_timezone_offset_hours = normalize_chart_bar_times(bars)
+            # 订单/成交记录可能保存标准名，而 K 线来自带后缀的经纪商名；
+            # 两者只要去掉 # 和末尾 m 后一致，就视为同一品种。
+            def same_symbol(left, right):
+                left_norm = str(left or "").rstrip("#").lower()
+                right_norm = str(right or "").rstrip("#").lower()
+                left_base = left_norm[:-1] if left_norm.endswith("m") else left_norm
+                right_base = right_norm[:-1] if right_norm.endswith("m") else right_norm
+                return left_norm == right_norm or left_base == right_base
+            symbol = chart_symbol
             events = []
             if deployment.get("execution_mode") == "paper":
-                detail = engine_manager.paper_trading.get_account_detail(
-                    user.user_id, account_id,
-                )
-                for order in detail.get("orders", []):
-                    if (str(order.get("deployment_id")) != str(deployment.get("deployment_id"))
-                            or str(order.get("symbol")) != symbol
-                            or order.get("status") != "filled"):
+                # 执行中心只需要当前部署的成交轨迹。不要调用完整账户详情，
+                # 后者还会读取权益曲线、运行日志、全部持仓和全部成交，
+                # 在远程 MySQL 上会把首屏请求拖到 10 秒以上。
+                paper_storage = engine_manager.paper_trading.storage
+                deployment_id = str(deployment.get("deployment_id") or "")
+                paper_orders = [dict(row) for row in paper_storage.fetchall(
+                    """
+                    SELECT o.*, p.position_id AS linked_position_id
+                    FROM paper_orders o
+                    LEFT JOIN paper_positions p ON p.order_id = o.order_id
+                    WHERE o.user_id = ? AND o.account_id = ?
+                      AND o.deployment_id = ? AND o.status = 'filled'
+                    ORDER BY o.filled_at DESC, o.order_id DESC
+                    LIMIT 100
+                    """,
+                    (user.user_id, account_id, deployment_id),
+                )]
+                paper_trades = [dict(row) for row in paper_storage.fetchall(
+                    """
+                    SELECT t.*, o.decision_id AS open_decision_id
+                    FROM paper_trades t
+                    LEFT JOIN paper_orders o ON o.order_id = t.order_id
+                    WHERE t.user_id = ? AND t.account_id = ?
+                      AND t.deployment_id = ?
+                    ORDER BY t.closed_at DESC, t.trade_id DESC
+                    LIMIT 100
+                    """,
+                    (user.user_id, account_id, deployment_id),
+                )]
+                decision_by_id = {
+                    str(item.get("decision_id")): item
+                    for item in decisions
+                    if item.get("decision_id")
+                }
+                # 同一仓位的开仓订单、分批止盈与最终平仓通过 position_id
+                # 串联，供 K 线回放页绘制完整持仓轨迹。
+                position_by_order = {
+                    str(order.get("order_id")): order.get("linked_position_id")
+                    for order in paper_orders
+                    if order.get("order_id") and order.get("linked_position_id")
+                }
+                for trade in paper_trades:
+                    if trade.get("order_id") and trade.get("position_id"):
+                        position_by_order[str(trade["order_id"])] = trade["position_id"]
+                for order in paper_orders:
+                    if not same_symbol(order.get("symbol"), configured_symbol):
                         continue
                     events.append({
                         "type": "buy" if str(order.get("direction")).lower() == "buy" else "sell",
@@ -1564,39 +1782,61 @@ def create_market_routes(
                         "price": order.get("filled_price") or order.get("requested_price"),
                         "reason": "订单成交",
                         "order_id": order.get("order_id"),
+                        "position_id": position_by_order.get(str(order.get("order_id"))),
+                        "volume": order.get("filled_volume") or order.get("requested_volume"),
+                        "decision_id": order.get("decision_id"),
+                        "decision": decision_by_id.get(str(order.get("decision_id"))) if order.get("decision_id") else None,
                     })
-                for trade in detail.get("trades", []):
-                    if (str(trade.get("deployment_id")) != str(deployment.get("deployment_id"))
-                            or str(trade.get("symbol")) != symbol):
+                for trade in paper_trades:
+                    if not same_symbol(trade.get("symbol"), configured_symbol):
                         continue
                     reason = str(trade.get("exit_reason") or "平仓")
                     lowered = reason.lower()
                     event_type = "take_profit" if "profit" in lowered or "tp" in lowered else (
                         "stop_loss" if "stop" in lowered or "sl" in lowered else "close"
                     )
+                    order_decision_id = next((
+                        item.get("decision_id") for item in paper_orders
+                        if str(item.get("order_id")) == str(trade.get("order_id"))
+                    ), None)
                     events.append({
                         "type": event_type,
                         "timestamp": trade.get("closed_at"),
                         "price": trade.get("exit_price"),
                         "reason": reason,
                         "trade_id": trade.get("trade_id"),
+                        "order_id": trade.get("order_id"),
+                        "position_id": trade.get("position_id"),
+                        "volume": trade.get("volume"),
+                        "decision_id": order_decision_id,
+                        "decision": decision_by_id.get(str(order_decision_id)) if order_decision_id else None,
                     })
             else:
                 for report in TradeExecutionRepository().list_for_account(
-                    user.user_id, account_id, 200,
+                    user.user_id, account_id, 100,
                 ):
-                    if str(report.get("symbol")) != symbol or not report.get("success"):
+                    if not same_symbol(report.get("symbol"), configured_symbol) or not report.get("success"):
                         continue
                     action = str(report.get("action") or "").lower()
+                    if action in {"buy", "b"}:
+                        marker = "buy"
+                    elif action in {"sell", "s"}:
+                        marker = "sell"
+                    elif action == "partial_close":
+                        marker = "take_profit"
+                    else:
+                        marker = "close"
                     events.append({
-                        "type": "buy" if action in {"buy", "b"} else "sell",
+                        "type": marker,
                         "timestamp": report.get("reported_at"),
                         "price": report.get("executed_price") or report.get("requested_price"),
-                        "reason": "实盘成交回报",
+                        "reason": "实盘分批平仓" if action == "partial_close" else "实盘成交回报",
                         "order_id": report.get("order_id") or report.get("instruction_id"),
+                        "position_id": str(report.get("mt5_position_id") or ""),
+                        "volume": report.get("executed_volume") or report.get("requested_volume"),
                     })
                 for event in PositionManagementEventRepository().list_for_account(
-                    user.user_id, account_id, symbol, 200,
+                    user.user_id, account_id, configured_symbol, 100,
                 ):
                     event_type = str(event.get("event_type") or "").lower()
                     if "take" in event_type or "profit" in event_type:
@@ -1613,7 +1853,15 @@ def create_market_routes(
                         "price": event.get("price"),
                         "reason": event.get("message") or event.get("event_type"),
                         "event_id": event.get("event_id"),
+                        "position_id": str(event.get("position_id") or event.get("ticket") or ""),
+                        "volume": event.get("volume"),
                     })
+            if start_ts is not None or end_ts is not None:
+                events = [
+                    item for item in events
+                    if (start_ts is None or (_historical_kline_timestamp(item.get("timestamp")) or 0) >= start_ts)
+                    and (end_ts is None or (_historical_kline_timestamp(item.get("timestamp")) or 0) <= end_ts)
+                ]
             print(
                 "[StrategyExecutionChart]",
                 f"strategy={strategy_id} deployment={deployment.get('deployment_id')} ",
@@ -1623,7 +1871,14 @@ def create_market_routes(
             account_views.append({
                 **deployment,
                 "symbol": symbol,
-                "chart": {"symbol": symbol, "period": period, "bars": bars, "events": events},
+                "chart": {
+                    "symbol": symbol,
+                    "period": period,
+                    "bars": bars,
+                    "events": events,
+                    "display_timezone": "Asia/Shanghai",
+                    "mt5_timezone_offset_hours": mt5_timezone_offset_hours,
+                },
                 "decisions": decisions,
             })
         return {
@@ -1635,6 +1890,289 @@ def create_market_routes(
             },
             "deployments": account_views,
         }
+
+    @protected_router.get("/strategy/{strategy_id}/audit-chain")
+    async def get_strategy_audit_chain(
+        strategy_id: str,
+        deployment_id: Optional[str] = None,
+        decision_id: Optional[str] = None,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Return the complete AI -> decision -> order -> fill audit chain."""
+        strategy = strategy_repo.get_strategy_by_id(user.user_id, strategy_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="策略不存在或不属于当前用户")
+        deployments = strategy_deployment_repo.list_for_strategy(user.user_id, strategy_id)
+        deployment = next((item for item in deployments if not deployment_id or str(item.get("deployment_id")) == str(deployment_id)), None)
+        if deployment is None:
+            return {"status": "ok", "items": []}
+        account_id = int(deployment["account_id"])
+        engine = engine_manager.get_engine(user.user_id, account_id)
+        decisions = engine.get_decision_history(strategy_id=strategy_id, count=10)
+        if decision_id:
+            decisions = [item for item in decisions if str(item.get("decision_id")) == str(decision_id)]
+        storage = engine_manager.paper_trading.storage
+        items = []
+        for decision in decisions:
+            did = str(decision.get("decision_id") or "")
+            orders = [dict(row) for row in storage.fetchall(
+                "SELECT * FROM paper_orders WHERE user_id = ? AND account_id = ? AND deployment_id = ? AND decision_id = ? ORDER BY requested_at DESC",
+                (user.user_id, account_id, deployment.get("deployment_id"), did),
+            )]
+            trades = [dict(row) for row in storage.fetchall(
+                "SELECT t.*, o.decision_id FROM paper_trades t LEFT JOIN paper_orders o ON o.order_id = t.order_id WHERE t.user_id = ? AND t.account_id = ? AND t.deployment_id = ? AND o.decision_id = ? ORDER BY t.closed_at DESC",
+                (user.user_id, account_id, deployment.get("deployment_id"), did),
+            )]
+            items.append({"decision": decision, "signals": decision.get("signals") or [], "orders": orders, "trades": trades})
+        return {"status": "ok", "strategy": {"strategy_id": strategy_id, "strategy_name": strategy.strategy_name}, "deployment": deployment, "items": items}
+
+    @protected_router.post("/strategy/{strategy_id}/ai-review")
+    async def review_strategy_execution(
+        strategy_id: str,
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Use the LLM to review a deployment's execution evidence.
+
+        The model only returns an evidence-based review and configuration
+        suggestions. No strategy, source, or position policy is changed here.
+        """
+        strategy = strategy_repo.get_strategy_by_id(user.user_id, strategy_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="策略不存在或不属于当前用户")
+        data = await request.json()
+        deployment_id = str(data.get("deployment_id") or "")
+        hours = max(1, min(24 * 30, int(data.get("hours") or 24)))
+        deployments = strategy_deployment_repo.list_for_strategy(
+            user.user_id, strategy_id
+        )
+        deployment = next(
+            (item for item in deployments
+             if str(item.get("deployment_id")) == deployment_id),
+            None,
+        ) if deployment_id else next(
+            (item for item in deployments if item.get("status") == "active"),
+            deployments[0] if deployments else None,
+        )
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="该策略没有可复盘的部署")
+
+        account_id = int(deployment["account_id"])
+        paper = deployment.get("execution_mode") == "paper"
+        if paper:
+            engine_manager.paper_trading.reconcile_decision_statuses(
+                user.user_id, account_id,
+            )
+        engine = engine_manager.get_engine(user.user_id, account_id)
+        now = int(time.time())
+        start_at = now - hours * 3600
+        report = engine_manager.paper_trading.build_report(
+            user.user_id, account_id, strategy_id, start_at,
+        ) if paper else None
+        detail = (
+            engine_manager.paper_trading.get_account_detail(user.user_id, account_id)
+            if paper else {}
+        )
+        trades = [
+            item for item in detail.get("trades", [])
+            if str(item.get("deployment_id")) == str(deployment.get("deployment_id"))
+            and int(item.get("closed_at") or item.get("opened_at") or 0) >= start_at
+        ][-100:]
+        orders = [
+            item for item in detail.get("orders", [])
+            if str(item.get("deployment_id")) == str(deployment.get("deployment_id"))
+            and int(item.get("requested_at") or 0) >= start_at
+        ][-100:]
+        decisions = engine.get_decision_history(
+            symbol=str(strategy.symbol), strategy_id=strategy_id, count=1000,
+        )
+        def event_epoch(value):
+            if value in (None, ""):
+                return 0
+            if isinstance(value, (int, float)):
+                return int(value)
+            try:
+                return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+            except (TypeError, ValueError, OverflowError):
+                return 0
+        decisions = [
+            item for item in decisions
+            if event_epoch(item.get("created_at") or item.get("timestamp")) >= start_at
+        ][-100:]
+        ai_context = []
+        for source in strategy.get_signal_sources("ai_entry", enabled_only=True):
+            params = source.get("params") or {}
+            source_id = str(params.get("ai_signal_source_id") or source.get("signal_source_id") or "")
+            result = engine.llm_store.get_analysis_result_for_source(
+                str(strategy.symbol), source_id,
+            ) if source_id and hasattr(engine.llm_store, "get_analysis_result_for_source") else None
+            if result:
+                ai_context.append({
+                    "signal_source_id": source_id,
+                    "analyzed_at": result.analyzed_at,
+                    "overall_trend": result.overall_trend,
+                    "trend_analysis": result.trend_analysis,
+                    "trade_suggestions": result.trade_suggestions[:10],
+                })
+        policy = None
+        try:
+            policy = engine._position_policy_repository.get_for_strategy(
+                user.user_id, strategy,
+            )
+        except Exception:
+            policy = None
+        def self_group_trade_stats(items, field):
+            grouped = {}
+            for item in items:
+                grouped.setdefault(str(item.get(field) or "unknown"), []).append(
+                    float(item.get("net_profit") or 0)
+                )
+            return [
+                {
+                    "name": name,
+                    "trade_count": len(values),
+                    "win_rate": round(
+                        sum(value > 0 for value in values) / len(values) * 100, 2
+                    ) if values else 0,
+                    "net_profit": round(sum(values), 2),
+                }
+                for name, values in grouped.items()
+            ]
+        review_input = {
+            "scope": {
+                "strategy_id": strategy_id,
+                "strategy_name": strategy.strategy_name,
+                "symbol": strategy.symbol,
+                "deployment_id": deployment.get("deployment_id"),
+                "account_name": deployment.get("account_name"),
+                "execution_mode": deployment.get("execution_mode"),
+                "hours": hours,
+            },
+            "performance": report.get("summary") if report else {
+                "trade_count": len(trades), "order_count": len(orders),
+            },
+            "direction_stats": self_group_trade_stats(trades, "direction"),
+            "exit_stats": report.get("by_exit_reason") if report else [],
+            "setup_performance": {
+                "coverage": {
+                    "closed_positions": report.get("summary", {}).get(
+                        "closed_position_count", 0
+                    ),
+                    "attributed_positions": report.get("summary", {}).get(
+                        "setup_attributed_position_count", 0
+                    ),
+                    "unattributed_positions": report.get("summary", {}).get(
+                        "setup_unattributed_position_count", 0
+                    ),
+                },
+                "by_setup": report.get("by_setup", []),
+                "by_setup_family": report.get("by_setup_family", []),
+                "by_setup_profile": report.get("by_setup_profile", []),
+                "by_setup_direction": report.get("by_setup_direction", []),
+            } if report else {},
+            "ai_context": ai_context,
+            "strategy_config": {
+                "min_confidence": strategy.min_confidence,
+                "consistency_requirement": strategy.consistency_requirement,
+                "conflict_resolution": strategy.conflict_resolution,
+                "max_positions": strategy.max_positions,
+                "max_same_direction": strategy.max_same_direction,
+                "signal_sources": strategy.get_signal_sources(enabled_only=True),
+            },
+            "position_policy": policy.to_dict() if policy else None,
+            "trades": trades,
+            "orders": orders,
+            "decisions": decisions,
+        }
+        system_prompt = (
+            "你是量化策略复盘分析器。只能依据输入的成交、订单、决策、AI行情和持仓管理数据分析，"
+            "不要臆测未提供的市场事实。必须只返回严格 JSON，不要 Markdown、解释或额外字段。"
+        )
+        prompt = (
+            "请复盘以下策略运行数据，找出亏损主要来源，并分别给出信号源、策略、持仓管理三类可执行改进建议。"
+            "必须引用具体统计证据；优先比较不同 Setup、方向和所用持仓场景方案的胜率、平均R、收益因子和连续亏损。"
+            "少于10个已平仓持仓的 Setup 只能标记为样本不足，不能据此给出停用结论；10到29个只能给出观察性建议。"
+            "不要直接修改配置。建议要说明目标字段、修改方向、原因、风险和验证方式。"
+            "输出格式：{\"summary\":\"\",\"root_causes\":[{\"category\":\"signal_source|strategy|position_management|execution\",\"severity\":\"high|medium|low\",\"evidence\":\"\",\"explanation\":\"\"}],\"suggestions\":[{\"target\":\"signal_source|strategy|position_management\",\"field\":\"\",\"change\":\"\",\"patch\":{},\"reason\":\"\",\"risk\":\"\",\"validation\":\"\"}],\"risk_notes\":[\"\"],\"confidence\":0}. patch只能包含明确可写入的配置字段，无法确定时必须返回空对象。\n\n"
+            + json.dumps(review_input, ensure_ascii=False, default=str)
+        )
+        try:
+            review = engine.llm_service.call_llm(
+                prompt,
+                system_prompt=system_prompt,
+                scene_code=AI_SIGNAL_ANALYSIS,
+                object_type="strategy_review",
+                object_id=f"{strategy_id}:{deployment.get('deployment_id')}",
+                max_tokens=5000,
+            )
+        except (LLMRequestError, LLMGovernanceError, ValueError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "status": "ok",
+            "review": review or {},
+            "evidence": {
+                "summary": review_input["performance"],
+                "trade_count": len(trades),
+                "order_count": len(orders),
+                "decision_count": len(decisions),
+                "generated_at": now,
+            },
+        }
+
+    @protected_router.post("/strategy/{strategy_id}/ai-review/apply")
+    async def apply_strategy_review_changes(
+        strategy_id: str,
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Apply an explicitly reviewed AI patch after optional deployment stop."""
+        strategy = strategy_repo.get_strategy_by_id(user.user_id, strategy_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="策略不存在或不属于当前用户")
+        data = await request.json()
+        stop_deployments = bool(data.get("stop_deployments"))
+        storage = engine_manager.paper_trading.storage
+        deployments = [dict(row) for row in storage.fetchall(
+            """SELECT deployment_id, account_id, execution_mode, status, symbol
+               FROM strategy_deployments WHERE user_id = ? AND strategy_id = ?
+                 AND status = 'active'""", (user.user_id, strategy_id)
+        )]
+        if deployments and not stop_deployments:
+            return {"status": "blocked", "message": "该策略仍有运行部署，请先停止后再应用修改",
+                    "deployments": deployments}
+        if deployments:
+            storage.execute(
+                "UPDATE strategy_deployments SET status = 'paused', updated_at = ? WHERE user_id = ? AND strategy_id = ? AND status = 'active'",
+                (int(time.time()), user.user_id, strategy_id),
+            )
+        changed = []
+        strategy_patch = data.get("strategy") or {}
+        allowed_strategy = {"min_confidence", "consistency_requirement", "conflict_resolution", "max_positions", "max_same_direction", "min_risk_reward", "max_risk_reward", "position_management_policy_id", "signal_sources"}
+        strategy_patch = {key: value for key, value in strategy_patch.items() if key in allowed_strategy}
+        if strategy_patch:
+            engine = engine_manager.get_engine_for_user(user.user_id)
+            engine.strategy_service.update_strategy(strategy.symbol, strategy_patch, strategy_id)
+            changed.append("strategy")
+        for item in data.get("signal_sources") or []:
+            source_id = str(item.get("signal_source_id") or item.get("id") or "")
+            patch = item.get("patch") or {}
+            if source_id and isinstance(patch, dict):
+                source = ai_signal_source_repo.get(user.user_id, source_id)
+                if source:
+                    ai_signal_source_repo.update(user.user_id, source_id, patch)
+                    changed.append(f"signal_source:{source_id}")
+        policy_patch = data.get("position_policy") or {}
+        policy_id = str(policy_patch.get("policy_id") or "")
+        if policy_id and isinstance(policy_patch.get("patch"), dict):
+            policy = position_policy_repo.get(user.user_id, policy_id)
+            if policy:
+                payload = policy.to_dict()
+                payload.update(policy_patch["patch"])
+                position_policy_repo.save(payload)
+                changed.append(f"position_policy:{policy_id}")
+        engine_manager.refresh_user_strategies(user.user_id)
+        add_audit_event(user, "strategy_review_applied", "应用 AI 复盘修改", f"应用策略 {strategy_id} 的复盘修改", {"changed": changed, "stopped_deployments": [item["deployment_id"] for item in deployments]}, "strategy", strategy_id)
+        return {"status": "ok", "changed": changed, "stopped_deployments": deployments, "message": "复盘修改已应用，运行部署已暂停"}
 
     @protected_router.get("/strategy/shared")
     async def get_shared_strategies(
@@ -2572,6 +3110,11 @@ def create_market_routes(
             AI_SIGNAL_KLINE_MIN_COUNT,
             min(AI_SIGNAL_KLINE_MAX_COUNT, int(config.get("kline_count", 100) or 100)),
         )
+        horizon = config.get("forecast_horizon_bars", 0)
+        if str(horizon).strip().lower() in {"", "auto", "0", "none"}:
+            config["forecast_horizon_bars"] = 0
+        else:
+            config["forecast_horizon_bars"] = max(3, min(48, int(horizon)))
 
     def prompt_candidate_context(data: Dict) -> Dict:
         config = dict(data.get("config") or {})
@@ -2590,12 +3133,29 @@ def create_market_routes(
         }
 
     def normalize_ai_signal_prompt_config(config: Dict) -> None:
-        """An AI source may run only with a user-applied generated prompt."""
+        """Normalize the legacy 1.0 prompt or the structured 2.0 template."""
+        version = str(config.get("signal_source_version") or "1.0").strip()
+        if version not in {"1.0", "2.0"}:
+            raise ValueError("AI 信号源配置版本只能是 1.0 或 2.0")
+        config["signal_source_version"] = version
+        if version == "2.0":
+            config["analysis_template"] = str(
+                config.get("analysis_template") or "auto_structure"
+            )
+            config["prompt_mode"] = "structured"
+            config["system_prompt"] = str(
+                config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+            )[:10000]
+            config["analysis_prompt_template"] = STRUCTURE_ANALYSIS_PROMPT_TEMPLATE
+            return
+        # 1.0 keeps the legacy editable prompt format, but no longer requires
+        # users to generate a candidate first. Missing fields are initialized
+        # from the platform defaults and can then be edited directly.
         config["prompt_mode"] = "custom"
-        system_prompt = str(config.get("system_prompt") or "").strip()
-        template = str(config.get("analysis_prompt_template") or "").strip()
-        if not system_prompt or not template:
-            raise ValueError("专属提示词必须包含 System Prompt 和分析模板")
+        system_prompt = str(config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT).strip()
+        template = str(
+            config.get("analysis_prompt_template") or DEFAULT_ANALYSIS_PROMPT_TEMPLATE
+        ).strip()
         if "{{market_data}}" not in template:
             raise ValueError("专属提示词缺少 {{market_data}}")
         if "{{strategy_context}}" in template:
@@ -2772,6 +3332,34 @@ def create_market_routes(
             return {"status": "ok", "source": ai_signal_source_payload(source)}
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
+
+    @protected_router.get("/ai-signal-sources/{signal_source_id}/impact")
+    async def get_ai_signal_source_impact(
+        signal_source_id: str, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        source = ai_signal_source_repo.get(user.user_id, signal_source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="AI 信号源不存在")
+        items = ai_signal_source_repo.deployment_impact(user.user_id, signal_source_id)
+        return {"status": "ok", "source": ai_signal_source_payload(source), "items": items}
+
+    @protected_router.post("/ai-signal-sources/{signal_source_id}/pause")
+    async def pause_ai_signal_source(
+        signal_source_id: str, request: Request, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        source = ai_signal_source_repo.get(user.user_id, signal_source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="AI 信号源不存在")
+        data = await request.json()
+        paused = bool(data.get("paused", True))
+        source = ai_signal_source_repo.set_analysis_paused(
+            user.user_id, signal_source_id, paused,
+        )
+        items = ai_signal_source_repo.deployment_impact(user.user_id, signal_source_id)
+        return {
+            "status": "ok", "paused": bool(source.get("config", {}).get("analysis_paused")),
+            "source": ai_signal_source_payload(source), "items": items,
+        }
 
     @protected_router.delete("/ai-signal-sources/{signal_source_id}")
     async def delete_ai_signal_source(signal_source_id: str, user: AuthUser = Depends(require_auth)) -> Dict:
@@ -3114,6 +3702,10 @@ def create_market_routes(
             )
             config = llm_config_repo.get_config(user.user_id)
             if provider["active"]:
+                # Provider changes can invalidate the old catalog. Repair all
+                # current model references when the new catalog is already
+                # known; otherwise sync_models will complete the migration.
+                llm_governance.last_reconciliation = llm_governance.reconcile_model_references(preferred_model=config.model)
                 engine = engine_manager.get_engine_for_user(user.user_id)
                 engine.configure_llm(
                     api_key=config.api_key,
@@ -3150,6 +3742,7 @@ def create_market_routes(
             )
             config = llm_config_repo.get_config(user.user_id)
             engine = engine_manager.get_engine_for_user(user.user_id)
+            llm_governance.last_reconciliation = llm_governance.reconcile_model_references(preferred_model=config.model)
             engine.configure_llm(
                 api_key=config.api_key,
                 api_base=config.api_base,
@@ -3237,6 +3830,7 @@ def create_market_routes(
             }
 
             if provider["active"]:
+                llm_governance.last_reconciliation = llm_governance.reconcile_model_references(preferred_model=data.get("model") or config.model)
                 engine = engine_manager.get_engine_for_user(user.user_id)
                 result = engine.configure_llm(
                     api_key=data.get("api_key"),

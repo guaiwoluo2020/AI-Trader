@@ -31,6 +31,8 @@ class PendingOrder:
     exit_mode: str = "fixed_rr"
     trailing_activation_r: float = 1.0
     trailing_distance_r: float = 1.0
+    decision_id: str = ""
+    position_attribution: Dict = field(default_factory=dict)
 
     # 策略相关字段
     pivot_price: Optional[float] = None  # 转折点价格
@@ -105,6 +107,8 @@ class PendingOrder:
             "exit_mode": self.exit_mode,
             "trailing_activation_r": self.trailing_activation_r,
             "trailing_distance_r": self.trailing_distance_r,
+            "decision_id": self.decision_id,
+            "position_attribution": self.position_attribution,
             "pivot_price": self.pivot_price,
             "key_level": self.key_level,
             "ai_period": self.ai_period,
@@ -156,6 +160,8 @@ class PendingOrder:
             exit_mode=data.get('exit_mode', 'fixed_rr'),
             trailing_activation_r=float(data.get('trailing_activation_r', 1.0)),
             trailing_distance_r=float(data.get('trailing_distance_r', 1.0)),
+            decision_id=str(data.get('decision_id', '') or ''),
+            position_attribution=dict(data.get('position_attribution') or {}),
             pivot_price=data.get('pivot_price'),
             key_level=data.get('key_level'),
             ai_period=data.get('ai_period'),

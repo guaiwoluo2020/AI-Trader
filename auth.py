@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from pymysql.err import IntegrityError
 from sqlite_storage import MetaRepository, UserRepository, bootstrap_runtime_storage
 
@@ -37,6 +37,8 @@ class AuthUser:
     membership_level: str = "silver"
     live_trading_enabled: bool = False
     token_version: int = 1
+    view_only: bool = False
+    impersonated_by: Optional[int] = None
 
 
 class UsernameAlreadyExistsError(ValueError):
@@ -209,6 +211,30 @@ class AuthManager:
         ).hexdigest()
         return f"{encoded_payload}.{signature}"
 
+    def start_session(self, user: AuthUser) -> AuthUser:
+        """Rotate the per-user version so only the newest login remains valid."""
+        with self._lock:
+            record = self.user_repo.rotate_token_version(user.user_id)
+        return self._to_auth_user(record)
+
+    def create_view_token(self, admin: AuthUser, target: AuthUser) -> str:
+        """Create a short-lived, read-only token for admin support viewing."""
+        with self._lock:
+            secret = self.meta_repo.get("auth_secret") or ""
+        payload = {
+            "sub": target.username,
+            "exp": int(time.time()) + min(self.token_ttl_seconds, 60 * 60),
+            "nonce": secrets.token_hex(8),
+            "ver": target.token_version,
+            "view_only": True,
+            "impersonated_by": int(admin.user_id),
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).decode("utf-8").rstrip("=")
+        signature = hmac.new(secret.encode("utf-8"), encoded.encode("utf-8"), hashlib.sha256).hexdigest()
+        return f"{encoded}.{signature}"
+
     def verify_token(self, token: str) -> AuthUser:
         try:
             encoded_payload, signature = token.split(".", 1)
@@ -262,7 +288,10 @@ class AuthManager:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="登录状态已失效，请重新登录",
             )
-        return self._to_auth_user(user)
+        authenticated = self._to_auth_user(user)
+        authenticated.view_only = bool(payload.get("view_only", False))
+        authenticated.impersonated_by = payload.get("impersonated_by")
+        return authenticated
 
 
 _AUTH_MANAGER: Optional[AuthManager] = None
@@ -280,7 +309,10 @@ def reset_auth_manager() -> None:
     _AUTH_MANAGER = None
 
 
-def require_auth(authorization: Optional[str] = Header(default=None)) -> AuthUser:
+def require_auth(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> AuthUser:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -294,7 +326,13 @@ def require_auth(authorization: Optional[str] = Header(default=None)) -> AuthUse
             detail="请先登录",
         )
 
-    return get_auth_manager().verify_token(token)
+    user = get_auth_manager().verify_token(token)
+    if user.view_only and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前为管理员只读查看模式，不能执行修改或交易操作",
+        )
+    return user
 
 
 def require_admin(user: AuthUser = Depends(require_auth)) -> AuthUser:

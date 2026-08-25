@@ -109,6 +109,13 @@ export const authAPI = {
     return response.data
   },
 
+  async createUserViewToken(userId) {
+    const response = await api.post(
+      `/auth/admin/users/${encodeURIComponent(userId)}/view-token`
+    )
+    return response.data
+  },
+
   async getInvitations() {
     const response = await api.get('/auth/admin/invitations')
     return response.data

@@ -34,8 +34,6 @@ class AIEntrySignalGenerator:
 
         # 冷却记录
         self._signal_cooldowns: Dict[str, datetime] = {}
-        self._consumed_recommendations = set()
-        self._consumed_order = []
 
         print("[AIEntrySignalGenerator] AI入场信号生成器已初始化")
 
@@ -113,19 +111,9 @@ class AIEntrySignalGenerator:
             entry_price = match.get('entry_price', 0)
             direction = match.get('direction', 'buy')
             analysis_id = str(match.get("analyzed_at") or "")
-            recommendation_key = (
-                analysis_id,
-                strategy_id,
-                signal_source_id,
-                symbol,
-                period,
-                direction,
-                round(float(entry_price or 0), 8),
-            )
-            if analysis_id and recommendation_key in self._consumed_recommendations:
-                continue
-            if int(match.get("confidence", 0)) < int(min_confidence):
-                continue
+            # AI trade suggestions are evaluated by price/entry mode and
+            # validated exits. Confidence remains available for display and
+            # tie-breaking, but is not a hard gate for forming an entry signal.
 
             # 检查冷却
             if not analysis_id and self._check_cooldown(
@@ -146,9 +134,7 @@ class AIEntrySignalGenerator:
                 require_suggested_exits=not allow_exit_fallback,
             )
             if signal:
-                if analysis_id:
-                    self._remember_consumed(recommendation_key)
-                else:
+                if not analysis_id:
                     self._set_cooldown(
                         symbol, period, entry_price, direction, strategy_id,
                         signal_source_id,
@@ -157,14 +143,6 @@ class AIEntrySignalGenerator:
                 signals.append(signal)
 
         return signals
-
-    def _remember_consumed(self, key) -> None:
-        """Bound memory while ensuring one emission per analyzed recommendation."""
-        self._consumed_recommendations.add(key)
-        self._consumed_order.append(key)
-        if len(self._consumed_order) > 5000:
-            expired = self._consumed_order.pop(0)
-            self._consumed_recommendations.discard(expired)
 
     def generate_signals_for_strategy(
         self, symbol: str, current_price: float, strategy,
@@ -181,6 +159,11 @@ class AIEntrySignalGenerator:
                 self._user_id, managed_source_id, managed_source_owner_id,
             ) if managed_source_id else None
             if managed_source_id and (not managed_source or not managed_source.get("enabled")):
+                continue
+            if managed_source and bool(
+                (managed_source.get("config") or {}).get("analysis_paused")
+            ):
+                # A paused owner source must not be consumed by shared strategies.
                 continue
             if managed_source_id and int(managed_source["user_id"]) != self._user_id:
                 # A shared source is executed by its owner. Consumers only use
@@ -208,6 +191,15 @@ class AIEntrySignalGenerator:
                 }},
             }
             source_id = config["signal_source_id"]
+            # Analysis pause is independent from source enabled/locked state.
+            # It prevents both new LLM calls and consumption of the last plan.
+            source_for_pause = self._ai_signal_source_repo.get_visible(
+                self._user_id, source_id,
+            )
+            if source_for_pause and bool(
+                (source_for_pause.get("config") or {}).get("analysis_paused")
+            ):
+                continue
             if params.get("analysis_mode", "self_analysis") == "shared_reference":
                 signals.append(self._shared_reference_signal(
                     symbol, current_price, strategy, {**config, "params": params}
@@ -328,7 +320,7 @@ class AIEntrySignalGenerator:
             )
         )
         trigger = None
-        if ready and suggestion and confidence >= min_confidence:
+        if ready and suggestion:
             local_suggestion = dict(suggestion)
             local_suggestion["period"] = config.get("period", source_period)
             # Normalize the provider's `action` alias before building the
@@ -358,16 +350,9 @@ class AIEntrySignalGenerator:
         )
         trigger = state["trigger"]
         shared = state.get("shared") or {}
-        recommendation_key = (
-            str(shared.get("share_id") or ""),
-            int(shared.get("last_run_at") or 0),
-            strategy.strategy_id,
-            config["signal_source_id"],
-        )
-        if trigger is not None and recommendation_key in self._consumed_recommendations:
-            trigger = None
-        elif trigger is not None:
-            self._remember_consumed(recommendation_key)
+        # Each consuming account/deployment performs persistent plan
+        # deduplication. A user-level in-memory flag here would incorrectly
+        # let the first account hide the same shared plan from other accounts.
         if trigger is None:
             trigger = TradingSignal(
                 symbol=symbol,

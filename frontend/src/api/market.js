@@ -527,6 +527,16 @@ export const marketAPI = {
     return response.data
   },
 
+  async getAISignalSourceImpact(signalSourceId) {
+    const response = await api.get(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}/impact`)
+    return response.data
+  },
+
+  async pauseAISignalSource(signalSourceId, paused = true) {
+    const response = await api.post(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}/pause`, { paused })
+    return response.data
+  },
+
   async getSharedAIRuntimeData(symbol = null) {
     const response = await api.get('/llm/runtime-shares', {
       params: symbol ? { symbol } : {}
@@ -812,9 +822,37 @@ export const marketAPI = {
     return response.data
   },
 
-  async getStrategyExecutionOverview(strategyId) {
+  async getStrategyExecutionOverview(strategyId, options = {}) {
+    const params = { _ts: Date.now() }
+    if (options.include_chart) params.include_chart = 'true'
+    if (options.start_ts != null) params.start_ts = options.start_ts
+    if (options.end_ts != null) params.end_ts = options.end_ts
     const response = await api.get(
-      `/strategy/${encodeURIComponent(strategyId)}/execution-overview`
+      `/strategy/${encodeURIComponent(strategyId)}/execution-overview`,
+      { params },
+    )
+    return response.data
+  },
+
+  async getStrategyAuditChain(strategyId, deploymentId, decisionId = null) {
+    const params = { deployment_id: deploymentId, _ts: Date.now() }
+    if (decisionId) params.decision_id = decisionId
+    const response = await api.get(`/strategy/${encodeURIComponent(strategyId)}/audit-chain`, { params })
+    return response.data
+  },
+
+  async reviewStrategyExecution(strategyId, deploymentId, hours = 24) {
+    const response = await api.post(
+      `/strategy/${encodeURIComponent(strategyId)}/ai-review`,
+      { deployment_id: deploymentId, hours },
+    )
+    return response.data
+  },
+
+  async applyStrategyReview(strategyId, payload) {
+    const response = await api.post(
+      `/strategy/${encodeURIComponent(strategyId)}/ai-review/apply`,
+      payload,
     )
     return response.data
   },

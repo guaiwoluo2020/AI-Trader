@@ -7,6 +7,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from paper_trading import PaperTradingService, market_spec
 from market.models import PositionManagementPolicy
@@ -504,6 +505,88 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertEqual(report["summary"]["trade_count"], 1)
         self.assertEqual(report["summary"]["win_rate"], 100.0)
         self.assertEqual(report["by_strategy"][0]["name"], "strategy-1")
+        self.assertEqual(report["summary"]["closed_position_count"], 1)
+        self.assertEqual(report["by_setup"][0]["name"], "generic_entry")
+
+    def test_setup_performance_counts_partial_exits_as_one_position(self):
+        attribution = {
+            "setup_type": "range_breakout",
+            "setup_family": "breakout",
+            "setup_profile_id": "profile-breakout",
+            "setup_profile_name": "突破跟随",
+            "entry_mode": "close_confirmed_breakout",
+            "initial_risk": 10,
+        }
+        trades = [{
+            "trade_id": "partial", "position_id": "position-1",
+            "strategy_id": "strategy-1", "symbol": "GOLD_",
+            "direction": "buy", "volume": 0.03, "net_profit": 30,
+            "gross_profit": 31, "commission": 1,
+            "exit_reason": "partial_take_profit", "opened_at": 100,
+            "closed_at": 160,
+            "position_attribution_json": json.dumps(attribution),
+        }, {
+            "trade_id": "final", "position_id": "position-1",
+            "strategy_id": "strategy-1", "symbol": "GOLD_",
+            "direction": "buy", "volume": 0.07, "net_profit": -10,
+            "gross_profit": -8, "commission": 2,
+            "exit_reason": "trailing_stop", "opened_at": 100,
+            "closed_at": 220,
+            "position_attribution_json": json.dumps(attribution),
+        }]
+
+        outcomes = self.service._position_trade_outcomes(trades)
+        grouped = self.service._group_position_outcomes(outcomes, "setup_type")
+
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]["net_profit"], 20)
+        self.assertAlmostEqual(outcomes[0]["realized_r"], 0.2)
+        self.assertEqual(grouped[0]["position_count"], 1)
+        self.assertEqual(grouped[0]["win_rate"], 100.0)
+        self.assertEqual(grouped[0]["sample_status"], "insufficient")
+
+    def test_ai_plan_is_consumed_once_per_paper_deployment(self):
+        deployment = self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        decision = self.decision("plan-decision")
+        decision["signal_summary"] = {
+            "selected_signal_source": "ai_entry",
+            "selected_signal_source_id": "ai-m1",
+            "selected_setup_type": "range_reversal",
+            "selected_setup_family": "reversal",
+            "selected_entry_mode": "touch_or_near",
+            "selected_ai_plan_id": "plan-1",
+            "selected_ai_plan_valid_from": 1000,
+            "selected_ai_plan_expires_at": 1300,
+            "position_management": {
+                "initial_risk": 10,
+                "setup_context": {
+                    "signal_source": "ai_entry",
+                    "setup_type": "range_reversal",
+                    "setup_family": "reversal",
+                    "entry_mode": "touch_or_near",
+                },
+            },
+        }
+        self.assertEqual(
+            self.service.enqueue_decisions(self.user.user_id, [decision]), 1
+        )
+        signal = SimpleNamespace(
+            source="ai_entry", source_period="M1",
+            setup_type="range_reversal", setup_family="reversal",
+            ai_plan_id="plan-1", ai_plan_valid_from=1000,
+        )
+        strategy = SimpleNamespace(strategy_id="strategy-1")
+
+        result = self.service._paper_loss_streak_guard(
+            self.user.user_id, self.account.account_id, deployment,
+            "GOLD_", strategy, "buy", signal,
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["scope"], "paper_setup")
+        self.assertIn("已经触发过", result["reason"])
 
     def test_backtest_deployment_uses_current_strategy_reference_and_expires(self):
         row = self.storage.fetchone(

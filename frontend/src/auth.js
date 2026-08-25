@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 
 const STORAGE_KEY = 'ai-trader-auth'
+const ADMIN_SESSION_KEY = 'ai-trader-admin-session'
 
 function loadStoredSession() {
   if (typeof window === 'undefined') {
@@ -52,6 +53,29 @@ export function clearAuthSession() {
 
   if (typeof window !== 'undefined') {
     window.localStorage.removeItem(STORAGE_KEY)
+  }
+}
+
+export function saveAdminSessionForView() {
+  if (typeof window !== 'undefined' && authState.user?.role === 'admin') {
+    window.sessionStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify({
+      token: authState.token,
+      user: authState.user,
+    }))
+  }
+}
+
+export function restoreAdminSession() {
+  if (typeof window === 'undefined') return false
+  try {
+    const raw = window.sessionStorage.getItem(ADMIN_SESSION_KEY)
+    if (!raw) return false
+    const session = JSON.parse(raw)
+    setAuthSession(session)
+    window.sessionStorage.removeItem(ADMIN_SESSION_KEY)
+    return true
+  } catch (_) {
+    return false
   }
 }
 

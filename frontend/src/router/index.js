@@ -5,6 +5,7 @@ import Login from '../views/Login.vue'
 import Register from '../views/Register.vue'
 import TradeOrders from '../views/TradeOrders.vue'
 import Market from '../views/Market.vue'
+import StrategyReplay from '../views/StrategyReplay.vue'
 import AIMarket from '../views/AIMarket.vue'
 import AISignalSources from '../views/AISignalSources.vue'
 import Settings from '../views/Settings.vue'
@@ -73,6 +74,12 @@ const routes = [
     path: '/market',
     name: 'Market',
     component: Market,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/strategy-replay',
+    name: 'StrategyReplay',
+    component: StrategyReplay,
     meta: { requiresAuth: true }
   },
   {

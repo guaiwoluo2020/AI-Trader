@@ -336,9 +336,29 @@ class EmailVerificationService:
         self._send_message(config, target, None, "test")
         return {"target_email": target}
 
+    def send_admin_alert(self, subject: str, body: str) -> Dict:
+        """向管理员发送系统告警，不触碰验证码发送频控记录。"""
+        config = self.config_repository.get(include_password=True)
+        if not config["enabled"] or not config["sender_email"] or not config["password"]:
+            raise RuntimeError("邮件服务未启用或 SMTP 配置不完整")
+        admins = [
+            user for user in self.user_repository.list_users()
+            if user.role == "admin" and user.email
+        ]
+        if not admins:
+            raise RuntimeError("没有配置管理员邮箱")
+        target = self.policy.normalize(admins[0].email)
+        self._send_message(
+            config, target, None, "alert",
+            subject=str(subject or "AI Trader 系统告警")[:180],
+            body=str(body or ""),
+        )
+        return {"target_email": target}
+
     @staticmethod
     def _send_message(
         config: Dict, target: str, code: Optional[str], purpose: str,
+        subject: Optional[str] = None, body: Optional[str] = None,
     ) -> None:
         message = EmailMessage()
         message["From"] = f'{config["sender_name"]} <{config["sender_email"]}>'
@@ -347,7 +367,10 @@ class EmailVerificationService:
         message["Message-ID"] = make_msgid(domain=config["sender_email"].split("@", 1)[-1])
         message["Auto-Submitted"] = "auto-generated"
         message["X-Auto-Response-Suppress"] = "All"
-        if code:
+        if subject is not None or body is not None:
+            message["Subject"] = subject or "AI Trader 系统告警"
+            message.set_content(body or "")
+        elif code:
             action = "登录" if purpose == "login" else "注册"
             message["Subject"] = f"AI Trader {action}验证码 · {time.strftime('%H:%M:%S')}"
             message.set_content(

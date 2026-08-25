@@ -9,6 +9,54 @@ def policy(config):
 
 
 class PositionManagerTests(unittest.TestCase):
+    def test_setup_profile_uses_exact_then_family_then_source(self):
+        config = {
+            "initial_stop_rules": [{"type": "fixed_percent", "value": 0.01}],
+            "initial_take_profit_rules": [{"type": "risk_reward", "value": 2}],
+            "management_rules": [],
+            "min_risk_reward": 1,
+            "setup_profiles": [
+                {
+                    "name": "AI兜底", "priority": 999,
+                    "match": {"signal_sources": ["ai_entry"]},
+                    "overrides": {"initial_stop_rules": [
+                        {"type": "fixed_percent", "value": 0.02}
+                    ]},
+                },
+                {
+                    "name": "突破族", "priority": 1,
+                    "match": {"setup_families": ["breakout"]},
+                    "overrides": {"initial_stop_rules": [
+                        {"type": "fixed_percent", "value": 0.03}
+                    ]},
+                },
+                {
+                    "name": "箱体突破", "priority": 0,
+                    "match": {"setup_types": ["range_breakout"]},
+                    "overrides": {"initial_stop_rules": [
+                        {"type": "fixed_percent", "value": 0.04}
+                    ]},
+                },
+            ],
+        }
+        plan = PositionManager().create_plan(
+            policy(config), "buy", 100,
+            setup_context={
+                "setup_type": "range_breakout",
+                "setup_family": "breakout",
+                "signal_source": "ai_entry",
+            },
+        )
+        self.assertEqual(plan.stop_loss, 96)
+        self.assertEqual(
+            plan.policy_snapshot["applied_setup_profile"]["name"],
+            "箱体突破",
+        )
+        self.assertEqual(
+            plan.policy_snapshot["setup_context"]["setup_type"],
+            "range_breakout",
+        )
+
     def test_empty_signal_exits_fall_through_to_policy_rules(self):
         plan = PositionManager().create_plan(
             policy({

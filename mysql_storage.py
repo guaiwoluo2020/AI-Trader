@@ -205,6 +205,57 @@ class MySQLStorage:
                   COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS live_trade_deals (
+                    id BIGINT NOT NULL AUTO_INCREMENT,
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    ticket BIGINT NOT NULL,
+                    mt5_order BIGINT NOT NULL DEFAULT 0,
+                    mt5_position_id BIGINT NOT NULL DEFAULT 0,
+                    symbol VARCHAR(64) NOT NULL DEFAULT '',
+                    deal_type INT NOT NULL DEFAULT 0,
+                    entry_type INT NOT NULL DEFAULT 0,
+                    volume DOUBLE NOT NULL DEFAULT 0,
+                    price DOUBLE NOT NULL DEFAULT 0,
+                    profit DOUBLE NOT NULL DEFAULT 0,
+                    swap DOUBLE NOT NULL DEFAULT 0,
+                    commission DOUBLE NOT NULL DEFAULT 0,
+                    deal_time VARCHAR(32) NOT NULL DEFAULT '',
+                    comment VARCHAR(512) NOT NULL DEFAULT '',
+                    received_at BIGINT NOT NULL,
+                    payload_json JSON NOT NULL,
+                    position_attribution_json JSON NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uq_live_trade_deals_account_ticket (account_id, ticket),
+                    KEY idx_live_trade_deals_account_time (account_id, deal_time, received_at),
+                    CONSTRAINT fk_live_trade_deals_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    CONSTRAINT fk_live_trade_deals_account FOREIGN KEY (account_id) REFERENCES trading_accounts(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS historical_klines (
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    period VARCHAR(16) NOT NULL,
+                    timestamp BIGINT NOT NULL,
+                    open_price DOUBLE NOT NULL,
+                    high_price DOUBLE NOT NULL,
+                    low_price DOUBLE NOT NULL,
+                    close_price DOUBLE NOT NULL,
+                    volume DOUBLE NOT NULL DEFAULT 0,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (user_id, account_id, symbol, period, timestamp),
+                    KEY idx_historical_klines_lookup (user_id, account_id, symbol, period, timestamp),
+                    KEY idx_historical_klines_retention (timestamp)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
                 try:
                     conn.execute(
                         "ALTER TABLE ai_signal_sources ADD COLUMN "
@@ -214,6 +265,50 @@ class MySQLStorage:
                     # The migration is idempotent; MySQL reports a duplicate
                     # column on every startup after the first successful run.
                     pass
+                # Execution attribution is deliberately migrated by the MySQL
+                # adapter itself. SQLiteStorage.initialize() is not part of the
+                # production runtime, so adding compatibility columns there is
+                # insufficient for RDS deployments.
+                compatibility_columns = {
+                    "trade_execution_reports": (
+                        ("mt5_position_id", "BIGINT NOT NULL DEFAULT 0"),
+                        ("position_attribution_json", "JSON NULL"),
+                    ),
+                    "live_trade_deals": (
+                        ("position_attribution_json", "JSON NULL"),
+                    ),
+                    "paper_orders": (
+                        ("position_attribution_json", "JSON NULL"),
+                    ),
+                    "paper_positions": (
+                        ("position_attribution_json", "JSON NULL"),
+                    ),
+                    "paper_trades": (
+                        ("position_attribution_json", "JSON NULL"),
+                    ),
+                    "backtest_orders": (
+                        ("position_attribution_json", "JSON NULL"),
+                    ),
+                    "backtest_positions": (
+                        ("position_attribution_json", "JSON NULL"),
+                    ),
+                    "backtest_trades": (
+                        ("position_attribution_json", "JSON NULL"),
+                    ),
+                }
+                for table, columns in compatibility_columns.items():
+                    for column, column_type in columns:
+                        try:
+                            conn.execute(
+                                f"ALTER TABLE {table} ADD COLUMN "
+                                f"{column} {column_type}"
+                            )
+                        except Exception as exc:
+                            # 1060 is MySQL's duplicate-column error. Any other
+                            # failure must stop startup, otherwise the next order
+                            # would fail later with a less actionable SQL error.
+                            if getattr(exc, "args", (None,))[0] != 1060:
+                                raise
                 conn.execute(
                     """
                     UPDATE ai_signal_sources AS source
@@ -241,6 +336,19 @@ class MySQLStorage:
         self.initialize()
         with self._connect() as conn:
             conn.execute(sql, params)
+
+    def executemany(self, sql: str, params: List[tuple]) -> None:
+        """Execute one statement for a batch using the pooled transaction.
+
+        Repository code uses this for persisted K-line batches. Exposing the
+        same surface as the connection wrapper keeps MySQL as the only runtime
+        store without falling back to SQLite-specific write paths.
+        """
+        if not params:
+            return
+        self.initialize()
+        with self._connect() as conn:
+            conn.executemany(sql, params)
 
     def fetchone(self, sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
         self.initialize()

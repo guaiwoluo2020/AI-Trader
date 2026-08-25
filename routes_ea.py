@@ -12,6 +12,7 @@ from ea_auth import EAIdentity, require_ea_auth
 from models import TradeInstruction
 from sqlite_storage import (
     EAActivationRepository,
+    LiveTradeDealRepository,
     TradeExecutionRepository,
     TradingAccountRepository,
 )
@@ -444,6 +445,11 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             # 使用新的交易历史服务
             server = engine_manager.get_engine_for_ea(identity)
             new_count = server.trade_history_service.process_deals(deals)
+            # 成交历史不能只依赖运行时 24 小时缓存；账户页和策略回放需要
+            # 在服务重启后仍可读取，因此同步写入 MySQL 持久化表。
+            persisted_count = LiveTradeDealRepository().record_many(
+                identity.user_id, identity.account_id, deals
+            )
 
             # 记录日志
             system_log = server.system_log
@@ -452,6 +458,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 {
                     "deals_received": len(deals),
                     "deals_new": new_count,
+                    "deals_persisted": persisted_count,
                     "total_deals": len(server.trade_history_store.get())
                 },
                 message=f"交易历史上报: 收到{len(deals)}条, 新增{new_count}条"
@@ -460,7 +467,8 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             return {
                 "status": "ok",
                 "message": "交易历史已更新",
-                "count": new_count
+                "count": new_count,
+                "persisted_count": persisted_count,
             }
 
         except Exception as e:

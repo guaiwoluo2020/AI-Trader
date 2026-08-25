@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from auth import AuthUser, require_auth
 from membership import MembershipService
 from sqlite_storage import (
+    LiveTradeDealRepository,
     PositionManagementEventRepository,
     StrategyConfigRepository,
     TradeExecutionRepository,
@@ -40,6 +41,13 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 **_account_payload(account, deployments),
                 "deployments": deployments,
             })
+        # 账户页以运行中的策略为首要排序依据；无运行策略的账户放在后面。
+        # 同组内优先显示在线账户，再按最近更新时间倒序。
+        payloads.sort(key=lambda item: (
+            -int(any(str(d.get("status")) == "active" for d in (item.get("deployments") or []))),
+            -int(bool(item.get("connected"))),
+            -int(item.get("last_seen_at") or item.get("financial_updated_at") or item.get("created_at") or 0),
+        ))
         return {
             "status": "ok",
             "count": len(accounts),
@@ -173,15 +181,75 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             position["management_events"] = events.list_for_position(
                 user.user_id, account_id, str(position.get("ticket", "")),
             )
+        execution_reports = TradeExecutionRepository().list_for_account(
+            user.user_id, account_id, 100,
+        )
+        trades = LiveTradeDealRepository().list_for_account(
+            user.user_id, account_id, 100,
+        )
+        # 成交回报通过 MT5 deal/order/position 与策略指令关联。老 EA 没有
+        # position_id 时仍可用 deal/order 关联，不影响历史展示。
+        by_deal = {int(r.get("mt5_deal", 0) or 0): r for r in execution_reports}
+        by_order = {int(r.get("mt5_order", 0) or 0): r for r in execution_reports}
+        by_position = {int(r.get("mt5_position_id", 0) or 0): r for r in execution_reports}
+        for trade in trades:
+            attribution = trade.get("position_attribution") or {}
+            trade["time"] = trade.get("deal_time") or ""
+            trade["type"] = int(trade.get("deal_type", 0) or 0)
+            trade["type_text"] = (
+                "买入" if int(trade.get("deal_type", 0) or 0) == 0 else "卖出"
+            )
+            trade["entry_text"] = {
+                0: "开仓", 1: "平仓", 2: "反向成交", 3: "对锁平仓",
+            }.get(int(trade.get("entry_type", 0) or 0), "成交")
+            trade["order_source"] = (
+                "策略指令" if attribution else (trade.get("comment") or "MT5 成交")
+            )
+            trade["setup_type"] = attribution.get("setup_type", "")
+            trade["setup_profile_name"] = attribution.get("setup_profile_name", "")
+            trade["open_reason"] = attribution.get("entry_reason", "")
+            trade["close_reason"] = attribution.get("exit_reason", "")
+            trade["initial_stop_loss"] = float(
+                attribution.get("initial_stop_loss") or 0
+            )
+            trade["initial_take_profit"] = float(
+                attribution.get("initial_take_profit") or 0
+            )
+            trade["realized_r"] = float(attribution.get("realized_r") or 0)
+            report = (
+                by_deal.get(int(trade.get("ticket", 0) or 0))
+                or by_order.get(int(trade.get("mt5_order", 0) or 0))
+                or by_position.get(int(trade.get("mt5_position_id", 0) or 0))
+            )
+            if report:
+                trade["strategy_triggered"] = True
+                trade["execution_report_id"] = report.get("id")
+                trade["instruction_id"] = report.get("instruction_id", "")
+                trade["execution_reason"] = (
+                    attribution.get("exit_reason")
+                    or attribution.get("entry_reason")
+                    or "策略指令已在 MT5 成交"
+                )
+            else:
+                trade["strategy_triggered"] = False
+        for report in execution_reports:
+            attribution = report.get("position_attribution") or {}
+            report["setup_type"] = attribution.get("setup_type", "")
+            report["setup_profile_name"] = attribution.get("setup_profile_name", "")
+            report["open_reason"] = attribution.get("entry_reason", "")
+            report["initial_stop_loss"] = float(
+                attribution.get("initial_stop_loss") or 0
+            )
+            report["initial_take_profit"] = float(
+                attribution.get("initial_take_profit") or 0
+            )
         return {
             "status": "ok",
             "detail": {
                 "account": _account_payload(account),
                 "positions": positions,
-                "trades": engine.trade_history_service.get_deals()[:100],
-                "execution_reports": TradeExecutionRepository().list_for_account(
-                    user.user_id, account_id, 100,
-                ),
+                "trades": trades,
+                "execution_reports": execution_reports,
                 "equity_curve": repository.list_live_equity_points(
                     user.user_id, account_id,
                 ),

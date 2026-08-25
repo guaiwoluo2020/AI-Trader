@@ -1,0 +1,37 @@
+<template>
+  <v-container fluid class="replay-page">
+    <header class="page-header">
+      <div><div class="section-kicker">STRATEGY EXECUTION REPLAY</div><h1>K线交易回放</h1><p>{{ strategyName }} · {{ deployment?.account_name || '加载部署中' }}</p></div>
+      <div class="header-actions"><v-text-field v-model="startAt" type="datetime-local" label="开始时间" density="compact" hide-details style="max-width:190px"/><v-text-field v-model="endAt" type="datetime-local" label="结束时间" density="compact" hide-details style="max-width:190px"/><v-btn v-if="deployment" color="primary" variant="tonal" prepend-icon="mdi-magnify" :loading="loading" @click="load">查询</v-btn><v-select v-if="deployment" v-model="reviewHours" :items="reviewRanges" label="复盘范围" density="compact" hide-details style="max-width:130px"/><v-btn v-if="deployment" color="primary" prepend-icon="mdi-brain" :loading="reviewLoading" @click="runReview">AI 策略复盘</v-btn><v-btn variant="outlined" prepend-icon="mdi-arrow-left" :to="{ path: '/market', query: { strategy_id: strategyId } }">返回策略执行中心</v-btn></div>
+    </header>
+    <v-alert v-if="loading" type="info" variant="tonal">正在加载 K线与交易执行事件。</v-alert>
+    <v-alert v-else-if="error" type="error" variant="tonal">{{ error }}</v-alert>
+    <v-alert v-else-if="!deployment" type="warning" variant="tonal">未找到该策略部署。</v-alert>
+    <StrategyExecutionChart v-else :symbol="deployment.chart?.symbol || deployment.symbol" :period="deployment.chart?.period || 'M5'" :bars="deployment.chart?.bars || []" :events="deployment.chart?.events || []" :decisions="deployment.decisions || []"/>
+    <v-alert v-if="reviewError" type="error" variant="tonal" class="mt-4">{{ reviewError }}</v-alert>
+    <v-btn v-if="review" class="review-apply-button" color="primary" variant="tonal" prepend-icon="mdi-content-save-edit" :loading="applyLoading" @click="applyReview">停止并应用全部建议</v-btn>
+    <v-card v-if="review" class="review-card mt-4" elevation="0">
+      <v-card-title class="d-flex align-center ga-2"><v-icon color="primary">mdi-brain</v-icon>AI 策略复盘建议 <v-chip v-if="review.confidence != null" size="small" color="primary" variant="tonal">置信度 {{ review.confidence }}%</v-chip></v-card-title>
+      <v-card-text><p class="review-summary">{{ review.summary || '暂无总结' }}</p><h3>主要问题</h3><div v-for="(item, index) in (review.root_causes || [])" :key="`cause-${index}`" class="review-item"><div><v-chip size="x-small" :color="severityColor(item.severity)" variant="tonal">{{ item.severity || 'medium' }}</v-chip> <strong>{{ item.category || 'execution' }}</strong></div><div>{{ item.explanation }}</div><div class="evidence">证据：{{ item.evidence }}</div></div><h3 class="mt-4">改进建议</h3><div v-for="(item, index) in (review.suggestions || [])" :key="`suggestion-${index}`" class="review-item suggestion"><div><v-chip size="x-small" color="primary" variant="tonal">{{ item.target }}</v-chip> <strong>{{ item.field }}</strong></div><div>{{ item.change }}</div><div class="evidence">原因：{{ item.reason }}</div><div v-if="item.validation" class="evidence">验证：{{ item.validation }}</div></div><div v-if="review.risk_notes?.length" class="risk-notes"><strong>风险提示：</strong>{{ review.risk_notes.join('；') }}</div><p class="review-footnote">以上内容仅为复盘建议，不会自动修改信号源、策略或持仓管理配置。</p></v-card-text>
+    </v-card>
+  </v-container>
+</template>
+<script setup>
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { marketAPI } from '@/api/market'
+import StrategyExecutionChart from '@/components/StrategyExecutionChart.vue'
+const route=useRoute(),loading=ref(false),error=ref(''),overview=ref(null),review=ref(null),reviewLoading=ref(false),reviewError=ref(''),reviewHours=ref(24),startAt=ref(''),endAt=ref(''),applyLoading=ref(false)
+const reviewRanges=[{title:'最近6小时',value:6},{title:'最近24小时',value:24},{title:'最近3天',value:72},{title:'最近7天',value:168}]
+const strategyId=computed(()=>String(route.query.strategy_id||'')),deploymentId=computed(()=>String(route.query.deployment_id||''))
+const deployment=computed(()=> (Array.isArray(overview.value?.deployments)?overview.value.deployments:[]).find(item=>String(item?.deployment_id)===deploymentId.value)||null)
+const strategyName=computed(()=>overview.value?.strategy?.strategy_name||strategyId.value||'策略')
+const severityColor=value=>({high:'error',medium:'warning',low:'info'}[String(value||'').toLowerCase()]||'grey')
+const runReview=async()=>{if(!deployment.value)return;reviewLoading.value=true;reviewError.value='';try{const result=await marketAPI.reviewStrategyExecution(strategyId.value,deployment.value.deployment_id,reviewHours.value);review.value=result.review||{}}catch(e){reviewError.value=e?.response?.data?.detail||'AI 策略复盘失败'}finally{reviewLoading.value=false}}
+const applyReview=async()=>{if(!review.value||!deployment.value)return;const suggestions=(review.value.suggestions||[]).filter(item=>item?.patch&&Object.keys(item.patch).length);if(!suggestions.length){reviewError.value='当前复盘没有可执行的结构化修改';return}if(!window.confirm('将暂停该策略的运行部署并应用复盘建议，已有持仓不会自动平仓。确认继续吗？'))return;applyLoading.value=true;reviewError.value='';try{const strategy={},sources=[];for(const item of suggestions){if(item.target==='strategy')Object.assign(strategy,item.patch);else if(item.target==='signal_source')sources.push({signal_source_id:item.signal_source_id||item.id,patch:item.patch})}const result=await marketAPI.applyStrategyReview(strategyId.value,{stop_deployments:true,strategy,signal_sources:sources});if(result.status!=='ok')throw new Error(result.message||'应用复盘修改失败');reviewError.value='复盘修改已应用，相关部署已暂停'}catch(e){reviewError.value=e?.response?.data?.detail||e.message||'应用复盘修改失败'}finally{applyLoading.value=false}}
+const load=async()=>{if(!strategyId.value){error.value='缺少 strategy_id';return}loading.value=true;error.value='';try{const toTs=value=>value?Math.floor(new Date(value).getTime()/1000):null;overview.value=await marketAPI.getStrategyExecutionOverview(strategyId.value,{include_chart:true,start_ts:toTs(startAt.value),end_ts:toTs(endAt.value)})}catch(e){error.value=e?.response?.data?.detail||'加载策略执行回放失败'}finally{loading.value=false}}
+onMounted(load);watch(strategyId,load)
+</script>
+<style scoped>
+.replay-page{max-width:1440px;margin:0 auto;padding-top:24px}.page-header{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:18px}.header-actions{display:flex;gap:10px;align-items:center}.section-kicker{color:#b18443;font-size:.64rem;font-weight:800;letter-spacing:.12em}.page-header h1{margin:4px 0;color:#29483f;font-size:1.55rem}.page-header p{margin:0;color:#71817a;font-size:.82rem}.review-card{border:1px solid #dbe8e1;border-radius:16px;background:linear-gradient(145deg,#fff,#f7fbf8)}.review-summary{font-size:1.02rem;color:#29483f}.review-card h3{margin:12px 0 8px;color:#315f50;font-size:1rem}.review-item{margin:8px 0;padding:11px 13px;border:1px solid #e0ebe5;border-radius:10px;background:#fbfdfb;line-height:1.55}.review-item.suggestion{border-left:3px solid #2f8063}.evidence{color:#71817a;font-size:.83rem}.risk-notes{margin-top:16px;padding:10px 12px;border-radius:9px;background:#fff8e8;color:#785b20}.review-footnote{margin:16px 0 0;color:#81918b;font-size:.8rem}@media(max-width:700px){.page-header{align-items:flex-start;flex-direction:column}.header-actions{width:100%;flex-wrap:wrap}.header-actions .v-btn{flex:1}}
+</style>

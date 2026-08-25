@@ -165,6 +165,9 @@ def build_moving_average_state_signal(
         confidence=int(state.get("confidence", 0)),
         source=SignalSource.MOVING_AVERAGE,
         source_period=period,
+        setup_family="trend_follow",
+        setup_type="ma_crossover" if cross in {"buy", "sell"} else "ma_trend_state",
+        entry_mode="confirmation",
         trigger_price=current_price,
         trigger_time=signal_time,
         trigger_reason=reason,
@@ -333,6 +336,12 @@ def build_key_level_state_signal(
         is_entry_trigger=bool(trigger_type and action in {"buy", "sell"}),
         confidence=confidence,
         source=SignalSource.KEY_LEVEL,
+        setup_family="breakout" if "breakout" in trigger_type else "reversal",
+        setup_type=(
+            "key_level_breakout" if "breakout" in trigger_type
+            else "key_level_reversal"
+        ),
+        entry_mode="breakout" if "breakout" in trigger_type else "touch_or_near",
         trigger_price=current_price,
         trigger_time=signal_time,
         trigger_reason=reason,
@@ -360,12 +369,23 @@ def build_ai_entry_signal(
     direction = str(
         suggestion.get("direction") or suggestion.get("action") or ""
     ).lower()
+    entry_mode = str(suggestion.get("entry_mode") or "touch_or_near").lower()
+    confirmation = str(suggestion.get("confirmation") or "none").lower()
+    activation_status = str(
+        suggestion.get("activation_status")
+        or ("pending_confirmation" if entry_mode == "breakout" else "active")
+    ).lower()
     entry = float(suggestion.get("entry_price") or 0)
     sl = float(suggestion.get("stop_loss") or 0)
     tp = float(suggestion.get("take_profit") or 0)
     if (
         current_price <= 0 or direction not in {"buy", "sell"} or entry <= 0
         or abs(current_price - entry) / current_price > threshold
+    ):
+        return None
+    if entry_mode == "breakout" and (
+        activation_status != "active"
+        or confirmation not in {"close_confirmed", "retest_confirmed"}
     ):
         return None
     exits_valid = valid_exits(direction, current_price, sl, tp)
@@ -383,12 +403,22 @@ def build_ai_entry_signal(
         confidence = max(0, min(100, int(suggestion.get("confidence", 75))))
     except (TypeError, ValueError):
         confidence = 75
+    setup_type = str(suggestion.get("setup_type") or "generic_entry")
+    setup_family = (
+        "breakout" if "breakout" in setup_type
+        else "pullback" if setup_type in {"trend_pullback", "trend_rebound"}
+        else "reversal" if "reversal" in setup_type
+        else "generic"
+    )
     return TradingSignal(
         symbol=symbol,
         action=direction,
         confidence=confidence,
         source=SignalSource.AI_ENTRY,
         source_period=period,
+        setup_family=setup_family,
+        setup_type=setup_type,
+        entry_mode=entry_mode,
         trigger_price=current_price,
         trigger_time=signal_time,
         trigger_reason=f"AI建议入场: {suggestion.get('reason', '')}",
@@ -397,6 +427,20 @@ def build_ai_entry_signal(
         suggested_tp=tp,
         risk_reward_ratio=round(reward / risk, 2) if risk else 0,
         ai_analysis_period=period,
+        ai_trend=str((suggestion.get("trend") or {}).get("trend") or ""),
+        ai_trend_confidence=int((suggestion.get("trend") or {}).get("confidence") or 0),
+        ai_trend_reason=str((suggestion.get("trend") or {}).get("reason") or ""),
+        ai_overall_trend=suggestion.get("overall_trend") or {},
+        ai_market_structure=suggestion.get("market_structure") or {},
+        ai_background_analysis=suggestion.get("background_analysis") or {},
+        ai_trade_horizon=suggestion.get("trade_horizon") or {},
+        ai_original_entry=entry,
+        ai_plan_id=str(suggestion.get("plan_id") or ""),
+        ai_setup_type=str(suggestion.get("setup_type") or ""),
+        ai_entry_mode=entry_mode,
+        ai_plan_status=str(suggestion.get("status") or activation_status),
+        ai_plan_valid_from=int(suggestion.get("valid_from") or 0),
+        ai_plan_expires_at=int(suggestion.get("expires_at") or 0),
         created_at=signal_time,
     )
 
@@ -427,6 +471,9 @@ def build_pivot_signal(
         confidence=60,
         source=SignalSource.PIVOT,
         source_period=period,
+        setup_family="reversal",
+        setup_type="pivot_reversal",
+        entry_mode="confirmation",
         trigger_price=current_price,
         trigger_time=signal_time,
         trigger_reason=f"{period}接近{pivot_type}点 {pivot_price:.2f}",
@@ -461,6 +508,9 @@ def build_pivot_breakout_signal(
         confidence=65,
         source=SignalSource.PIVOT,
         source_period=period,
+        setup_family="breakout",
+        setup_type="pivot_breakout",
+        entry_mode="breakout",
         trigger_price=current_price,
         trigger_time=signal_time,
         trigger_reason=f"{period}突破{pivot_type}点 {pivot_price:.2f}",

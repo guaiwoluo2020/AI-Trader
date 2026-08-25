@@ -446,6 +446,7 @@ string GetPositionsSummary(bool onlyCurrentSymbol = true)
       if(positionCount > 0) summary += ",";
       summary += "{";
       summary += "\"ticket\":" + IntegerToString(PositionGetInteger(POSITION_TICKET)) + ",";
+      summary += "\"position_id\":" + IntegerToString(PositionGetInteger(POSITION_IDENTIFIER)) + ",";
       summary += "\"symbol\":\"" + posSymbol + "\",";
       summary += "\"volume\":" + DoubleToString(posVolume, 2) + ",";
       summary += "\"priceOpen\":" + DoubleToString(posPriceOpen, _Digits) + ",";
@@ -530,13 +531,14 @@ void CheckAndCloseRiskyPositions()
       if(posProfit < -riskThreshold)
         {
          long posTicket = PositionGetInteger(POSITION_TICKET);
+         double posVolume = PositionGetDouble(POSITION_VOLUME);
          Print("Risk limit exceeded! Position profit: ", posProfit, " Limit: ", -riskThreshold);
          
-         if(trade.PositionClose(posTicket))
+         if(ClosePositionByTicket(posTicket))
            {
             Print("Position closed successfully: ", posTicket);
             // 记录平仓动作
-            RecordTrade("CLOSE", _Symbol, PositionGetDouble(POSITION_VOLUME), 0, 0, 0);
+            RecordTrade("CLOSE", _Symbol, posVolume, 0, 0, 0);
            }
          else
            {
@@ -711,10 +713,36 @@ void ParseAndExecuteTrades(string jsonData)
             string levelId = ExtractJsonString(partialJson, "level_id");
             if(ticket > 0 && volume > 0 && PositionSelectByTicket(ticket))
               {
+               string positionSymbol = PositionGetString(POSITION_SYMBOL);
+               long positionId = PositionGetInteger(POSITION_IDENTIFIER);
+               ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+               double requestedPrice = positionType == POSITION_TYPE_BUY
+                                       ? SymbolInfoDouble(positionSymbol, SYMBOL_BID)
+                                       : SymbolInfoDouble(positionSymbol, SYMBOL_ASK);
                if(trade.PositionClosePartial(ticket, volume))
+                 {
                   Print("[分批止盈成功] Ticket: ", ticket, " Volume: ", volume, " Level: ", levelId);
+                  long resultPositionId = ResolvePositionId((long)trade.ResultDeal(), positionSymbol);
+                  SendTradeExecutionReport(
+                     "position-partial-" + IntegerToString(ticket) + "-" + IntegerToString(trade.ResultDeal()),
+                     "position-" + IntegerToString(ticket), positionSymbol, "partial_close",
+                     true, requestedPrice, trade.ResultPrice(), volume, trade.ResultVolume(),
+                     (long)trade.ResultOrder(), (long)trade.ResultDeal(),
+                     resultPositionId > 0 ? resultPositionId : positionId,
+                     (long)trade.ResultRetcode(), ""
+                  );
+                 }
                else
+                 {
                   Print("[分批止盈失败] Ticket: ", ticket, " Volume: ", volume, " Retcode: ", trade.ResultRetcodeDescription());
+                  SendTradeExecutionReport(
+                     "position-partial-failed-" + IntegerToString(ticket) + "-" + IntegerToString((long)TimeCurrent()),
+                     "position-" + IntegerToString(ticket), positionSymbol, "partial_close",
+                     false, requestedPrice, 0, volume, 0,
+                     (long)trade.ResultOrder(), (long)trade.ResultDeal(), positionId,
+                     (long)trade.ResultRetcode(), trade.ResultRetcodeDescription()
+                  );
+                 }
               }
             cursor = objectEnd + 1;
            }
@@ -772,18 +800,49 @@ void ParseAndExecuteClose(string jsonData)
 //+------------------------------------------------------------------+
 //| 根据订单号平仓                                                    |
 //+------------------------------------------------------------------+
-void ClosePositionByTicket(long ticket)
+bool ClosePositionByTicket(long ticket)
   {
    Print("[EA] ClosePositionByTicket 尝试平仓: ticket=", ticket);
+
+   if(!PositionSelectByTicket(ticket))
+     {
+      Print("[平仓失败] 未找到持仓 Ticket: ", ticket);
+      return false;
+     }
+   string positionSymbol = PositionGetString(POSITION_SYMBOL);
+   long positionId = PositionGetInteger(POSITION_IDENTIFIER);
+   double volume = PositionGetDouble(POSITION_VOLUME);
+   ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double requestedPrice = positionType == POSITION_TYPE_BUY
+                           ? SymbolInfoDouble(positionSymbol, SYMBOL_BID)
+                           : SymbolInfoDouble(positionSymbol, SYMBOL_ASK);
 
    // 使用CTrade类平仓（更简单可靠）
    if(trade.PositionClose(ticket))
      {
       Print("[平仓成功] Ticket: ", ticket);
+      long resultPositionId = ResolvePositionId((long)trade.ResultDeal(), positionSymbol);
+      SendTradeExecutionReport(
+         "position-close-" + IntegerToString(ticket) + "-" + IntegerToString(trade.ResultDeal()),
+         "position-" + IntegerToString(ticket), positionSymbol, "close",
+         true, requestedPrice, trade.ResultPrice(), volume, trade.ResultVolume(),
+         (long)trade.ResultOrder(), (long)trade.ResultDeal(),
+         resultPositionId > 0 ? resultPositionId : positionId,
+         (long)trade.ResultRetcode(), ""
+      );
+      return true;
      }
    else
      {
       Print("[平仓失败] Ticket: ", ticket, " Error: ", GetLastError(), " Retcode: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+      SendTradeExecutionReport(
+         "position-close-failed-" + IntegerToString(ticket) + "-" + IntegerToString((long)TimeCurrent()),
+         "position-" + IntegerToString(ticket), positionSymbol, "close",
+         false, requestedPrice, 0, volume, 0,
+         (long)trade.ResultOrder(), (long)trade.ResultDeal(), positionId,
+         (long)trade.ResultRetcode(), trade.ResultRetcodeDescription()
+      );
+      return false;
      }
   }
 
@@ -990,6 +1049,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
       succeeded ? trade.ResultVolume() : 0,
       (long)trade.ResultOrder(),
       (long)trade.ResultDeal(),
+      ResolvePositionId((long)trade.ResultDeal(), _Symbol),
       (long)trade.ResultRetcode(),
       succeeded ? "" : trade.ResultRetcodeDescription()
    );
@@ -1002,7 +1062,7 @@ void SendTradeExecutionReport(
    string instructionId, string orderId, string symbol, string action,
    bool success, double requestedPrice, double executedPrice,
    double requestedVolume, double executedVolume, long mt5Order,
-   long mt5Deal, long retcode, string errorMessage)
+   long mt5Deal, long mt5PositionId, long retcode, string errorMessage)
   {
    if(instructionId == "")
       return;
@@ -1019,6 +1079,7 @@ void SendTradeExecutionReport(
    jsonBody += "\"executed_volume\":" + DoubleToString(executedVolume, 2) + ",";
    jsonBody += "\"mt5_order\":" + IntegerToString(mt5Order) + ",";
    jsonBody += "\"mt5_deal\":" + IntegerToString(mt5Deal) + ",";
+   jsonBody += "\"mt5_position_id\":" + IntegerToString(mt5PositionId) + ",";
    jsonBody += "\"retcode\":" + IntegerToString(retcode) + ",";
    jsonBody += "\"error_message\":\"" + EscapeJsonString(errorMessage) + "\"";
    jsonBody += "}";
@@ -1039,6 +1100,28 @@ void SendTradeExecutionReport(
    );
    if(responseCode != 200)
       Print("[EA] 交易执行回报失败: HTTP ", responseCode);
+  }
+
+//+------------------------------------------------------------------+
+//| 获取成交所属的稳定持仓生命周期标识                                |
+//| DEAL_POSITION_ID 连接开仓、分批平仓与最终平仓；历史尚未可读时，   |
+//| 回退为当前持仓的 POSITION_IDENTIFIER。                            |
+//+------------------------------------------------------------------+
+long ResolvePositionId(long dealTicket, string symbol)
+  {
+   if(dealTicket > 0)
+     {
+      datetime now = TimeCurrent();
+      if(HistorySelect(now - 86400, now + 60))
+        {
+         long positionId = HistoryDealGetInteger((ulong)dealTicket, DEAL_POSITION_ID);
+         if(positionId > 0)
+            return positionId;
+        }
+     }
+   if(symbol != "" && PositionSelect(symbol))
+      return PositionGetInteger(POSITION_IDENTIFIER);
+   return 0;
   }
 
 //+------------------------------------------------------------------+
@@ -1263,8 +1346,8 @@ bool PushAllKlineData(bool isFull)
    if(!PushKlineData(PERIOD_M5, isFull ? 288 : 1))
       success = false;
 
-   // M1: 5小时约300根，满足AI分析默认200根上下文
-   if(!PushKlineData(PERIOD_M1, isFull ? 300 : 1))
+   // M1: 20小时约1200根，覆盖策略交易回放；AI分析仍由服务端限制最多288根
+   if(!PushKlineData(PERIOD_M1, isFull ? 1200 : 1))
       success = false;
 
    if(success && isFull)
@@ -1729,12 +1812,14 @@ bool ReportTradeHistory()
       datetime deal_time = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
       string deal_comment = HistoryDealGetString(deal_ticket, DEAL_COMMENT);
       long deal_order = HistoryDealGetInteger(deal_ticket, DEAL_ORDER);
+      long deal_position_id = HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID);
 
       if(validDeals > 0) json += ",";
 
       json += "{";
       json += "\"ticket\":" + IntegerToString(deal_ticket) + ",";
       json += "\"order\":" + IntegerToString(deal_order) + ",";
+      json += "\"position_id\":" + IntegerToString(deal_position_id) + ",";
       json += "\"symbol\":\"" + deal_symbol + "\",";
       json += "\"type\":" + IntegerToString(deal_type) + ",";
       json += "\"entry\":" + IntegerToString(deal_entry) + ",";

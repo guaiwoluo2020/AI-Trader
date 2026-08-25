@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 from typing import Dict, Iterable, Optional, Tuple
 
 from market.models.position_management import (
     PositionAction, PositionManagementPolicy, PositionPlan,
+    resolve_position_management_config,
 )
 
 
@@ -129,11 +131,14 @@ class PositionManager:
         entry_price: float, signal_stop_loss: float = 0,
         signal_take_profit: float = 0, pivots=None, atr: float = 0,
         current_time: int = 0,
+        setup_context: Optional[Dict] = None,
     ) -> PositionPlan:
         direction = str(direction).lower()
         if direction not in {"buy", "sell"} or entry_price <= 0:
             raise ValueError("开仓方向或价格无效")
-        config = policy.config
+        config, applied_profile = resolve_position_management_config(
+            policy.config, setup_context
+        )
         stop, stop_rule = self._resolve_rule(
             config["initial_stop_rules"], direction, entry_price,
             float(signal_stop_loss or 0), 0, pivots, atr, True, current_time,
@@ -157,15 +162,22 @@ class PositionManager:
         rr = reward / risk if risk and take_profit else 0
         if take_profit and rr < float(config.get("min_risk_reward", 0)):
             raise ValueError("生成的盈亏比低于持仓管理方案要求")
+        policy_snapshot = policy.to_dict()
+        policy_snapshot["config"] = copy.deepcopy(config)
+        policy_snapshot["setup_context"] = copy.deepcopy(setup_context or {})
+        policy_snapshot["applied_setup_profile"] = copy.deepcopy(applied_profile)
+        explanation = [
+            f"止损使用 {stop_rule['type']} 规则",
+            f"止盈使用 {take_rule['type']} 规则",
+        ]
+        if applied_profile:
+            explanation.insert(0, f"匹配场景规则：{applied_profile.get('name')}")
         return PositionPlan(
             stop_loss=stop, take_profit=take_profit, initial_risk=risk,
             risk_reward=rr, policy_id=policy.policy_id,
-            policy_snapshot=policy.to_dict(), stop_rule=dict(stop_rule),
+            policy_snapshot=policy_snapshot, stop_rule=dict(stop_rule),
             take_profit_rule=dict(take_rule),
-            explanation=[
-                f"止损使用 {stop_rule['type']} 规则",
-                f"止盈使用 {take_rule['type']} 规则",
-            ],
+            explanation=explanation,
         )
 
     def evaluate(

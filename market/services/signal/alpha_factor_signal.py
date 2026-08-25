@@ -185,6 +185,15 @@ class AlphaFactorSignalGenerator:
                 symbol, period, current_price, state, datetime.now()
             )
             signal.signal_source_id = config["signal_source_id"]
+            signal.setup_family = str(
+                params.get("setup_family") or "factor"
+            ).lower()
+            signal.setup_type = str(
+                params.get("setup_type") or "factor_entry"
+            ).lower()
+            signal.entry_mode = str(
+                params.get("entry_mode") or "confirmation"
+            ).lower()
             if state["is_entry_trigger"]:
                 self._last_emitted[key] = datetime.now()
             signals.append(signal)
