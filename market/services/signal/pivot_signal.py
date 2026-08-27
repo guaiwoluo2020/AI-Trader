@@ -19,6 +19,45 @@ from .pivot_repository import (
 )
 
 
+def classify_main_period_regime(klines: List, lookback: int = 20) -> str:
+    """Classify the execution period as up, down, or sideways.
+
+    This deliberately uses only the configured pivot source's main period;
+    no higher-timeframe data or trend-strength score is involved.  A small
+    normalized slope and net move threshold keep ordinary tick noise from
+    being treated as a directional trend.
+    """
+    closes = []
+    for item in list(klines or [])[-max(6, int(lookback)):]:
+        value = getattr(item, "close", None)
+        if value is None and isinstance(item, dict):
+            value = item.get("close") or item.get("close_price")
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            closes.append(value)
+    if len(closes) < 6:
+        return "sideways"
+    first, last = closes[0], closes[-1]
+    net_change = (last - first) / first
+    n = len(closes)
+    mean_x = (n - 1) / 2
+    mean_y = sum(closes) / n
+    denominator = sum((index - mean_x) ** 2 for index in range(n))
+    slope = (
+        sum((index - mean_x) * (value - mean_y) for index, value in enumerate(closes))
+        / denominator / first
+        if denominator else 0.0
+    )
+    if net_change >= 0.001 and slope > 0:
+        return "up"
+    if net_change <= -0.001 and slope < 0:
+        return "down"
+    return "sideways"
+
+
 class PivotSignalGenerator:
     """转折点信号生成器"""
 
@@ -219,6 +258,10 @@ class PivotSignalGenerator:
             min_pivot_score = max(
                 0, min(100, int(params.get("min_pivot_score", 0)))
             )
+            trend_filter_enabled = bool(params.get("trend_filter_enabled", True))
+            main_period_regime = (
+                classify_main_period_regime(raw_klines) if trend_filter_enabled else "sideways"
+            )
             pivots = sorted(
                 pivots, key=lambda item: pivot_timestamp(item.timestamp), reverse=True
             )[:candidate_limit]
@@ -237,6 +280,17 @@ class PivotSignalGenerator:
                     age_bars, confirmation_count, half_life
                 )
                 if pivot_score < min_pivot_score:
+                    continue
+                pivot_action = "buy" if pivot.direction == "low" else "sell"
+                if trend_filter_enabled and (
+                    (main_period_regime == "up" and pivot_action == "sell")
+                    or (main_period_regime == "down" and pivot_action == "buy")
+                ):
+                    print(
+                        f"[PivotSignalGenerator] {symbol} {period} 过滤逆势转折点: "
+                        f"主周期={main_period_regime}, action={pivot_action}, "
+                        f"pivot={pivot.price}"
+                    )
                     continue
                 distance = abs(current_price - pivot.price) / current_price
                 is_near = (
