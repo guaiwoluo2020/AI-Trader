@@ -2723,12 +2723,9 @@ export default {
     const loadStrategies = async () => {
       strategiesLoading.value = true
       try {
-        const [data, admissionData, policyData] = await Promise.all([
-          marketAPI.getStrategies(), marketAPI.getStrategyAdmission(),
-          marketAPI.getPositionManagementPolicies()
-        ])
-        positionPolicies.value = policyData.policies || []
-        if (!newStrategyPolicyId.value) newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
+        // 先渲染策略列表。准入证据和持仓方案只在详情/生命周期操作时需要，
+        // 不应阻塞策略配置页首屏。
+        const data = await marketAPI.getStrategies()
         if (data.status === 'ok') {
           strategies.value = data.strategies || []
           strategyQuota.value = data.quota || strategyQuota.value
@@ -2737,11 +2734,29 @@ export default {
             ensureSignalSources(strategy)
           })
         }
-        if (admissionData.status === 'ok') {
-          strategyAdmissions.value = Object.fromEntries(
-            (admissionData.items || []).map(item => [item.strategy_id, item])
-          )
-        }
+        // 空闲时再加载补充信息；失败不影响策略列表可用性。
+        window.setTimeout(() => {
+          Promise.allSettled([
+            marketAPI.getStrategyAdmission(),
+            marketAPI.getPositionManagementPolicies(),
+          ]).then(([admissionResult, policyResult]) => {
+            const admissionData = admissionResult.status === 'fulfilled'
+              ? admissionResult.value : null
+            const policyData = policyResult.status === 'fulfilled'
+              ? policyResult.value : null
+            if (admissionData?.status === 'ok') {
+              strategyAdmissions.value = Object.fromEntries(
+                (admissionData.items || []).map(item => [item.strategy_id, item])
+              )
+            }
+            if (policyData?.status === 'ok') {
+              positionPolicies.value = policyData.policies || []
+              if (!newStrategyPolicyId.value) {
+                newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
+              }
+            }
+          })
+        }, 0)
       } catch (err) {
         console.error('加载策略配置失败:', err)
       } finally {
@@ -3290,8 +3305,8 @@ export default {
 
     onMounted(async () => {
       if (isStrategyPage.value) {
-        loadSymbols()
-        loadTradeConfig()
+        // 品种仅在新建策略弹窗打开时加载；交易配置属于系统页，
+        // 策略工作区不需要在首屏请求它。
         loadStrategies()
         return
       }
