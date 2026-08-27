@@ -106,7 +106,7 @@ class PaperTradingService:
                 "paper_eligible": paper_eligible,
                 "paper_direct_allowed": direct_paper,
                 "paper_eligibility_reason": (
-                    "包含 AI 或转折点信号源，可跳过回测直接进入模拟观察"
+                    "包含 AI、转折点或整数点位信号源，可跳过回测直接进入模拟观察"
                     if direct_paper and lifecycle not in {
                         StrategyLifecycle.BACKTEST_PASSED,
                         StrategyLifecycle.PAPER_TRADING,
@@ -137,7 +137,7 @@ class PaperTradingService:
     def _direct_paper_eligible(strategy_data: Dict) -> bool:
         return (
             any(
-                source.get("source") in {"ai_entry", "pivot"}
+                source.get("source") in {"ai_entry", "pivot", "key_level"}
                 and source.get("enabled", True)
                 for source in (strategy_data.get("signal_sources") or [])
             )
@@ -164,7 +164,7 @@ class PaperTradingService:
                 "to_status": StrategyLifecycle.PAPER_TRADING,
                 "changed_at": now.isoformat(),
                 "reason": (
-                    f"包含 AI 或转折点信号源，跳过回测直接部署到模拟账户 "
+                    f"包含 AI、转折点或整数点位信号源，跳过回测直接部署到模拟账户 "
                     f"{account_name} 观察"
                 ),
             })
@@ -210,7 +210,7 @@ class PaperTradingService:
             if not normal_eligible and not direct_observation_bypass:
                 raise ValueError(
                     "策略通过回测后才能部署到模拟账户；"
-                    "包含 AI 或转折点信号源的策略可直接模拟观察"
+                    "包含 AI、转折点或整数点位信号源的策略可直接模拟观察"
                 )
             if (
                 current_strategy.lifecycle_status == StrategyLifecycle.BACKTEST_PASSED

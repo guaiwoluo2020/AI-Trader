@@ -35,7 +35,6 @@ class StrategyAdmissionService:
         strategy_data = strategy.to_dict()
         backtest = self._backtest_evidence(user_id, strategy_data)
         paper = self._paper_evidence(user_id, strategy.strategy_id, strategy_data)
-        ai_strategy = self._has_enabled_ai_signal(strategy_data)
         direct_paper_strategy = self._has_enabled_direct_paper_signal(
             strategy_data
         )
@@ -52,11 +51,11 @@ class StrategyAdmissionService:
             },
             "backtest": backtest,
             "paper": paper,
-            "ai_strategy": ai_strategy,
+            "ai_strategy": self._has_enabled_ai_signal(strategy_data),
             "direct_paper_strategy": direct_paper_strategy,
             "eligible_for_paper": backtest["passed"] or direct_paper_strategy,
             "eligible_for_production": (
-                paper["passed"] if ai_strategy
+                paper["passed"] if direct_paper_strategy
                 else backtest["passed"] and paper["passed"]
             ),
         }
@@ -68,7 +67,7 @@ class StrategyAdmissionService:
         if target_status == "paper_trading" and not admission["eligible_for_paper"]:
             raise ValueError(
                 "当前策略版本缺少有效回测证据，不能进入模拟盘验证；"
-                "包含 AI 或转折点信号源的策略可直接模拟观察"
+                "包含 AI、转折点或整数点位信号源的策略可直接模拟观察"
             )
         if target_status == "production" and not admission["eligible_for_production"]:
             raise ValueError("策略尚未通过模拟盘准入，不能批准用于实盘")
@@ -156,7 +155,7 @@ class StrategyAdmissionService:
     @staticmethod
     def _has_enabled_direct_paper_signal(strategy_data: Dict) -> bool:
         return any(
-            source.get("source") in {"ai_entry", "pivot"}
+            source.get("source") in {"ai_entry", "pivot", "key_level"}
             and source.get("enabled", True)
             for source in (strategy_data.get("signal_sources") or [])
         ) and strategy_data.get("lifecycle_status") != "retired"

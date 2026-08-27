@@ -211,7 +211,7 @@
         </v-card-title>
         <v-card-text>
           <v-alert type="info" variant="tonal" class="mb-4">
-            模拟运行会绑定当前策略配置。包含 AI 或转折点信号源的策略可以跳过回测，直接进入模拟观察；其他策略仍需满足回测准入。
+            模拟运行会绑定当前策略配置。包含 AI、转折点或整数点位信号源的策略可以跳过回测，直接进入模拟观察；其他策略仍需满足回测准入。
           </v-alert>
           <v-select
             v-model="paperDeployAccountId"

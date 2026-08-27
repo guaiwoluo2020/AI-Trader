@@ -266,7 +266,7 @@ class PaperTradingServiceTests(unittest.TestCase):
         )
         self.assertFalse(option["paper_eligible"])
 
-        with self.assertRaisesRegex(ValueError, "AI 或转折点信号源"):
+        with self.assertRaisesRegex(ValueError, "AI、转折点或整数点位信号源"):
             self.service.deploy(
                 self.user.user_id, self.account.account_id, "strategy-1"
             )

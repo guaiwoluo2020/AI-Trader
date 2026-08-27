@@ -181,7 +181,7 @@
             <div>
               <div class="section-tag">STRATEGY DEPLOYMENT</div>
               <h3>策略运行实例</h3>
-              <p>部署后仅在该 Paper 账户自动执行；包含 AI 或转折点信号源的策略可跳过回测直接模拟观察，实盘准入仍会检查验证证据。</p>
+              <p>部署后仅在该 Paper 账户自动执行；包含 AI、转折点或整数点位信号源的策略可跳过回测直接模拟观察，实盘准入仍会检查验证证据。</p>
             </div>
             <div class="deployment-form">
               <v-select
