@@ -709,6 +709,7 @@ class SQLiteStorage:
                         invalid_count INTEGER NOT NULL DEFAULT 0,
                         checksum TEXT NOT NULL,
                         file_path TEXT NOT NULL,
+                        broker_utc_offset_seconds INTEGER NOT NULL DEFAULT 0,
                         created_at INTEGER NOT NULL,
                         PRIMARY KEY(dataset_id, chunk_index),
                         FOREIGN KEY(dataset_id) REFERENCES backtest_datasets(dataset_id) ON DELETE CASCADE
@@ -3008,7 +3009,7 @@ class TradeExecutionRepository:
         executed_price = float(payload.get("executed_price", 0) or 0)
         raw_slippage = executed_price - requested_price
         slippage = raw_slippage if action in {"b", "buy"} else -raw_slippage
-        now = _now_ts()
+        now = int(payload.get("reported_timestamp", 0) or _now_ts())
         runtime = self.storage.fetchone(
             "SELECT payload_json FROM runtime_entities WHERE user_id = ? "
             "AND account_id = ? AND entity_type = 'trading_instruction' "
@@ -3127,6 +3128,9 @@ class LiveTradeDealRepository:
         received_at = _now_ts()
         count = 0
         for deal in deals:
+            from market.models.trade_history import TradeDeal
+            parsed_deal = TradeDeal.from_ea_data(deal).to_dict()
+            canonical_deal = {**deal, **parsed_deal}
             ticket = int(deal.get("ticket", 0) or 0)
             if ticket <= 0:
                 continue
@@ -3182,9 +3186,11 @@ class LiveTradeDealRepository:
                 float(deal.get("volume", 0) or 0), float(deal.get("price", 0) or 0),
                 float(deal.get("profit", 0) or 0), float(deal.get("swap", 0) or 0),
                 float(deal.get("commission", 0) or 0),
-                str(deal.get("time", "") or ""),
+                str(canonical_deal.get("time_beijing", "") or ""),
+                int(canonical_deal.get("deal_timestamp", 0) or 0),
+                int(deal.get("broker_utc_offset_seconds", 0) or 0),
                 str(deal.get("comment", "") or ""), received_at,
-                json.dumps(deal, ensure_ascii=False),
+                json.dumps(canonical_deal, ensure_ascii=False),
                 json.dumps(attribution, ensure_ascii=False),
             )
             self.storage.execute(
@@ -3192,9 +3198,10 @@ class LiveTradeDealRepository:
                 INSERT INTO live_trade_deals(
                     user_id, account_id, ticket, mt5_order, mt5_position_id,
                     symbol, deal_type, entry_type, volume, price, profit, swap,
-                    commission, deal_time, comment, received_at, payload_json
+                    commission, deal_time, deal_timestamp,
+                    broker_utc_offset_seconds, comment, received_at, payload_json
                     , position_attribution_json
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id, ticket) DO UPDATE SET
                     mt5_order = excluded.mt5_order,
                     mt5_position_id = excluded.mt5_position_id,
@@ -3202,7 +3209,10 @@ class LiveTradeDealRepository:
                     entry_type = excluded.entry_type, volume = excluded.volume,
                     price = excluded.price, profit = excluded.profit,
                     swap = excluded.swap, commission = excluded.commission,
-                    deal_time = excluded.deal_time, comment = excluded.comment,
+                    deal_time = excluded.deal_time,
+                    deal_timestamp = excluded.deal_timestamp,
+                    broker_utc_offset_seconds = excluded.broker_utc_offset_seconds,
+                    comment = excluded.comment,
                     received_at = excluded.received_at, payload_json = excluded.payload_json
                     , position_attribution_json = excluded.position_attribution_json
                 """,
@@ -3216,13 +3226,25 @@ class LiveTradeDealRepository:
             """
             SELECT * FROM live_trade_deals
             WHERE user_id = ? AND account_id = ?
-            ORDER BY COALESCE(deal_time, '' ) DESC, received_at DESC, id DESC LIMIT ?
+            ORDER BY deal_timestamp DESC, received_at DESC, id DESC LIMIT ?
             """,
             (int(user_id), int(account_id), max(1, min(int(count), 100))),
         )
         items = []
         for row in rows:
             item = dict(row)
+            payload = json.loads(item.get("payload_json") or "{}")
+            item["deal_timestamp"] = int(
+                item.get("deal_timestamp") or payload.get("deal_timestamp") or 0
+            )
+            item["time_utc"] = payload.get("time_utc")
+            item["time_beijing"] = payload.get("time_beijing") or item.get("deal_time")
+            item["broker_server_time"] = payload.get("time")
+            item["broker_utc_offset_seconds"] = int(
+                item.get("broker_utc_offset_seconds")
+                or payload.get("broker_utc_offset_seconds")
+                or 0
+            )
             item["position_attribution"] = json.loads(
                 item.get("position_attribution_json") or "{}"
             )
@@ -3918,6 +3940,9 @@ class AISignalSourceRepository:
         config = json.loads(row["config_json"] or "{}")
         config.setdefault("signal_source_version", "1.0")
         config.setdefault("analysis_template", "custom")
+        if config.get("signal_source_version") == "2.0":
+            config.setdefault("adaptive_enabled", True)
+            config.setdefault("adaptive_sample_size", 7)
         return {
             "signal_source_id": row["signal_source_id"],
             "user_id": int(row["user_id"]),
@@ -4091,6 +4116,9 @@ class AISignalSourceRepository:
         # records without this field remain 1.0 and keep their custom prompt.
         config.setdefault("signal_source_version", "2.0")
         config.setdefault("analysis_template", "auto_structure")
+        if config.get("signal_source_version") == "2.0":
+            config.setdefault("adaptive_enabled", True)
+            config.setdefault("adaptive_sample_size", 7)
         self.storage.execute(
             """
             INSERT INTO ai_signal_sources(
@@ -4109,11 +4137,14 @@ class AISignalSourceRepository:
         )
         return self.get(user_id, source_id) or {}
 
-    def update(self, user_id: int, signal_source_id: str, data: Dict) -> Dict:
+    def update(
+        self, user_id: int, signal_source_id: str, data: Dict,
+        allow_hot_reload: bool = False,
+    ) -> Dict:
         current = self.get(user_id, signal_source_id)
         if current is None:
             raise ValueError("AI 信号源不存在")
-        if self.is_locked(user_id, signal_source_id):
+        if self.is_locked(user_id, signal_source_id) and not allow_hot_reload:
             raise ValueError("该 AI 信号源已被引用或用于已部署策略，不能修改；请复制后创建新版本")
         merged = {**current, **data}
         self.storage.execute(
@@ -4130,6 +4161,23 @@ class AISignalSourceRepository:
                 json.dumps(merged.get("config") or {}, ensure_ascii=False),
                 int(bool(merged.get("enabled", True))), int(bool(merged.get("share_runtime_data", False))),
                 _now_ts(), int(user_id), str(signal_source_id),
+            ),
+        )
+        return self.get(user_id, signal_source_id) or {}
+
+    def update_adaptive_config(
+        self, user_id: int, signal_source_id: str, config: Dict,
+    ) -> Dict:
+        """Persist a bounded tuner update even when a deployed source is locked."""
+        current = self.get(user_id, signal_source_id)
+        if current is None:
+            raise ValueError("AI 信号源不存在")
+        self.storage.execute(
+            "UPDATE ai_signal_sources SET config_json = ?, updated_at = ? "
+            "WHERE user_id = ? AND signal_source_id = ?",
+            (
+                json.dumps(config or {}, ensure_ascii=False), _now_ts(),
+                int(user_id), str(signal_source_id),
             ),
         )
         return self.get(user_id, signal_source_id) or {}

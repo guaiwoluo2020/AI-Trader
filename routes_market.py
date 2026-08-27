@@ -14,6 +14,7 @@ import asyncio
 import json
 import time
 import uuid
+import threading
 
 from auth import AuthUser, get_auth_manager, require_admin, require_auth
 from ea_auth import EAIdentity, require_ea_auth
@@ -28,6 +29,7 @@ from llm_governance import (
     LLMGovernanceError, LLMGovernanceService,
 )
 from market.services.llm_service import LLMRequestError
+from market.mt5_time import broker_wall_epoch_to_utc, normalize_epoch
 from membership import MembershipService
 from sqlite_storage import (
     get_storage,
@@ -52,6 +54,7 @@ from trading_engine_manager import TradingEngineManager
 from strategy_admission import StrategyAdmissionService
 from web_account_context import resolve_web_engine
 from user_quotas import UserQuotaService
+from configuration_impact import ConfigurationImpactService
 from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
 
@@ -72,7 +75,32 @@ def _historical_kline_timestamp(value):
     return None
 
 
-def _persist_historical_klines(identity, symbol, period, klines):
+def _deployment_is_running(deployment, account, trade_config_enabled=True, now=None):
+    """Return whether a deployment can currently receive strategy decisions."""
+    if (
+        not account
+        or str(deployment.get("status") or "") != "active"
+        or str(deployment.get("execution_mode") or "") not in {"paper", "live"}
+        or not trade_config_enabled
+        or account.status != "active"
+        or not account.enabled
+        or not account.trading_enabled
+        or not account.auto_trading_enabled
+    ):
+        return False
+    if str(deployment.get("execution_mode")) == "live":
+        current_time = int(time.time() if now is None else now)
+        return bool(
+            account.account_type == "mt5"
+            and account.last_seen_at
+            and current_time - int(account.last_seen_at) <= 120
+        )
+    return account.account_type == "paper"
+
+
+def _persist_historical_klines(
+    identity, symbol, period, klines, broker_utc_offset_seconds=0
+):
     rows = []
     now = int(time.time())
     for item in klines or []:
@@ -81,8 +109,17 @@ def _persist_historical_klines(identity, symbol, period, klines):
         timestamp = _historical_kline_timestamp(item.get("timestamp") or item.get("time"))
         if timestamp is None:
             continue
+        offset = item.get(
+            "broker_utc_offset_seconds", broker_utc_offset_seconds
+        )
+        utc_timestamp = normalize_epoch(item.get("timestamp_utc"))
+        # Do not label a legacy broker-wall epoch as UTC when no offset was
+        # supplied. EA 2.07 always sends timestamp_utc explicitly.
+        if utc_timestamp is None and int(offset or 0) != 0:
+            utc_timestamp = broker_wall_epoch_to_utc(timestamp, offset)
         try:
             rows.append((identity.user_id, identity.account_id, symbol, period, timestamp,
+                         int(utc_timestamp or 0), int(offset or 0),
                          float(item.get("open", 0)), float(item.get("high", 0)),
                          float(item.get("low", 0)), float(item.get("close", 0)),
                          float(item.get("volume", 0) or 0), now))
@@ -94,19 +131,68 @@ def _persist_historical_klines(identity, symbol, period, klines):
     storage.executemany(
         """
         INSERT INTO historical_klines
-          (user_id, account_id, symbol, period, timestamp, open_price, high_price,
+          (user_id, account_id, symbol, period, timestamp, timestamp_utc,
+           broker_utc_offset_seconds, open_price, high_price,
            low_price, close_price, volume, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
+          timestamp_utc=VALUES(timestamp_utc),
+          broker_utc_offset_seconds=VALUES(broker_utc_offset_seconds),
           open_price=VALUES(open_price), high_price=VALUES(high_price),
           low_price=VALUES(low_price), close_price=VALUES(close_price),
           volume=VALUES(volume), updated_at=VALUES(updated_at)
         """, rows,
     )
     # 上传时顺便执行轻量清理；即使没有行情上传，下一次上传也会清理。
+
+
+def _restore_kline_memory(identity, symbol, period, kline_service) -> int:
+    """Restore recent persistent bars after a backend restart."""
+    if kline_service.is_initialized(symbol, period):
+        return len(kline_service.get_all_klines(symbol, period))
+    limits = {"H4": 1100, "H1": 720, "M15": 1200, "M5": 1200, "M1": 1200}
+    rows = get_storage().fetchall(
+        """
+        SELECT timestamp, timestamp_utc, broker_utc_offset_seconds,
+               open_price, high_price, low_price, close_price, volume
+        FROM historical_klines
+        WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
+        ORDER BY timestamp DESC LIMIT ?
+        """,
+        (identity.user_id, identity.account_id, symbol, period, limits.get(period, 1200)),
+    )
+    if not rows:
+        return 0
+    bars = [{
+        "timestamp": int(row["timestamp"]),
+        "timestamp_utc": int(row["timestamp_utc"] or 0),
+        "broker_utc_offset_seconds": int(row["broker_utc_offset_seconds"] or 0),
+        "open": float(row["open_price"]),
+        "high": float(row["high_price"]),
+        "low": float(row["low_price"]),
+        "close": float(row["close_price"]),
+        "volume": float(row["volume"] or 0),
+    } for row in reversed(rows)]
+    kline_service.process_kline_data(symbol, period, bars, True)
+    return len(bars)
 from market.system_log import get_system_log_broadcaster
 from shared_notifications import SharedReferenceNotificationService
 from instrument_price_store import get_instrument_price_store
+
+
+_STRATEGY_REVIEW_JOBS = {}
+_STRATEGY_REVIEW_JOBS_LOCK = threading.RLock()
+_STRATEGY_REVIEW_JOB_TTL = 2 * 3600
+
+
+class _StrategyReviewRequest:
+    """Minimal request adapter used when the existing review handler runs in a worker."""
+    def __init__(self, payload):
+        self.payload = payload
+        self._strategy_review_background = True
+
+    async def json(self):
+        return self.payload
 
 
 AI_SIGNAL_SOURCE_RUNTIME_CONTRACT = {
@@ -222,6 +308,7 @@ def create_market_routes(
     trade_config_repo = TradeConfigRepository()
     strategy_repo = StrategyConfigRepository()
     strategy_deployment_repo = StrategyDeploymentRepository()
+    account_repo = TradingAccountRepository()
     position_policy_repo = PositionManagementPolicyRepository()
     llm_config_repo = LLMConfigRepository()
     llm_access_repo = LLMAccessRepository()
@@ -235,6 +322,7 @@ def create_market_routes(
     event_logs = SystemEventLogRepository()
     memberships = MembershipService()
     shared_notifications = SharedReferenceNotificationService()
+    impact_service = ConfigurationImpactService()
 
     def strategy_payload(strategy, user_id: int) -> Dict:
         payload = strategy.to_dict()
@@ -365,14 +453,19 @@ def create_market_routes(
             ),
         )
 
-    def assert_strategy_not_locked(user: AuthUser, strategy) -> None:
+    def assert_strategy_not_locked(
+        user: AuthUser, strategy, allow_hot_reload: bool = False,
+    ) -> None:
         if (
             strategy.visibility == "shared"
             and strategy_repo.strategy_application_count(user.user_id, strategy.strategy_id)
+            and not allow_hot_reload
         ):
             raise ValueError("该共享策略已被应用，不能继续修改；请复制为新策略后再调整")
 
-    def assert_strategy_material_edit_allowed(strategy, data: Dict) -> None:
+    def assert_strategy_material_edit_allowed(
+        strategy, data: Dict, allow_hot_reload: bool = False,
+    ) -> None:
         material_fields = {
             "signal_config", "signal_sources", "signal_weights", "period_weights",
             "min_confidence", "consistency_requirement",
@@ -385,6 +478,7 @@ def create_market_routes(
         if (
             strategy.lifecycle_status in {"paper_trading", "production"}
             and any(field in data for field in material_fields)
+            and not allow_hot_reload
         ):
             raise ValueError("策略进入模拟盘或实盘后不能直接修改核心配置；请复制为新策略重新验证")
 
@@ -465,6 +559,37 @@ def create_market_routes(
 
     # ==================== EA端接口 ====================
 
+    @router.get("/ea/kline_cursor/{period}")
+    async def get_ea_kline_cursor(
+        period: str,
+        symbol: str = Query(...),
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
+        """返回服务端已持久化的最后一根K线时间，作为断线补传游标。"""
+        period = period.upper()
+        if period not in {"H4", "H1", "M15", "M5", "M1"}:
+            raise HTTPException(status_code=400, detail=f"不支持的周期: {period}")
+        engine = engine_manager.get_engine_for_ea(identity)
+        restored_count = _restore_kline_memory(
+            identity, symbol, period, engine.kline_service,
+        )
+        row = get_storage().fetchone(
+            """
+            SELECT MAX(timestamp) AS last_bar_time, COUNT(*) AS bar_count
+            FROM historical_klines
+            WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
+            """,
+            (identity.user_id, identity.account_id, symbol, period),
+        )
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "period": period,
+            "server_last_bar_time": int(row["last_bar_time"]) if row and row["last_bar_time"] else 0,
+            "stored_bar_count": int(row["bar_count"] or 0) if row else 0,
+            "memory_restored_count": restored_count,
+        }
+
     @router.post("/ea/kline/{period}")
     async def receive_kline(
         period: str,
@@ -491,6 +616,10 @@ def create_market_routes(
             symbol = data.get('symbol', 'GOLD')
             is_full = data.get('is_full', False)
             klines = data.get('klines', [])
+
+            # 服务重启后先用MySQL恢复内存行情，再接受缺口增量。
+            if not kline_service.is_initialized(symbol, period):
+                _restore_kline_memory(identity, symbol, period, kline_service)
 
             if not klines:
                 return {"status": "ok", "count": 0, "message": "无数据"}
@@ -542,19 +671,20 @@ def create_market_routes(
             if not is_full and kline_service.is_initialized(symbol, period):
                 continuity = kline_service.check_continuity(symbol, period, klines)
                 if not continuity["is_continuous"]:
-                    print(f"[MarketAPI] {symbol} {period} 数据不连续，缺失 {continuity['gap_count']} 个周期")
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "status": "error",
-                            "code": 8888,
-                            "message": f"数据不连续，缺失 {continuity['gap_count']} 个周期，需要全量数据"
-                        }
+                    # 周末、休市和券商停盘本来就没有K线，不能仅按墙钟间隔
+                    # 认定丢失并强制全量。EA会按服务端持久化游标补传券商
+                    # 实际存在的所有bar；此处保留告警但继续幂等写入。
+                    print(
+                        f"[MarketAPI] {symbol} {period} 时间间隔跨越 "
+                        f"{continuity['gap_count']} 个理论周期，按EA游标数据接收"
                     )
 
             # 保存K线数据
             result = kline_service.process_kline_data(symbol, period, klines, is_full)
-            _persist_historical_klines(identity, symbol, period, klines)
+            _persist_historical_klines(
+                identity, symbol, period, klines,
+                data.get("broker_utc_offset_seconds", 0),
+            )
             if staleness and staleness.get("is_stale"):
                 result.update({
                     "stale": True,
@@ -584,6 +714,18 @@ def create_market_routes(
                 if all_klines:
                     pivot_service.update_pivots(symbol, period, all_klines)
 
+            cursor_row = get_storage().fetchone(
+                """
+                SELECT MAX(timestamp) AS last_bar_time
+                FROM historical_klines
+                WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
+                """,
+                (identity.user_id, identity.account_id, symbol, period),
+            )
+            result["server_last_bar_time"] = (
+                int(cursor_row["last_bar_time"])
+                if cursor_row and cursor_row["last_bar_time"] else 0
+            )
             return result
 
         except Exception as e:
@@ -617,7 +759,10 @@ def create_market_routes(
                     continue
 
                 result = kline_service.process_kline_data(symbol, period, klines, is_full)
-                _persist_historical_klines(identity, symbol, period, klines)
+                _persist_historical_klines(
+                    identity, symbol, period, klines,
+                    data.get("broker_utc_offset_seconds", 0),
+                )
                 results[period] = result
 
                 if is_full:
@@ -1096,21 +1241,14 @@ def create_market_routes(
                 status_code=400,
                 detail="共享持仓管理方案为只读引用，不能修改；源方案变更会自动同步",
             )
-        if (
-            policy.visibility == "shared"
-            and position_policy_repo.policy_application_count(user.user_id, policy.policy_id)
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="该共享持仓管理方案已被应用，不能继续修改；请复制为新方案后再调整",
-            )
-        if position_policy_repo.active_deployment_count(user.user_id, policy.policy_id):
-            raise HTTPException(
-                status_code=409,
-                detail="该持仓管理方案正被已部署的策略使用（模拟盘或实盘），修改会导致已部署策略停止运行；请先解除相关策略部署后再修改",
-            )
         try:
             data = await request.json()
+            confirmed = bool(data.pop("_confirm_hot_reload", False))
+            impact = impact_service.analyze(user.user_id, "position_management", policy.policy_id)
+            if not impact["allowed"]:
+                raise HTTPException(status_code=409, detail={"message": impact["blocked_reason"], "impact": impact})
+            if impact["requires_confirmation"] and not confirmed:
+                raise HTTPException(status_code=409, detail={"message": "该修改会热更新已部署策略，请确认影响范围", "impact": impact})
             was_shared = policy.visibility == "shared"
             policy.name = str(data.get("name", policy.name)).strip()
             if not policy.name:
@@ -1211,7 +1349,7 @@ def create_market_routes(
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    @protected_router.post("/strategy/quick-create-ai")
+    # 一键创建AI策略已下线；保留旧函数体仅用于平滑升级，未注册任何HTTP路由。
     async def quick_create_ai_strategy(
         request: Request,
         user: AuthUser = Depends(require_auth),
@@ -1566,6 +1704,7 @@ def create_market_routes(
     async def get_strategy_execution_overview(
         strategy_id: str,
         include_chart: bool = Query(False),
+        include_inactive: bool = Query(False),
         start_ts: Optional[int] = Query(None, ge=0),
         end_ts: Optional[int] = Query(None, ge=0),
         user: AuthUser = Depends(require_auth),
@@ -1582,9 +1721,18 @@ def create_market_routes(
         deployments = strategy_deployment_repo.list_for_strategy(
             user.user_id, strategy_id
         )
+        trade_config_enabled = bool(
+            trade_config_repo.get_config(user.user_id).get("enabled", True)
+        )
         account_views = []
         for deployment in deployments:
             account_id = int(deployment["account_id"])
+            account = account_repo.get_by_id(user.user_id, account_id)
+            runtime_active = _deployment_is_running(
+                deployment, account, trade_config_enabled,
+            )
+            if not runtime_active and not include_inactive:
+                continue
             engine = engine_manager.get_engine(user.user_id, account_id)
             # 执行中心首屏只展示最近 10 条决策；历史回放按时间范围另行加载，
             # 避免把账户全部运行态、上千根 K 线和成交事件一次性拼进响应。
@@ -1596,6 +1744,7 @@ def create_market_routes(
                 # include_chart=true 后再加载 K 线及成交轨迹，避免首屏超时。
                 account_views.append({
                     **deployment,
+                    "runtime_active": runtime_active,
                     "symbol": str(deployment.get("symbol") or strategy.symbol or ""),
                     "chart": None,
                     "decisions": decisions,
@@ -1614,20 +1763,29 @@ def create_market_routes(
             )).upper()
             if period not in {"M1", "M5", "M15", "H1", "H4"}:
                 period = "M5"
-            def load_chart_bars(source_engine, requested_symbol):
+            def load_chart_bars(
+                source_engine, requested_symbol, source_account_id=None,
+            ):
                 """在当前账户优先读取，必要时兼容 MT5 经纪商后缀。"""
+                chart_account_id = int(
+                    source_account_id
+                    if source_account_id is not None
+                    else account_id
+                )
                 historical = get_storage().fetchall(
                     """
-                    SELECT timestamp, open_price AS open, high_price AS high,
+                    SELECT timestamp, timestamp_utc, broker_utc_offset_seconds,
+                           open_price AS open, high_price AS high,
                            low_price AS low, close_price AS close, volume
                     FROM historical_klines
                     WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
-                      AND timestamp >= ?
-                      AND (? IS NULL OR timestamp >= ?)
-                      AND (? IS NULL OR timestamp <= ?)
-                    ORDER BY timestamp
+                      AND timestamp_utc > 0
+                      AND timestamp_utc >= ?
+                      AND (? IS NULL OR timestamp_utc >= ?)
+                      AND (? IS NULL OR timestamp_utc <= ?)
+                    ORDER BY timestamp_utc
                     """,
-                    (user.user_id, account_id, requested_symbol, period, int(time.time()) - 7 * 86400,
+                    (user.user_id, chart_account_id, requested_symbol, period, int(time.time()) - 7 * 86400,
                      start_ts, start_ts, end_ts, end_ts),
                 )
                 if historical:
@@ -1687,19 +1845,40 @@ def create_market_routes(
                 then return UTC epochs. This prevents valid fills being filtered
                 out solely because the broker is not on Beijing time.
                 """
-                parsed = [
-                    parse_mt5_wall_time(item.get("timestamp") or item.get("time"))
-                    for item in chart_bars if isinstance(item, dict)
-                ]
-                parsed = [value for value in parsed if value is not None]
-                if not parsed:
-                    return chart_bars, 0
-                offset_hours = int(round((max(parsed) - time.time()) / 3600))
-                offset_hours = max(-12, min(14, offset_hours))
                 normalized = []
+                needs_inference = []
                 for item in chart_bars:
                     if not isinstance(item, dict):
                         continue
+                    bar = dict(item)
+                    explicit_utc = normalize_epoch(
+                        bar.get("timestamp_utc")
+                    )
+                    if explicit_utc is not None:
+                        bar["mt5_timestamp"] = bar.get("timestamp") or bar.get("time")
+                        bar["timestamp"] = explicit_utc
+                        normalized.append(bar)
+                    else:
+                        needs_inference.append(bar)
+                if not needs_inference:
+                    offsets = {
+                        int(item.get("broker_utc_offset_seconds") or 0)
+                        for item in normalized
+                    }
+                    offset = next(iter(offsets)) if len(offsets) == 1 else 0
+                    normalized.sort(key=lambda item: int(item.get("timestamp") or 0))
+                    return normalized, offset / 3600
+
+                parsed = [
+                    parse_mt5_wall_time(item.get("timestamp") or item.get("time"))
+                    for item in needs_inference
+                ]
+                parsed = [value for value in parsed if value is not None]
+                if not parsed:
+                    return normalized or chart_bars, 0
+                offset_hours = int(round((max(parsed) - time.time()) / 3600))
+                offset_hours = max(-12, min(14, offset_hours))
+                for item in needs_inference:
                     bar = dict(item)
                     raw_timestamp = bar.get("timestamp") or bar.get("time")
                     epoch = parse_mt5_wall_time(raw_timestamp)
@@ -1707,15 +1886,22 @@ def create_market_routes(
                         bar["mt5_timestamp"] = raw_timestamp
                         bar["timestamp"] = epoch - offset_hours * 3600
                     normalized.append(bar)
+                normalized.sort(key=lambda item: int(item.get("timestamp") or 0))
                 return normalized, offset_hours
 
-            bars, chart_symbol = load_chart_bars(engine, symbol)
+            bars, chart_symbol = load_chart_bars(
+                engine, symbol, getattr(engine, "account_id", account_id),
+            )
             # 模拟盘不接收 EA 行情。若部署账户没有 K 线，使用同一用户
             # 当前 MT5 行情账户的 K 线作为图表背景；订单事件仍来自部署账户。
             if not bars:
                 market_engine = engine_manager.get_engine_for_user(user.user_id)
                 if market_engine is not engine:
-                    bars, chart_symbol = load_chart_bars(market_engine, symbol)
+                    bars, chart_symbol = load_chart_bars(
+                        market_engine,
+                        symbol,
+                        getattr(market_engine, "account_id", None),
+                    )
             bars, mt5_timezone_offset_hours = normalize_chart_bar_times(bars)
             # 订单/成交记录可能保存标准名，而 K 线来自带后缀的经纪商名；
             # 两者只要去掉 # 和末尾 m 后一致，就视为同一品种。
@@ -1869,6 +2055,7 @@ def create_market_routes(
             )
             account_views.append({
                 **deployment,
+                "runtime_active": runtime_active,
                 "symbol": symbol,
                 "chart": {
                     "symbol": symbol,
@@ -1940,6 +2127,50 @@ def create_market_routes(
         if strategy is None:
             raise HTTPException(status_code=404, detail="策略不存在或不属于当前用户")
         data = await request.json()
+        if not getattr(request, "_strategy_review_background", False):
+            job_id = uuid.uuid4().hex
+            with _STRATEGY_REVIEW_JOBS_LOCK:
+                _STRATEGY_REVIEW_JOBS[job_id] = {
+                    "job_id": job_id, "status": "queued", "created_at": int(time.time()),
+                    "user_id": int(user.user_id), "strategy_id": str(strategy_id),
+                    "deployment_id": str(data.get("deployment_id") or ""),
+                }
+                cutoff = int(time.time()) - _STRATEGY_REVIEW_JOB_TTL
+                for old_id, old_job in list(_STRATEGY_REVIEW_JOBS.items()):
+                    if int(old_job.get("created_at") or 0) < cutoff:
+                        _STRATEGY_REVIEW_JOBS.pop(old_id, None)
+
+            async def run_review_job():
+                with _STRATEGY_REVIEW_JOBS_LOCK:
+                    if job_id in _STRATEGY_REVIEW_JOBS:
+                        _STRATEGY_REVIEW_JOBS[job_id]["status"] = "running"
+                try:
+                    result = await asyncio.to_thread(
+                        lambda: asyncio.run(
+                            review_strategy_execution(
+                                strategy_id, _StrategyReviewRequest(data), user,
+                            )
+                        )
+                    )
+                    with _STRATEGY_REVIEW_JOBS_LOCK:
+                        if job_id in _STRATEGY_REVIEW_JOBS:
+                            _STRATEGY_REVIEW_JOBS[job_id].update(
+                                status="completed", result=result,
+                                completed_at=int(time.time()),
+                            )
+                except Exception as exc:
+                    with _STRATEGY_REVIEW_JOBS_LOCK:
+                        if job_id in _STRATEGY_REVIEW_JOBS:
+                            _STRATEGY_REVIEW_JOBS[job_id].update(
+                                status="failed", error=str(exc),
+                                completed_at=int(time.time()),
+                            )
+
+            asyncio.create_task(run_review_job())
+            return {
+                "status": "accepted", "job_id": job_id,
+                "message": "策略复盘已提交，后台生成中",
+            }
         deployment_id = str(data.get("deployment_id") or "")
         hours = max(1, min(24 * 30, int(data.get("hours") or 24)))
         deployments = strategy_deployment_repo.list_for_strategy(
@@ -1998,6 +2229,66 @@ def create_market_routes(
             item for item in decisions
             if event_epoch(item.get("created_at") or item.get("timestamp")) >= start_at
         ][-100:]
+
+        def compact_text(value, limit=600):
+            text = str(value or "")
+            return text if len(text) <= limit else text[:limit] + "…"
+
+        def compact_record(item, fields):
+            return {
+                key: item.get(key)
+                for key in fields
+                if item.get(key) not in (None, "", [], {})
+            }
+
+        # 运行态记录包含持仓方案快照、AI完整分析快照和归因 JSON；直接把
+        # 100 条原始对象重复交给模型会产生数十万 token。复盘只保留能够
+        # 支撑结论的成交、风控和信号字段，汇总统计仍来自完整数据库记录。
+        compact_trades = [compact_record(item, (
+            "trade_id", "position_id", "order_id", "direction", "volume",
+            "entry_price", "exit_price", "net_profit", "commission",
+            "exit_reason", "opened_at", "closed_at", "signal_source_id",
+            "setup_type", "setup_family", "setup_profile_id",
+        )) for item in trades[-50:]]
+        compact_orders = []
+        for item in orders[-50:]:
+            record = compact_record(item, (
+                "order_id", "decision_id", "direction", "status",
+                "requested_volume", "filled_volume", "requested_price",
+                "filled_price", "stop_loss", "take_profit", "confidence",
+                "requested_at", "filled_at", "canceled_at",
+                "signal_source_id", "exit_mode",
+            ))
+            if item.get("rejection_reason"):
+                record["rejection_reason"] = compact_text(
+                    item.get("rejection_reason"), 300
+                )
+            compact_orders.append(record)
+        compact_decisions = []
+        for item in decisions[-50:]:
+            record = compact_record(item, (
+                "decision_id", "created_at", "timestamp", "action", "status",
+                "confidence", "decision_type", "auto_executed", "order_id",
+                "observation_count",
+            ))
+            record["reason"] = compact_text(item.get("reason"), 500)
+            record["signals"] = []
+            for signal in (item.get("signals") or [])[:5]:
+                if not isinstance(signal, dict):
+                    continue
+                signal_record = compact_record(signal, (
+                    "signal_id", "signal_source_id", "source", "source_period",
+                    "action", "direction", "confidence", "trigger_price",
+                    "suggested_entry", "suggested_sl", "suggested_tp",
+                    "setup_type", "setup_family", "ai_setup_type",
+                    "ai_entry_mode", "pivot_price", "pivot_score",
+                ))
+                if signal.get("trigger_reason"):
+                    signal_record["trigger_reason"] = compact_text(
+                        signal.get("trigger_reason"), 400
+                    )
+                record["signals"].append(signal_record)
+            compact_decisions.append(record)
         ai_context = []
         for source in strategy.get_signal_sources("ai_entry", enabled_only=True):
             params = source.get("params") or {}
@@ -2079,9 +2370,15 @@ def create_market_routes(
                 "signal_sources": strategy.get_signal_sources(enabled_only=True),
             },
             "position_policy": policy.to_dict() if policy else None,
-            "trades": trades,
-            "orders": orders,
-            "decisions": decisions,
+            "evidence_limits": {
+                "trades_in_scope": len(trades),
+                "orders_in_scope": len(orders),
+                "decisions_in_scope": len(decisions),
+                "detail_limit_per_type": 50,
+            },
+            "trades": compact_trades,
+            "orders": compact_orders,
+            "decisions": compact_decisions,
         }
         system_prompt = (
             "你是量化策略复盘分析器。只能依据输入的成交、订单、决策、AI行情和持仓管理数据分析，"
@@ -2117,6 +2414,27 @@ def create_market_routes(
                 "generated_at": now,
             },
         }
+
+    @protected_router.get("/strategy/{strategy_id}/ai-review/{job_id}")
+    async def get_strategy_review_status(
+        strategy_id: str,
+        job_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Poll an asynchronous strategy review without blocking the page."""
+        with _STRATEGY_REVIEW_JOBS_LOCK:
+            job = dict(_STRATEGY_REVIEW_JOBS.get(str(job_id)) or {})
+        if not job or int(job.get("user_id") or 0) != int(user.user_id) or str(job.get("strategy_id")) != str(strategy_id):
+            raise HTTPException(status_code=404, detail="复盘任务不存在或已过期")
+        response = {
+            "status": job.get("status"), "job_id": str(job_id),
+            "message": "策略复盘已提交，后台生成中" if job.get("status") in {"queued", "running"} else "",
+        }
+        if job.get("status") == "completed":
+            response.update(job.get("result") or {})
+        elif job.get("status") == "failed":
+            response["error"] = str(job.get("error") or "AI 策略复盘失败")
+        return response
 
     @protected_router.post("/strategy/{strategy_id}/ai-review/apply")
     async def apply_strategy_review_changes(
@@ -2282,6 +2600,7 @@ def create_market_routes(
         try:
             engine = engine_manager.get_engine_for_user(user.user_id)
             data = await request.json()
+            confirmed = bool(data.pop("_confirm_hot_reload", False))
             if "position_management_policy_id" in data:
                 policy_id = str(data.get("position_management_policy_id", "")).strip()
                 if not policy_id or not position_policy_repo.get(user.user_id, policy_id):
@@ -2297,8 +2616,13 @@ def create_market_routes(
                     "status": "error",
                     "message": "平台共享策略为只读引用，不能修改；如不再使用可以删除引用",
                 }
-            assert_strategy_not_locked(user, strategy)
-            assert_strategy_material_edit_allowed(strategy, data)
+            assert_strategy_not_locked(user, strategy, allow_hot_reload=True)
+            impact = impact_service.analyze(user.user_id, "strategy", strategy.strategy_id)
+            if not impact["allowed"]:
+                return {"status": "error", "code": "external_deployment", "message": impact["blocked_reason"], "impact": impact}
+            if impact["requires_confirmation"] and not confirmed:
+                return {"status": "error", "code": "hot_reload_confirmation_required", "message": "该修改会热更新已部署策略，请确认影响范围", "impact": impact}
+            assert_strategy_material_edit_allowed(strategy, data, allow_hot_reload=confirmed or not impact["requires_confirmation"])
             was_shared = strategy.visibility == "shared"
             if "signal_sources" in data:
                 bind_alpha_signal_snapshots(user, data)
@@ -3114,6 +3438,11 @@ def create_market_routes(
             config["forecast_horizon_bars"] = 0
         else:
             config["forecast_horizon_bars"] = max(3, min(48, int(horizon)))
+        if str(config.get("signal_source_version") or "1.0") == "2.0":
+            config["adaptive_enabled"] = config.get("adaptive_enabled", True) is not False
+            config["adaptive_sample_size"] = max(
+                5, min(50, int(config.get("adaptive_sample_size", 7) or 7))
+            )
 
     def prompt_candidate_context(data: Dict) -> Dict:
         config = dict(data.get("config") or {})
@@ -3308,6 +3637,7 @@ def create_market_routes(
     async def update_ai_signal_source(signal_source_id: str, request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
         try:
             data = await request.json()
+            confirmed = bool(data.pop("_confirm_hot_reload", False))
             current = ai_signal_source_repo.get(user.user_id, signal_source_id)
             if current is None:
                 raise HTTPException(status_code=404, detail="AI 信号源不存在")
@@ -3319,7 +3649,15 @@ def create_market_routes(
             candidate["config"] = candidate_config
             validate_independent_ai_signal_source(user, candidate)
             data["config"] = candidate_config
-            source = ai_signal_source_repo.update(user.user_id, signal_source_id, data)
+            impact = impact_service.analyze(user.user_id, "ai_signal_source", signal_source_id)
+            if not impact["allowed"]:
+                raise HTTPException(status_code=409, detail={"message": impact["blocked_reason"], "impact": impact})
+            if impact["requires_confirmation"] and not confirmed:
+                raise HTTPException(status_code=409, detail={"message": "该修改会热更新已使用的信号源，请确认影响范围", "impact": impact})
+            source = ai_signal_source_repo.update(
+                user.user_id, signal_source_id, data, allow_hot_reload=True,
+            )
+            engine_manager.refresh_user_strategies(user.user_id)
             return {"status": "ok", "source": ai_signal_source_payload(source)}
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -3339,8 +3677,22 @@ def create_market_routes(
         source = ai_signal_source_repo.get(user.user_id, signal_source_id)
         if source is None:
             raise HTTPException(status_code=404, detail="AI 信号源不存在")
-        items = ai_signal_source_repo.deployment_impact(user.user_id, signal_source_id)
-        return {"status": "ok", "source": ai_signal_source_payload(source), "items": items}
+        impact = impact_service.analyze(user.user_id, "ai_signal_source", signal_source_id)
+        return {"status": "ok", "source": ai_signal_source_payload(source), **impact, "items": impact["own_deployments"] + impact["external_deployments"]}
+
+    @protected_router.get("/configuration-impact/{entity_type}/{entity_id}")
+    async def get_configuration_impact(
+        entity_type: str, entity_id: str, user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Preview cross-account/user impact before a hot-reloadable edit."""
+        aliases = {"policy": "position_management", "position_policy": "position_management", "strategy": "strategy", "ai": "ai_signal_source", "signal_source": "ai_signal_source"}
+        try:
+            impact = impact_service.analyze(
+                user.user_id, aliases.get(entity_type, entity_type), entity_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "impact": impact}
 
     @protected_router.post("/ai-signal-sources/{signal_source_id}/pause")
     async def pause_ai_signal_source(
@@ -3359,6 +3711,34 @@ def create_market_routes(
             "status": "ok", "paused": bool(source.get("config", {}).get("analysis_paused")),
             "source": ai_signal_source_payload(source), "items": items,
         }
+
+    @protected_router.post("/ai-signal-sources/{signal_source_id}/adaptive")
+    async def configure_ai_signal_source_adaptive(
+        signal_source_id: str, request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        source = ai_signal_source_repo.get(user.user_id, signal_source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="AI 信号源不存在")
+        config = dict(source.get("config") or {})
+        if str(config.get("signal_source_version") or "1.0") != "2.0":
+            raise HTTPException(status_code=400, detail="只有2.0信号源支持自适应调参")
+        data = await request.json()
+        config["adaptive_enabled"] = bool(data.get("enabled", True))
+        config["adaptive_sample_size"] = max(
+            5, min(50, int(data.get("sample_size", config.get("adaptive_sample_size", 7)) or 7))
+        )
+        source = ai_signal_source_repo.update_adaptive_config(
+            user.user_id, signal_source_id, config,
+        )
+        engine_manager.refresh_user_strategies(user.user_id)
+        add_audit_event(
+            user, "ai_signal_adaptive_configured", "调整 AI 信号源自适应设置",
+            f"信号源 {signal_source_id} 自适应调参{'开启' if config['adaptive_enabled'] else '关闭'}",
+            {"enabled": config["adaptive_enabled"], "sample_size": config["adaptive_sample_size"]},
+            "ai_signal_source", signal_source_id,
+        )
+        return {"status": "ok", "source": ai_signal_source_payload(source), "hot_reloaded": True}
 
     @protected_router.delete("/ai-signal-sources/{signal_source_id}")
     async def delete_ai_signal_source(signal_source_id: str, user: AuthUser = Depends(require_auth)) -> Dict:

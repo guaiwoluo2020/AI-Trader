@@ -86,7 +86,7 @@ def create_backtest_data_routes(
                 for item in accounts
             ],
             "symbols": sorted(symbol for symbol in symbols if symbol),
-            "required_ea_version": "2.04",
+            "required_ea_version": "2.0.7",
         }
 
     @router.post("/backtest/datasets")

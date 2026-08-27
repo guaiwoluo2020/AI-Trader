@@ -17,6 +17,7 @@ from .signal import (
     SignalService, KeyLevelSignalGenerator,
     AIEntrySignalGenerator, MovingAverageSignalGenerator,
     AlphaFactorSignalGenerator, AlphaRuntimeExecutor,
+    PivotSignalGenerator,
 )
 
 # 策略服务
@@ -34,6 +35,7 @@ __all__ = [
     'SignalService', 'KeyLevelSignalGenerator',
     'AIEntrySignalGenerator', 'MovingAverageSignalGenerator',
     'AlphaFactorSignalGenerator', 'AlphaRuntimeExecutor',
+    'PivotSignalGenerator',
     'StrategyService', 'RiskManager',
     'StatisticsService', 'PositionService', 'TradeHistoryService', 'PositionManager',
     'calculate_ma', 'calculate_adx', 'calculate_rsi', 'calculate_macd', 'calculate_bollinger_bands'

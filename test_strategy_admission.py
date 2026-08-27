@@ -139,6 +139,27 @@ class StrategyAdmissionTests(unittest.TestCase):
         self.assertFalse(admission["backtest"]["passed"])
         self.assertIn("当前策略版本", admission["backtest"]["message"])
 
+    def test_pivot_strategy_can_enter_paper_without_backtest(self):
+        self.strategy.lifecycle_status = StrategyLifecycle.DRAFT
+        self.strategy.signal_sources = [{
+            "signal_source_id": "pivot-m1",
+            "source": "pivot",
+            "period": "M1",
+            "enabled": True,
+            "weight": 100,
+            "params": {},
+        }]
+
+        admission = self.service.evaluate(self.user.user_id, self.strategy)
+
+        self.assertFalse(admission["backtest"]["passed"])
+        self.assertTrue(admission["direct_paper_strategy"])
+        self.assertTrue(admission["eligible_for_paper"])
+        self.assertFalse(admission["eligible_for_production"])
+        self.service.validate_transition(
+            self.user.user_id, self.strategy, StrategyLifecycle.PAPER_TRADING
+        )
+
     def test_ai_strategy_can_reach_production_with_passing_paper_only(self):
         self.strategy.lifecycle_status = StrategyLifecycle.PAPER_TRADING
         self.strategy.signal_sources = [{

@@ -7,11 +7,16 @@
 
 from typing import Optional, List, Dict
 from datetime import datetime
+import time
 
 from ...models import KlineData, TradingSignal
 from ...store import PivotStore, KlineStore
 from ...services import PivotService
 from .signal_rules import build_pivot_breakout_signal, build_pivot_signal
+from .pivot_repository import (
+    ConfiguredPivotRepository, PERIOD_SECONDS, calculate_pivot_score,
+    pivot_config_fingerprint, pivot_timestamp,
+)
 
 
 class PivotSignalGenerator:
@@ -19,10 +24,14 @@ class PivotSignalGenerator:
 
     def __init__(self, pivot_service: PivotService = None,
                  pivot_store: PivotStore = None,
-                 kline_store: KlineStore = None):
+                 kline_store: KlineStore = None, user_id: int = 0,
+                 account_id: int = 0, repository=None):
         self.pivot_service = pivot_service
         self.pivot_store = pivot_store or PivotStore()
         self.kline_store = kline_store or KlineStore()
+        self.user_id = int(user_id or 0)
+        self.account_id = int(account_id or 0)
+        self.repository = repository
 
         # 信号冷却时间（秒）
         self.cooldown = 180
@@ -134,12 +143,14 @@ class PivotSignalGenerator:
             raw_klines = self.kline_store.get_all_klines(symbol, period)
             strength = max(1, int(params.get("confirmation_strength", 3)))
             merge_distance = float(params.get("merge_distance", 0.0004))
+            fingerprint = pivot_config_fingerprint(period, params)
             latest_time = (
                 raw_klines[-1].get("timestamp") or raw_klines[-1].get("time")
                 if raw_klines else None
             )
             cache_key = (
-                symbol, period, str(latest_time), strength, merge_distance
+                strategy.strategy_id, config["signal_source_id"], symbol,
+                period, str(latest_time), len(raw_klines), fingerprint,
             )
             pivots = self._configured_pivot_cache.get(cache_key)
             if pivots is None:
@@ -153,6 +164,31 @@ class PivotSignalGenerator:
                     symbol, period, klines, strength
                 ) if self.pivot_service else []
                 pivots = self._merge_pivots(pivots, merge_distance)
+                max_age_bars = max(1, int(params.get("max_age_bars", 120)))
+                now = int(time.time())
+                period_seconds = PERIOD_SECONDS.get(period, 300)
+                market_now = pivot_timestamp(latest_time) or now
+                pivots = [
+                    pivot for pivot in pivots
+                    if pivot_timestamp(pivot.timestamp)
+                    and market_now - (
+                        pivot_timestamp(pivot.timestamp) + strength * period_seconds
+                    ) <= max_age_bars * period_seconds
+                ]
+                repository = self._repository()
+                complete_window = len(raw_klines) >= 2 * strength + 1
+                if repository is not None and complete_window:
+                    repository.replace_scope(
+                        self.user_id, self.account_id, strategy.strategy_id,
+                        config["signal_source_id"], symbol, period, fingerprint,
+                        pivots, strength, max_age_bars,
+                        reference_time=market_now,
+                    )
+                elif repository is not None and not complete_window:
+                    pivots = repository.list_active(
+                        self.user_id, self.account_id, strategy.strategy_id,
+                        config["signal_source_id"], fingerprint, now,
+                    )
                 self._configured_pivot_cache[cache_key] = pivots
                 if len(self._configured_pivot_cache) > 100:
                     self._configured_pivot_cache.pop(
@@ -160,8 +196,48 @@ class PivotSignalGenerator:
                     )
             threshold = max(0.0, float(params.get("proximity_threshold", 0.001)))
             signal_type = params.get("signal_type", "near")
+            stop_buffer_ratio = max(
+                0.0, float(params.get("stop_buffer_ratio", 0.0005))
+            )
+            risk_reward_ratio = max(
+                1.0, float(params.get("risk_reward_ratio", 2.0))
+            )
             candidates = []
+            now = int(time.time())
+            period_seconds = PERIOD_SECONDS.get(period, 300)
+            latest_kline_time = (
+                pivot_timestamp(raw_klines[-1].get("timestamp") or raw_klines[-1].get("time"))
+                if raw_klines else 0
+            )
+            market_now = latest_kline_time or now
+            half_life = max(1, int(params.get("recency_half_life_bars", 30)))
+            max_age = max(1, int(params.get("max_age_bars", 120)))
+            candidate_limit = max(1, int(params.get("candidate_limit", 10)))
+            min_confirmations = max(
+                1, int(params.get("min_confirmation_count", 1))
+            )
+            min_pivot_score = max(
+                0, min(100, int(params.get("min_pivot_score", 0)))
+            )
+            pivots = sorted(
+                pivots, key=lambda item: pivot_timestamp(item.timestamp), reverse=True
+            )[:candidate_limit]
             for pivot in pivots:
+                pivot_time = pivot_timestamp(pivot.timestamp)
+                confirmed_at = pivot_time + strength * period_seconds
+                age_bars = max(0.0, (market_now - confirmed_at) / period_seconds)
+                if not pivot_time or age_bars > max_age:
+                    continue
+                confirmation_count = max(
+                    1, int(getattr(pivot, "confirmation_count", 1) or 1)
+                )
+                if confirmation_count < min_confirmations:
+                    continue
+                pivot_score, recency_score = calculate_pivot_score(
+                    age_bars, confirmation_count, half_life
+                )
+                if pivot_score < min_pivot_score:
+                    continue
                 distance = abs(current_price - pivot.price) / current_price
                 is_near = (
                     (pivot.direction == "high" and current_price <= pivot.price)
@@ -175,10 +251,16 @@ class PivotSignalGenerator:
                     (signal_type in {"near", "both"} and is_near)
                     or (signal_type in {"breakout", "both"} and is_breakout)
                 ):
-                    candidates.append((distance, pivot, is_breakout))
+                    candidates.append((
+                        pivot_score, distance, pivot, is_breakout,
+                        age_bars, confirmation_count, recency_score,
+                    ))
             if not candidates:
                 continue
-            _, pivot, is_breakout = min(candidates, key=lambda item: item[0])
+            (
+                pivot_score, _, pivot, is_breakout,
+                age_bars, confirmation_count, recency_score,
+            ) = min(candidates, key=lambda item: (-item[0], item[1]))
             source_id = config["signal_source_id"]
             cooldown = max(0, int(params.get("cooldown_seconds", self.cooldown)))
             key = f"{strategy.strategy_id}_{source_id}_{symbol}_{period}_{pivot.price}"
@@ -186,10 +268,24 @@ class PivotSignalGenerator:
             if last_time and (datetime.now() - last_time).total_seconds() < cooldown:
                 continue
             if is_breakout:
+                confidence = min(
+                    95, 60 + min(20, (confirmation_count - 1) * 7)
+                    + round(15 * recency_score)
+                )
                 signal = build_pivot_breakout_signal(
-                    symbol, current_price, period, pivot.price, pivot.direction
+                    symbol, current_price, period, pivot.price, pivot.direction,
+                    stop_buffer_ratio=stop_buffer_ratio,
+                    risk_reward_ratio=risk_reward_ratio,
+                    confidence=confidence,
+                    confirmation_count=confirmation_count,
+                    age_bars=age_bars,
+                    pivot_score=pivot_score,
                 )
             else:
+                confidence = min(
+                    95, 55 + min(20, (confirmation_count - 1) * 7)
+                    + round(15 * recency_score)
+                )
                 opposite = "high" if pivot.direction == "low" else "low"
                 opposite_prices = [
                     item.price for item in pivots
@@ -206,12 +302,25 @@ class PivotSignalGenerator:
                 signal = build_pivot_signal(
                     symbol, current_price, period, pivot.price,
                     pivot.direction, nearest_opposite,
+                    stop_buffer_ratio=stop_buffer_ratio,
+                    risk_reward_ratio=risk_reward_ratio,
+                    confidence=confidence,
+                    confirmation_count=confirmation_count,
+                    age_bars=age_bars,
+                    pivot_score=pivot_score,
                 )
             if signal:
                 self._signal_cooldowns[key] = datetime.now()
                 signal.signal_source_id = source_id
                 signals.append(signal)
         return signals
+
+    def _repository(self):
+        if not self.user_id or not self.account_id:
+            return self.repository
+        if self.repository is None:
+            self.repository = ConfiguredPivotRepository()
+        return self.repository
 
     @staticmethod
     def _merge_pivots(pivots, merge_distance: float):
@@ -222,23 +331,29 @@ class PivotSignalGenerator:
                 (item for item in pivots if item.direction == direction),
                 key=lambda item: str(item.timestamp),
             )
-            index = 0
-            while index < len(items):
-                group = [items[index]]
-                cursor = index + 1
-                while cursor < len(items):
-                    base = items[index].price
-                    if base <= 0 or abs(items[cursor].price - base) / base > merge_distance:
-                        break
-                    group.append(items[cursor])
-                    cursor += 1
+            groups = []
+            for item in items:
+                matching = next((
+                    group for group in groups
+                    if group[0].price > 0
+                    and abs(item.price - group[0].price) / group[0].price
+                    <= merge_distance
+                ), None)
+                if matching is None:
+                    groups.append([item])
+                else:
+                    matching.append(item)
+            for group in groups:
                 merged.append(
                     max(group, key=lambda item: item.price)
                     if direction == "high"
                     else min(group, key=lambda item: item.price)
                 )
-                index = cursor
-        return merged
+                merged[-1].confirmation_count = sum(
+                    max(1, int(getattr(item, "confirmation_count", 1) or 1))
+                    for item in group
+                )
+        return sorted(merged, key=lambda item: str(item.timestamp))
 
     def __call__(self, symbol: str, current_price: float) -> List[TradingSignal]:
         """使对象可调用，用于注册到SignalService"""

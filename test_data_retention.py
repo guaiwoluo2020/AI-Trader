@@ -142,5 +142,27 @@ class DataRetentionServiceTestCase(unittest.TestCase):
         return int(self.storage.fetchone(f"SELECT COUNT(*) count FROM {table}")["count"])
 
 
+class MySQLRetentionPolicyTestCase(unittest.TestCase):
+    def test_cleanup_includes_expired_strategy_pivots(self):
+        service = DataRetentionService.__new__(DataRetentionService)
+        calls = []
+
+        def delete_in_batches(table, where, params):
+            calls.append((table, where, params))
+            return 0
+
+        service._delete_in_batches = delete_in_batches
+        service._delete_task_details = lambda *args: 0
+        service._delete_alpha_signals = lambda *args: 0
+
+        result = service.cleanup(2_000_000_000)
+
+        self.assertEqual(result["strategy_pivot_points"], 0)
+        self.assertIn(
+            ("strategy_pivot_points", "valid_until < ?", (2_000_000_000,)),
+            calls,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

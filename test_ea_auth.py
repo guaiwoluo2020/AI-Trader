@@ -55,6 +55,7 @@ class EAAuthTestCase(unittest.TestCase):
             request=request,
             user_id=self.user.user_id,
             ea_token=token,
+            x_ea_version="2.0.7",
         )
 
         self.assertEqual(identity.user_id, self.user.user_id)
@@ -67,6 +68,7 @@ class EAAuthTestCase(unittest.TestCase):
                 request=_Request(),
                 user_id=self.user.user_id,
                 ea_token=None,
+                x_ea_version="2.0.7",
             )
 
         self.assertEqual(context.exception.status_code, 401)

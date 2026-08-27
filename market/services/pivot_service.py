@@ -130,35 +130,31 @@ class PivotService:
 
         pivots = sorted(pivots, key=lambda p: str(p.timestamp))
 
+        groups = []
+        for pivot in pivots:
+            matching = next((
+                group for group in groups
+                if group[0].price > 0
+                and abs(pivot.price - group[0].price) / group[0].price <= 0.0004
+            ), None)
+            if matching is None:
+                groups.append([pivot])
+            else:
+                matching.append(pivot)
         merged = []
-        i = 0
-
-        while i < len(pivots):
-            current = pivots[i]
-            group = [current]
-
-            j = i + 1
-            while j < len(pivots):
-                next_pivot = pivots[j]
-
-                if current.price > 0:
-                    price_diff_pct = abs(next_pivot.price - current.price) / current.price
-                    if price_diff_pct <= 0.0004:
-                        group.append(next_pivot)
-                        j += 1
-                        continue
-
-                break
-
+        for group in groups:
             if direction == "high":
                 best = max(group, key=lambda p: p.price)
             else:
                 best = min(group, key=lambda p: p.price)
 
+            best.confirmation_count = sum(
+                max(1, int(getattr(item, "confirmation_count", 1) or 1))
+                for item in group
+            )
             merged.append(best)
-            i = j
 
-        return merged
+        return sorted(merged, key=lambda item: str(item.timestamp))
 
     def update_pivots(self, symbol: str, period: str, klines: List[KlineData],
                       strength: int = None) -> int:

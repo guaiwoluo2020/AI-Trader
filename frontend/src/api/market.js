@@ -21,6 +21,13 @@ api.interceptors.response.use(
   (error) => handleAuthError(error)
 )
 
+function formatConfigurationImpact(impact = {}) {
+  const own = impact.own_deployments?.length || 0
+  const externalRefs = impact.external_references?.length || 0
+  const external = impact.external_deployments?.length || 0
+  return `本用户部署 ${own} 个；外部用户引用 ${externalRefs} 个；外部已部署 ${external} 个。\n已有持仓：${impact.existing_positions || '保持原配置快照'}。`
+}
+
 export const marketAPI = {
   async getMarketEventStatus() {
     const response = await api.get('/news/status')
@@ -513,8 +520,17 @@ export const marketAPI = {
   },
 
   async updateAISignalSource(signalSourceId, data) {
-    const response = await api.put(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}`, data)
-    return response.data
+    try {
+      const response = await api.put(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}`, data)
+      return response.data
+    } catch (error) {
+      const detail = error?.response?.data?.detail
+      if (detail?.impact && detail?.message && detail?.impact?.allowed && window.confirm(`${detail.message}\n\n${formatConfigurationImpact(detail.impact)}\n\n确认热加载修改吗？`)) {
+        const response = await api.put(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}`, { ...data, _confirm_hot_reload: true })
+        return response.data
+      }
+      throw error
+    }
   },
 
   async copyAISignalSource(signalSourceId) {
@@ -534,6 +550,14 @@ export const marketAPI = {
 
   async pauseAISignalSource(signalSourceId, paused = true) {
     const response = await api.post(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}/pause`, { paused })
+    return response.data
+  },
+
+  async configureAISignalAdaptive(signalSourceId, enabled, sampleSize = 10) {
+    const response = await api.post(`/ai-signal-sources/${encodeURIComponent(signalSourceId)}/adaptive`, {
+      enabled,
+      sample_size: sampleSize
+    })
     return response.data
   },
 
@@ -700,10 +724,22 @@ export const marketAPI = {
   },
 
   async updatePositionManagementPolicy(policyId, data) {
-    const response = await api.put(
-      `/position-management-policies/${encodeURIComponent(policyId)}`, data
-    )
-    return response.data
+    try {
+      const response = await api.put(
+        `/position-management-policies/${encodeURIComponent(policyId)}`, data
+      )
+      return response.data
+    } catch (error) {
+      const detail = error?.response?.data?.detail
+      if (detail?.impact && detail?.message && detail?.impact?.allowed && window.confirm(`${detail.message}\n\n${formatConfigurationImpact(detail.impact)}\n\n确认热加载修改吗？`)) {
+        const response = await api.put(
+          `/position-management-policies/${encodeURIComponent(policyId)}`,
+          { ...data, _confirm_hot_reload: true },
+        )
+        return response.data
+      }
+      throw error
+    }
   },
 
   async deletePositionManagementPolicy(policyId) {
@@ -738,11 +774,6 @@ export const marketAPI = {
     return response.data
   },
 
-  async quickCreateAIStrategy(data) {
-    const response = await api.post('/strategy/quick-create-ai', data)
-    return response.data
-  },
-
   // 使用平台共享策略；服务端创建不可编辑的安全引用
   async useSharedStrategy(ownerUserId, strategyId, data = {}) {
     const response = await api.post(
@@ -760,7 +791,10 @@ export const marketAPI = {
 
   // 更新品种策略配置
   async updateStrategy(strategyId, data) {
-    const response = await api.post(`/strategy/${encodeURIComponent(strategyId)}`, data)
+    let response = await api.post(`/strategy/${encodeURIComponent(strategyId)}`, data)
+    if (response.data?.code === 'hot_reload_confirmation_required' && response.data?.impact?.allowed && window.confirm(`${response.data.message}\n\n${formatConfigurationImpact(response.data.impact)}\n\n确认热加载修改吗？`)) {
+      response = await api.post(`/strategy/${encodeURIComponent(strategyId)}`, { ...data, _confirm_hot_reload: true })
+    }
     return response.data
   },
 
@@ -825,6 +859,7 @@ export const marketAPI = {
   async getStrategyExecutionOverview(strategyId, options = {}) {
     const params = { _ts: Date.now() }
     if (options.include_chart) params.include_chart = 'true'
+    if (options.include_inactive) params.include_inactive = 'true'
     if (options.start_ts != null) params.start_ts = options.start_ts
     if (options.end_ts != null) params.end_ts = options.end_ts
     const response = await api.get(
@@ -845,6 +880,14 @@ export const marketAPI = {
     const response = await api.post(
       `/strategy/${encodeURIComponent(strategyId)}/ai-review`,
       { deployment_id: deploymentId, hours },
+    )
+    return response.data
+  },
+
+  async getStrategyReviewStatus(strategyId, jobId) {
+    const response = await api.get(
+      `/strategy/${encodeURIComponent(strategyId)}/ai-review/${encodeURIComponent(jobId)}`,
+      { params: { _ts: Date.now() } },
     )
     return response.data
   },

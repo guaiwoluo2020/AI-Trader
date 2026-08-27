@@ -334,7 +334,7 @@ import { marketAPI } from '../api/market'
 
 const datasets = ref([])
 const quota = reactive({ usage: { datasets: 0 }, limits: { datasets: 10 } })
-const context = reactive({ account: null, accounts: [], symbols: [], required_ea_version: '2.04' })
+const context = reactive({ account: null, accounts: [], symbols: [], required_ea_version: '2.0.7' })
 const loading = ref(false)
 const creating = ref(false)
 const message = ref('')
@@ -484,7 +484,7 @@ async function loadAll() {
     context.account = contextData.account || null
     context.accounts = contextData.accounts || []
     context.symbols = contextData.symbols || []
-    context.required_ea_version = contextData.required_ea_version || '2.04'
+    context.required_ea_version = contextData.required_ea_version || '2.0.7'
     if (!form.accountId && context.accounts.length) {
       form.accountId = context.accounts[0].account_id
     }

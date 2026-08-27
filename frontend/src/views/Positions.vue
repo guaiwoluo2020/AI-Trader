@@ -320,6 +320,7 @@ export default {
       if (!timestamp) return '-'
       const date = new Date(timestamp)
       return date.toLocaleTimeString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit'
@@ -328,6 +329,7 @@ export default {
     const formatDateTime = (timestamp) => {
       if (!timestamp) return '-'
       return new Date(timestamp).toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
         month: '2-digit',
         day: '2-digit',
         hour: '2-digit',

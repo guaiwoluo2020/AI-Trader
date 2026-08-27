@@ -5,7 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "wwananggxxxx"
 #property link      "https://www.mql5.com"
-#property version   "2.04"
+#property version   "2.07"
+#define EA_API_VERSION "2.0.7"
 #property strict
 
 //--- 需要访问Web请求权限
@@ -19,16 +20,17 @@
 //+------------------------------------------------------------------+
 
 // Python 服务配置
-input string InpServerUrl = "http://182.92.119.121/api"; // WebRequest 白名单中的服务地址
+input string InpServerUrl = "http://39.106.142.123/api"; // WebRequest 白名单中的服务地址
 input long InpWebUserId = 0;       // 高级用法：手工绑定 user_id
 input string InpEaToken = "";      // 高级用法：手工绑定 EA token
 string g_pythonServer = "";
 long g_webUserId = 0;
 string g_eaToken = "";
+bool g_isAdmin = false;
 string g_activationCode = "";
 string g_credentialsFile = "AITrader_credentials.dat";
 uint g_lastPythonRequestTime = 0;
-uint g_pythonRequestInterval = 100;  // 毫秒
+uint g_pythonRequestInterval = 300;  // 毫秒；Tick驱动但避免请求过密
 uint g_lastHistoryTaskPollTime = 0;
 uint g_historyTaskPollInterval = 5000;  // 历史数据任务每5秒处理一个分片
 bool g_historyTaskActive = false;
@@ -56,6 +58,8 @@ string g_tradesOfDay = "";
 
 // K线数据推送相关
 bool g_klineInitialized = false;           // 是否已发送历史K线数据
+int g_klineBootstrapIndex = 0;             // 分周期启动补传进度
+const int KLINE_GAP_BATCH_SIZE = 288;
 datetime g_lastKlinePushTime = 0;          // 上次推送K线时间
 int g_klinePushInterval = 60;              // K线推送间隔（秒）
 datetime g_lastH4CloseTime = 0;            // 上次H4 K线收盘时间
@@ -83,6 +87,16 @@ int g_tradeHistoryReportInterval = 300;      // 兜底同步间隔（秒），5�
 bool g_tradeHistorySyncPending = false;      // 有真实成交等待同步
 datetime g_nextTradeHistoryRetryTime = 0;    // 同步失败后的下次重试时间
 const int TRADE_HISTORY_RETRY_DELAY_SECONDS = 15;
+
+// 账户级后台任务。财经日历由服务端校验，仅ADMIN实例可写入公共数据。
+datetime g_lastCalendarSyncTime = 0;
+const int CALENDAR_SYNC_INTERVAL_SECONDS = 60;
+int g_calendarDayOffset = 0;
+datetime g_lastPositionSyncTime = 0;
+const int POSITION_SYNC_INTERVAL_SECONDS = 10;
+bool g_positionsSyncPending = false;
+datetime g_lastHeartbeatTime = 0;
+const int HEARTBEAT_INTERVAL_SECONDS = 30;
 
 //+------------------------------------------------------------------+
 //| URL编码函数 - 处理特殊字符                                        |
@@ -146,7 +160,8 @@ string BuildAuthenticatedHeaders()
   {
    return "Content-Type: application/json\r\n"
           + "X-EA-User-ID: " + IntegerToString(g_webUserId) + "\r\n"
-          + "X-EA-Token: " + g_eaToken + "\r\n";
+          + "X-EA-Token: " + g_eaToken + "\r\n"
+          + "X-EA-Version: " + EA_API_VERSION + "\r\n";
   }
 
 //+------------------------------------------------------------------+
@@ -192,6 +207,9 @@ bool LoadCredentials(string expectedActivationCode)
    string savedCode = FileReadString(handle);
    string savedUserId = FileReadString(handle);
    string savedToken = FileReadString(handle);
+   string savedRole = "";
+   if(!FileIsEnding(handle))
+      savedRole = FileReadString(handle);
    FileClose(handle);
 
    if(savedServer != g_pythonServer || savedCode != expectedActivationCode ||
@@ -204,6 +222,7 @@ bool LoadCredentials(string expectedActivationCode)
 
    g_webUserId = userId;
    g_eaToken = savedToken;
+   g_isAdmin = (savedRole == "admin");
    return true;
   }
 
@@ -223,6 +242,7 @@ bool SaveCredentials(string activationCode)
    FileWrite(handle, activationCode);
    FileWrite(handle, IntegerToString(g_webUserId));
    FileWrite(handle, g_eaToken);
+   FileWrite(handle, g_isAdmin ? "admin" : "user");
    FileClose(handle);
    return true;
   }
@@ -239,7 +259,7 @@ bool ActivateEA(string activationCode)
                + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "\",";
    jsonBody += "\"mt5_server\":\""
                + EscapeJsonString(AccountInfoString(ACCOUNT_SERVER)) + "\",";
-   jsonBody += "\"ea_version\":\"2.04\",";
+   jsonBody += "\"ea_version\":\"" + EA_API_VERSION + "\",";
    jsonBody += "\"program_name\":\"" + EscapeJsonString(programName) + "\"";
    jsonBody += "}";
 
@@ -275,6 +295,7 @@ bool ActivateEA(string activationCode)
    );
    long userId = (long)ExtractJsonDouble(responseText, "user_id");
    string token = ExtractJsonString(responseText, "ea_token");
+   g_isAdmin = (ExtractJsonDouble(responseText, "is_admin") > 0.5);
    if(userId <= 0 || StringLen(token) == 0)
      {
       Print("[EA Activation] Server response did not contain credentials.");
@@ -311,6 +332,7 @@ int OnInit()
      {
       g_webUserId = InpWebUserId;
       g_eaToken = InpEaToken;
+      g_isAdmin = false; // 手工凭证不绕过服务端ADMIN校验
       credentialsReady = true;
      }
    else
@@ -347,13 +369,11 @@ int OnInit()
    Print("Python server: ", g_pythonServer);
    Print("Risk limit: ", g_riskLimitPercent, "%");
 
-//--- 启动时推送历史K线数据
-   Print("Pushing historical K-line data...");
-   PushAllKlineData(true);  // is_full = true
-
-//--- 启动时上报交易历史
-   Print("Reporting trade history...");
-   ReportTradeHistory();
+//--- 启动任务改由OnTimer分批执行，避免阻塞EA初始化
+   g_klineInitialized = false;
+   g_tradeHistorySyncPending = true;
+   g_nextTradeHistoryRetryTime = TimeCurrent();
+   Print("Historical K-line and trade history bootstrap scheduled by OnTimer");
 
 //---
    return(INIT_SUCCEEDED);
@@ -373,9 +393,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void UpdateStatistics()
   {
-   g_tickCount++;
-
-//--- 获取当前价格
+//--- 获取当前价格；Tick计数只在OnTick中增加
    MqlTick lastTick;
    if(SymbolInfoTick(_Symbol, lastTick))
      {
@@ -451,6 +469,10 @@ string GetPositionsSummary(bool onlyCurrentSymbol = true)
       summary += "\"volume\":" + DoubleToString(posVolume, 2) + ",";
       summary += "\"priceOpen\":" + DoubleToString(posPriceOpen, _Digits) + ",";
       summary += "\"openTime\":" + IntegerToString(PositionGetInteger(POSITION_TIME)) + ",";
+      long brokerOffset = (long)(TimeCurrent() - TimeGMT());
+      summary += "\"open_timestamp\":" + IntegerToString(PositionGetInteger(POSITION_TIME) - brokerOffset) + ",";
+      summary += "\"broker_open_time\":\"" + TimeToString((datetime)PositionGetInteger(POSITION_TIME), TIME_DATE | TIME_SECONDS) + "\",";
+      summary += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
       summary += "\"type\":\"" + (posType == POSITION_TYPE_BUY ? "BUY" : "SELL") + "\",";
       summary += "\"profit\":" + DoubleToString(posProfit, 2) + ",";
       summary += "\"comment\":\"" + EscapeJsonString(posComment) + "\",";
@@ -596,7 +618,7 @@ void RequestTradesFromPython()
    else if(responseCode == -1)
      {
       Print("WebRequest is disabled! Please enable WebRequest in MT5 Options -> Expert Advisors");
-      Print("Make sure 'http://182.92.119.121' is added to the WebRequest allowed list");
+      Print("Make sure 'http://39.106.142.123' is added to the WebRequest allowed list");
      }
   }
 
@@ -1081,6 +1103,10 @@ void SendTradeExecutionReport(
    jsonBody += "\"mt5_deal\":" + IntegerToString(mt5Deal) + ",";
    jsonBody += "\"mt5_position_id\":" + IntegerToString(mt5PositionId) + ",";
    jsonBody += "\"retcode\":" + IntegerToString(retcode) + ",";
+   long brokerOffset = (long)(TimeCurrent() - TimeGMT());
+   jsonBody += "\"reported_timestamp\":" + IntegerToString((long)TimeCurrent() - brokerOffset) + ",";
+   jsonBody += "\"broker_server_time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\",";
+   jsonBody += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
    jsonBody += "\"error_message\":\"" + EscapeJsonString(errorMessage) + "\"";
    jsonBody += "}";
 
@@ -1129,8 +1155,11 @@ long ResolvePositionId(long dealTicket, string symbol)
 //+------------------------------------------------------------------+
 void RecordTrade(string action, string symbol, double volume, double sl, double tp, double price)
   {
+   long brokerOffset = (long)(TimeCurrent() - TimeGMT());
    string tradeRecord = "{";
    tradeRecord += "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES) + "\",";
+   tradeRecord += "\"trade_timestamp\":" + IntegerToString((long)TimeCurrent() - brokerOffset) + ",";
+   tradeRecord += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
    tradeRecord += "\"action\":\"" + action + "\",";
    tradeRecord += "\"symbol\":\"" + symbol + "\",";
    tradeRecord += "\"volume\":" + DoubleToString(volume, 2) + ",";
@@ -1155,6 +1184,10 @@ void SendMinuteStatistics()
    string statisticJson = "{";
    statisticJson += "\"symbol\":\"" + _Symbol + "\",";
    statisticJson += "\"timestamp\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES) + "\",";
+   long brokerOffset = (long)(TimeCurrent() - TimeGMT());
+   statisticJson += "\"reported_timestamp\":" + IntegerToString((long)TimeCurrent() - brokerOffset) + ",";
+   statisticJson += "\"broker_server_time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\",";
+   statisticJson += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
    statisticJson += "\"tickCount\":" + IntegerToString(g_tickCount) + ",";
    statisticJson += "\"bidPrice\":" + DoubleToString(g_bidPrice, _Digits) + ",";
    statisticJson += "\"askPrice\":" + DoubleToString(g_askPrice, _Digits) + ",";
@@ -1239,6 +1272,94 @@ void SendToPythonServer(string jsonData)
         }
      }
   }
+
+//+------------------------------------------------------------------+
+//| ADMIN主EA上报MT5财经日历（按天覆盖，后端保存为全局公共数据）       |
+//+------------------------------------------------------------------+
+double CalendarScaledValue(long value)
+  {
+   // MT5日历数值以10^-6存储；无值使用空字符串，避免伪造0。
+   if(value == LONG_MIN)
+      return 0.0;
+   return (double)value / 1000000.0;
+  }
+
+bool SendCalendarDay(int beijingDayOffset)
+  {
+   long brokerOffset = (long)(TimeCurrent() - TimeGMT());
+   datetime beijingNow = (datetime)((long)TimeGMT() + 8 * 60 * 60);
+   datetime beijingDayWall = StringToTime(TimeToString(beijingNow, TIME_DATE));
+   datetime targetBeijingWall = beijingDayWall + beijingDayOffset * 24 * 60 * 60;
+   datetime targetUtc = targetBeijingWall - 8 * 60 * 60;
+   datetime dayStart = (datetime)((long)targetUtc + brokerOffset);
+   datetime dayEnd = dayStart + 24 * 60 * 60 - 1;
+   MqlCalendarValue values[];
+   int count = CalendarValueHistory(values, dayStart, dayEnd, NULL, NULL);
+   if(count < 0)
+     {
+      Print("[财经日历] CalendarValueHistory失败，error=", GetLastError());
+      return false;
+     }
+
+   string day = TimeToString(targetBeijingWall, TIME_DATE);
+   StringReplace(day, ".", "-");
+   string json = "{\"date\":\"" + day + "\",\"source\":\"mt5_calendar\",\"events\":[";
+   int valid = 0;
+   for(int i = 0; i < count; i++)
+     {
+      MqlCalendarEvent eventInfo;
+      if(!CalendarEventById(values[i].event_id, eventInfo))
+         continue;
+      MqlCalendarCountry countryInfo;
+      string currency = "";
+      if(CalendarCountryById(eventInfo.country_id, countryInfo))
+         currency = countryInfo.currency;
+      string eventName = EscapeJsonString(eventInfo.name);
+      if(StringLen(eventName) == 0)
+         continue;
+      if(valid > 0) json += ",";
+      long eventTimestampUtc = (long)values[i].time - brokerOffset;
+      json += "{\"id\":\"mt5_" + IntegerToString((long)values[i].event_id) + "\",";
+      json += "\"name\":\"" + eventName + "\",";
+      json += "\"currency\":\"" + EscapeJsonString(currency) + "\",";
+      json += "\"event_time\":\"" + TimeToString(values[i].time, TIME_DATE|TIME_SECONDS) + "\",";
+      json += "\"broker_server_time\":\"" + TimeToString(values[i].time, TIME_DATE|TIME_SECONDS) + "\",";
+      json += "\"event_timestamp\":" + IntegerToString(eventTimestampUtc) + ",";
+      json += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
+      json += "\"importance\":" + IntegerToString((int)eventInfo.importance) + ",";
+      json += "\"actual\":" + DoubleToString(CalendarScaledValue(values[i].actual_value), 6) + ",";
+      json += "\"forecast\":" + DoubleToString(CalendarScaledValue(values[i].forecast_value), 6) + ",";
+      json += "\"previous\":" + DoubleToString(CalendarScaledValue(values[i].prev_value), 6);
+      json += "}";
+      valid++;
+     }
+   json += "]}";
+
+   uchar postData[], responseData[];
+   StringToCharArray(json, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(postData) > 0) ArrayResize(postData, ArraySize(postData) - 1);
+   string responseHeaders = "";
+   int responseCode = WebRequest(
+      "POST", g_pythonServer + "/ea/calendar/daily",
+      BuildAuthenticatedHeaders(), 5000, postData, responseData, responseHeaders
+   );
+   if(responseCode == 200)
+     {
+      Print("[财经日历] ADMIN公共日历已同步 ", day, "，事件数=", valid);
+      return true;
+     }
+   if(responseCode != -1)
+      Print("[财经日历] 未同步，HTTP=", responseCode,
+            "（普通用户EA会被服务端拒绝，这是预期行为）");
+   return false;
+  }
+
+void SyncEconomicCalendar()
+  {
+   // 今天/明天交替同步，避免一次OnTimer连续执行两个阻塞请求。
+   SendCalendarDay(g_calendarDayOffset);
+   g_calendarDayOffset = 1 - g_calendarDayOffset;
+  }
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
@@ -1246,8 +1367,10 @@ void OnTick()
   {
 //--- 记录最后一次Tick时间戳
    g_lastTickTime = TimeCurrent();
+   g_tickCount++;
+   UpdateStatistics();
 
-//--- 每100毫秒请求一次Python服务
+//--- Tick驱动策略评估；网络请求限频，避免请求过密
    uint currentTime = GetTickCount();
    if((currentTime - g_lastPythonRequestTime) >= g_pythonRequestInterval)
      {
@@ -1261,21 +1384,10 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTimer()
   {
-//--- 历史任务不依赖实时Tick，休市期间也可以继续下载
-   CheckHistoricalDataTask();
-   if(g_historyTaskActive)
-      return;  // 采集期间优先处理历史分片
-
-//--- 检查最后一次Tick时间，如果超过10秒无Tick则跳过（可能休市）
    datetime now = TimeCurrent();
-   if(g_lastTickTime == 0 || (now - g_lastTickTime) > 10)
-     {
-      // 无Tick超过10秒，跳过定时任务
-      return;
-     }
 
-//--- 更新统计数据
-   UpdateStatistics();
+//--- 历史任务是低优先级，不能阻断成交、持仓和心跳任务
+   CheckHistoricalDataTask();
 
 //--- 新成交在下一次定时器立即同步；定期同步用于补偿网络或终端短暂异常
    if(g_tradeHistorySyncPending && now >= g_nextTradeHistoryRetryTime)
@@ -1298,22 +1410,34 @@ void OnTimer()
 //--- 检查是否需要推送增量K线数据
    CheckAndPushIncrementalKlines();
 
-//--- 检查是否需要进行分钟级统计和发送
-   if(now - g_lastStatisticTime >= 6)  // 每6秒执行一次
-     {
-      SendMinuteStatistics();
-      g_lastStatisticTime = now;
-      g_tickCount = 0;
-     }
-
 //--- 检查持仓风险并平仓
    CheckAndCloseRiskyPositions();
 
-//--- 持仓数据上报：生成0-10的随机数，等于5时上报
-   int randomNum = (int)(MathRand() % 11);
-   if(randomNum == 5)
+//--- 成交后立即由标志触发，固定周期兜底，不再随机上报
+   if(g_positionsSyncPending || g_lastPositionSyncTime == 0 ||
+      (now - g_lastPositionSyncTime) >= POSITION_SYNC_INTERVAL_SECONDS)
      {
       SendPositionsToPython(true);  // 上报所有品种持仓
+      g_lastPositionSyncTime = now;
+      g_positionsSyncPending = false;
+     }
+
+//--- ADMIN实例上报公共财经日历；普通用户请求会被服务端拒绝
+   if(g_isAdmin && (g_lastCalendarSyncTime == 0 ||
+      (now - g_lastCalendarSyncTime) >= CALENDAR_SYNC_INTERVAL_SECONDS))
+     {
+      SyncEconomicCalendar();
+      g_lastCalendarSyncTime = now;
+     }
+
+//--- 账户心跳即使休市也应继续发送
+   if(g_lastHeartbeatTime == 0 ||
+      (now - g_lastHeartbeatTime) >= HEARTBEAT_INTERVAL_SECONDS)
+     {
+      SendMinuteStatistics();
+      g_lastHeartbeatTime = now;
+      g_lastStatisticTime = now;
+      g_tickCount = 0;
      }
   }
 //+------------------------------------------------------------------+
@@ -1368,7 +1492,8 @@ bool PushKlineData(ENUM_TIMEFRAMES period, int count)
    ArraySetAsSeries(rates, true);
 
    // 获取K线数据
-   int copied = CopyRates(_Symbol, period, 0, count, rates);
+   // shift=1：只上传已经收盘的K线，不上传仍在变化的当前K线。
+   int copied = CopyRates(_Symbol, period, 1, count, rates);
    if(copied <= 0)
      {
       Print("Failed to get K-line data for period: ", PeriodToString(period));
@@ -1376,7 +1501,7 @@ bool PushKlineData(ENUM_TIMEFRAMES period, int count)
      }
 
    // 构建JSON
-   string klineJson = BuildKlineJson(period, rates, copied);
+   string klineJson = BuildKlineJson(period, rates, copied, !g_klineInitialized);
 
    // 发送到Python服务
    string periodStr = PeriodToString(period);
@@ -1386,20 +1511,114 @@ bool PushKlineData(ENUM_TIMEFRAMES period, int count)
   }
 
 //+------------------------------------------------------------------+
+//| 查询MySQL持久化游标                                               |
+//+------------------------------------------------------------------+
+long GetServerKlineCursor(ENUM_TIMEFRAMES period)
+  {
+   uchar requestData[], responseData[];
+   string responseHeaders = "";
+   string url = g_pythonServer + "/ea/kline_cursor/" + PeriodToString(period)
+                + "?symbol=" + URLEncode(_Symbol);
+   int responseCode = WebRequest(
+      "GET", url, BuildAuthenticatedHeaders(), 5000,
+      requestData, responseData, responseHeaders
+   );
+   if(responseCode != 200)
+     {
+      Print("[K线游标] 查询失败 ", PeriodToString(period), " HTTP=", responseCode);
+      return -1;
+     }
+   string response = CharArrayToString(responseData, 0, WHOLE_ARRAY, CP_UTF8);
+   return (long)ExtractJsonDouble(response, "server_last_bar_time");
+  }
+
+//+------------------------------------------------------------------+
+//| 从服务端确认游标之后分批补传已收盘K线                             |
+//+------------------------------------------------------------------+
+bool SyncKlineGap(ENUM_TIMEFRAMES period, int fullCount)
+  {
+   long serverCursor = GetServerKlineCursor(period);
+   if(serverCursor < 0)
+      return false;
+
+   datetime latestClosed = iTime(_Symbol, period, 1);
+   if(latestClosed <= 0)
+      return false;
+
+   if(serverCursor == 0 || serverCursor > (long)latestClosed)
+     {
+      Print("[K线游标] ", PeriodToString(period), " 无有效游标，执行全量初始化");
+      return PushKlineData(period, fullCount);
+     }
+   if(serverCursor >= (long)latestClosed)
+      return true;
+
+   int cursorShift = iBarShift(_Symbol, period, (datetime)serverCursor, false);
+   if(cursorShift < 2)
+      return true;
+   int missingCount = cursorShift - 1; // 排除shift=0当前K线和服务端已有游标K线
+   int batchCount = MathMin(missingCount, KLINE_GAP_BATCH_SIZE);
+   int startPosition = cursorShift - batchCount;
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   // 从缺口最早处向新时间推进，避免长缺口先上传最新批次后跳过中段。
+   int copied = CopyRates(_Symbol, period, startPosition, batchCount, rates);
+   if(copied <= 0)
+     {
+      Print("[K线游标] 无法读取缺口 ", PeriodToString(period), " error=", GetLastError());
+      return false;
+     }
+
+   // CopyRates可能带回当前未收盘K线，发送前将其排除。
+   MqlRates closedRates[];
+   ArraySetAsSeries(closedRates, false);
+   int closedCount = 0;
+   long lastSentTime = serverCursor;
+   for(int i = copied - 1; i >= 0; i--)
+     {
+      if(rates[i].time <= (datetime)serverCursor || rates[i].time > latestClosed)
+         continue;
+      ArrayResize(closedRates, closedCount + 1);
+      closedRates[closedCount] = rates[i];
+      if((long)rates[i].time > lastSentTime)
+         lastSentTime = (long)rates[i].time;
+      closedCount++;
+     }
+   if(closedCount == 0)
+      return true;
+   ArraySetAsSeries(closedRates, true);
+   string json = BuildKlineJson(period, closedRates, closedCount, false);
+   bool success = SendKlineToServer(
+      g_pythonServer + "/ea/kline/" + PeriodToString(period), json
+   );
+   if(success)
+      Print("[K线游标] ", PeriodToString(period), " 补传 ", closedCount, " 根已收盘K线");
+   // false表示尚未追平，OnTimer会保持当前周期并继续下一批。
+   return success && lastSentTime >= (long)latestClosed;
+  }
+
+//+------------------------------------------------------------------+
 //| 构建K线JSON数据                                                   |
 //+------------------------------------------------------------------+
-string BuildKlineJson(ENUM_TIMEFRAMES period, MqlRates &rates[], int count)
+string BuildKlineJson(ENUM_TIMEFRAMES period, MqlRates &rates[], int count, bool isFull)
   {
+   long brokerOffset = (long)(TimeCurrent() - TimeGMT());
    string json = "{\"symbol\":\"" + _Symbol + "\",";
-   json += "\"is_full\":" + (g_klineInitialized ? "false" : "true") + ",";
+   json += "\"is_full\":" + (isFull ? "true" : "false") + ",";
    json += "\"reported_at\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\",";
+   json += "\"reported_timestamp\":" + IntegerToString((long)TimeCurrent() - brokerOffset) + ",";
+   json += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
    json += "\"klines\":[";
 
    for(int i = count - 1; i >= 0; i--)  // 从旧到新排序
      {
       if(i < count - 1) json += ",";
       json += "{";
-      json += "\"timestamp\":\"" + TimeToString(rates[i].time, TIME_DATE | TIME_MINUTES) + "\",";
+      json += "\"timestamp\":" + IntegerToString((long)rates[i].time) + ",";
+      json += "\"timestamp_utc\":" + IntegerToString((long)rates[i].time - brokerOffset) + ",";
+      json += "\"broker_server_time\":\"" + TimeToString(rates[i].time, TIME_DATE | TIME_MINUTES) + "\",";
+      json += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
       json += "\"open\":" + DoubleToString(rates[i].open, _Digits) + ",";
       json += "\"high\":" + DoubleToString(rates[i].high, _Digits) + ",";
       json += "\"low\":" + DoubleToString(rates[i].low, _Digits) + ",";
@@ -1459,6 +1678,7 @@ bool SendKlineToServer(string url, string jsonData)
         {
          Print("Server needs full K-line data, scheduling a retry...");
          g_klineInitialized = false;
+         g_klineBootstrapIndex = 0;
          g_nextKlineRetryTime = TimeCurrent();
         }
       return false;
@@ -1533,11 +1753,14 @@ bool UploadHistoricalDataChunk(
    datetime rangeEnd
 )
   {
+   long brokerOffset = (long)(TimeCurrent() - TimeGMT());
+   datetime brokerRangeStart = (datetime)((long)rangeStart + brokerOffset);
+   datetime brokerRangeEnd = (datetime)((long)rangeEnd + brokerOffset);
    MqlRates rates[];
    ArraySetAsSeries(rates, false);
    ResetLastError();
    int copied = CopyRates(
-      _Symbol, PERIOD_M1, rangeStart, rangeEnd, rates
+      _Symbol, PERIOD_M1, brokerRangeStart, brokerRangeEnd, rates
    );
    if(copied < 0)
      {
@@ -1583,14 +1806,17 @@ bool UploadHistoricalDataChunk(
    json += "\"range_end\":" + IntegerToString((long)rangeEnd) + ",";
    json += "\"broker_server\":\""
            + EscapeJsonString(AccountInfoString(ACCOUNT_SERVER)) + "\",";
-   json += "\"ea_version\":\"2.04\",";
+   json += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
+   json += "\"ea_version\":\"" + EA_API_VERSION + "\",";
    json += "\"bars\":[";
 
    for(int i = 0; i < copied; i++)
      {
       if(i > 0) json += ",";
       json += "{";
-      json += "\"time\":" + IntegerToString((long)rates[i].time) + ",";
+      json += "\"time\":" + IntegerToString((long)rates[i].time - brokerOffset) + ",";
+      json += "\"broker_timestamp\":" + IntegerToString((long)rates[i].time) + ",";
+      json += "\"broker_server_time\":\"" + TimeToString(rates[i].time, TIME_DATE | TIME_SECONDS) + "\",";
       json += "\"open\":" + DoubleToString(rates[i].open, _Digits) + ",";
       json += "\"high\":" + DoubleToString(rates[i].high, _Digits) + ",";
       json += "\"low\":" + DoubleToString(rates[i].low, _Digits) + ",";
@@ -1665,12 +1891,29 @@ void CheckAndPushIncrementalKlines()
    // Retry the complete bootstrap with backoff until all periods are accepted.
    if(!g_klineInitialized)
      {
-      if(PushAllKlineData(true))
-         g_nextKlineRetryTime = 0;
+      bool pushed = false;
+      // 每轮只上传一个周期，避免全量请求阻塞OnTimer和成交回报。
+      switch(g_klineBootstrapIndex)
+        {
+         case 0: pushed = SyncKlineGap(PERIOD_H4, 1100); break;
+         case 1: pushed = SyncKlineGap(PERIOD_H1, 720); break;
+         case 2: pushed = SyncKlineGap(PERIOD_M15, 288); break;
+         case 3: pushed = SyncKlineGap(PERIOD_M5, 288); break;
+         case 4: pushed = SyncKlineGap(PERIOD_M1, 1200); break;
+         default:
+            g_klineInitialized = true;
+            g_nextKlineRetryTime = 0;
+            return;
+        }
+      if(pushed)
+        {
+         g_klineBootstrapIndex++;
+         g_nextKlineRetryTime = now + 1;
+        }
       else
         {
          g_nextKlineRetryTime = now + KLINE_RETRY_DELAY_SECONDS;
-         Print("K-line bootstrap failed; retrying in ", KLINE_RETRY_DELAY_SECONDS, " seconds");
+         Print("K-line bootstrap period failed; retrying in ", KLINE_RETRY_DELAY_SECONDS, " seconds");
         }
       return;
      }
@@ -1678,10 +1921,10 @@ void CheckAndPushIncrementalKlines()
    datetime barTime;
 
    // 检查H4 K线是否有新周期
-   barTime = iTime(_Symbol, PERIOD_H4, 0);
+   barTime = iTime(_Symbol, PERIOD_H4, 1);
    if(barTime != 0 && barTime != g_lastH4CloseTime)
      {
-      if(PushKlineData(PERIOD_H4, 1))
+      if(SyncKlineGap(PERIOD_H4, 1100))
          g_lastH4CloseTime = barTime;
       else
         {
@@ -1691,10 +1934,10 @@ void CheckAndPushIncrementalKlines()
      }
 
    // 检查H1 K线
-   barTime = iTime(_Symbol, PERIOD_H1, 0);
+   barTime = iTime(_Symbol, PERIOD_H1, 1);
    if(barTime != 0 && barTime != g_lastH1CloseTime)
      {
-      if(PushKlineData(PERIOD_H1, 1))
+      if(SyncKlineGap(PERIOD_H1, 720))
          g_lastH1CloseTime = barTime;
       else
         {
@@ -1704,10 +1947,10 @@ void CheckAndPushIncrementalKlines()
      }
 
    // 检查M15 K线
-   barTime = iTime(_Symbol, PERIOD_M15, 0);
+   barTime = iTime(_Symbol, PERIOD_M15, 1);
    if(barTime != 0 && barTime != g_lastM15CloseTime)
      {
-      if(PushKlineData(PERIOD_M15, 1))
+      if(SyncKlineGap(PERIOD_M15, 288))
          g_lastM15CloseTime = barTime;
       else
         {
@@ -1717,10 +1960,10 @@ void CheckAndPushIncrementalKlines()
      }
 
    // 检查M5 K线
-   barTime = iTime(_Symbol, PERIOD_M5, 0);
+   barTime = iTime(_Symbol, PERIOD_M5, 1);
    if(barTime != 0 && barTime != g_lastM5CloseTime)
      {
-      if(PushKlineData(PERIOD_M5, 1))
+      if(SyncKlineGap(PERIOD_M5, 288))
          g_lastM5CloseTime = barTime;
       else
         {
@@ -1730,10 +1973,10 @@ void CheckAndPushIncrementalKlines()
      }
 
    // 检查M1 K线
-   barTime = iTime(_Symbol, PERIOD_M1, 0);
+   barTime = iTime(_Symbol, PERIOD_M1, 1);
    if(barTime != 0 && barTime != g_lastM1CloseTime)
      {
-      if(PushKlineData(PERIOD_M1, 1))
+      if(SyncKlineGap(PERIOD_M1, 1200))
          g_lastM1CloseTime = barTime;
       else
         {
@@ -1765,6 +2008,7 @@ string PeriodToString(ENUM_TIMEFRAMES period)
 bool ReportTradeHistory()
   {
    datetime now = TimeCurrent();
+   long brokerOffset = (long)(TimeCurrent() - TimeGMT());
    datetime from = now - 24 * 3600;  // 最近24小时
 
    // 选择交易历史
@@ -1828,6 +2072,9 @@ bool ReportTradeHistory()
       json += "\"profit\":" + DoubleToString(deal_profit, 2) + ",";
       json += "\"swap\":" + DoubleToString(deal_swap, 2) + ",";
       json += "\"commission\":" + DoubleToString(deal_commission, 2) + ",";
+      json += "\"deal_timestamp\":" + IntegerToString((long)deal_time - brokerOffset) + ",";
+      json += "\"broker_deal_timestamp\":" + IntegerToString((long)deal_time) + ",";
+      json += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
       json += "\"time\":\"" + TimeToString(deal_time, TIME_DATE | TIME_MINUTES | TIME_SECONDS) + "\",";
       json += "\"comment\":\"" + EscapeJsonString(deal_comment) + "\"";
       json += "}";
@@ -1888,6 +2135,7 @@ void OnTradeTransaction(
    if(dealType == DEAL_TYPE_BUY || dealType == DEAL_TYPE_SELL)
      {
       g_tradeHistorySyncPending = true;
+      g_positionsSyncPending = true;
       g_nextTradeHistoryRetryTime = 0;
       Print("[交易历史] 检测到新成交，等待立即同步: deal=", transaction.deal);
      }

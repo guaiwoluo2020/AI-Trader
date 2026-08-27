@@ -453,22 +453,30 @@ def build_pivot_signal(
     pivot_type: str,
     opposite_price: Optional[float],
     signal_time: Optional[datetime] = None,
+    stop_buffer_ratio: float = 0.0005,
+    risk_reward_ratio: float = 2.0,
+    confidence: int = 60,
+    confirmation_count: int = 1,
+    age_bars: float = 0,
+    pivot_score: int = 0,
 ) -> Optional[TradingSignal]:
     action = "buy" if pivot_type == "low" else "sell"
-    sl = pivot_price - 10 if action == "buy" else pivot_price + 10
+    buffer = max(current_price * max(0.0, stop_buffer_ratio), 1e-9)
+    sl = pivot_price - buffer if action == "buy" else pivot_price + buffer
     risk = abs(current_price - sl)
     if risk <= 0 or risk > current_price * 0.02:
         return None
-    minimum_reward = risk * 1.5
+    minimum_reward = risk * max(1.0, risk_reward_ratio)
     tp = opposite_price
     if tp is None or abs(tp - current_price) < minimum_reward:
         tp = current_price + minimum_reward if action == "buy" else current_price - minimum_reward
+    sl, tp = constrain_pivot_levels_to_hundred_band(current_price, action, sl, tp)
     if not valid_exits(action, current_price, sl, tp):
         return None
     return TradingSignal(
         symbol=symbol,
         action=action,
-        confidence=60,
+        confidence=max(0, min(100, int(confidence))),
         source=SignalSource.PIVOT,
         source_period=period,
         setup_family="reversal",
@@ -483,6 +491,9 @@ def build_pivot_signal(
         risk_reward_ratio=round(abs(tp - current_price) / risk, 2),
         pivot_price=pivot_price,
         pivot_type=pivot_type,
+        pivot_confirmation_count=max(1, int(confirmation_count)),
+        pivot_age_bars=round(max(0.0, float(age_bars)), 2),
+        pivot_score=max(0, min(100, int(pivot_score))),
         created_at=signal_time,
     )
 
@@ -494,18 +505,30 @@ def build_pivot_breakout_signal(
     pivot_price: float,
     pivot_type: str,
     signal_time: Optional[datetime] = None,
+    stop_buffer_ratio: float = 0.0005,
+    risk_reward_ratio: float = 2.0,
+    confidence: int = 65,
+    confirmation_count: int = 1,
+    age_bars: float = 0,
+    pivot_score: int = 0,
 ) -> Optional[TradingSignal]:
     """价格突破高点做多、跌破低点做空。"""
     action = "buy" if pivot_type == "high" else "sell"
-    buffer = max(abs(current_price - pivot_price), current_price * 0.0005)
+    buffer = max(
+        abs(current_price - pivot_price),
+        current_price * max(0.0, stop_buffer_ratio),
+    )
     sl = pivot_price - buffer if action == "buy" else pivot_price + buffer
-    tp = current_price + buffer * 2 if action == "buy" else current_price - buffer * 2
+    risk = abs(current_price - sl)
+    reward = risk * max(1.0, risk_reward_ratio)
+    tp = current_price + reward if action == "buy" else current_price - reward
+    sl, tp = constrain_pivot_levels_to_hundred_band(current_price, action, sl, tp)
     if not valid_exits(action, current_price, sl, tp):
         return None
     return TradingSignal(
         symbol=symbol,
         action=action,
-        confidence=65,
+        confidence=max(0, min(100, int(confidence))),
         source=SignalSource.PIVOT,
         source_period=period,
         setup_family="breakout",
@@ -517,9 +540,12 @@ def build_pivot_breakout_signal(
         suggested_entry=current_price,
         suggested_sl=sl,
         suggested_tp=tp,
-        risk_reward_ratio=2.0,
+        risk_reward_ratio=round(reward / risk, 2),
         pivot_price=pivot_price,
         pivot_type=pivot_type,
+        pivot_confirmation_count=max(1, int(confirmation_count)),
+        pivot_age_bars=round(max(0.0, float(age_bars)), 2),
+        pivot_score=max(0, min(100, int(pivot_score))),
         created_at=signal_time,
     )
 
@@ -528,3 +554,50 @@ def valid_exits(direction: str, entry: float, sl: float, tp: float) -> bool:
     if min(entry, sl, tp) <= 0:
         return False
     return (sl < entry < tp) if direction == "buy" else (tp < entry < sl)
+
+
+def constrain_pivot_levels_to_hundred_band(
+    entry: float, direction: str, stop_loss: float, take_profit: float,
+) -> tuple[float, float]:
+    """Keep pivot strategy exits inside the entry price's 100-point band.
+
+    Round-number hundreds are commonly treated as support/resistance.  A
+    pivot signal may calculate an exit across such a level (for example
+    4580 -> 4610).  In that case the exit is moved just inside the same band
+    (4610 -> 4599, and a lower target is moved to 4501).  We only apply a
+    change when the adjusted level remains a valid exit; prices at the band
+    edge must not be made invalid merely to satisfy the heuristic.
+    """
+    try:
+        entry = float(entry)
+        stop_loss = float(stop_loss)
+        take_profit = float(take_profit)
+    except (TypeError, ValueError):
+        return stop_loss, take_profit
+    if entry <= 0 or direction not in {"buy", "sell"}:
+        return stop_loss, take_profit
+
+    band_low = (entry // 100) * 100
+    band_high = band_low + 100
+    adjusted_stop, adjusted_take = stop_loss, take_profit
+
+    if direction == "buy":
+        if adjusted_take >= band_high:
+            candidate = band_high - 1
+            if candidate > entry:
+                adjusted_take = candidate
+        if adjusted_stop < band_low:
+            candidate = band_low + 1
+            if candidate < entry:
+                adjusted_stop = candidate
+    else:
+        if adjusted_take <= band_low:
+            candidate = band_low + 1
+            if candidate < entry:
+                adjusted_take = candidate
+        if adjusted_stop >= band_high:
+            candidate = band_high - 1
+            if candidate > entry:
+                adjusted_stop = candidate
+
+    return adjusted_stop, adjusted_take

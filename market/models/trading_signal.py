@@ -64,6 +64,9 @@ class TradingSignal:
     # Pivot信号
     pivot_price: Optional[float] = None
     pivot_type: Optional[str] = None      # high/low
+    pivot_confirmation_count: int = 0
+    pivot_age_bars: float = 0
+    pivot_score: int = 0
 
     # KeyLevel信号
     key_level: Optional[float] = None
@@ -177,6 +180,9 @@ class TradingSignal:
             "risk_reward_ratio": self.risk_reward_ratio,
             "pivot_price": self.pivot_price,
             "pivot_type": self.pivot_type,
+            "pivot_confirmation_count": self.pivot_confirmation_count,
+            "pivot_age_bars": self.pivot_age_bars,
+            "pivot_score": self.pivot_score,
             "key_level": self.key_level,
             "distance_pct": self.distance_pct,
             "ai_analysis_period": self.ai_analysis_period,
@@ -244,6 +250,9 @@ class TradingSignal:
             risk_reward_ratio=data.get('risk_reward_ratio', 0.0),
             pivot_price=data.get('pivot_price'),
             pivot_type=data.get('pivot_type'),
+            pivot_confirmation_count=int(data.get('pivot_confirmation_count') or 0),
+            pivot_age_bars=float(data.get('pivot_age_bars') or 0),
+            pivot_score=int(data.get('pivot_score') or 0),
             key_level=data.get('key_level'),
             distance_pct=data.get('distance_pct'),
             ai_analysis_period=data.get('ai_analysis_period'),

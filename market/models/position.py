@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional
 
+from ..mt5_time import UTC, parse_ea_instant, utc_iso, utc_now
+
 
 @dataclass
 class PositionData:
@@ -36,7 +38,7 @@ class PositionData:
 
     def __post_init__(self):
         if self.updated_at is None:
-            self.updated_at = datetime.now()
+            self.updated_at = utc_now()
 
     @property
     def is_buy(self) -> bool:
@@ -68,7 +70,8 @@ class PositionData:
             "distance_sl": self.distance_sl,
             "distance_tp": self.distance_tp,
             "direction": self.direction,
-            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
+            "opened_at": utc_iso(self.opened_at) if self.opened_at else None,
+            "open_timestamp": int(self.opened_at.timestamp()) if self.opened_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None
         }
 
@@ -87,20 +90,25 @@ class PositionData:
             tp=float(data.get('tp', 0)),
             distance_sl=float(data.get('distanceSL', 0)),
             distance_tp=float(data.get('distanceTP', 0)),
-            opened_at=(
-                datetime.fromtimestamp(int(data['openTime']))
-                if data.get('openTime') else None
-            ),
+            opened_at=parse_ea_instant(
+                data,
+                utc_field="open_timestamp",
+                broker_epoch_field="openTime",
+            ) if data.get("open_timestamp") or data.get("openTime") else None,
         )
 
     @classmethod
     def from_dict(cls, data: Dict) -> 'PositionData':
         updated_at = data.get("updated_at")
         if isinstance(updated_at, str):
-            updated_at = datetime.fromisoformat(updated_at)
+            updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
         opened_at = data.get("opened_at")
         if isinstance(opened_at, str):
-            opened_at = datetime.fromisoformat(opened_at)
+            opened_at = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=UTC)
         return cls(
             ticket=int(data.get("ticket", 0)),
             symbol=data.get("symbol", ""),

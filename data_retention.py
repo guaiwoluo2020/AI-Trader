@@ -45,7 +45,12 @@ class DataRetentionService:
                 current, terminal
             ),
             "historical_klines": self._delete_in_batches(
-                "historical_klines", "timestamp < ?", (current - 7 * 86400,)
+                "historical_klines",
+                "COALESCE(NULLIF(timestamp_utc, 0), timestamp) < ?",
+                (current - 7 * 86400,),
+            ),
+            "strategy_pivot_points": self._delete_in_batches(
+                "strategy_pivot_points", "valid_until < ?", (current,)
             ),
         }
         return results

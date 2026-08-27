@@ -384,15 +384,19 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
             ["最早策略", "最新策略"],
         )
 
-    def test_pivot_signal_source_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "不再支持"):
-            TradingStrategy(symbol="GOLD#", signal_sources=[{
-                "signal_source_id": "pivot-m1",
-                "source": "pivot",
-                "period": "M1",
-                "weight": 30,
-                "params": {},
-            }])
+    def test_pivot_signal_source_is_normalized(self):
+        strategy = TradingStrategy(symbol="GOLD#", signal_sources=[{
+            "signal_source_id": "pivot-m1",
+            "source": "pivot",
+            "period": "M1",
+            "weight": 30,
+            "params": {},
+        }])
+
+        source = strategy.signal_sources[0]
+        self.assertEqual(source["source"], "pivot")
+        self.assertEqual(source["params"]["confirmation_strength"], 6)
+        self.assertEqual(source["params"]["signal_type"], "both")
 
     def test_pivot_strategy_migration_removes_backtest_chain(self):
         pivot_config = json.dumps({

@@ -5,7 +5,7 @@
 """
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 import threading
 
@@ -40,7 +40,9 @@ class PositionStore:
                 self._positions[position.symbol][position.ticket] = position
                 self._last_update_time[position.symbol] = max(
                     position.updated_at,
-                    self._last_update_time.get(position.symbol, datetime.min),
+                    self._last_update_time.get(
+                        position.symbol, datetime.min.replace(tzinfo=timezone.utc)
+                    ),
                 )
 
         print("[PositionStore] 持仓存储已初始化")
@@ -77,7 +79,7 @@ class PositionStore:
                         self._repository.delete_entity(self.ENTITY_TYPE, str(ticket))
 
             # 更新最后更新时间
-            self._last_update_time[symbol] = datetime.now()
+            self._last_update_time[symbol] = datetime.now(timezone.utc)
 
             result = {
                 "status": "ok",

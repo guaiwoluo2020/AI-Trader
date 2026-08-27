@@ -209,7 +209,7 @@ export default {
 
     const formatTime = (timestamp) => {
       if (!timestamp) return ''
-      return new Date(timestamp * 1000).toLocaleString('zh-CN')
+      return new Date(timestamp * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
     }
 
     const formatExecutionTime = (timestamp) => {
@@ -217,7 +217,7 @@ export default {
       const date = typeof timestamp === 'number'
         ? new Date(timestamp * 1000)
         : new Date(timestamp)
-      return date.toLocaleString('zh-CN')
+      return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
     }
 
     const formatPrice = (value) => value == null ? '-' : Number(value).toLocaleString('zh-CN', {

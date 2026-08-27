@@ -439,6 +439,14 @@ class LLMService:
             "analysis_prompt_template": str(params.get("analysis_prompt_template") or ""),
             "signal_source_version": str(params.get("signal_source_version") or "1.0"),
             "analysis_template": str(params.get("analysis_template") or "custom"),
+            "structure_config": {
+                "range_min_touches": int(params.get("range_min_touches", 3) or 3),
+                "range_min_inside_ratio": float(params.get("range_min_inside_ratio", 0.80) or 0.80),
+                "range_tolerance_atr_multiplier": float(params.get("range_tolerance_atr_multiplier", 0.60) or 0.60),
+                "range_tolerance_width_ratio": float(params.get("range_tolerance_width_ratio", 0.02) or 0.02),
+                "range_min_width_atr": float(params.get("range_min_width_atr", 2.0) or 2.0),
+                "range_max_width_atr": float(params.get("range_max_width_atr", 6.0) or 6.0),
+            },
             "share_runtime_data": bool(source.get("share_runtime_data")),
             "reference_runtime_ids": list(params.get("reference_runtime_ids") or []),
             "reference_market_data": references,
@@ -586,6 +594,14 @@ class LLMService:
             ),
             "signal_source_version": str(params.get("signal_source_version") or "1.0"),
             "analysis_template": str(params.get("analysis_template") or "custom"),
+            "structure_config": {
+                "range_min_touches": int(params.get("range_min_touches", 3) or 3),
+                "range_min_inside_ratio": float(params.get("range_min_inside_ratio", 0.80) or 0.80),
+                "range_tolerance_atr_multiplier": float(params.get("range_tolerance_atr_multiplier", 0.60) or 0.60),
+                "range_tolerance_width_ratio": float(params.get("range_tolerance_width_ratio", 0.02) or 0.02),
+                "range_min_width_atr": float(params.get("range_min_width_atr", 2.0) or 2.0),
+                "range_max_width_atr": float(params.get("range_max_width_atr", 6.0) or 6.0),
+            },
             "share_runtime_data": runtime_shared,
             "reference_runtime_ids": list(
                 params.get("reference_runtime_ids") or []
@@ -829,11 +845,21 @@ class LLMService:
         return {"period": str(period).upper(), "bar_minutes": bar_minutes, "analysis_interval_minutes": int(interval_minutes), "forecast_horizon_bars": horizon, "forecast_horizon_minutes": horizon * bar_minutes, "layers": layers}
 
     @staticmethod
-    def _structure_features(klines: List[Dict], period: str = "M5", interval_minutes: int = 5, horizon_bars: int = 0) -> Dict:
+    def _structure_features(
+        klines: List[Dict], period: str = "M5", interval_minutes: int = 5,
+        horizon_bars: int = 0, structure_config: Optional[Dict] = None,
+    ) -> Dict:
         """Compute common and structure-specific evidence for source 2.0."""
         rows = list(klines or [])
         if len(rows) < 10:
             return {"status": "insufficient_data", "bar_count": len(rows)}
+        structure_config = structure_config or {}
+        min_touches = max(1, min(5, int(structure_config.get("range_min_touches", 3) or 3)))
+        min_inside = max(0.5, min(1.0, float(structure_config.get("range_min_inside_ratio", 0.80) or 0.80)))
+        tolerance_atr = max(0.1, min(3.0, float(structure_config.get("range_tolerance_atr_multiplier", 0.60) or 0.60)))
+        tolerance_width = max(0.005, min(0.2, float(structure_config.get("range_tolerance_width_ratio", 0.02) or 0.02)))
+        min_width_atr = max(0.0, min(20.0, float(structure_config.get("range_min_width_atr", 2.0) or 2.0)))
+        max_width_atr = max(min_width_atr, min(50.0, float(structure_config.get("range_max_width_atr", 6.0) or 6.0)))
         layers = LLMService._observation_layers(len(rows), period, interval_minutes, horizon_bars)
         candidates = []
         for layer in layers["layers"]:
@@ -841,12 +867,31 @@ class LLMService:
             closes = [float(x.get("close", 0) or 0) for x in window]
             highs = [float(x.get("high", 0) or 0) for x in window]
             lows = [float(x.get("low", 0) or 0) for x in window]
-            ranges = [max(0.0, h - l) for h, l in zip(highs, lows)]
-            atr = sum(ranges[-min(14, len(ranges)):]) / max(1, min(14, len(ranges)))
+            true_ranges = []
+            previous_close = None
+            for high, low, close in zip(highs, lows, closes):
+                if previous_close is None:
+                    true_range = max(0.0, high - low)
+                else:
+                    true_range = max(
+                        0.0, high - low,
+                        abs(high - previous_close),
+                        abs(low - previous_close),
+                    )
+                true_ranges.append(true_range)
+                previous_close = close
+            atr_period = min(14, len(true_ranges))
+            if atr_period:
+                atr = sum(true_ranges[:atr_period]) / atr_period
+                for true_range in true_ranges[atr_period:]:
+                    # Wilder's RMA is the standard ATR smoothing method.
+                    atr = ((atr * (atr_period - 1)) + true_range) / atr_period
+            else:
+                atr = 0.0
             upper = sorted(highs)[max(0, int(len(highs) * .90) - 1)]
             lower = sorted(lows)[min(len(lows) - 1, int(len(lows) * .10))]
             width = max(upper - lower, 1e-12)
-            tolerance = max(atr * .75, width * .03, 1e-12)
+            tolerance = max(atr * tolerance_atr, width * tolerance_width, 1e-12)
             pivot_highs, pivot_lows = [], []
             for index in range(2, len(window) - 2):
                 if highs[index] >= max(highs[index - 2:index + 3]) and highs[index] > highs[index - 1]:
@@ -888,7 +933,8 @@ class LLMService:
             candidates.append({
                 "layer": layer["name"], "bars": layer["bars"],
                 "common": {"atr": round(atr, 8), "change_pct": round(change_pct, 4), "slope": round(slope, 8), "efficiency_ratio": round(efficiency_ratio, 4), "pivot_high_count": len(pivot_highs), "pivot_low_count": len(pivot_lows)},
-                "range_features": {"upper": upper, "lower": lower, "width_atr": round(width / atr, 4) if atr else 0, "touch_upper": touches_high, "touch_lower": touches_low, "inside_ratio": round(inside, 4)},
+                "range_features": {"upper": upper, "lower": lower, "width_atr": round(width / atr, 4) if atr else 0, "touch_upper": touches_high, "touch_lower": touches_low, "inside_ratio": round(inside, 4), "tolerance": round(tolerance, 8), "is_candidate": bool(touches_high >= min_touches and touches_low >= min_touches and inside >= min_inside and (not atr or min_width_atr <= width / atr <= max_width_atr))},
+                "range_confirmation": {"min_touches": min_touches, "min_inside_ratio": min_inside, "tolerance_atr_multiplier": tolerance_atr, "tolerance_width_ratio": tolerance_width, "min_width_atr": min_width_atr, "max_width_atr": max_width_atr},
                 "trend_features": {"higher_highs": higher_highs, "higher_lows": higher_lows, "lower_highs": lower_highs, "lower_lows": lower_lows, "trendline_slope": round(slope, 8)},
                 "breakout_features": {"state": breakout, "confirmation_bars": 0 if breakout == "none" else 1},
                 "triangle_features": {"type": triangle_type, "upper_slope": round(upper_slope, 8), "lower_slope": round(lower_slope, 8), "width_slope": round(width_slope, 8), "apex_distance_bars": int(width / max(abs(width_slope), 1e-12)) if triangle_type == "converging" else 0},
@@ -921,6 +967,7 @@ class LLMService:
         lower = int(trend.get("lower_highs") or 0) + int(trend.get("lower_lows") or 0)
         triangle_type = str(triangle.get("type") or "none")
 
+        range_candidate = bool(range_features.get("is_candidate"))
         if triangle_type in {"converging", "diverging"}:
             structure = f"{triangle_type}_triangle"
             confidence = min(88, 60 + min(20, (higher + lower) * 3))
@@ -929,11 +976,13 @@ class LLMService:
                 f"上沿斜率 {float(triangle.get('upper_slope') or 0):.4f}，"
                 f"下沿斜率 {float(triangle.get('lower_slope') or 0):.4f}"
             )
-        elif touches_upper >= 2 and touches_lower >= 2 and inside >= 0.75:
+        elif range_candidate:
             structure = "range"
+            confirmation = candidate.get("range_confirmation") or {}
+            configured_inside = float(confirmation.get("min_inside_ratio") or 0.80)
             confidence = min(
                 90, 55 + min(18, (touches_upper + touches_lower) * 3)
-                + int(max(0, inside - 0.75) * 40),
+                + int(max(0, inside - configured_inside) * 40),
             )
             reason = (
                 f"价格在箱体内比例 {inside:.0%}，"
@@ -1076,6 +1125,7 @@ class LLMService:
                                     klines, period,
                                     int(profile.get("analysis_interval_minutes", 5) or 5),
                                     int(profile.get("forecast_horizon_bars", 0) or 0),
+                                    profile.get("structure_config") or {},
                                 ), ensure_ascii=False
                             )
                         )
@@ -1095,6 +1145,7 @@ class LLMService:
                                 rows, ref_period,
                                 int(profile.get("analysis_interval_minutes", 5) or 5),
                                 int(profile.get("forecast_horizon_bars", 0) or 0),
+                                profile.get("structure_config") or {},
                             )
                         )
                 combined_background = self._combine_background_periods(period_results)

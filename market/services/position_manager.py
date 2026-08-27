@@ -152,11 +152,28 @@ class PositionManager:
             minimum = float(config.get("min_stop_distance", 0) or 0)
         if not maximum:
             maximum = float(config.get("max_stop_distance", 0) or 0)
+        stop_adjustment = None
         if minimum and risk < minimum:
-            raise ValueError(
-                f"止损距离 {risk:.2f} 小于持仓管理方案最小比例 "
-                f"{float(config.get('min_stop_percent', 0) or 0):.2f}%"
+            original_stop = stop
+            stop = (
+                entry_price - minimum
+                if direction == "buy" else entry_price + minimum
             )
+            risk = abs(entry_price - stop)
+            stop_adjustment = {
+                "reason": "signal_stop_below_policy_minimum",
+                "original_stop_loss": float(original_stop),
+                "adjusted_stop_loss": float(stop),
+                "original_distance": float(abs(entry_price - original_stop)),
+                "adjusted_distance": float(risk),
+                "minimum_distance": float(minimum),
+                "minimum_percent": float(config.get("min_stop_percent", 0) or 0),
+                "message": (
+                    f"AI止损距离 {abs(entry_price - original_stop):.2f} 小于最小止损比例 "
+                    f"{float(config.get('min_stop_percent', 0) or 0):.2f}%，"
+                    f"已自动调整为 {risk:.2f}"
+                ),
+            }
         if maximum and risk > maximum:
             raise ValueError(
                 f"止损距离 {risk:.2f} 超过持仓管理方案最大比例 "
@@ -180,6 +197,8 @@ class PositionManager:
             f"止损使用 {stop_rule['type']} 规则",
             f"止盈使用 {take_rule['type']} 规则",
         ]
+        if stop_adjustment:
+            explanation.append(stop_adjustment["message"])
         if applied_profile:
             explanation.insert(0, f"匹配场景规则：{applied_profile.get('name')}")
         return PositionPlan(
@@ -188,6 +207,7 @@ class PositionManager:
             policy_snapshot=policy_snapshot, stop_rule=dict(stop_rule),
             take_profit_rule=dict(take_rule),
             explanation=explanation,
+            stop_adjustment=stop_adjustment,
         )
 
     def evaluate(

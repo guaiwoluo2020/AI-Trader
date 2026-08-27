@@ -11,6 +11,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 from background_scheduler import SharedTaskScheduler
 from data_retention import DataRetentionService
+from market.services.adaptive_signal_tuner import AdaptiveSignalTuner
 from ea_auth import EAIdentity
 from paper_trading import PaperTradingService
 from server import TradingServer
@@ -48,6 +49,9 @@ class TradingEngineManager:
         self._account_repo = TradingAccountRepository()
         self.paper_trading = PaperTradingService()
         self.data_retention = DataRetentionService()
+        self.adaptive_signal_tuner = AdaptiveSignalTuner(
+            refresh_callback=self.refresh_user_strategies,
+        )
         self._idle_timeout_seconds = float(
             idle_timeout_seconds
             if idle_timeout_seconds is not None
@@ -67,6 +71,7 @@ class TradingEngineManager:
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._next_paper_maintenance_at = time.monotonic() + 10
         self._next_data_retention_at = time.monotonic() + 60
+        self._next_adaptive_tuning_at = time.monotonic() + 120
         self._last_data_retention_date = ""
 
     @staticmethod
@@ -223,6 +228,14 @@ class TradingEngineManager:
             scheduler.submit(
                 ("system", "data_retention"),
                 self.data_retention.run_maintenance,
+            )
+        if now >= self._next_adaptive_tuning_at:
+            # A completed sample is fingerprinted, so running every five
+            # minutes cannot repeatedly tune from the same closed trades.
+            self._next_adaptive_tuning_at = now + 300
+            scheduler.submit(
+                ("system", "adaptive_signal_tuning"),
+                self.adaptive_signal_tuner.run_once,
             )
 
         with self._lock:

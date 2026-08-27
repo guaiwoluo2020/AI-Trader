@@ -75,7 +75,7 @@
         <v-window-item value="calendar">
           <div v-if="calendar.length" class="calendar-list">
             <article v-for="item in calendar" :key="item.id" class="calendar-row">
-              <time>{{ formatEventTime(item.publish_time || item.event_time) }}</time>
+              <time>{{ formatEventTime(item.event_time_beijing || item.publish_time || item.event_time) }}</time>
               <div class="event-copy">
                 <div class="event-title-line">
                   <strong>{{ item.name }}</strong>
@@ -84,7 +84,7 @@
                     {{ importanceLabel(item.importance) }}
                   </v-chip>
                 </div>
-                <span>{{ item.country || '全球' }} · {{ item.source || 'external' }}</span>
+                <span>{{ item.country || '全球' }} · {{ item.source || 'external' }} · 北京时间</span>
               </div>
               <div class="value-strip">
                 <span>前值 <b>{{ displayValue(item.previous) }}</b></span>

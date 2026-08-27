@@ -8,10 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from auth import AuthUser, require_auth
 from membership import MembershipService
+from market.services.account_strategy_performance import build_live_performance
 from sqlite_storage import (
     LiveTradeDealRepository,
     PositionManagementEventRepository,
     StrategyConfigRepository,
+    TradeConfigRepository,
     TradeExecutionRepository,
     TradingAccountRecord,
     TradingAccountRepository,
@@ -23,6 +25,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     router = APIRouter()
     repository = TradingAccountRepository()
     strategy_repository = StrategyConfigRepository()
+    trade_config_repository = TradeConfigRepository()
     memberships = MembershipService()
 
     @router.get("/accounts")
@@ -30,6 +33,9 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         accounts = repository.list_for_user(user.user_id)
+        trade_config_enabled = bool(
+            trade_config_repository.get_config(user.user_id).get("enabled", True)
+        )
         payloads = []
         for account in accounts:
             # list_deployments also expires timed-out paper deployments before
@@ -37,8 +43,22 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             deployments = engine_manager.paper_trading.list_deployments(
                 user.user_id, account.account_id
             )
+            account_payload = _account_payload(account, deployments)
+            for deployment in deployments:
+                deployment["runtime_active"] = bool(
+                    deployment.get("status") == "active"
+                    and trade_config_enabled
+                    and account.status == "active"
+                    and account.enabled
+                    and account.trading_enabled
+                    and account.auto_trading_enabled
+                    and (
+                        deployment.get("execution_mode") == "paper"
+                        or account_payload["connected"]
+                    )
+                )
             payloads.append({
-                **_account_payload(account, deployments),
+                **account_payload,
                 "deployments": deployments,
             })
         # 账户页以运行中的策略为首要排序依据；无运行策略的账户放在后面。
@@ -250,6 +270,9 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 "positions": positions,
                 "trades": trades,
                 "execution_reports": execution_reports,
+                "strategy_performance": build_live_performance(
+                    repository.storage, user.user_id, account_id, positions,
+                ),
                 "equity_curve": repository.list_live_equity_points(
                     user.user_id, account_id,
                 ),

@@ -17,6 +17,7 @@ from market.services.position_manager import PositionManager
 from market.services.position_attribution import (
     build_position_attribution, close_position_attribution,
 )
+from market.services.account_strategy_performance import build_paper_performance
 from market.services.strategy.transient_decision_store import transient_decision_store
 from membership import MembershipService
 from sqlite_storage import (
@@ -47,6 +48,10 @@ def market_spec(symbol: str) -> Tuple[float, float]:
 
 class PaperTradingService:
     """以 EA Tick 驱动的持久化模拟撮合器。"""
+
+    # paper_orders.pending 只是等待下一次 Tick 撮合的短暂状态，不是长期限价单。
+    # 报价链路中断时必须释放风险额度，避免旧订单永久阻塞后续信号。
+    PENDING_ORDER_TIMEOUT_SECONDS = 180
 
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
@@ -83,14 +88,14 @@ class PaperTradingService:
             lifecycle = config.get(
                 "lifecycle_status", StrategyLifecycle.PRODUCTION
             )
-            ai_direct = self._ai_direct_paper_eligible(config)
+            direct_paper = self._direct_paper_eligible(config)
             paper_eligible = (
                 lifecycle in {
                     StrategyLifecycle.BACKTEST_PASSED,
                     StrategyLifecycle.PAPER_TRADING,
                     StrategyLifecycle.PRODUCTION,
                 }
-                or ai_direct
+                or direct_paper
             )
             items.append({
                 "strategy_id": row["strategy_id"],
@@ -99,10 +104,10 @@ class PaperTradingService:
                 "enabled": True,
                 "lifecycle_status": lifecycle,
                 "paper_eligible": paper_eligible,
-                "paper_direct_allowed": ai_direct,
+                "paper_direct_allowed": direct_paper,
                 "paper_eligibility_reason": (
-                    "包含 AI 信号源，可跳过回测直接进入模拟观察"
-                    if ai_direct and lifecycle not in {
+                    "包含 AI 或转折点信号源，可跳过回测直接进入模拟观察"
+                    if direct_paper and lifecycle not in {
                         StrategyLifecycle.BACKTEST_PASSED,
                         StrategyLifecycle.PAPER_TRADING,
                         StrategyLifecycle.PRODUCTION,
@@ -125,21 +130,30 @@ class PaperTradingService:
 
     @classmethod
     def _ai_direct_paper_eligible(cls, strategy_data: Dict) -> bool:
+        """Compatibility alias for integrations that still use the old name."""
+        return cls._direct_paper_eligible(strategy_data)
+
+    @staticmethod
+    def _direct_paper_eligible(strategy_data: Dict) -> bool:
         return (
-            cls._has_enabled_ai_signal(strategy_data)
+            any(
+                source.get("source") in {"ai_entry", "pivot"}
+                and source.get("enabled", True)
+                for source in (strategy_data.get("signal_sources") or [])
+            )
             and strategy_data.get("lifecycle_status") != StrategyLifecycle.RETIRED
         )
 
     def _promote_for_paper_deployment(
         self, user_id: int, strategy: TradingStrategy, account_name: str,
-        *, direct_ai: bool = False,
+        *, direct_observation: bool = False,
     ) -> TradingStrategy:
         if strategy.lifecycle_status == StrategyLifecycle.BACKTEST_PASSED:
             strategy.transition_lifecycle(
                 StrategyLifecycle.PAPER_TRADING,
                 f"部署到模拟账户 {account_name}",
             )
-        elif direct_ai and strategy.lifecycle_status != StrategyLifecycle.PAPER_TRADING:
+        elif direct_observation and strategy.lifecycle_status != StrategyLifecycle.PAPER_TRADING:
             now = datetime.now()
             previous = strategy.lifecycle_status
             strategy.lifecycle_status = StrategyLifecycle.PAPER_TRADING
@@ -150,7 +164,7 @@ class PaperTradingService:
                 "to_status": StrategyLifecycle.PAPER_TRADING,
                 "changed_at": now.isoformat(),
                 "reason": (
-                    f"包含 AI 信号源，跳过回测直接部署到模拟账户 "
+                    f"包含 AI 或转折点信号源，跳过回测直接部署到模拟账户 "
                     f"{account_name} 观察"
                 ),
             })
@@ -189,19 +203,22 @@ class PaperTradingService:
                 StrategyLifecycle.PAPER_TRADING,
                 StrategyLifecycle.PRODUCTION,
             }
-            direct_ai_bypass = (
+            direct_observation_bypass = (
                 not normal_eligible
-                and self._ai_direct_paper_eligible(current_strategy.to_dict())
+                and self._direct_paper_eligible(current_strategy.to_dict())
             )
-            if not normal_eligible and not direct_ai_bypass:
-                raise ValueError("策略通过回测后才能部署到模拟账户；包含 AI 信号源的策略可直接模拟观察")
+            if not normal_eligible and not direct_observation_bypass:
+                raise ValueError(
+                    "策略通过回测后才能部署到模拟账户；"
+                    "包含 AI 或转折点信号源的策略可直接模拟观察"
+                )
             if (
                 current_strategy.lifecycle_status == StrategyLifecycle.BACKTEST_PASSED
-                or direct_ai_bypass
+                or direct_observation_bypass
             ):
                 current_strategy = self._promote_for_paper_deployment(
                     user_id, current_strategy, account.account_name,
-                    direct_ai=direct_ai_bypass,
+                    direct_observation=direct_observation_bypass,
                 )
                 strategy = current_strategy.to_dict()
             execution_mode = "paper"
@@ -669,6 +686,7 @@ class PaperTradingService:
     ) -> int:
         """按每个模拟部署独立生成决策，不复用实盘风控或实盘冷却。"""
         self._expire_deployments(user_id)
+        self._expire_stale_pending_orders(user_id, symbol, int(time.time()))
         deployments = self.storage.fetchall(
             """
             SELECT d.* FROM strategy_deployments d
@@ -694,29 +712,22 @@ class PaperTradingService:
                 user_id, strategy, symbol, quote_account_id
             ):
                 continue
-            signals = [
-                signal for signal in
-                strategy_service.signal_service.get_active_signals(symbol)
-                if getattr(signal, "strategy_id", "") == strategy.strategy_id
-            ]
-            expected_source_ids = {
-                item["signal_source_id"]
-                for item in strategy.get_signal_sources(enabled_only=True)
-            }
-            reported_source_ids = {
-                signal.signal_source_id for signal in signals
-                if signal.signal_source_id
-            }
             generator = getattr(
                 strategy_service.signal_service,
                 "generate_signals_for_strategy",
                 None,
             )
-            if (
-                generator is not None
-                and not expected_source_ids.issubset(reported_source_ids)
-            ):
-                signals = generator(symbol, current_price, strategy)
+            if generator is not None:
+                # Active signals are a short-lived decision cache, not proof that
+                # the deployment's generators ran for this tick.  Always refresh
+                # the deployment first so pivot/price-state sources can observe
+                # the latest quote and Kline fingerprint.
+                generator(symbol, current_price, strategy)
+            signals = [
+                signal for signal in
+                strategy_service.signal_service.get_active_signals(symbol)
+                if getattr(signal, "strategy_id", "") == strategy.strategy_id
+            ]
             account_id = int(deployment["account_id"])
             policy_snapshot = runtime_strategy["position_management_policy_snapshot"]
             reverse_enabled = any(
@@ -833,6 +844,7 @@ class PaperTradingService:
         symbol = str(symbol)
         with self._lock:
             self._expire_deployments(user_id)
+            self._expire_stale_pending_orders(user_id, symbol, now)
             self._quotes[(user_id, symbol)] = (bid, ask)
             account_rows = self.storage.fetchall(
                 """
@@ -857,6 +869,38 @@ class PaperTradingService:
                 for key in summary:
                     summary[key] += result[key]
             return summary
+
+    def _expire_stale_pending_orders(
+        self, user_id: int, symbol: str, now: int,
+    ) -> int:
+        cutoff = int(now) - self.PENDING_ORDER_TIMEOUT_SECONDS
+        orders = self.storage.fetchall(
+            """
+            SELECT order_id, account_id, decision_id
+            FROM paper_orders
+            WHERE user_id = ? AND symbol = ? AND status = 'pending'
+              AND requested_at <= ?
+            """,
+            (user_id, symbol, cutoff),
+        )
+        if not orders:
+            return 0
+        reason = "等待下一次行情撮合超时，订单已自动取消"
+        for order in orders:
+            self.storage.execute(
+                """
+                UPDATE paper_orders
+                SET status = 'canceled', rejection_reason = ?,
+                    canceled_at = ?, updated_at = ?
+                WHERE order_id = ? AND status = 'pending'
+                """,
+                (reason, now, now, order["order_id"]),
+            )
+            self._sync_paper_decision_status(
+                user_id, int(order["account_id"]), str(order["decision_id"]),
+                str(order["order_id"]), status="canceled", auto_executed=False,
+            )
+        return len(orders)
 
     def get_account_detail(self, user_id: int, account_id: int) -> Dict:
         account = self._paper_account(user_id, account_id)
@@ -997,6 +1041,9 @@ class PaperTradingService:
             "orders": orders,
             "positions": positions,
             "trades": trades,
+            "strategy_performance": build_paper_performance(
+                self.storage, user_id, account_id,
+            ),
             "runtime_logs": [
                 {
                     **dict(row),

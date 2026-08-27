@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict
 
+from ..mt5_time import parse_ea_instant, utc_iso
+
 
 @dataclass
 class StatisticsData:
@@ -47,7 +49,8 @@ class StatisticsData:
         """转换为字典"""
         return {
             "symbol": self.symbol,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": utc_iso(self.timestamp) if self.timestamp else None,
+            "reported_timestamp": int(self.timestamp.timestamp()) if self.timestamp else None,
             "bid_price": self.bid_price,
             "ask_price": self.ask_price,
             "spread": self.spread,
@@ -64,15 +67,11 @@ class StatisticsData:
     @classmethod
     def from_ea_data(cls, data: Dict) -> 'StatisticsData':
         """从EA上报数据创建"""
-        # 解析时间戳
-        timestamp = data.get('timestamp')
-        if isinstance(timestamp, str):
-            try:
-                timestamp = datetime.fromisoformat(timestamp)
-            except:
-                timestamp = datetime.now()
-        elif not isinstance(timestamp, datetime):
-            timestamp = datetime.now()
+        timestamp = parse_ea_instant(
+            data,
+            utc_field="reported_timestamp",
+            legacy_wall_field="timestamp",
+        )
 
         return cls(
             symbol=data.get('symbol', ''),

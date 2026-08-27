@@ -139,6 +139,26 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "min_confidence": 70,
             "cooldown_seconds": 180,
         }
+    elif source == "pivot":
+        strength_by_period = {"M1": 6, "M5": 4, "M15": 3, "H1": 3, "H4": 3}
+        threshold_by_period = {
+            "M1": 0.0002, "M5": 0.0005, "M15": 0.0015,
+            "H1": 0.0015, "H4": 0.0015,
+        }
+        params = {
+            "confirmation_strength": strength_by_period[period],
+            "signal_type": "both",
+            "proximity_threshold": threshold_by_period[period],
+            "merge_distance": 0.0004,
+            "stop_buffer_ratio": 0.0005,
+            "risk_reward_ratio": 2.0,
+            "max_age_bars": 120,
+            "recency_half_life_bars": 30,
+            "candidate_limit": 10,
+            "min_confirmation_count": 1,
+            "min_pivot_score": 0,
+            "cooldown_seconds": 180,
+        }
     elif source == "alpha_factor":
         params = {
             "alpha_id": "",
@@ -205,7 +225,7 @@ def normalize_signal_sources(
         }
         if "key_level" in sources and (
             "ai_entry" in sources or "moving_average" in sources
-            or "alpha_factor" in sources
+            or "alpha_factor" in sources or "pivot" in sources
         ):
             raise ValueError(
                 "关键点位信号源不能和AI/均线信号源同时存在，也不能和Alpha信号源同时存在"
@@ -217,9 +237,7 @@ def normalize_signal_sources(
         raw = raw or {}
         source = str(raw.get("source", "")).strip()
         period = str(raw.get("period", "")).upper()
-        if source == "pivot":
-            raise ValueError("转折点已改为系统基础数据，不再支持作为策略信号源")
-        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor"}:
+        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor", "pivot"}:
             raise ValueError(f"不支持的信号源类型: {source}")
         if source == "key_level":
             period = "M1"
@@ -283,6 +301,47 @@ def normalize_signal_sources(
                 params[flag] = bool(params.get(flag, True))
             params["cooldown_seconds"] = max(
                 0, min(86400, int(params["cooldown_seconds"]))
+            )
+        elif source == "pivot":
+            params["confirmation_strength"] = max(
+                1, min(20, int(params.get("confirmation_strength", 3)))
+            )
+            params["signal_type"] = str(
+                params.get("signal_type") or "both"
+            ).strip().lower()
+            if params["signal_type"] not in {"near", "breakout", "both"}:
+                raise ValueError("转折点触发方式无效")
+            for field, fallback, upper in (
+                ("proximity_threshold", 0.001, 0.05),
+                ("merge_distance", 0.0004, 0.05),
+                ("stop_buffer_ratio", 0.0005, 0.05),
+            ):
+                params[field] = max(
+                    0.0, min(upper, float(params.get(field, fallback)))
+                )
+            params["risk_reward_ratio"] = max(
+                1.0, min(10.0, float(params.get("risk_reward_ratio", 2.0)))
+            )
+            params["max_age_bars"] = max(
+                1, min(5000, int(params.get("max_age_bars", 120)))
+            )
+            params["recency_half_life_bars"] = max(
+                1, min(
+                    params["max_age_bars"],
+                    int(params.get("recency_half_life_bars", 30)),
+                )
+            )
+            params["candidate_limit"] = max(
+                1, min(100, int(params.get("candidate_limit", 10)))
+            )
+            params["min_confirmation_count"] = max(
+                1, min(20, int(params.get("min_confirmation_count", 1)))
+            )
+            params["min_pivot_score"] = max(
+                0, min(100, int(params.get("min_pivot_score", 0)))
+            )
+            params["cooldown_seconds"] = max(
+                0, min(86400, int(params.get("cooldown_seconds", 180)))
             )
         elif source == "ai_entry":
             params["analysis_mode"] = str(

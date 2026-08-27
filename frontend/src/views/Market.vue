@@ -155,7 +155,17 @@ export default {
     const accountList = computed(() => (Array.isArray(accounts.value) ? accounts.value : []))
     const activeDeployments = computed(() => accountList.value.flatMap(account => (
       (Array.isArray(account?.deployments) ? account.deployments : [])
-        .filter(item => item && ['paper', 'live'].includes(item.execution_mode) && item.status === 'active')
+        .filter(item => (
+          item
+          && ['paper', 'live'].includes(item.execution_mode)
+          && item.status === 'active'
+          && item.runtime_active !== false
+          && account.status === 'active'
+          && account.enabled !== false
+          && account.trading_enabled !== false
+          && account.auto_trading_enabled !== false
+          && (item.execution_mode === 'paper' || account.connected === true)
+        ))
         .map(item => ({
           ...item,
           account_id: account.account_id,

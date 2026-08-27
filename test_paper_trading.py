@@ -139,6 +139,41 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertEqual(promoted["lifecycle_status"], "paper_trading")
         self.assertIn("跳过回测", promoted["lifecycle_history"][-1]["reason"])
 
+    def test_pivot_strategy_can_deploy_to_paper_without_backtest(self):
+        self.update_strategy_config({
+            "lifecycle_status": "draft",
+            "signal_sources": [{
+                "signal_source_id": "pivot-m1",
+                "source": "pivot",
+                "period": "M1",
+                "enabled": True,
+                "weight": 100,
+                "params": {
+                    "confirmation_strength": 6,
+                    "signal_type": "both",
+                },
+            }],
+        })
+
+        context = self.service.list_context(self.user.user_id)
+        option = next(
+            item for item in context["strategies"]
+            if item["strategy_id"] == "strategy-1"
+        )
+        self.assertTrue(option["paper_eligible"])
+        self.assertTrue(option["paper_direct_allowed"])
+
+        deployment = self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        promoted = json.loads(self.storage.fetchone(
+            "SELECT config_json FROM user_strategy_configs "
+            "WHERE strategy_id = 'strategy-1'"
+        )["config_json"])
+        self.assertEqual(deployment["status"], "active")
+        self.assertEqual(promoted["lifecycle_status"], "paper_trading")
+        self.assertIn("转折点", promoted["lifecycle_history"][-1]["reason"])
+
     def test_shared_ai_strategy_can_deploy_to_paper_without_backtest(self):
         owner = UserRepository(self.storage).create_user(
             "strategy-owner", "hash", "salt"
@@ -231,7 +266,7 @@ class PaperTradingServiceTests(unittest.TestCase):
         )
         self.assertFalse(option["paper_eligible"])
 
-        with self.assertRaisesRegex(ValueError, "AI 信号源"):
+        with self.assertRaisesRegex(ValueError, "AI 或转折点信号源"):
             self.service.deploy(
                 self.user.user_id, self.account.account_id, "strategy-1"
             )
@@ -266,6 +301,33 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertAlmostEqual(detail["trades"][0]["net_profit"], 107.6)
         self.assertAlmostEqual(detail["account"]["balance"], 10107.6)
         self.assertEqual(len(detail["equity_curve"]), 2)
+
+    def test_stale_pending_order_is_canceled_before_it_can_fill(self):
+        self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        self.assertEqual(
+            self.service.enqueue_decisions(
+                self.user.user_id, [self.decision("stale-decision")]
+            ),
+            1,
+        )
+        self.storage.execute(
+            "UPDATE paper_orders SET requested_at = 100 WHERE decision_id = ?",
+            ("stale-decision",),
+        )
+
+        result = self.service.process_tick(
+            self.user.user_id, "GOLD_", 3000, 3000.2, timestamp=1000
+        )
+        order = self.storage.fetchone(
+            "SELECT status, rejection_reason FROM paper_orders WHERE decision_id = ?",
+            ("stale-decision",),
+        )
+
+        self.assertEqual(result["filled"], 0)
+        self.assertEqual(order["status"], "canceled")
+        self.assertIn("撮合超时", order["rejection_reason"])
 
     def test_moving_average_paper_position_uses_trailing_exit(self):
         row = self.storage.fetchone(
@@ -491,6 +553,53 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertTrue(all(callable(call["volume_calculator"]) for call in runtime.calls))
         self.assertTrue(all(callable(call["position_checker"]) for call in runtime.calls))
         self.assertTrue(all(callable(call["risk_checker"]) for call in runtime.calls))
+
+    def test_paper_deployment_refreshes_strategy_signals_even_when_cached(self):
+        self.update_strategy_config({
+            "signal_sources": [{
+                "signal_source_id": "pivot-m1",
+                "source": "pivot",
+                "period": "M1",
+                "enabled": True,
+                "weight": 100,
+                "params": {},
+            }],
+        })
+        self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        cached = SimpleNamespace(
+            strategy_id="strategy-1",
+            signal_source_id="pivot-m1",
+        )
+
+        class FakeSignals:
+            def __init__(self):
+                self.generate_calls = 0
+
+            def get_active_signals(self, symbol):
+                return [cached]
+
+            def generate_signals_for_strategy(self, symbol, price, strategy):
+                self.generate_calls += 1
+                return []
+
+        class FakeStrategyService:
+            def __init__(self):
+                self.signal_service = FakeSignals()
+                self.force_signals = None
+
+            def make_decision(self, *args, **kwargs):
+                self.force_signals = kwargs["force_signals"]
+                return None
+
+        runtime = FakeStrategyService()
+        self.service.process_strategy_signals(
+            self.user.user_id, "GOLD_", 3000, runtime
+        )
+
+        self.assertEqual(runtime.signal_service.generate_calls, 1)
+        self.assertEqual(runtime.force_signals, [cached])
 
     def test_report_summarizes_closed_trades(self):
         self.service.deploy(self.user.user_id, self.account.account_id, "strategy-1")

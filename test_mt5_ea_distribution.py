@@ -12,7 +12,7 @@ class MT5EADistributionTest(unittest.TestCase):
         source = EA_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
-            'input string InpServerUrl = "http://182.92.119.121/api"',
+            'input string InpServerUrl = "http://39.106.142.123/api"',
             source,
         )
         self.assertNotIn(
@@ -27,7 +27,9 @@ class MT5EADistributionTest(unittest.TestCase):
     def test_ea_supports_historical_dataset_tasks(self):
         source = EA_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn('#property version   "2.04"', source)
+        self.assertIn('#property version   "2.07"', source)
+        self.assertIn('#define EA_API_VERSION "2.0.7"', source)
+        self.assertIn('X-EA-Version: " + EA_API_VERSION', source)
         self.assertIn("CheckHistoricalDataTask();", source)
         self.assertIn("CopyRates(\n      _Symbol, PERIOD_M1", source)
         self.assertIn("/ea/backtest-data/tasks/next?symbol=", source)

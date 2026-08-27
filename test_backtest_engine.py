@@ -21,11 +21,15 @@ from backtest_engine import (
     build_result,
     combine_signals,
     detect_confirmed_pivots,
+    merge_nearby_pivots,
     position_limit_reason,
 )
 from backtest_tasks import BacktestTaskStatus, BacktestTemplateService
 from market.services.signal.ai_entry_signal import AIEntrySignalGenerator
 from market.services.signal.key_level_signal import KeyLevelSignalGenerator
+from market.services.signal.pivot_repository import (
+    calculate_pivot_score, pivot_config_fingerprint,
+)
 from sqlite_storage import SQLiteStorage, UserRepository
 
 
@@ -515,6 +519,108 @@ class M1BacktestEngineTests(unittest.TestCase):
         self.assertEqual(len(confirmed), 1)
         self.assertEqual(confirmed[0]["direction"], "low")
         self.assertEqual(confirmed[0]["time"], "6")
+
+    def test_pivot_repeated_confirmation_does_not_require_adjacent_events(self):
+        merged = merge_nearby_pivots([
+            {"time": 1, "price": 100.0, "direction": "high"},
+            {"time": 2, "price": 110.0, "direction": "high"},
+            {"time": 3, "price": 100.02, "direction": "high"},
+        ], merge_distance=0.001)
+
+        repeated = next(item for item in merged if item["price"] < 101)
+        self.assertEqual(repeated["confirmation_count"], 2)
+
+    def test_pivot_score_combines_recency_and_confirmation(self):
+        latest_once, _ = calculate_pivot_score(0, 1, 30)
+        latest_twice, _ = calculate_pivot_score(0, 2, 30)
+        aged_once, _ = calculate_pivot_score(30, 1, 30)
+
+        self.assertEqual(latest_once, 70)
+        self.assertEqual(latest_twice, 80)
+        self.assertEqual(aged_once, 40)
+
+    def test_pivot_config_fingerprint_changes_with_runtime_filter(self):
+        base = {"max_age_bars": 120, "min_confirmation_count": 1}
+        cautious = {**base, "min_confirmation_count": 2}
+        self.assertNotEqual(
+            pivot_config_fingerprint("M1", base),
+            pivot_config_fingerprint("M1", cautious),
+        )
+
+    def test_replay_pivot_source_generates_confirmed_reversal(self):
+        strategy = strategy_snapshot()
+        strategy["signal_sources"] = [{
+            "signal_source_id": "pivot-m1",
+            "source": "pivot",
+            "period": "M1",
+            "enabled": True,
+            "weight": 100,
+            "params": {
+                "confirmation_strength": 3,
+                "signal_type": "near",
+                "proximity_threshold": 0.001,
+                "merge_distance": 0.0004,
+                "stop_buffer_ratio": 0.0005,
+                "risk_reward_ratio": 2,
+                "cooldown_seconds": 180,
+            },
+        }]
+        bars = []
+        for index in range(13):
+            distance = abs(index - 6)
+            low = 3000 + distance * 0.05
+            bars.append({
+                "time": self.start + index * 60,
+                "open": low + 0.1,
+                "high": low + 1,
+                "low": low,
+                "close": low + 0.2,
+            })
+
+        signals = ReplaySignalEngine(strategy).generate(
+            bars, float(bars[-1]["close"]), self.start + 13 * 60, None,
+        )
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].action, "buy")
+        self.assertEqual(signals[0].setup_type, "pivot_reversal")
+        self.assertEqual(signals[0].signal_source_id, "pivot-m1")
+        self.assertLess(signals[0].suggested_sl, signals[0].suggested_entry)
+
+    def test_replay_pivot_source_filters_single_confirmation(self):
+        strategy = strategy_snapshot()
+        strategy["signal_sources"] = [{
+            "signal_source_id": "pivot-m1",
+            "source": "pivot",
+            "period": "M1",
+            "enabled": True,
+            "weight": 100,
+            "params": {
+                "confirmation_strength": 3,
+                "signal_type": "near",
+                "proximity_threshold": 0.001,
+                "merge_distance": 0.0004,
+                "min_confirmation_count": 2,
+                "max_age_bars": 120,
+                "min_pivot_score": 0,
+            },
+        }]
+        bars = []
+        for index in range(13):
+            low = 3000 + abs(index - 6) * 0.05
+            bars.append({
+                "time": self.start + index * 60,
+                "open": low + 0.1,
+                "high": low + 1,
+                "low": low,
+                "close": low + 0.2,
+            })
+
+        signals = ReplaySignalEngine(strategy).generate(
+            bars, float(bars[-1]["close"]), self.start + 13 * 60, None,
+        )
+
+        self.assertEqual(signals, [])
 
     def test_pivot_configuration_no_longer_creates_backtest_trade(self):
         task = self.task()

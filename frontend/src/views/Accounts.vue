@@ -181,7 +181,7 @@
             <div>
               <div class="section-tag">STRATEGY DEPLOYMENT</div>
               <h3>策略运行实例</h3>
-              <p>部署后仅在该 Paper 账户自动执行；包含 AI 信号源的策略可跳过回测直接模拟观察，实盘准入仍会检查验证证据。</p>
+              <p>部署后仅在该 Paper 账户自动执行；包含 AI 或转折点信号源的策略可跳过回测直接模拟观察，实盘准入仍会检查验证证据。</p>
             </div>
             <div class="deployment-form">
               <v-select
@@ -251,6 +251,34 @@
             </div>
             <div v-if="paperDetail.equity_curve.length" ref="equityChart" class="equity-chart" />
             <div v-else class="runtime-empty">收到第一条 EA Tick 后开始记录净值</div>
+          </section>
+
+          <section class="strategy-performance-card">
+            <div class="runtime-section-title">
+              <h3>策略收益贡献</h3>
+              <span>按部署实例统计 · 分批平仓合并为一笔完整交易</span>
+            </div>
+            <div v-if="!paperDetail.strategy_performance?.length" class="runtime-empty compact">该账户暂无策略部署</div>
+            <article v-for="item in paperDetail.strategy_performance || []" :key="item.deployment_id" class="strategy-performance-row">
+              <header>
+                <div><strong>{{ item.strategy_name }}</strong><span>{{ item.symbol }} · 部署于 {{ formatTime(item.deployed_at) }}</span></div>
+                <v-chip size="x-small" :color="deploymentStatusColor(item.status)" variant="tonal">{{ deploymentStatusLabel(item.status) }}</v-chip>
+              </header>
+              <div class="strategy-performance-grid">
+                <span>完整交易<b>{{ item.closed_position_count }}</b></span>
+                <span>成交订单<b>{{ item.filled_order_count }}</b></span>
+                <span>盈利 / 亏损 / 持平<b>{{ item.win_count }} / {{ item.loss_count }} / {{ item.breakeven_count }}</b></span>
+                <span>胜率<b>{{ Number(item.win_rate).toFixed(2) }}%</b></span>
+                <span>盈利金额<b class="positive">{{ signedMoney(item.gross_profit) }}</b></span>
+                <span>亏损金额<b class="negative">-{{ Number(item.gross_loss || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }}</b></span>
+                <span>净盈利<b :class="item.net_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(item.net_profit) }}</b></span>
+                <span>持仓 / 浮盈<b :class="item.unrealized_profit >= 0 ? 'positive' : 'negative'">{{ item.open_position_count }} / {{ signedMoney(item.unrealized_profit) }}</b></span>
+                <span>手续费<b>{{ Number(item.commission || 0).toFixed(2) }}</b></span>
+                <span>收益因子<b>{{ profitFactorLabel(item) }}</b></span>
+                <span>平均盈利 / 亏损<b>{{ Number(item.average_win || 0).toFixed(2) }} / -{{ Number(item.average_loss || 0).toFixed(2) }}</b></span>
+                <span>最大回撤 / 连亏<b>{{ Number(item.max_drawdown || 0).toFixed(2) }} / {{ item.max_consecutive_losses }} 次</b></span>
+              </div>
+            </article>
           </section>
 
           <section v-if="paperReport" class="paper-report">
@@ -423,6 +451,34 @@
             <div class="runtime-section-title"><h3>实盘账户净值</h3><span>每 6 秒自动刷新</span></div>
             <div v-if="liveDetail.equity_curve.length" ref="liveEquityChart" class="equity-chart" />
             <div v-else class="runtime-empty">等待 EA 上报第一条账户资金快照</div>
+          </section>
+
+          <section class="strategy-performance-card">
+            <div class="runtime-section-title">
+              <h3>策略收益贡献</h3>
+              <span>按部署实例统计 · 手工成交不计入策略</span>
+            </div>
+            <div v-if="!liveDetail.strategy_performance?.length" class="runtime-empty compact">该账户暂无实盘策略部署</div>
+            <article v-for="item in liveDetail.strategy_performance || []" :key="item.deployment_id" class="strategy-performance-row">
+              <header>
+                <div><strong>{{ item.strategy_name }}</strong><span>{{ item.symbol }} · 部署于 {{ formatTime(item.deployed_at) }}</span></div>
+                <v-chip size="x-small" :color="deploymentStatusColor(item.status)" variant="tonal">{{ deploymentStatusLabel(item.status) }}</v-chip>
+              </header>
+              <div class="strategy-performance-grid">
+                <span>完整交易<b>{{ item.closed_position_count }}</b></span>
+                <span>成交订单<b>{{ item.filled_order_count }}</b></span>
+                <span>盈利 / 亏损 / 持平<b>{{ item.win_count }} / {{ item.loss_count }} / {{ item.breakeven_count }}</b></span>
+                <span>胜率<b>{{ Number(item.win_rate).toFixed(2) }}%</b></span>
+                <span>盈利金额<b class="positive">{{ signedMoney(item.gross_profit) }}</b></span>
+                <span>亏损金额<b class="negative">-{{ Number(item.gross_loss || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }}</b></span>
+                <span>净盈利<b :class="item.net_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(item.net_profit) }}</b></span>
+                <span>持仓 / 浮盈<b :class="item.unrealized_profit >= 0 ? 'positive' : 'negative'">{{ item.open_position_count }} / {{ signedMoney(item.unrealized_profit) }}</b></span>
+                <span>手续费<b>{{ Number(item.commission || 0).toFixed(2) }}</b></span>
+                <span>收益因子<b>{{ profitFactorLabel(item) }}</b></span>
+                <span>平均盈利 / 亏损<b>{{ Number(item.average_win || 0).toFixed(2) }} / -{{ Number(item.average_loss || 0).toFixed(2) }}</b></span>
+                <span>最大回撤 / 连亏<b>{{ Number(item.max_drawdown || 0).toFixed(2) }} / {{ item.max_consecutive_losses }} 次</b></span>
+              </div>
+            </article>
           </section>
 
           <section class="runtime-grid">
@@ -633,7 +689,7 @@ const accountStrategyOptions = computed(() => {
     return eligible && !existing.has(strategy.strategy_id)
   }).map(strategy => ({
     value: strategy.strategy_id,
-    label: `${strategy.strategy_name} · ${strategy.symbol}${strategy.paper_eligibility_reason ? ' · AI可直接模拟' : ''}`,
+    label: `${strategy.strategy_name} · ${strategy.symbol}${strategy.paper_eligibility_reason ? ' · 可直接模拟' : ''}`,
     ...strategy,
     lifecycleLabel: lifecycleLabel(strategy.lifecycle_status),
   }))
@@ -665,7 +721,10 @@ function money(value, currency) {
   return `${Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`
 }
 function formatTime(value) {
-  return value ? new Date(value * 1000).toLocaleString('zh-CN', { hour12: false }) : '暂无数据'
+  return value ? new Date(value * 1000).toLocaleString('zh-CN', {
+    hour12: false,
+    timeZone: 'Asia/Shanghai',
+  }) : '暂无数据'
 }
 function signedMoney(value) {
   const number = Number(value || 0)
@@ -674,6 +733,11 @@ function signedMoney(value) {
 function signedDelta(value) {
   const number = Number(value || 0)
   return `${number > 0 ? '+' : ''}${number.toFixed(2)}`
+}
+function profitFactorLabel(item) {
+  if (!Number(item?.closed_position_count || 0)) return '--'
+  if (item.profit_factor == null) return Number(item.gross_profit || 0) > 0 ? '∞' : '--'
+  return Number(item.profit_factor).toFixed(2)
 }
 function price(value) {
   const number = Number(value || 0)
@@ -1224,6 +1288,16 @@ onBeforeUnmount(() => {
 .deployment-list article { display: flex; align-items: center; justify-content: space-between; padding: 10px 13px; border: 1px solid #dce6e0; border-radius: 10px; background: #fff; }
 .deployment-list strong,.deployment-list span { display: block; }.deployment-list strong { color: #31554b; font-size: .78rem; }.deployment-list span { color: #87928d; font-size: .64rem; }
 .runtime-chart-card,.runtime-table-card { margin-top: 13px; padding: 15px; border: 1px solid #dfe7e2; border-radius: 13px; background: #fff; }
+.strategy-performance-card { margin-top:13px; padding:15px; border:1px solid #dfe7e2; border-radius:8px; background:#fff; }
+.strategy-performance-row { padding:13px 0; border-top:1px solid #e7ede9; }
+.strategy-performance-row:first-of-type { border-top:0; }
+.strategy-performance-row header { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; }
+.strategy-performance-row header strong,.strategy-performance-row header span { display:block; }
+.strategy-performance-row header strong { color:#284f44; font-size:.82rem; }
+.strategy-performance-row header span { margin-top:2px; color:#87938d; font-size:.63rem; }
+.strategy-performance-grid { display:grid; grid-template-columns:repeat(4,minmax(130px,1fr)); gap:7px; }
+.strategy-performance-grid>span { min-width:0; padding:8px 10px; border-radius:7px; background:#f3f7f4; color:#84918b; font-size:.6rem; }
+.strategy-performance-grid b { display:block; margin-top:3px; overflow-wrap:anywhere; color:#31554b; font-size:.72rem; }
 .paper-report { margin-top: 13px; padding: 18px; border-radius: 15px; background: linear-gradient(135deg,#173d34,#275d50); color: #fff; }
 .report-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; }.report-heading h3 { margin: 3px 0; }.report-heading .v-select { max-width: 280px; }.report-heading :deep(.v-field) { background: #fff; }
 .report-metrics { display: grid; grid-template-columns: repeat(6,1fr); gap: 8px; margin-top: 14px; }.report-metrics article { padding: 12px; border-radius: 10px; background: rgba(255,255,255,.1); }.report-metrics span,.report-metrics strong { display:block; }.report-metrics span { color: rgba(255,255,255,.62); font-size:.62rem; }.report-metrics strong { margin-top:4px; font-size:.9rem; }
@@ -1251,7 +1325,7 @@ onBeforeUnmount(() => {
 .runtime-empty { display: grid; place-items: center; min-height: 130px; color: #919c97; font-size: .72rem; }.runtime-empty.compact { min-height: 62px; }
 .empty-state { padding: 65px 20px; color: #85918b; text-align: center; }
 .empty-state h3 { margin: 12px 0 5px; color: #4a625b; }.empty-state p { margin: 0; }
-@media(max-width:1000px){.content-grid{grid-template-columns:1fr}.paper-card{position:static}.account-details{grid-template-columns:1fr 1fr}.deployment-workbench{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}.report-metrics{grid-template-columns:repeat(3,1fr)}.report-breakdowns{grid-template-columns:1fr}.benchmark-grid{grid-template-columns:repeat(2,1fr)}.setup-direction-grid{grid-template-columns:1fr}}
-@media(max-width:650px){.accounts-page{padding:15px}.account-hero{align-items:flex-start;flex-direction:column;padding:25px}.metric-grid,.runtime-metrics{grid-template-columns:1fr 1fr}.account-topline{align-items:flex-start;flex-direction:column}.balance-row,.account-details,.paper-setting-grid{grid-template-columns:1fr}.account-chips{flex-wrap:wrap}.runtime-body{padding:14px!important}.deployment-form,.active-deployment-strip{grid-template-columns:1fr}.order-row{grid-template-columns:1fr 45px 70px}.order-row>*:nth-child(n+4):not(:last-child){display:none}.trade-row{grid-template-columns:1fr auto}.trade-row>*:nth-child(2),.trade-row>*:nth-child(3){display:none}}
+@media(max-width:1000px){.content-grid{grid-template-columns:1fr}.paper-card{position:static}.account-details{grid-template-columns:1fr 1fr}.deployment-workbench{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}.strategy-performance-grid{grid-template-columns:repeat(3,minmax(120px,1fr))}.report-metrics{grid-template-columns:repeat(3,1fr)}.report-breakdowns{grid-template-columns:1fr}.benchmark-grid{grid-template-columns:repeat(2,1fr)}.setup-direction-grid{grid-template-columns:1fr}}
+@media(max-width:650px){.accounts-page{padding:15px}.account-hero{align-items:flex-start;flex-direction:column;padding:25px}.metric-grid,.runtime-metrics{grid-template-columns:1fr 1fr}.account-topline{align-items:flex-start;flex-direction:column}.balance-row,.account-details,.paper-setting-grid{grid-template-columns:1fr}.account-chips{flex-wrap:wrap}.runtime-body{padding:14px!important}.deployment-form,.active-deployment-strip{grid-template-columns:1fr}.strategy-performance-grid{grid-template-columns:1fr 1fr}.order-row{grid-template-columns:1fr 45px 70px}.order-row>*:nth-child(n+4):not(:last-child){display:none}.trade-row{grid-template-columns:1fr auto}.trade-row>*:nth-child(2),.trade-row>*:nth-child(3){display:none}}
 .deployment-form :deep(.v-field__input),.deployment-form :deep(.v-field__input input),.deployment-form :deep(.v-label){color:#254b40!important}.deployment-form :deep(.v-field__input input::placeholder){color:#71817a!important;opacity:1}.strategy-select-value span{color:#254b40}.strategy-select-value small{color:#6b7b74}.strategy-select-item :deep(.v-list-item-title),.strategy-select-item :deep(.v-list-item-subtitle){color:#254b40!important}.strategy-select-item :deep(.v-list-item-subtitle){color:#6f7e77!important}.deployment-form :deep(.v-field){border-color:#d6e4dc!important}.deployment-form :deep(.v-field--focused){border-color:#80b59f!important}
 </style>

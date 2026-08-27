@@ -18,6 +18,7 @@ from ...store import StrategyStore
 from ..position_attribution import build_position_attribution
 from sqlite_storage import PositionManagementPolicyRepository
 from ..signal import SignalService
+from ..signal.signal_rules import constrain_pivot_levels_to_hundred_band, valid_exits
 from ..position_manager import PositionManager
 from .risk_manager import RiskManager
 
@@ -496,6 +497,24 @@ class StrategyService:
             print(f"[StrategyService] 持仓管理方案无法生成开仓计划: {exc}")
             return None
         sl, tp = plan.stop_loss, plan.take_profit
+        round_number_adjustment = None
+        # 转折点策略在最终持仓方案生成后再次应用整数百位关口约束。
+        # 这样即使持仓管理方案选择了固定止盈/止损，最终下单价格也不会
+        # 横跨当前价所在的百位支撑/压力区间。
+        if str(getattr(best_signal, "source", "")) == str(SignalSource.PIVOT):
+            adjusted_sl, adjusted_tp = constrain_pivot_levels_to_hundred_band(
+                entry_price, action, sl, tp
+            )
+            if valid_exits(action, entry_price, adjusted_sl, adjusted_tp):
+                sl, tp = adjusted_sl, adjusted_tp
+                if sl != plan.stop_loss or tp != plan.take_profit:
+                    round_number_adjustment = {
+                        "original_stop_loss": plan.stop_loss,
+                        "original_take_profit": plan.take_profit,
+                        "adjusted_stop_loss": sl,
+                        "adjusted_take_profit": tp,
+                        "rule": "止盈止损限制在当前价格所在百位区间内",
+                    }
         analysis["position_management"] = {
             "policy_id": plan.policy_id,
             "policy_snapshot": plan.policy_snapshot,
@@ -503,11 +522,14 @@ class StrategyService:
             "take_profit_rule": plan.take_profit_rule,
             "initial_risk": plan.initial_risk,
             "explanation": plan.explanation,
+            "stop_adjustment": plan.stop_adjustment,
             "setup_context": setup_context,
             "applied_setup_profile": plan.policy_snapshot.get(
                 "applied_setup_profile"
             ),
         }
+        if round_number_adjustment:
+            analysis["position_management"]["round_number_adjustment"] = round_number_adjustment
 
         has_fixed_take_profit = bool(tp and tp > 0)
         if not sl or sl == 0:
@@ -815,6 +837,10 @@ class StrategyService:
             f"综合判断: {direction}，一致率{analysis.get('consistency', 0):.0%}"
         )
         reasons.append(f"风险回报比: {signal.risk_reward_ratio:.2f}")
+
+        adjustment = (analysis.get("position_management") or {}).get("stop_adjustment")
+        if adjustment and adjustment.get("message"):
+            reasons.append(adjustment["message"])
 
         return " | ".join(reasons)
 

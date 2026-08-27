@@ -68,11 +68,6 @@
               <v-btn color="primary" size="large" class="strategy-primary-action" @click="openNewStrategyDialog">
                 <v-icon start>mdi-plus</v-icon>新建策略
               </v-btn>
-              <v-btn size="large" class="strategy-quick-action" @click="openQuickStrategyDialog">
-                <v-icon start>mdi-creation-outline</v-icon>
-                <span>一键创建 AI 策略</span>
-                <v-chip size="x-small" variant="flat" class="strategy-quick-action__badge">快速搭建</v-chip>
-              </v-btn>
             </div>
           </section>
 
@@ -173,7 +168,7 @@
               </v-window-item>
 
               <v-window-item value="signals">
-                <div class="detail-section-title"><div><h3>信号源配置</h3><p>关键点位与 AI/均线互斥；AI 和均线可以按不同周期组合。</p></div><v-btn v-if="!selectedStrategy.readonly_reference" color="primary" variant="tonal" @click="openSignalSourceDialog(selectedStrategy)"><v-icon start>mdi-plus</v-icon>添加信号源</v-btn></div>
+                <div class="detail-section-title"><div><h3>信号源配置</h3><p>关键点位与其他信号互斥；AI、转折点、均线和 Alpha 可以按不同周期组合。</p></div><v-btn v-if="!selectedStrategy.readonly_reference" color="primary" variant="tonal" @click="openSignalSourceDialog(selectedStrategy)"><v-icon start>mdi-plus</v-icon>添加信号源</v-btn></div>
                 <div v-if="selectedStrategySignalSources.length" class="signal-source-list">
                   <article v-for="source in selectedStrategySignalSources" :key="source.signal_source_id" class="signal-source-card">
                     <div class="signal-source-card__head"><div class="d-flex align-center flex-wrap ga-2"><v-avatar size="34" color="grey-lighten-4"><v-icon :color="sourceMetaFor(source.source).color" size="19">{{ sourceMetaFor(source.source).icon }}</v-icon></v-avatar><div><strong>{{ sourceMetaFor(source.source).label }}</strong><div class="text-caption text-medium-emphasis">{{ source.source === 'key_level' ? '全周期共用' : source.period }}</div></div></div><div class="d-flex align-center"><v-switch v-model="source.enabled" color="success" density="compact" hide-details :disabled="selectedStrategy.readonly_reference"></v-switch><v-btn v-if="!selectedStrategy.readonly_reference" icon="mdi-pencil-outline" size="small" variant="text" color="primary" @click="openSignalSourceDialog(selectedStrategy, source)"></v-btn><v-btn v-if="!selectedStrategy.readonly_reference" icon="mdi-delete-outline" size="small" variant="text" color="error" @click="removeSignalSource(selectedStrategy, source)"></v-btn></div></div>
@@ -216,7 +211,7 @@
         </v-card-title>
         <v-card-text>
           <v-alert type="info" variant="tonal" class="mb-4">
-            模拟运行会绑定当前策略配置。包含 AI 信号源的策略可以直接进入模拟观察；非 AI 策略仍需满足回测准入。
+            模拟运行会绑定当前策略配置。包含 AI 或转折点信号源的策略可以跳过回测，直接进入模拟观察；其他策略仍需满足回测准入。
           </v-alert>
           <v-select
             v-model="paperDeployAccountId"
@@ -937,60 +932,6 @@
       </v-card>
     </v-dialog>
 
-    <v-dialog v-model="quickStrategyDialog" max-width="620">
-      <v-card>
-        <v-card-title class="new-strategy-title"><v-avatar color="secondary" variant="tonal" size="42"><v-icon>mdi-auto-fix</v-icon></v-avatar><div><strong>一键创建 AI 策略</strong><span>自动复用同交易商共享信号源；没有时创建并共享运行数据。</span></div></v-card-title>
-        <v-card-text>
-          <v-select v-model="quickStrategySymbol" :items="strategySymbolOptions" label="交易品种" prepend-inner-icon="mdi-currency-usd" class="mt-4" @update:model-value="loadQuickStrategySources"></v-select>
-          <v-select v-model="quickStrategyPeriod" :items="signalPeriods" label="AI 分析周期" prepend-inner-icon="mdi-clock-outline" @update:model-value="loadQuickStrategySources"></v-select>
-          <v-select
-            v-model="quickStrategySourceId"
-            :items="quickAISignalSourceOptions"
-            :loading="quickStrategyOptionsLoading"
-            label="AI 信号源"
-            prepend-inner-icon="mdi-brain"
-          ></v-select>
-          <v-select
-            v-if="!quickSelectedAISignalSource"
-            v-model="quickStrategyModel"
-            :items="quickStrategyModelOptions"
-            :loading="quickStrategyOptionsLoading"
-            label="AI 模型（新建信号源时使用）"
-            prepend-inner-icon="mdi-robot-outline"
-            hint="仅在新建 AI 信号源时选择"
-            persistent-hint
-          ></v-select>
-          <v-alert v-if="quickSelectedAISignalSource" type="success" variant="tonal" density="compact" class="mb-3">
-            默认复用：{{ quickSelectedAISignalSource.name }} · {{ quickSelectedAISignalSource.symbol }} · {{ quickSelectedAISignalSource.period }} · 每 {{ quickSelectedAISignalSource.config?.analysis_interval_minutes || '-' }} 分钟分析
-          </v-alert>
-          <v-alert v-else type="info" variant="tonal" density="compact" class="mb-3">
-            当前没有可复用的同周期 AI 信号源，创建时会自动新建一个并共享运行数据。
-          </v-alert>
-          <v-select
-            v-model="quickStrategyPolicyId"
-            :items="quickPositionPolicyOptions"
-            label="持仓管理方案"
-            prepend-inner-icon="mdi-shield-check-outline"
-          ></v-select>
-          <v-alert v-if="quickSelectedPositionPolicy" type="success" variant="tonal" density="compact" class="mb-3">
-            默认使用：{{ quickSelectedPositionPolicy.name }}{{ quickSelectedPositionPolicy.is_shared ? `（共享自 ${quickSelectedPositionPolicy.owner_username || '平台用户'}）` : '（我的方案）' }}
-          </v-alert>
-          <v-alert v-else type="info" variant="tonal" density="compact" class="mb-3">
-            当前没有合适的方案，创建时会自动生成并共享标准 AI 分批止盈方案。
-          </v-alert>
-          <v-text-field v-model="quickStrategyName" label="策略名称（可选）" placeholder="例如：BTCm M5 AI 策略" prepend-inner-icon="mdi-tag-outline"></v-text-field>
-          <v-alert type="info" variant="tonal" density="compact">
-            系统优先使用我的合适方案，其次复用平台共享方案；均没有时才自动生成并共享：信号止损/止盈、1R 平仓 33%、到 AI 止盈再平剩余仓位 50% 后移动止损。策略以草稿创建，不会自动部署。
-          </v-alert>
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer></v-spacer>
-          <v-btn variant="text" @click="quickStrategyDialog = false">取消</v-btn>
-          <v-btn color="secondary" :disabled="!quickStrategySymbol" :loading="quickStrategySaving" @click="quickCreateStrategy"><v-icon start>mdi-auto-fix</v-icon>立即创建</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
-
     <v-dialog v-model="signalSourceDialog" max-width="760">
       <v-card>
         <v-card-title>{{ signalSourceEditMode === 'edit' ? '编辑信号源' : '添加信号源' }}</v-card-title>
@@ -1012,7 +953,7 @@
             当前配置：{{ sourceMetaFor(newSignalSource.source).label }} · {{ newSignalSource.source === 'key_level' ? '全周期' : newSignalSource.period || '未选择周期' }}
           </v-alert>
           <v-alert type="info" variant="tonal" density="compact" class="mb-4">
-            关键点位信号与 AI 入场、均线交叉、已验证 Alpha 互斥：策略中一旦存在关键点位，就不能再添加其他信号；存在其他信号时，也不能添加关键点位。
+            关键点位信号与 AI 入场、转折点、均线交叉、已验证 Alpha 互斥：策略中一旦存在关键点位，就不能再添加其他信号；存在其他信号时，也不能添加关键点位。
           </v-alert>
           <v-alert v-if="aiSignalOptionsLoading" type="info" variant="tonal" density="compact" class="mb-4">
             正在加载 AI 模型与共享 Alpha 选项，弹窗可先配置基础参数。
@@ -1090,6 +1031,24 @@
                   下单距离沿用比例语义，例如 0.0008 表示价格距离关键位万分之八内可触发；止盈止损统一由持仓管理方案生成。
                 </div>
               </v-col>
+            </v-row>
+          </template>
+
+          <template v-else-if="newSignalSource.source === 'pivot'">
+            <v-row dense class="mt-3">
+              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">系统先用左右已收盘 K 线确认局部高低点，再按价格区域合并重复确认。接近低点做多、接近高点做空；突破高点做多、跌破低点做空。百分比均按“价格差 ÷ 转折点价格”计算，最终止盈止损仍会由持仓管理方案校验。</v-alert></v-col>
+              <v-col cols="12" sm="6"><v-select v-model="newSignalSource.params.signal_type" :items="pivotSignalTypeOptions" label="触发方式" hint="接近反转、突破跟随，或同时启用两种机会" persistent-hint></v-select></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.confirmation_strength" label="左右确认K线" type="number" min="1" max="20" suffix="根" hint="左右各需要多少根已收盘K线；越大越稳定，但确认越慢" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.proximity_threshold_percent" label="接近转折点范围" type="number" min="0" max="5" step="0.01" suffix="%" hint="当前价进入该距离才触发接近反转；越大越容易触发" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.merge_distance_percent" label="重复确认价格范围" type="number" min="0" max="5" step="0.01" suffix="%" hint="同方向转折点价格差在此范围内视为同一区域并累计确认次数" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.stop_buffer_percent" label="结构止损缓冲" type="number" min="0" max="5" step="0.01" suffix="%" hint="建议止损放在转折点外侧的距离；持仓管理方案会再次约束" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.risk_reward_ratio" label="建议盈亏比" type="number" min="1" max="10" step="0.1" hint="例如 2 表示建议止盈距离约为止损距离的 2 倍" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.candidate_limit" label="最近候选转折点" type="number" min="1" max="100" suffix="个" hint="仅从最新的候选中选择" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_confirmation_count" label="最少重复确认" type="number" min="1" max="20" suffix="次" hint="谨慎场景建议设为 2" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_age_bars" label="最长有效期" type="number" min="1" max="5000" suffix="根K线" hint="确认后超过该时间的转折点不再参与交易" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.recency_half_life_bars" label="评分半衰期" type="number" min="1" max="5000" suffix="根K线" hint="每经过该数量K线，时间评分减半" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_pivot_score" label="最低转折点评分" type="number" min="0" max="100" suffix="分" hint="0 不过滤；谨慎场景建议 80 分" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.cooldown_seconds" label="同一转折点冷却" type="number" min="0" max="86400" suffix="秒" hint="一次触发后，在该时长内不重复发送同一转折点信号" persistent-hint></v-text-field></v-col>
             </v-row>
           </template>
 
@@ -2138,8 +2097,6 @@ export default {
     const selectedStrategy = ref(null)
     const selectedStrategySnapshot = ref('')
     const newStrategyDialog = ref(false)
-    const quickStrategyDialog = ref(false)
-    const quickStrategySaving = ref(false)
     const strategySearch = ref('')
     const strategyLifecycleFilter = ref('all')
     const strategyVisibilityFilter = ref('all')
@@ -2178,16 +2135,6 @@ export default {
     const newStrategySymbol = ref('')
     const newStrategyName = ref('')
     const newStrategyPolicyId = ref('')
-    const quickStrategySymbol = ref('')
-    const quickStrategyPeriod = ref('M5')
-    const quickStrategyName = ref('')
-    const quickStrategySourceId = ref('__auto__')
-    const quickStrategyModel = ref('')
-    const quickStrategyPolicyId = ref('__auto__')
-    const quickStrategyOptionsLoading = ref(false)
-    const quickAISignalSources = ref([])
-    const quickStrategyModelOptions = ref([])
-    const quickSharedPositionPolicies = ref([])
     const signalSourceDialog = ref(false)
     const signalSourceDialogLoading = ref(false)
     const signalSourceTarget = ref(null)
@@ -2210,6 +2157,7 @@ export default {
     const signalSourceMeta = {
       key_level: { label: '关键点位信号', color: 'success', icon: 'mdi-map-marker-path' },
       ai_entry: { label: 'AI 入场信号', color: 'info', icon: 'mdi-brain' },
+      pivot: { label: '转折点信号', color: 'primary', icon: 'mdi-chart-timeline-variant-shimmer' },
       moving_average: { label: '均线交叉信号', color: 'orange-darken-2', icon: 'mdi-chart-bell-curve' },
       alpha_factor: { label: '已验证 Alpha', color: 'teal-darken-1', icon: 'mdi-atom-variant' }
     }
@@ -2221,7 +2169,7 @@ export default {
     const signalSourceLabel = (source) => sourceMetaFor(source).label
     const strategySignalSources = (strategy) => {
       const sources = Array.isArray(strategy?.signal_sources)
-        ? strategy.signal_sources.filter(source => source.source !== 'pivot')
+        ? strategy.signal_sources
         : []
       return sources.some(source => source.source === 'key_level')
         ? sources.filter(source => source.source === 'key_level')
@@ -2275,6 +2223,11 @@ export default {
       { title: '简单移动平均线（SMA）', value: 'sma' },
       { title: '指数移动平均线（EMA）', value: 'ema' }
     ]
+    const pivotSignalTypeOptions = [
+      { title: '接近反转与突破跟随', value: 'both' },
+      { title: '仅接近转折点反转', value: 'near' },
+      { title: '仅突破转折点跟随', value: 'breakout' }
+    ]
     const periodMinuteMap = { M1: 1, M5: 5, M15: 15, H1: 60, H4: 240 }
     const aiIntervalValues = [1, 2, 3, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
     const periodMinutes = (period) => periodMinuteMap[period] || 1
@@ -2291,55 +2244,6 @@ export default {
         value: item.signal_source_id,
         title: `${item.is_owner ? '我的' : `共享自 ${item.owner_username || '平台用户'}`} · ${item.name} · ${item.symbol} · ${item.period}${item.locked ? ' · 已冻结' : ''}`
       })))
-    const quickAISignalSourceOptions = computed(() => [
-      { title: '自动选择最佳共享源；没有则创建新源', value: '__auto__' },
-      ...quickAISignalSources.value.map(item => ({
-        value: item.signal_source_id,
-        title: `${item.is_owner ? '我的' : `共享自 ${item.owner_username || '平台用户'}`} · ${item.name} · ${item.symbol} · ${item.period}`
-      }))
-    ])
-    const quickSelectedAISignalSource = computed(() => quickAISignalSources.value.find(
-      item => item.signal_source_id === quickStrategySourceId.value
-    ) || null)
-    const isAIPositionPolicy = (policy) => {
-      const config = policy?.config || {}
-      const hasRule = (key, type) => (config[key] || []).some(rule => rule?.type === type)
-      const managementTypes = new Set((config.management_rules || []).map(rule => rule?.type))
-      return hasRule('initial_stop_rules', 'signal')
-        && hasRule('initial_take_profit_rules', 'signal')
-        && managementTypes.has('partial_take_profit')
-        && managementTypes.has('trailing_stop')
-    }
-    const quickOwnPositionPolicies = computed(() => positionPolicies.value.filter(
-      policy => policy.enabled && isAIPositionPolicy(policy)
-    ))
-    const quickUsableSharedPositionPolicies = computed(() => quickSharedPositionPolicies.value.filter(
-      policy => policy.enabled && isAIPositionPolicy(policy)
-    ))
-    const quickPositionPolicyOptions = computed(() => [
-      ...quickOwnPositionPolicies.value.map(policy => ({
-        title: `我的 · ${policy.name}`,
-        value: policy.policy_id
-      })),
-      ...quickUsableSharedPositionPolicies.value.map(policy => ({
-        title: `共享自 ${policy.owner_username || '平台用户'} · ${policy.name}`,
-        value: `shared:${policy.owner_user_id}:${policy.policy_id}`
-      })),
-      { title: '自动生成并共享 AI 信号分批止盈方案', value: '__auto__' }
-    ])
-    const quickSelectedPositionPolicy = computed(() => {
-      if (quickStrategyPolicyId.value === '__auto__') return null
-      const sharedPrefix = 'shared:'
-      if (quickStrategyPolicyId.value.startsWith(sharedPrefix)) {
-        const [, ownerId, policyId] = quickStrategyPolicyId.value.split(':')
-        return quickUsableSharedPositionPolicies.value.find(policy => (
-          String(policy.owner_user_id) === ownerId && policy.policy_id === policyId
-        )) || null
-      }
-      return quickOwnPositionPolicies.value.find(
-        policy => policy.policy_id === quickStrategyPolicyId.value
-      ) || null
-    })
     const alphaLibraryOptions = computed(() => {
       const occupied = new Set(strategySignalSources(signalSourceTarget.value)
         .filter(item => item.source === 'alpha_factor')
@@ -2461,7 +2365,22 @@ export default {
               upward_breakout_buy: true, downward_breakout_sell: true,
               cooldown_seconds: 180
             }
-          : source === 'moving_average'
+          : source === 'pivot'
+            ? {
+                confirmation_strength: ({ M1: 6, M5: 4, M15: 3, H1: 3, H4: 3 })[period] || 3,
+                signal_type: 'both',
+                proximity_threshold: ({ M1: 0.0002, M5: 0.0005, M15: 0.0015, H1: 0.0015, H4: 0.0015 })[period] || 0.001,
+                merge_distance: 0.0004,
+                stop_buffer_ratio: 0.0005,
+                risk_reward_ratio: 2,
+                candidate_limit: 10,
+                min_confirmation_count: 1,
+                max_age_bars: 120,
+                recency_half_life_bars: 30,
+                min_pivot_score: 0,
+                cooldown_seconds: 180
+              }
+            : source === 'moving_average'
             ? {
                 fast_period: 5, slow_period: 20, ma_type: 'sma',
                 min_confidence: 70,
@@ -2478,6 +2397,28 @@ export default {
             }
     })
     const cloneSignalSource = (source) => JSON.parse(JSON.stringify(source || {}))
+    const pivotPercentFields = [
+      ['proximity_threshold', 'proximity_threshold_percent'],
+      ['merge_distance', 'merge_distance_percent'],
+      ['stop_buffer_ratio', 'stop_buffer_percent']
+    ]
+    const hydratePivotPercentParams = (params) => {
+      pivotPercentFields.forEach(([ratioField, percentField]) => {
+        const ratio = Number(params[ratioField])
+        params[percentField] = Number.isFinite(ratio)
+          ? Number((ratio * 100).toFixed(6))
+          : 0
+      })
+    }
+    const serializePivotPercentParams = (params) => {
+      pivotPercentFields.forEach(([ratioField, percentField]) => {
+        const percent = Number(params[percentField])
+        if (Number.isFinite(percent)) {
+          params[ratioField] = Math.max(0, Math.min(5, percent)) / 100
+        }
+        delete params[percentField]
+      })
+    }
     const normalizeSignalSourceForDialog = (source) => {
       const sourceType = source?.source || 'key_level'
       const period = source?.period || (sourceType === 'key_level' ? 'M1' : signalPeriods[0])
@@ -2501,6 +2442,7 @@ export default {
         params.order_distance ??= params.proximity_threshold ?? 0.0008
         params.proximity_threshold = params.order_distance
       }
+      if (sourceType === 'pivot') hydratePivotPercentParams(params)
       return {
         ...defaults,
         ...cloned,
@@ -2541,63 +2483,6 @@ export default {
       positionPolicies.value = data.policies || []
       if (!newStrategyPolicyId.value) {
         newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
-      }
-    }
-
-    const loadQuickStrategySources = async () => {
-      quickStrategySourceId.value = '__auto__'
-      if (!quickStrategySymbol.value) {
-        quickAISignalSources.value = []
-        return
-      }
-      quickStrategyOptionsLoading.value = true
-      try {
-        const [data, llmOptions] = await Promise.all([
-          marketAPI.getAISignalSources({
-            symbol: quickStrategySymbol.value,
-            include_shared: true
-          }),
-          marketAPI.getLLMSignalOptions(quickStrategySymbol.value)
-        ])
-        quickStrategyModelOptions.value = (llmOptions.models || []).map(model => ({
-          title: model,
-          value: model
-        }))
-        if (!quickStrategyModel.value || !quickStrategyModelOptions.value.some(item => item.value === quickStrategyModel.value)) {
-          quickStrategyModel.value = quickStrategyModelOptions.value[0]?.value || ''
-        }
-        quickAISignalSources.value = (data.items || []).filter(source => (
-          source.enabled && source.period === quickStrategyPeriod.value
-        ))
-        if (quickAISignalSources.value.length) {
-          quickStrategySourceId.value = quickAISignalSources.value[0].signal_source_id
-        }
-      } catch (error) {
-        quickAISignalSources.value = []
-        quickStrategyModelOptions.value = []
-      } finally {
-        quickStrategyOptionsLoading.value = false
-      }
-    }
-
-    const loadQuickStrategyPolicies = async () => {
-      try {
-        const [ownData, sharedData] = await Promise.all([
-          marketAPI.getPositionManagementPolicies(),
-          marketAPI.getSharedPositionManagementPolicies()
-        ])
-        positionPolicies.value = ownData.policies || []
-        quickSharedPositionPolicies.value = (sharedData.policies || []).map(policy => ({
-          ...policy,
-          is_shared: true
-        }))
-        const own = quickOwnPositionPolicies.value[0]
-        const shared = quickUsableSharedPositionPolicies.value[0]
-        quickStrategyPolicyId.value = own?.policy_id
-          || (shared ? `shared:${shared.owner_user_id}:${shared.policy_id}` : '__auto__')
-      } catch (error) {
-        quickSharedPositionPolicies.value = []
-        quickStrategyPolicyId.value = '__auto__'
       }
     }
 
@@ -2750,6 +2635,10 @@ export default {
         }
         if (source.source === 'moving_average') {
           return `${params.ma_type || 'sma'} 快线 ${params.fast_period} / 慢线 ${params.slow_period}，最低置信度 ${params.min_confidence ?? 0}%`
+        }
+        if (source.source === 'pivot') {
+          const trigger = ({ both: '反转 + 突破', near: '接近反转', breakout: '突破跟随' })[params.signal_type] || '反转 + 突破'
+          return `${trigger}，最近 ${params.candidate_limit ?? 10} 个，至少确认 ${params.min_confirmation_count ?? 1} 次，有效 ${params.max_age_bars ?? 120} 根K线`
         }
         if (source.source === 'alpha_factor') {
           return `${params.alpha_name || '已验证 Alpha'} · ${source.period}，最低置信度 ${params.min_confidence ?? 0}%`
@@ -3100,9 +2989,6 @@ export default {
 
     function ensureSignalSources (strategy) {
       if (!Array.isArray(strategy.signal_sources)) strategy.signal_sources = []
-      strategy.signal_sources = strategy.signal_sources.filter(
-        source => source.source !== 'pivot'
-      )
       if (strategy.signal_sources.some(source => source.source === 'key_level')) {
         strategy.signal_sources = strategy.signal_sources.filter(
           source => source.source === 'key_level'
@@ -3158,6 +3044,7 @@ export default {
           .filter(value => Number.isFinite(value) && value > 0)
         delete clean.params.levels_text
       }
+      if (clean.source === 'pivot') serializePivotPercentParams(clean.params)
       return clean
     })
 
@@ -3306,6 +3193,9 @@ export default {
           nextSource.params.order_distance || nextSource.params.proximity_threshold || 0
         )
       }
+      if (nextSource.source === 'pivot') {
+        serializePivotPercentParams(nextSource.params)
+      }
       const sources = ensureSignalSources(signalSourceTarget.value)
       if (signalSourceEditMode.value === 'edit') {
         const index = sources.findIndex(
@@ -3347,53 +3237,6 @@ export default {
       }
     }
 
-    // 添加策略
-    const quickCreateStrategy = async () => {
-      if (!quickStrategySymbol.value) {
-        errorMessage.value = '请先选择交易品种'
-        showError.value = true
-        return
-      }
-      quickStrategySaving.value = true
-      try {
-        const data = await marketAPI.quickCreateAIStrategy({
-          symbol: quickStrategySymbol.value,
-          period: quickStrategyPeriod.value,
-          model: quickStrategyModel.value || undefined,
-          strategy_name: quickStrategyName.value || undefined,
-          ai_signal_source_id: quickStrategySourceId.value === '__auto__'
-            ? undefined
-            : quickStrategySourceId.value,
-          ai_signal_source_owner_id: quickSelectedAISignalSource.value?.user_id || undefined,
-          position_management_policy_id: quickStrategyPolicyId.value === '__auto__'
-            ? undefined
-            : quickSelectedPositionPolicy.value?.policy_id,
-          position_management_policy_owner_id: quickSelectedPositionPolicy.value?.is_shared
-            ? quickSelectedPositionPolicy.value.owner_user_id
-            : undefined,
-        })
-        if (data.status !== 'ok') throw new Error(data.message || '创建失败')
-        successMessage.value = data.source_reused
-          ? 'AI 策略已创建，并复用了同交易商共享信号源'
-          : 'AI 策略已创建，并新建了共享运行数据的 AI 信号源'
-        showSuccess.value = true
-        const createdId = data.strategy?.strategy_id
-        quickStrategyDialog.value = false
-        quickStrategySymbol.value = ''
-        quickStrategyName.value = ''
-        quickStrategySourceId.value = '__auto__'
-        quickStrategyPolicyId.value = '__auto__'
-        await loadStrategies()
-        const created = strategies.value.find(strategy => strategy.strategy_id === createdId)
-        if (created) openStrategyDetail(created)
-      } catch (err) {
-        errorMessage.value = err.response?.data?.detail || err.message || '一键创建 AI 策略失败'
-        showError.value = true
-      } finally {
-        quickStrategySaving.value = false
-      }
-    }
-
     const openNewStrategyDialog = async () => {
       newStrategyDialog.value = true
       strategySymbolsLoading.value = true
@@ -3405,22 +3248,6 @@ export default {
       } finally {
         strategySymbolsLoading.value = false
       }
-    }
-
-    const openQuickStrategyDialog = async () => {
-      quickStrategyPeriod.value ||= 'M5'
-      quickStrategySourceId.value = '__auto__'
-      quickStrategyModel.value = ''
-      quickStrategyPolicyId.value = '__auto__'
-      try {
-        await loadSymbols()
-      } catch (err) {
-        errorMessage.value = err.response?.data?.detail || err.message || '加载交易品种失败'
-        showError.value = true
-      }
-      loadQuickStrategyPolicies()
-      loadQuickStrategySources()
-      quickStrategyDialog.value = true
     }
 
     const addStrategy = async () => {
@@ -3586,8 +3413,6 @@ export default {
       selectedStrategy,
       newStrategyDialog,
       strategySymbolsLoading,
-      quickStrategyDialog,
-      quickStrategySaving,
       strategySearch,
       strategyLifecycleFilter,
       strategyVisibilityFilter,
@@ -3620,18 +3445,6 @@ export default {
       deploySelectedStrategyToLive,
       newStrategySymbol,
       newStrategyName,
-      quickStrategySymbol,
-      quickStrategyPeriod,
-      quickStrategyName,
-      quickStrategySourceId,
-      quickStrategyModel,
-      quickStrategyModelOptions,
-      quickStrategyPolicyId,
-      quickStrategyOptionsLoading,
-      quickAISignalSourceOptions,
-      quickSelectedAISignalSource,
-      quickPositionPolicyOptions,
-      quickSelectedPositionPolicy,
       consistencyOptions,
       positionPolicies,
       positionPolicyOptions,
@@ -3646,10 +3459,6 @@ export default {
       deleteStrategy,
       addStrategy,
       openNewStrategyDialog,
-      openQuickStrategyDialog,
-      loadQuickStrategySources,
-      loadQuickStrategyPolicies,
-      quickCreateStrategy,
       getLifecycleMeta,
       getLifecycleColor,
       getLifecycleActions,
@@ -3677,6 +3486,7 @@ export default {
       signalSourceDisabledReason,
       keyLevelModeOptions,
       movingAverageTypeOptions,
+      pivotSignalTypeOptions,
       periodMinutes,
       aiIntervalOptionsFor,
       aiSignalOptions,

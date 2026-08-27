@@ -31,6 +31,8 @@ from market.services.signal.signal_rules import (
     build_ai_entry_signal,
     build_key_level_state_signal,
     build_moving_average_state_signal,
+    build_pivot_breakout_signal,
+    build_pivot_signal,
     direction_action,
     evaluate_moving_average_state,
     extract_ai_trend_state,
@@ -38,6 +40,7 @@ from market.services.signal.signal_rules import (
 )
 from market.services.signal.key_level_signal import evaluate_key_level_expression
 from market.services.signal.alpha_factor_signal import AlphaRuntimeExecutor
+from market.services.signal.pivot_repository import calculate_pivot_score
 from market.services.strategy.strategy_service import StrategyService
 from market.store.llm_store import LLMStore
 from sqlite_storage import SQLiteStorage, get_storage
@@ -921,6 +924,12 @@ class ReplaySignalEngine:
                 )
                 if signal:
                     signals.append(signal)
+            elif config["source"] == "pivot":
+                signal = self._pivot_signal(
+                    config, seen_bars, current_price, simulated_time
+                )
+                if signal:
+                    signals.append(signal)
             elif config["source"] == "alpha_factor":
                 signal = self._alpha_factor_signal(
                     config, seen_bars, current_price, simulated_time
@@ -1093,6 +1102,141 @@ class ReplaySignalEngine:
                 self._pending_ma_crosses.pop(intent_key, None)
         return signal
 
+    def _pivot_signal(
+        self, config, seen_bars, current_price: float, simulated_time: int,
+    ) -> Optional[TradingSignal]:
+        period = config["period"]
+        params = config.get("params") or {}
+        strength = max(1, int(params.get("confirmation_strength", 3)))
+        period_bars = aggregate_period(seen_bars, period, 2000)
+        pivots = detect_confirmed_pivots(
+            period_bars, strength,
+            max(0.0, float(params.get("merge_distance", 0.0004))),
+        )
+        if not pivots or current_price <= 0:
+            return None
+        threshold = max(0.0, float(params.get("proximity_threshold", 0.001)))
+        signal_type = str(params.get("signal_type") or "both")
+        candidate_limit = max(1, int(params.get("candidate_limit", 10)))
+        min_confirmations = max(
+            1, int(params.get("min_confirmation_count", 1))
+        )
+        max_age = max(1, int(params.get("max_age_bars", 120)))
+        half_life = max(1, int(params.get("recency_half_life_bars", 30)))
+        min_pivot_score = max(
+            0, min(100, int(params.get("min_pivot_score", 0)))
+        )
+        period_seconds = PERIOD_SECONDS[period]
+        pivots = sorted(
+            pivots,
+            key=lambda item: int(datetime.fromisoformat(item["time"]).timestamp())
+            if isinstance(item["time"], str) and "T" in item["time"]
+            else int(item["time"]),
+            reverse=True,
+        )[:candidate_limit]
+        candidates = []
+        for pivot in pivots:
+            pivot_time = (
+                int(datetime.fromisoformat(pivot["time"]).timestamp())
+                if isinstance(pivot["time"], str) and "T" in pivot["time"]
+                else int(pivot["time"])
+            )
+            age_bars = max(
+                0.0,
+                (simulated_time - (pivot_time + strength * period_seconds))
+                / period_seconds,
+            )
+            if age_bars > max_age:
+                continue
+            confirmation_count = max(
+                1, int(pivot.get("confirmation_count") or 1)
+            )
+            if confirmation_count < min_confirmations:
+                continue
+            pivot_score, recency_score = calculate_pivot_score(
+                age_bars, confirmation_count, half_life
+            )
+            if pivot_score < min_pivot_score:
+                continue
+            distance = abs(current_price - pivot["price"]) / current_price
+            is_near = (
+                (pivot["direction"] == "high" and current_price <= pivot["price"])
+                or (pivot["direction"] == "low" and current_price >= pivot["price"])
+            )
+            is_breakout = (
+                (pivot["direction"] == "high" and current_price > pivot["price"])
+                or (pivot["direction"] == "low" and current_price < pivot["price"])
+            )
+            if distance <= threshold and (
+                (signal_type in {"near", "both"} and is_near)
+                or (signal_type in {"breakout", "both"} and is_breakout)
+            ):
+                candidates.append((
+                    pivot_score, distance, pivot, is_breakout,
+                    age_bars, confirmation_count, recency_score,
+                ))
+        if not candidates:
+            return None
+        (
+            pivot_score, _, pivot, is_breakout,
+            age_bars, confirmation_count, recency_score,
+        ) = min(candidates, key=lambda item: (-item[0], item[1]))
+        source_id = config["signal_source_id"]
+        cooldown_key = (
+            f"pivot:{source_id}:{period}:{float(pivot['price']):.8f}"
+        )
+        cooldown = max(0, int(params.get("cooldown_seconds", 180)))
+        if not self._can_emit(cooldown_key, simulated_time, cooldown):
+            return None
+        rule_kwargs = {
+            "signal_time": replay_datetime(simulated_time),
+            "stop_buffer_ratio": max(
+                0.0, float(params.get("stop_buffer_ratio", 0.0005))
+            ),
+            "risk_reward_ratio": max(
+                1.0, float(params.get("risk_reward_ratio", 2.0))
+            ),
+            "confirmation_count": confirmation_count,
+            "age_bars": age_bars,
+            "pivot_score": pivot_score,
+        }
+        if is_breakout:
+            rule_kwargs["confidence"] = min(
+                95, 60 + min(20, (confirmation_count - 1) * 7)
+                + round(15 * recency_score)
+            )
+            signal = build_pivot_breakout_signal(
+                self.strategy.get("symbol", ""), current_price, period,
+                pivot["price"], pivot["direction"], **rule_kwargs,
+            )
+        else:
+            rule_kwargs["confidence"] = min(
+                95, 55 + min(20, (confirmation_count - 1) * 7)
+                + round(15 * recency_score)
+            )
+            opposite_direction = "high" if pivot["direction"] == "low" else "low"
+            opposite_prices = [
+                item["price"] for item in pivots
+                if item["direction"] == opposite_direction and (
+                    (pivot["direction"] == "low" and item["price"] > current_price)
+                    or (pivot["direction"] == "high" and item["price"] < current_price)
+                )
+            ]
+            opposite_price = min(
+                opposite_prices,
+                key=lambda price: abs(price - current_price),
+                default=None,
+            )
+            signal = build_pivot_signal(
+                self.strategy.get("symbol", ""), current_price, period,
+                pivot["price"], pivot["direction"], opposite_price,
+                **rule_kwargs,
+            )
+        if signal:
+            signal.signal_source_id = source_id
+            self._mark_emitted(cooldown_key, simulated_time)
+        return signal
+
     def _can_emit(self, key: str, now: int, cooldown: int) -> bool:
         return now - self._cooldowns.get(key, -cooldown) >= cooldown
 
@@ -1166,25 +1310,30 @@ def merge_nearby_pivots(
     merged = []
     for direction in ("high", "low"):
         items = [item for item in pivots if item["direction"] == direction]
-        index = 0
-        while index < len(items):
-            group = [items[index]]
-            cursor = index + 1
-            while cursor < len(items):
-                if (
-                    abs(items[cursor]["price"] - items[index]["price"])
-                    / items[index]["price"] > merge_distance
-                ):
-                    break
-                group.append(items[cursor])
-                cursor += 1
-            merged.append(
+        groups = []
+        for item in items:
+            matching = next((
+                group for group in groups
+                if group[0]["price"] > 0
+                and abs(item["price"] - group[0]["price"])
+                / group[0]["price"] <= merge_distance
+            ), None)
+            if matching is None:
+                groups.append([item])
+            else:
+                matching.append(item)
+        for group in groups:
+            best = dict(
                 max(group, key=lambda item: item["price"])
                 if direction == "high"
                 else min(group, key=lambda item: item["price"])
             )
-            index = cursor
-    return merged
+            best["confirmation_count"] = sum(
+                max(1, int(item.get("confirmation_count") or 1))
+                for item in group
+            )
+            merged.append(best)
+    return sorted(merged, key=lambda item: str(item["time"]))
 
 
 def signal_source_enabled(strategy: Dict, source: str) -> bool:
@@ -2314,14 +2463,14 @@ def build_result(
         source_counts[source] = source_counts.get(source, 0) + 1
     enabled_sources = [
         source for source in (
-            "key_level", "ai_entry", "moving_average", "alpha_factor"
+            "key_level", "ai_entry", "pivot", "moving_average", "alpha_factor"
         )
         if signal_source_enabled(strategy, source)
     ]
     return {
         "engine_version": ENGINE_VERSION,
         "supported_signal_sources": [
-            "key_level", "ai_entry", "moving_average", "alpha_factor"
+            "key_level", "ai_entry", "pivot", "moving_average", "alpha_factor"
         ],
         "enabled_signal_sources": enabled_sources,
         "signal_source_trade_counts": source_counts,

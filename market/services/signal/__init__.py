@@ -9,6 +9,7 @@ from .key_level_signal import KeyLevelSignalGenerator
 from .ai_entry_signal import AIEntrySignalGenerator
 from .moving_average_signal import MovingAverageSignalGenerator
 from .alpha_factor_signal import AlphaFactorSignalGenerator, AlphaRuntimeExecutor
+from .pivot_signal import PivotSignalGenerator
 
 __all__ = [
     'SignalService',
@@ -17,4 +18,5 @@ __all__ = [
     'MovingAverageSignalGenerator',
     'AlphaFactorSignalGenerator',
     'AlphaRuntimeExecutor',
+    'PivotSignalGenerator',
 ]

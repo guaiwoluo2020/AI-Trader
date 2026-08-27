@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Dict, Optional
 import re
 
+from ..mt5_time import beijing_text, parse_ea_instant, utc_iso
+
 
 @dataclass
 class TradeDeal:
@@ -109,7 +111,12 @@ class TradeDeal:
             "profit": self.profit,
             "swap": self.swap,
             "commission": self.commission,
-            "time": self.time.strftime("%Y-%m-%d %H:%M:%S") if self.time else None,
+            # `time` remains Beijing wall time for existing pages and daily-risk
+            # logic. New consumers should use the explicit UTC fields.
+            "time": beijing_text(self.time) if self.time else None,
+            "deal_timestamp": int(self.time.timestamp()) if self.time else None,
+            "time_utc": utc_iso(self.time) if self.time else None,
+            "time_beijing": beijing_text(self.time) if self.time else None,
             "comment": self.comment,
             "is_auto": self.is_auto,
             "order_source": self.order_source
@@ -118,17 +125,12 @@ class TradeDeal:
     @classmethod
     def from_ea_data(cls, data: Dict) -> 'TradeDeal':
         """从EA上报数据创建"""
-        # 解析时间
-        deal_time = data.get('time')
-        if isinstance(deal_time, str):
-            for fmt in ["%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
-                try:
-                    deal_time = datetime.strptime(deal_time, fmt)
-                    break
-                except:
-                    pass
-        if not isinstance(deal_time, datetime):
-            deal_time = datetime.now()
+        deal_time = parse_ea_instant(
+            data,
+            utc_field="deal_timestamp",
+            broker_epoch_field="broker_deal_timestamp",
+            legacy_wall_field="time",
+        )
 
         return cls(
             ticket=int(data.get('ticket', 0)),

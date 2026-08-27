@@ -8,21 +8,27 @@ import random
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional, List, Dict
 from auth import AuthUser, require_auth
-from ea_auth import EAIdentity, require_ea_auth
+from ea_auth import EAIdentity, ensure_supported_ea_version, require_ea_auth
 from models import TradeInstruction
 from sqlite_storage import (
     EAActivationRepository,
     LiveTradeDealRepository,
     TradeExecutionRepository,
     TradingAccountRepository,
+    UserRepository,
 )
 from instrument_price_store import get_instrument_price_store
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
+from routes_news import _normalize_calendar, _require_items, _validate_day
+from market_event_repository import MarketEventRepository
 
 
 # 统计数据日志打印概率 (5%)
 STATISTICS_LOG_PROBABILITY = 0.05
+_calendar_publisher_account_id: Optional[int] = None
+_calendar_publisher_seen_at: float = 0.0
+CALENDAR_PUBLISHER_LEASE_SECONDS = 90
 
 
 def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -42,11 +48,13 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 detail="激活请求格式无效",
             ) from exc
 
+        ea_version = ensure_supported_ea_version(data.get("ea_version", ""))
+
         result = EAActivationRepository().consume(
             str(data.get("activation_code", "")),
             mt5_login=str(data.get("mt5_login", "")),
             mt5_server=str(data.get("mt5_server", "")),
-            ea_version=str(data.get("ea_version", "")),
+            ea_version=ea_version,
             program_name=str(data.get("program_name", "")),
         )
         if result is None:
@@ -57,11 +65,13 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
 
         account, ea_token = result
         engine_manager.bind_account(account.user_id, account.account_id)
+        user = UserRepository().get_by_id(account.user_id)
         return {
             "status": "ok",
             "user_id": account.user_id,
             "account_id": account.account_id,
             "ea_token": ea_token,
+            "is_admin": bool(user and user.role == "admin"),
         }
 
     @router.get("/get_trades")
@@ -108,6 +118,17 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         """
         server = engine_manager.get_engine_for_ea(identity)
         result = server.get_trades_by_symbol(symbol, price)
+        paper_execution = {"filled": 0, "closed": 0, "rejected": 0}
+        if price is not None and float(price) > 0:
+            try:
+                # EA 的 get_trades 轮询就是实时 Tick 通道。先用本次报价撮合
+                # 上一 Tick 产生的模拟订单，再评估本 Tick 的新策略信号。
+                paper_execution = engine_manager.paper_trading.process_tick(
+                    identity.user_id, symbol, float(price), float(price)
+                )
+            except Exception as exc:
+                # 模拟账户故障不能阻断 EA 获取真实交易指令。
+                print(f"[PaperTrading] 模拟撮合失败: {exc}")
         paper_orders_created = 0
         try:
             paper_orders_created = engine_manager.paper_trading.process_strategy_signals(
@@ -118,6 +139,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             # 模拟账户故障不能阻断 EA 获取真实交易指令。
             print(f"[PaperTrading] 创建模拟订单失败: {exc}")
         result["paper_orders_created"] = paper_orders_created
+        result["paper_execution"] = paper_execution
 
         # 如果结果不为空，记录到运行日志
         trades = result.get("trades", [])
@@ -220,6 +242,53 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.post("/ea/calendar/daily")
+    async def receive_ea_calendar(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
+        """接收ADMIN主EA上报的MT5公共财经日历。
+
+        财经日历是平台级数据，不按交易账户保存。EA认证之后仍需校验
+        user role，普通用户即使知道接口也不能覆盖公共日历。
+        """
+        global _calendar_publisher_account_id, _calendar_publisher_seen_at
+        admin = UserRepository().get_by_id(identity.user_id)
+        if admin is None or admin.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="只有ADMIN账户的主EA可以上报财经日历",
+            )
+        now = __import__("time").time()
+        if (
+            _calendar_publisher_account_id is not None
+            and _calendar_publisher_account_id != identity.account_id
+            and now - _calendar_publisher_seen_at < CALENDAR_PUBLISHER_LEASE_SECONDS
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="当前已有ADMIN主EA负责财经日历上报",
+            )
+        _calendar_publisher_account_id = identity.account_id
+        _calendar_publisher_seen_at = now
+        try:
+            payload = await request.json()
+            day = _validate_day(payload.get("date"))
+            source = str(payload.get("source") or "mt5_calendar").strip()
+            events = _normalize_calendar(day, _require_items(payload, "events"))
+            count = MarketEventRepository().replace_calendar_day(day, events, source)
+            return {
+                "status": "ok",
+                "date": day,
+                "count": count,
+                "scope": "global",
+                "publisher_user_id": identity.user_id,
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"财经日历处理失败: {exc}") from exc
+
     @router.post("/send_statistics")
     async def send_statistics(
         request: Request,
@@ -268,23 +337,8 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             bid = data.get("bidPrice")
             ask = data.get("askPrice")
             if bid is not None:
-                # Tick 是实盘策略入场触发的驱动源。此前这里仅更新账户快照并
-                # 驱动模拟撮合，导致 AI 计划在分析时尚未到入场价时，后续
-                # 实盘 Tick 不会重新评估价格条件，也就不会创建 MT5 指令。
-                # 在统计上报链路中复用 TradingServer 的统一策略评估入口；
-                # EA 后续轮询 get_trades 时即可领取已创建的交易指令。
-                try:
-                    live_price = (
-                        (float(bid) + float(ask)) / 2
-                        if ask is not None else float(bid)
-                    )
-                    server.process_price(
-                        str(data.get("symbol", "")), live_price,
-                    )
-                except Exception as exc:
-                    # 实盘统计上报必须优先成功；策略评估错误留在服务日志中，
-                    # 不影响 EA 继续上报行情。
-                    print(f"[LiveTrading] Tick 策略评估失败: {exc}")
+                # 策略评估严格由EA的/get_trades Tick通道驱动；统计通道不再
+                # 重复触发实盘或模拟策略，避免30秒心跳产生非Tick决策。
                 try:
                     get_instrument_price_store().record(
                         identity.user_id,
@@ -296,25 +350,6 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 except Exception as exc:
                     # 关联候选是辅助功能，不能影响 EA 统计和模拟撮合。
                     print(f"[InstrumentMapping] 报价观察失败: {exc}")
-                try:
-                    engine_manager.paper_trading.process_tick(
-                        identity.user_id,
-                        str(data.get("symbol", "")),
-                        float(bid),
-                        float(ask) if ask is not None else None,
-                        pivots=[
-                            item.to_dict()
-                            for period in server.pivot_store.get_all_periods(
-                                str(data.get("symbol", ""))
-                            )
-                            for item in server.pivot_store.get_pivot_objects(
-                                str(data.get("symbol", "")), period
-                            )
-                        ],
-                    )
-                except Exception as exc:
-                    # 实盘账户上报成功优先，模拟撮合错误单独记录。
-                    print(f"[PaperTrading] 模拟 Tick 处理失败: {exc}")
 
             # 随机打印日志 (5%概率)
             if random.random() < STATISTICS_LOG_PROBABILITY:

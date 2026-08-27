@@ -223,13 +223,15 @@ class MySQLStorage:
                     swap DOUBLE NOT NULL DEFAULT 0,
                     commission DOUBLE NOT NULL DEFAULT 0,
                     deal_time VARCHAR(32) NOT NULL DEFAULT '',
+                    deal_timestamp BIGINT NOT NULL DEFAULT 0,
+                    broker_utc_offset_seconds INT NOT NULL DEFAULT 0,
                     comment VARCHAR(512) NOT NULL DEFAULT '',
                     received_at BIGINT NOT NULL,
                     payload_json JSON NOT NULL,
                     position_attribution_json JSON NULL,
                     PRIMARY KEY (id),
                     UNIQUE KEY uq_live_trade_deals_account_ticket (account_id, ticket),
-                    KEY idx_live_trade_deals_account_time (account_id, deal_time, received_at),
+                    KEY idx_live_trade_deals_account_time (account_id, deal_timestamp, received_at),
                     CONSTRAINT fk_live_trade_deals_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                     CONSTRAINT fk_live_trade_deals_account FOREIGN KEY (account_id) REFERENCES trading_accounts(id) ON DELETE CASCADE
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -243,6 +245,8 @@ class MySQLStorage:
                     symbol VARCHAR(64) NOT NULL,
                     period VARCHAR(16) NOT NULL,
                     timestamp BIGINT NOT NULL,
+                    timestamp_utc BIGINT NOT NULL DEFAULT 0,
+                    broker_utc_offset_seconds INT NOT NULL DEFAULT 0,
                     open_price DOUBLE NOT NULL,
                     high_price DOUBLE NOT NULL,
                     low_price DOUBLE NOT NULL,
@@ -251,7 +255,38 @@ class MySQLStorage:
                     updated_at BIGINT NOT NULL,
                     PRIMARY KEY (user_id, account_id, symbol, period, timestamp),
                     KEY idx_historical_klines_lookup (user_id, account_id, symbol, period, timestamp),
+                    KEY idx_historical_klines_utc (user_id, account_id, symbol, period, timestamp_utc),
                     KEY idx_historical_klines_retention (timestamp)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS strategy_pivot_points (
+                    pivot_id VARCHAR(64) NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    strategy_id VARCHAR(64) NOT NULL,
+                    signal_source_id VARCHAR(64) NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    period VARCHAR(16) NOT NULL,
+                    config_fingerprint VARCHAR(64) NOT NULL,
+                    pivot_time BIGINT NOT NULL,
+                    confirmed_at BIGINT NOT NULL,
+                    valid_until BIGINT NOT NULL,
+                    price DOUBLE NOT NULL,
+                    direction VARCHAR(8) NOT NULL,
+                    strength INT NOT NULL,
+                    confirmation_count INT NOT NULL DEFAULT 1,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (pivot_id),
+                    KEY idx_strategy_pivots_runtime (
+                        user_id, account_id, strategy_id, signal_source_id,
+                        config_fingerprint, valid_until
+                    ),
+                    KEY idx_strategy_pivots_expiry (valid_until)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                   COLLATE=utf8mb4_unicode_ci
                     """
@@ -276,6 +311,15 @@ class MySQLStorage:
                     ),
                     "live_trade_deals": (
                         ("position_attribution_json", "JSON NULL"),
+                        ("deal_timestamp", "BIGINT NOT NULL DEFAULT 0"),
+                        ("broker_utc_offset_seconds", "INT NOT NULL DEFAULT 0"),
+                    ),
+                    "historical_klines": (
+                        ("timestamp_utc", "BIGINT NOT NULL DEFAULT 0"),
+                        ("broker_utc_offset_seconds", "INT NOT NULL DEFAULT 0"),
+                    ),
+                    "backtest_dataset_chunks": (
+                        ("broker_utc_offset_seconds", "INT NOT NULL DEFAULT 0"),
                     ),
                     "paper_orders": (
                         ("position_attribution_json", "JSON NULL"),
@@ -309,6 +353,26 @@ class MySQLStorage:
                             # would fail later with a less actionable SQL error.
                             if getattr(exc, "args", (None,))[0] != 1060:
                                 raise
+                compatibility_indexes = (
+                    (
+                        "historical_klines",
+                        "idx_historical_klines_utc",
+                        "user_id, account_id, symbol, period, timestamp_utc",
+                    ),
+                    (
+                        "live_trade_deals",
+                        "idx_live_trade_deals_account_timestamp",
+                        "account_id, deal_timestamp, received_at",
+                    ),
+                )
+                for table, index_name, columns in compatibility_indexes:
+                    try:
+                        conn.execute(
+                            f"ALTER TABLE {table} ADD INDEX {index_name} ({columns})"
+                        )
+                    except Exception as exc:
+                        if getattr(exc, "args", (None,))[0] != 1061:
+                            raise
                 conn.execute(
                     """
                     UPDATE ai_signal_sources AS source

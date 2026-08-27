@@ -345,6 +345,9 @@ class PositionPlan:
     stop_rule: Dict
     take_profit_rule: Dict
     explanation: List[str] = field(default_factory=list)
+    # When the signal-provided stop is tighter than the policy floor, the
+    # runtime widens it to the floor and records the change for audit/UI.
+    stop_adjustment: Optional[Dict] = None
 
 
 @dataclass

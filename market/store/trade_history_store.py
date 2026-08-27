@@ -5,7 +5,7 @@
 """
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 import threading
 
@@ -47,10 +47,10 @@ class TradeHistoryStore:
                 for data in self._repository.list_entities(self.ENTITY_TYPE)
             ]
             self._deals.sort(
-                key=lambda deal: deal.time or datetime.min,
+                key=lambda deal: deal.time or datetime.min.replace(tzinfo=timezone.utc),
                 reverse=True,
             )
-            cutoff = datetime.now() - timedelta(hours=self._retention_hours)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=self._retention_hours)
             self._deals = [
                 deal
                 for deal in self._deals
@@ -64,7 +64,7 @@ class TradeHistoryStore:
                 for deal in self._deals:
                     self._persist(deal)
             if self._deals:
-                self._last_update_time = datetime.now()
+                self._last_update_time = datetime.now(timezone.utc)
 
         print(f"[TradeHistoryStore] 交易历史存储已初始化 (retention={retention_hours}h)")
 
@@ -81,7 +81,7 @@ class TradeHistoryStore:
         if not deals:
             return 0
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         new_count = 0
 
         with self._lock:
@@ -95,7 +95,10 @@ class TradeHistoryStore:
                     new_count += 1
 
             # 按时间排序
-            self._deals.sort(key=lambda d: d.time or datetime.min, reverse=True)
+            self._deals.sort(
+                key=lambda d: d.time or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
 
             # 清理过期数据
             cutoff = now - timedelta(hours=self._retention_hours)
@@ -130,7 +133,7 @@ class TradeHistoryStore:
                 deals = [d for d in deals if d.symbol == symbol]
 
             if hours:
-                cutoff = datetime.now() - timedelta(hours=hours)
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
                 deals = [d for d in deals if d.time and d.time > cutoff]
 
             return deals

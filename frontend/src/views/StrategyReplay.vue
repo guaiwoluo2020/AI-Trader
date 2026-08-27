@@ -8,6 +8,7 @@
     <v-alert v-else-if="error" type="error" variant="tonal">{{ error }}</v-alert>
     <v-alert v-else-if="!deployment" type="warning" variant="tonal">未找到该策略部署。</v-alert>
     <StrategyExecutionChart v-else :symbol="deployment.chart?.symbol || deployment.symbol" :period="deployment.chart?.period || 'M5'" :bars="deployment.chart?.bars || []" :events="deployment.chart?.events || []" :decisions="deployment.decisions || []"/>
+    <v-alert v-if="reviewLoading" type="info" variant="tonal" class="mt-4">策略复盘已提交，后台正在分析成交、决策与 AI 行情数据，完成后会自动显示。</v-alert>
     <v-alert v-if="reviewError" type="error" variant="tonal" class="mt-4">{{ reviewError }}</v-alert>
     <v-btn v-if="review" class="review-apply-button" color="primary" variant="tonal" prepend-icon="mdi-content-save-edit" :loading="applyLoading" @click="applyReview">停止并应用全部建议</v-btn>
     <v-card v-if="review" class="review-card mt-4" elevation="0">
@@ -17,20 +18,21 @@
   </v-container>
 </template>
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { marketAPI } from '@/api/market'
 import StrategyExecutionChart from '@/components/StrategyExecutionChart.vue'
-const route=useRoute(),loading=ref(false),error=ref(''),overview=ref(null),review=ref(null),reviewLoading=ref(false),reviewError=ref(''),reviewHours=ref(24),startAt=ref(''),endAt=ref(''),applyLoading=ref(false)
+const route=useRoute(),loading=ref(false),error=ref(''),overview=ref(null),review=ref(null),reviewLoading=ref(false),reviewError=ref(''),reviewHours=ref(24),startAt=ref(''),endAt=ref(''),applyLoading=ref(false),reviewJobId=ref('');let reviewPollTimer=null
 const reviewRanges=[{title:'最近6小时',value:6},{title:'最近24小时',value:24},{title:'最近3天',value:72},{title:'最近7天',value:168}]
 const strategyId=computed(()=>String(route.query.strategy_id||'')),deploymentId=computed(()=>String(route.query.deployment_id||''))
 const deployment=computed(()=> (Array.isArray(overview.value?.deployments)?overview.value.deployments:[]).find(item=>String(item?.deployment_id)===deploymentId.value)||null)
 const strategyName=computed(()=>overview.value?.strategy?.strategy_name||strategyId.value||'策略')
 const severityColor=value=>({high:'error',medium:'warning',low:'info'}[String(value||'').toLowerCase()]||'grey')
-const runReview=async()=>{if(!deployment.value)return;reviewLoading.value=true;reviewError.value='';try{const result=await marketAPI.reviewStrategyExecution(strategyId.value,deployment.value.deployment_id,reviewHours.value);review.value=result.review||{}}catch(e){reviewError.value=e?.response?.data?.detail||'AI 策略复盘失败'}finally{reviewLoading.value=false}}
+const stopReviewPolling=()=>{if(reviewPollTimer){window.clearInterval(reviewPollTimer);reviewPollTimer=null}}
+const runReview=async()=>{if(!deployment.value)return;stopReviewPolling();reviewLoading.value=true;reviewError.value='';review.value=null;try{const result=await marketAPI.reviewStrategyExecution(strategyId.value,deployment.value.deployment_id,reviewHours.value);if(result.status!=='accepted'||!result.job_id)throw new Error(result.message||'复盘任务提交失败');reviewJobId.value=result.job_id;reviewPollTimer=window.setInterval(async()=>{try{const status=await marketAPI.getStrategyReviewStatus(strategyId.value,reviewJobId.value);if(status.status==='completed'){review.value=status.review||{};reviewLoading.value=false;stopReviewPolling()}else if(status.status==='failed'){reviewError.value=status.error||'AI 策略复盘失败';reviewLoading.value=false;stopReviewPolling()}}catch(e){reviewError.value=e?.response?.data?.detail||'查询复盘任务失败';reviewLoading.value=false;stopReviewPolling()}},2000)}catch(e){reviewError.value=e?.response?.data?.detail||e.message||'AI 策略复盘失败';reviewLoading.value=false}}
 const applyReview=async()=>{if(!review.value||!deployment.value)return;const suggestions=(review.value.suggestions||[]).filter(item=>item?.patch&&Object.keys(item.patch).length);if(!suggestions.length){reviewError.value='当前复盘没有可执行的结构化修改';return}if(!window.confirm('将暂停该策略的运行部署并应用复盘建议，已有持仓不会自动平仓。确认继续吗？'))return;applyLoading.value=true;reviewError.value='';try{const strategy={},sources=[];for(const item of suggestions){if(item.target==='strategy')Object.assign(strategy,item.patch);else if(item.target==='signal_source')sources.push({signal_source_id:item.signal_source_id||item.id,patch:item.patch})}const result=await marketAPI.applyStrategyReview(strategyId.value,{stop_deployments:true,strategy,signal_sources:sources});if(result.status!=='ok')throw new Error(result.message||'应用复盘修改失败');reviewError.value='复盘修改已应用，相关部署已暂停'}catch(e){reviewError.value=e?.response?.data?.detail||e.message||'应用复盘修改失败'}finally{applyLoading.value=false}}
-const load=async()=>{if(!strategyId.value){error.value='缺少 strategy_id';return}loading.value=true;error.value='';try{const toTs=value=>value?Math.floor(new Date(value).getTime()/1000):null;overview.value=await marketAPI.getStrategyExecutionOverview(strategyId.value,{include_chart:true,start_ts:toTs(startAt.value),end_ts:toTs(endAt.value)})}catch(e){error.value=e?.response?.data?.detail||'加载策略执行回放失败'}finally{loading.value=false}}
-onMounted(load);watch(strategyId,load)
+const load=async()=>{if(!strategyId.value){error.value='缺少 strategy_id';return}loading.value=true;error.value='';try{const toTs=value=>value?Math.floor(new Date(value).getTime()/1000):null;overview.value=await marketAPI.getStrategyExecutionOverview(strategyId.value,{include_chart:true,include_inactive:true,start_ts:toTs(startAt.value),end_ts:toTs(endAt.value)})}catch(e){error.value=e?.response?.data?.detail||'加载策略执行回放失败'}finally{loading.value=false}}
+onMounted(load);onBeforeUnmount(stopReviewPolling);watch(strategyId,load)
 </script>
 <style scoped>
 .replay-page{max-width:1440px;margin:0 auto;padding-top:24px}.page-header{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:18px}.header-actions{display:flex;gap:10px;align-items:center}.section-kicker{color:#b18443;font-size:.64rem;font-weight:800;letter-spacing:.12em}.page-header h1{margin:4px 0;color:#29483f;font-size:1.55rem}.page-header p{margin:0;color:#71817a;font-size:.82rem}.review-card{border:1px solid #dbe8e1;border-radius:16px;background:linear-gradient(145deg,#fff,#f7fbf8)}.review-summary{font-size:1.02rem;color:#29483f}.review-card h3{margin:12px 0 8px;color:#315f50;font-size:1rem}.review-item{margin:8px 0;padding:11px 13px;border:1px solid #e0ebe5;border-radius:10px;background:#fbfdfb;line-height:1.55}.review-item.suggestion{border-left:3px solid #2f8063}.evidence{color:#71817a;font-size:.83rem}.risk-notes{margin-top:16px;padding:10px 12px;border-radius:9px;background:#fff8e8;color:#785b20}.review-footnote{margin:16px 0 0;color:#81918b;font-size:.8rem}@media(max-width:700px){.page-header{align-items:flex-start;flex-direction:column}.header-actions{width:100%;flex-wrap:wrap}.header-actions .v-btn{flex:1}}

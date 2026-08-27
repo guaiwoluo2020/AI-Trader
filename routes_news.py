@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
 
 from fastapi import (
@@ -107,6 +108,19 @@ def _normalize_calendar(day: str, items: List[Dict]) -> List[Dict]:
             item.get("publish_time") or item.get("event_time")
             or item.get("time") or ""
         ).strip()
+        raw_timestamp = item.get("event_timestamp", item.get("timestamp"))
+        try:
+            event_timestamp = int(raw_timestamp) if raw_timestamp not in (None, "") else None
+        except (TypeError, ValueError):
+            event_timestamp = None
+        event_time_utc = ""
+        event_time_beijing = ""
+        if event_timestamp is not None and event_timestamp > 0:
+            instant = datetime.fromtimestamp(event_timestamp, tz=timezone.utc)
+            event_time_utc = instant.isoformat().replace("+00:00", "Z")
+            event_time_beijing = instant.astimezone(
+                ZoneInfo("Asia/Shanghai")
+            ).isoformat()
         event_id = str(item.get("id") or "").strip() or _stable_id(
             "calendar", day, event_time, name, item.get("currency")
         )
@@ -116,6 +130,11 @@ def _normalize_calendar(day: str, items: List[Dict]) -> List[Dict]:
             "name": name,
             "event_time": event_time,
             "publish_time": event_time,
+            "event_timestamp": event_timestamp,
+            "event_time_utc": event_time_utc,
+            "event_time_beijing": event_time_beijing,
+            "broker_server_time": str(item.get("broker_server_time") or event_time),
+            "broker_utc_offset_seconds": item.get("broker_utc_offset_seconds"),
             "forecast": item.get("forecast", item.get("consensus", "")),
             "importance": _normalize_importance(
                 item.get("importance", item.get("star", 0))

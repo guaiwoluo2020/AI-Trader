@@ -300,6 +300,7 @@ class BacktestDatasetRepository:
         file_path: str,
         broker_server: str,
         ea_version: str,
+        broker_utc_offset_seconds: int = 0,
     ) -> Tuple[str, Dict]:
         """原子记录分片并推进服务端游标。"""
         now = int(time.time())
@@ -347,8 +348,8 @@ class BacktestDatasetRepository:
                 INSERT INTO backtest_dataset_chunks(
                     dataset_id, chunk_index, range_start, range_end,
                     first_bar_time, last_bar_time, bar_count, invalid_count,
-                    checksum, file_path, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    checksum, file_path, broker_utc_offset_seconds, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     dataset_id,
@@ -361,6 +362,7 @@ class BacktestDatasetRepository:
                     invalid_count,
                     checksum,
                     file_path,
+                    int(broker_utc_offset_seconds or 0),
                     now,
                 ),
             )
@@ -691,6 +693,7 @@ class BacktestDatasetService:
             str(chunk_path),
             str(payload.get("broker_server", "")).strip(),
             str(payload.get("ea_version", "")).strip(),
+            int(payload.get("broker_utc_offset_seconds", 0) or 0),
         )
         if updated["status"] == DatasetStatus.VALIDATING:
             self._finalize(updated)
