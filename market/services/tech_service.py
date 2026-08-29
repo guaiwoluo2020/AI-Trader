@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from ..models import KlineData, TechTrendState, TechTrendChange, TechResonanceResult, TechTradeSuggestion
 from ..store import TechStore, KlineStore, PivotStore
 from .tech_indicators import calculate_ma, calculate_adx
+from .regime_classifier import classify_main_period_regime
 
 
 class TechService:
@@ -96,7 +97,11 @@ class TechService:
         adx = calculate_adx(klines)
 
         # 判断趋势
-        trend, reason = self._determine_trend(adx, ma_fast, ma_slow, current_price)
+        # 主周期方向统一由 K 线状态判定；ADX/均线仅用于说明和强度，避免
+        # 技术分析与转折点、策略执行出现不同方向口径。
+        trend = classify_main_period_regime(klines)
+        _, indicator_reason = self._determine_trend(adx, ma_fast, ma_slow, current_price)
+        reason = f"主周期K线状态={trend}；{indicator_reason}"
 
         # 计算强度
         strength = self._calculate_strength(adx)

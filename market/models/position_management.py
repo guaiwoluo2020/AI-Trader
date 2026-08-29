@@ -25,7 +25,7 @@ SETUP_FAMILIES = {
 }
 SIGNAL_SOURCES = {
     "ai_entry", "pivot", "key_level", "moving_average",
-    "alpha_factor", "manual",
+    "alpha_factor", "multi_timeframe", "manual",
 }
 
 
@@ -58,6 +58,12 @@ def default_position_management_config() -> Dict:
         "max_stop_percent": 0.7,
         "min_stop_distance": 0.0,
         "max_stop_distance": 0.0,
+        # Per deployment circuit breaker: completed losing positions only.
+        # It blocks fresh entries, never existing-position protection.
+        "loss_streak_circuit_breaker_enabled": True,
+        "loss_streak_limit": 3,
+        # 默认连续亏损熔断暂停 10 分钟；可在持仓管理方案中调整。
+        "loss_streak_pause_minutes": 10,
         "setup_profiles": [],
     }
 
@@ -152,6 +158,15 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
     )
     normalized["max_stop_distance"] = _positive(
         normalized.get("max_stop_distance", 0), "最大止损距离", True
+    )
+    normalized["loss_streak_circuit_breaker_enabled"] = bool(
+        normalized.get("loss_streak_circuit_breaker_enabled", True)
+    )
+    normalized["loss_streak_limit"] = max(
+        1, min(20, int(normalized.get("loss_streak_limit", 3) or 3))
+    )
+    normalized["loss_streak_pause_minutes"] = max(
+        1, min(24 * 60, int(normalized.get("loss_streak_pause_minutes", 10) or 10))
     )
     if "signal_take_profit_close_percent" in normalized:
         normalized["signal_take_profit_close_percent"] = min(

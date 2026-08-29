@@ -28,6 +28,31 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     trade_config_repository = TradeConfigRepository()
     memberships = MembershipService()
 
+    def deployment_warnings(user_id: int, account_id: int, strategy_id: str) -> List[str]:
+        """Non-blocking preflight for a deployment's quote binding."""
+        account = repository.get_by_id(user_id, account_id)
+        strategy = strategy_repository.get_strategy_by_id(user_id, strategy_id)
+        if account is None or strategy is None:
+            return []
+        now = int(time.time())
+        symbol = str(strategy.symbol or "").strip()
+        rows = repository.storage.fetchall(
+            "SELECT symbol, MAX(updated_at) AS updated_at FROM historical_klines "
+            "WHERE user_id = ? AND updated_at >= ? GROUP BY symbol ORDER BY updated_at DESC",
+            (int(user_id), now - 15 * 60),
+        )
+        fresh = {str(row["symbol"]): int(row["updated_at"] or 0) for row in rows}
+        warnings = []
+        if symbol not in fresh:
+            reported = "、".join(list(fresh)[:6]) or "暂无最近15分钟K线"
+            warnings.append(
+                f"策略品种「{symbol}」没有匹配的实时行情；最近上报品种：{reported}。"
+                "部署仍可继续，但策略不会产生订单，直到品种一致或建立映射。"
+            )
+        if account.account_type == "mt5" and (not account.last_seen_at or now - int(account.last_seen_at) > 180):
+            warnings.append("目标 MT5 账户超过3分钟未心跳，实盘部署后暂时不会接收交易指令。")
+        return warnings
+
     @router.get("/accounts")
     async def list_accounts(
         user: AuthUser = Depends(require_auth),
@@ -310,9 +335,21 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 "status": "ok",
                 "message": "策略已绑定到交易账户",
                 "deployment": deployment,
+                "warnings": deployment_warnings(user.user_id, account_id, str(payload.get("strategy_id", "").strip())),
             }
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/accounts/{account_id}/deployments/preflight")
+    async def deployment_preflight(
+        account_id: int,
+        strategy_id: str = Query(...),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        return {
+            "status": "ok",
+            "warnings": deployment_warnings(user.user_id, account_id, strategy_id.strip()),
+        }
 
     @router.post("/accounts/{account_id}/deployments/backtest")
     async def deploy_backtest_strategy(

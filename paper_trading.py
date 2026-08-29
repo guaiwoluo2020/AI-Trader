@@ -517,6 +517,7 @@ class PaperTradingService:
     def _paper_loss_streak_guard(
         self, user_id: int, account_id: int, deployment: Dict,
         symbol: str, strategy: TradingStrategy, action: str, signal,
+        policy_config: Optional[Dict] = None,
     ) -> Dict:
         """Protect one paper deployment/setup/direction and consume AI plans once."""
         setup_type = str(
@@ -562,6 +563,37 @@ class PaperTradingService:
                         "plan_instance_id": plan_instance_id,
                         "reason": "本次AI分析的该交易建议已经触发过，不重复开仓",
                     }
+
+        config = policy_config or {}
+        if not bool(config.get("loss_streak_circuit_breaker_enabled", True)):
+            return {"allowed": True, "loss_streak": 0, "scope": "deployment"}
+        limit = max(1, int(config.get("loss_streak_limit", 3) or 3))
+        pause_seconds = max(60, int(config.get("loss_streak_pause_minutes", 120) or 120) * 60)
+        # A paper trade is written once when the complete position closes;
+        # partial take-profits are separate rows and must not affect the streak.
+        rows = self.storage.fetchall(
+            "SELECT net_profit, closed_at FROM paper_trades WHERE user_id = ? "
+            "AND account_id = ? AND deployment_id = ? "
+            "AND exit_reason NOT IN ('partial_take_profit', 'signal_take_profit') "
+            "ORDER BY closed_at DESC, created_at DESC LIMIT 100",
+            (int(user_id), int(account_id), deployment["deployment_id"]),
+        )
+        streak = 0
+        for row in rows:
+            if float(row.get("net_profit") or 0) < 0:
+                streak += 1
+            else:
+                break
+        if streak < limit:
+            return {"allowed": True, "loss_streak": streak, "scope": "deployment"}
+        release_at = int(rows[0].get("closed_at") or 0) + pause_seconds
+        if int(time.time()) < release_at:
+            return {
+                "allowed": False, "loss_streak": streak, "scope": "deployment",
+                "release_at": release_at,
+                "reason": f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}",
+            }
+        return {"allowed": True, "loss_streak": streak, "scope": "deployment", "cooldown_completed": True}
 
         candidates = self.storage.fetchall(
             """
@@ -770,7 +802,8 @@ class PaperTradingService:
                 ),
                 entry_guard=lambda s, st, action, signal, aid=account_id, dep=deployment: (
                     self._paper_loss_streak_guard(
-                        user_id, aid, dep, s, st, action, signal
+                        user_id, aid, dep, s, st, action, signal,
+                        policy_snapshot.get("config") or {},
                     )
                 ),
                 position_policy=PositionManagementPolicy.from_dict(policy_snapshot),

@@ -1422,9 +1422,10 @@ void OnTimer()
       g_positionsSyncPending = false;
      }
 
-//--- ADMIN实例上报公共财经日历；普通用户请求会被服务端拒绝
-   if(g_isAdmin && (g_lastCalendarSyncTime == 0 ||
-      (now - g_lastCalendarSyncTime) >= CALENDAR_SYNC_INTERVAL_SECONDS))
+//--- 上报公共财经日历；服务端仅接受ADMIN实例，普通用户会被拒绝。
+//    不依赖EA缓存的角色标记，避免ADMIN旧凭证导致漏报。
+   if(g_lastCalendarSyncTime == 0 ||
+      (now - g_lastCalendarSyncTime) >= CALENDAR_SYNC_INTERVAL_SECONDS)
      {
       SyncEconomicCalendar();
       g_lastCalendarSyncTime = now;

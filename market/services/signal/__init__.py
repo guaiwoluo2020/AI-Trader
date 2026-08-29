@@ -10,6 +10,7 @@ from .ai_entry_signal import AIEntrySignalGenerator
 from .moving_average_signal import MovingAverageSignalGenerator
 from .alpha_factor_signal import AlphaFactorSignalGenerator, AlphaRuntimeExecutor
 from .pivot_signal import PivotSignalGenerator
+from .multi_timeframe_signal import MultiTimeframeSignalGenerator
 
 __all__ = [
     'SignalService',
@@ -19,4 +20,5 @@ __all__ = [
     'AlphaFactorSignalGenerator',
     'AlphaRuntimeExecutor',
     'PivotSignalGenerator',
+    'MultiTimeframeSignalGenerator',
 ]

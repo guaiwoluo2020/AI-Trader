@@ -285,6 +285,12 @@ export const accountAPI = {
     )
     return response.data
   },
+  async deploymentPreflight(accountId, strategyId) {
+    const response = await api.get(`/accounts/${accountId}/deployments/preflight`, {
+      params: { strategy_id: strategyId },
+    })
+    return response.data
+  },
 
   async deployBacktest(accountId, taskId, durationDays = 30) {
     const response = await api.post(

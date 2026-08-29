@@ -49,8 +49,56 @@
           <v-tab v-if="isAdmin" value="email"><v-icon start>mdi-email-lock-outline</v-icon>邮件服务</v-tab>
           <v-tab v-if="isAdmin" value="instruments"><v-icon start>mdi-swap-horizontal-bold</v-icon>品种映射</v-tab>
           <v-tab v-if="isAdmin" value="quota"><v-icon start>mdi-account-star-outline</v-icon>用户与会员</v-tab>
+          <v-tab v-if="isAdmin" value="structure"><v-icon start>mdi-chart-timeline-variant</v-icon>结构分析</v-tab>
           <v-tab value="llm"><v-icon start>mdi-brain</v-icon>{{ isAdmin ? 'AI 服务管理' : 'AI 功能' }}</v-tab>
         </v-tabs>
+      </v-col>
+    </v-row>
+
+    <v-row v-if="!isStrategyPage && isAdmin && settingsTab === 'structure'">
+      <v-col cols="12">
+        <v-card class="user-settings-card admin-service-card" elevation="0">
+          <v-card-title class="settings-card-title">
+            <div><v-icon>mdi-chart-timeline-variant</v-icon><span>自动大模型结构段分析</span></div>
+            <small>新收盘 K 线上报后异步触发，不阻塞 EA</small>
+          </v-card-title>
+          <v-card-text>
+            <div class="d-flex flex-wrap ga-2 mb-4">
+              <v-select v-model="structureDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:220px" />
+              <v-select v-model="structureDraft.period" :items="['M1','M5','M15','H1','H4']" label="周期" density="compact" variant="outlined" hide-details style="max-width:150px" />
+              <v-text-field v-model.number="structureDraft.kline_count" type="number" min="50" max="288" label="K线数量" density="compact" variant="outlined" hide-details style="max-width:150px" />
+              <v-btn color="primary" @click="addStructureConfig"><v-icon start>mdi-plus</v-icon>添加</v-btn>
+            </div>
+            <v-table v-if="structureConfigs.length" density="comfortable">
+              <thead><tr><th>品种</th><th>周期</th><th>K线数量</th><th>状态</th><th></th></tr></thead>
+              <tbody><tr v-for="(item,index) in structureConfigs" :key="`${item.symbol}-${item.period}`"><td>{{ item.symbol }}</td><td>{{ item.period }}</td><td>{{ item.kline_count }}</td><td><v-switch v-model="item.enabled" color="success" density="compact" hide-details @update:model-value="saveStructureConfigs" /></td><td><v-btn icon="mdi-delete" size="small" variant="text" @click="removeStructureConfig(index)" /></td></tr></tbody>
+            </v-table>
+            <v-alert v-else type="info" variant="tonal">尚未配置自动分析品种和周期</v-alert>
+            <v-divider class="my-5" />
+            <div class="llm-section-head compact"><div><h3>系统结构识别参数</h3><p>规则引擎用于 Pivot、趋势线、箱体和突破确认。参数修改后，下次行情请求立即使用。</p></div><v-btn color="primary" :loading="structureEngineSaving" @click="saveStructureEngineConfig">保存参数</v-btn></div>
+            <v-row class="mt-2">
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pivot_legs" type="number" min="2" max="12" label="小级别 Pivot 腿数" hint="左右各观察几根K线" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.medium_pivot_legs" type="number" min="3" max="30" label="中级别 Pivot 腿数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.large_pivot_legs" type="number" min="5" max="60" label="大级别 Pivot 腿数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.min_reversal_atr" type="number" min="0.1" max="5" step="0.1" label="最小反转幅度（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.break_confirm_bars" type="number" min="1" max="10" label="突破收盘确认根数" hint="连续收盘站上/跌破才确认" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.range_touch_tolerance" type="number" min="0.0001" max="0.05" step="0.0001" label="箱体触碰容差" hint="比例，例如 0.003 = 0.3%" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.range_min_touches" type="number" min="1" max="10" label="箱体最少触碰次数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.range_max_atr" type="number" min="1" max="30" step="0.5" label="箱体最大宽度（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.min_segment_bars" type="number" min="5" max="100" label="结构段最少K线数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trendline_touch_atr" type="number" min="0.1" max="3" step="0.1" label="趋势线触碰容差（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trendline_min_touches" type="number" min="2" max="10" label="趋势线最少触碰次数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trendline_min_bars" type="number" min="10" max="200" label="趋势线最少跨度（K线）" density="compact" variant="outlined" /></v-col>
+            </v-row>
+            <div class="llm-section-head compact mt-4"><div><h3>品种 / 周期专属覆盖</h3><p>专属参数优先于全局参数；未配置的字段继续使用全局值。</p></div></div>
+            <div class="d-flex flex-wrap ga-2 align-center">
+              <v-select v-model="structureProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:220px" />
+              <v-select v-model="structureProfileDraft.period" :items="['M1','M5','M15','H1','H4']" label="周期" density="compact" variant="outlined" hide-details style="max-width:150px" />
+              <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureProfile">保存当前参数为专属配置</v-btn>
+            </div>
+            <v-chip v-for="item in structureProfiles" :key="`${item.symbol}-${item.period}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureProfile(item)">{{ item.symbol }} · {{ item.period }}</v-chip>
+          </v-card-text>
+        </v-card>
       </v-col>
     </v-row>
 
@@ -211,7 +259,7 @@
         </v-card-title>
         <v-card-text>
           <v-alert type="info" variant="tonal" class="mb-4">
-            模拟运行会绑定当前策略配置。包含 AI、转折点或整数点位信号源的策略可以跳过回测，直接进入模拟观察；其他策略仍需满足回测准入。
+            模拟运行会绑定当前策略配置。包含 AI、转折点、整数点位或多周期趋势入场信号源的策略可以跳过回测，直接进入模拟观察；其他策略仍需满足回测准入。
           </v-alert>
           <v-select
             v-model="paperDeployAccountId"
@@ -953,7 +1001,7 @@
             当前配置：{{ sourceMetaFor(newSignalSource.source).label }} · {{ newSignalSource.source === 'key_level' ? '全周期' : newSignalSource.period || '未选择周期' }}
           </v-alert>
           <v-alert type="info" variant="tonal" density="compact" class="mb-4">
-            关键点位信号与 AI 入场、转折点、均线交叉、已验证 Alpha 互斥：策略中一旦存在关键点位，就不能再添加其他信号；存在其他信号时，也不能添加关键点位。
+            关键点位信号与 AI 入场、转折点、均线交叉、已验证 Alpha、多周期趋势入场互斥：策略中一旦存在关键点位，就不能再添加其他信号；存在其他信号时，也不能添加关键点位。
           </v-alert>
           <v-alert v-if="aiSignalOptionsLoading" type="info" variant="tonal" density="compact" class="mb-4">
             正在加载 AI 模型与共享 Alpha 选项，弹窗可先配置基础参数。
@@ -1060,6 +1108,20 @@
               <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.cooldown_seconds" label="信号冷却（秒）" type="number" min="0"></v-text-field></v-col>
               <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_confidence" label="最低置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
               <v-col cols="12" class="text-caption text-medium-emphasis">交叉先生成潜在信号；方向一致且置信度达标后才触发入场，触发后失效，反向交叉会刷新方向。</v-col>
+            </v-row>
+          </template>
+
+          <template v-else-if="newSignalSource.source === 'multi_timeframe'">
+            <v-row dense class="mt-3">
+              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">大周期只决定趋势或箱体方向，小周期负责寻找回调、边界反转或突破回踩入场；趋势与入场必须使用同一品种。</v-alert></v-col>
+              <v-col cols="12" sm="6"><v-select v-model="newSignalSource.params.trend_period" :items="signalPeriods" label="趋势周期"></v-select></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.trend_kline_count" label="趋势K线数量" type="number" min="20" max="288" suffix="根"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-select v-model="newSignalSource.params.entry_period" :items="signalPeriods" label="入场周期"></v-select></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.entry_kline_count" label="入场K线数量" type="number" min="20" max="288" suffix="根"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-select v-model="newSignalSource.params.entry_mode" :items="[{title:'趋势回调',value:'pullback'},{title:'箱体边界反转',value:'range_reversal'},{title:'突破回踩',value:'breakout_retest'}]" label="入场方式"></v-select></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.proximity_threshold_percent" label="入场区域容差" type="number" min="0" max="5" step="0.01" suffix="%"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_trend_confidence" label="最低趋势置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.risk_reward_ratio" label="建议盈亏比" type="number" min="1" max="10" step="0.1"></v-text-field></v-col>
             </v-row>
           </template>
 
@@ -1253,6 +1315,12 @@ export default {
     const pageTitle = computed(() => isStrategyPage.value ? '策略管理' : '用户配置')
     const settingsTab = ref('account')
     const llmWorkspaceTab = ref('providers')
+    const structureConfigs = ref([])
+    const structureDraft = ref({ symbol: '', period: 'M5', kline_count: 288 })
+    const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_confirm_bars: 2, range_touch_tolerance: 0.003, range_min_touches: 2, range_max_atr: 6, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18 })
+    const structureEngineSaving = ref(false)
+    const structureProfiles = ref([])
+    const structureProfileDraft = ref({ symbol: '', period: 'M5' })
 
     // 交易配置
     const tradeConfig = ref({
@@ -1525,14 +1593,54 @@ export default {
         await Promise.all([
           loadUserQuotas(), loadInvitations(), loadEmailConfig(),
           loadLLMConfig(), loadLLMAccessRequests(), loadAdminStrategies(),
-          loadInstrumentMappings(), loadInstrumentObservations(), loadInstrumentPriceObservations()
+          loadInstrumentMappings(), loadInstrumentObservations(), loadInstrumentPriceObservations(),
+          loadTradeConfig(), loadSymbols()
         ])
+        const structureData = await marketAPI.getStructureAnalysisConfig()
+        structureConfigs.value = structureData.items || []
+        const engineData = await marketAPI.getMarketStructureConfig()
+        structureEngineConfig.value = { ...structureEngineConfig.value, ...(engineData.config || {}) }
+        structureProfiles.value = Array.isArray(engineData.profiles) ? engineData.profiles : []
+        if (!structureDraft.value.symbol && symbols.value.length) structureDraft.value.symbol = symbols.value[0]
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
       } finally {
         quotaSaving.value = null
       }
     }
+
+    const saveStructureConfigs = async () => {
+      const data = await marketAPI.saveStructureAnalysisConfig(structureConfigs.value)
+      structureConfigs.value = data.items || structureConfigs.value
+    }
+    const saveStructureEngineConfig = async () => {
+      structureEngineSaving.value = true
+      try {
+        const data = await marketAPI.saveMarketStructureConfig({ ...structureEngineConfig.value, profiles: structureProfiles.value })
+        structureEngineConfig.value = { ...structureEngineConfig.value, ...(data.config || {}) }
+        successMessage.value = '系统结构识别参数已保存'
+        showSuccess.value = true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '保存结构识别参数失败'
+        showError.value = true
+      } finally { structureEngineSaving.value = false }
+    }
+    const saveStructureProfile = async () => {
+      if (!structureProfileDraft.value.symbol) return
+      const item = { symbol: structureProfileDraft.value.symbol, period: structureProfileDraft.value.period, ...structureEngineConfig.value }
+      const index = structureProfiles.value.findIndex(x => x.symbol === item.symbol && x.period === item.period)
+      if (index >= 0) structureProfiles.value.splice(index, 1, item); else structureProfiles.value.push(item)
+      await saveStructureEngineConfig()
+    }
+    const removeStructureProfile = async item => { structureProfiles.value = structureProfiles.value.filter(x => !(x.symbol === item.symbol && x.period === item.period)); await saveStructureEngineConfig() }
+    const addStructureConfig = async () => {
+      if (!structureDraft.value.symbol) return
+      const existing = structureConfigs.value.find(item => item.symbol === structureDraft.value.symbol && item.period === structureDraft.value.period)
+      if (existing) Object.assign(existing, { enabled: true, kline_count: structureDraft.value.kline_count })
+      else structureConfigs.value.push({ ...structureDraft.value, enabled: true })
+      await saveStructureConfigs()
+    }
+    const removeStructureConfig = async index => { structureConfigs.value.splice(index, 1); await saveStructureConfigs() }
 
     const loadInstrumentMappings = async () => {
       if (!isAdmin.value) return
@@ -2159,7 +2267,8 @@ export default {
       ai_entry: { label: 'AI 入场信号', color: 'info', icon: 'mdi-brain' },
       pivot: { label: '转折点信号', color: 'primary', icon: 'mdi-chart-timeline-variant-shimmer' },
       moving_average: { label: '均线交叉信号', color: 'orange-darken-2', icon: 'mdi-chart-bell-curve' },
-      alpha_factor: { label: '已验证 Alpha', color: 'teal-darken-1', icon: 'mdi-atom-variant' }
+      alpha_factor: { label: '已验证 Alpha', color: 'teal-darken-1', icon: 'mdi-atom-variant' },
+      multi_timeframe: { label: '多周期趋势入场', color: 'deep-purple', icon: 'mdi-chart-timeline-variant' }
     }
     const sourceMetaFor = (source) => signalSourceMeta[source] || {
       label: source || '未知信号源',
@@ -2391,6 +2500,8 @@ export default {
                   alpha_id: '', alpha_version: 1, alpha_name: '',
                   alpha_snapshot: {}, min_confidence: 60, cooldown_seconds: 180
                 }
+              : source === 'multi_timeframe'
+                ? { trend_period: 'M15', trend_kline_count: 70, entry_period: period, entry_kline_count: 40, confirmation_period: '', entry_mode: 'pullback', proximity_threshold: 0.0008, proximity_threshold_percent: 0.08, min_trend_confidence: 60, risk_reward_ratio: 2, cooldown_seconds: 180 }
               : {
               ai_signal_source_id: '', ai_signal_source_owner_id: '',
               min_confidence: 70, entry_threshold_percent: 0.08
@@ -3060,6 +3171,10 @@ export default {
         delete clean.params.levels_text
       }
       if (clean.source === 'pivot') serializePivotPercentParams(clean.params)
+      if (clean.source === 'multi_timeframe' && clean.params.proximity_threshold_percent !== undefined) {
+        clean.params.proximity_threshold = Math.max(0, Math.min(5, Number(clean.params.proximity_threshold_percent || 0))) / 100
+        delete clean.params.proximity_threshold_percent
+      }
       return clean
     })
 
@@ -3211,6 +3326,10 @@ export default {
       if (nextSource.source === 'pivot') {
         serializePivotPercentParams(nextSource.params)
       }
+      if (nextSource.source === 'multi_timeframe') {
+        nextSource.params.proximity_threshold = Math.max(0, Math.min(5, Number(nextSource.params.proximity_threshold_percent || 0))) / 100
+        delete nextSource.params.proximity_threshold_percent
+      }
       const sources = ensureSignalSources(signalSourceTarget.value)
       if (signalSourceEditMode.value === 'edit') {
         const index = sources.findIndex(
@@ -3325,6 +3444,18 @@ export default {
       pageTitle,
       settingsTab,
       llmWorkspaceTab,
+      structureConfigs,
+      structureDraft,
+      structureEngineConfig,
+      structureEngineSaving,
+      saveStructureEngineConfig,
+      structureProfiles,
+      structureProfileDraft,
+      saveStructureProfile,
+      removeStructureProfile,
+      addStructureConfig,
+      saveStructureConfigs,
+      removeStructureConfig,
       tradeConfig,
       newSymbol,
       newVolume,
@@ -3332,6 +3463,7 @@ export default {
       newKeyLevels,
       newKeyLevelThreshold,
       availableSymbols,
+      symbols,
       showError,
       errorMessage,
       showSuccess,

@@ -1002,11 +1002,13 @@ function openStrategyManager(account) {
 }
 
 async function bindAccountStrategy() {
+  const preflight = await accountAPI.deploymentPreflight(selectedAccount.value.account_id, accountStrategyId.value)
+  if (preflight.warnings?.length && !confirm(`部署风险提醒：\n\n${preflight.warnings.join('\n\n')}\n\n仍然部署吗？`)) return
   bindingStrategy.value = true
   try {
     const data = await accountAPI.deployStrategy(selectedAccount.value.account_id, accountStrategyId.value)
     messageType.value = 'success'
-    message.value = data.message
+    message.value = [data.message, ...(data.warnings || [])].join('；')
     accountStrategyId.value = ''
     await refreshSelectedAccount()
   } catch (error) {
@@ -1137,13 +1139,15 @@ async function refreshPaperDetail() {
 }
 
 async function deploySelectedStrategy() {
+  const preflight = await accountAPI.deploymentPreflight(paperDetail.value.account.account_id, selectedStrategyId.value)
+  if (preflight.warnings?.length && !confirm(`部署风险提醒：\n\n${preflight.warnings.join('\n\n')}\n\n仍然部署吗？`)) return
   deploying.value = true
   try {
     const data = await accountAPI.deployStrategy(
       paperDetail.value.account.account_id, selectedStrategyId.value
     )
     messageType.value = 'success'
-    message.value = data.message
+    message.value = [data.message, ...(data.warnings || [])].join('；')
     selectedStrategyId.value = ''
     await refreshPaperDetail()
   } catch (error) {

@@ -164,6 +164,14 @@
             <v-col cols="6" md="3"><v-text-field v-model.number="form.config.min_stop_percent" label="最小止损比例" suffix="%" hint="默认 0.1%，按入场价计算" persistent-hint type="number" min="0" step="0.01" /></v-col>
             <v-col cols="6" md="3"><v-text-field v-model.number="form.config.max_stop_percent" label="最大止损比例" suffix="%" hint="默认 0.7%，按入场价计算" persistent-hint type="number" min="0" step="0.01" /></v-col>
           </v-row>
+          <v-divider class="my-5" />
+          <div class="section-title">连续亏损熔断</div>
+          <v-alert type="info" variant="tonal" density="compact" class="mb-3">按“策略部署 × 交易账户”统计完整平仓后的净盈亏。触发后只禁止新开仓和新挂单；已有仓位的止损、止盈和风控平仓不受影响。</v-alert>
+          <v-row align="center">
+            <v-col cols="12" md="4"><v-switch v-model="form.config.loss_streak_circuit_breaker_enabled" color="error" label="启用连续亏损熔断" /></v-col>
+            <v-col cols="6" md="4"><v-text-field v-model.number="form.config.loss_streak_limit" label="连续亏损次数" type="number" min="1" max="20" :disabled="!form.config.loss_streak_circuit_breaker_enabled" /></v-col>
+            <v-col cols="6" md="4"><v-text-field v-model.number="form.config.loss_streak_pause_minutes" label="暂停时长" suffix="分钟" type="number" min="1" max="1440" :disabled="!form.config.loss_streak_circuit_breaker_enabled" /></v-col>
+          </v-row>
           <v-divider class="my-6" />
           <div class="d-flex align-center ga-3"><div><div class="section-title">场景规则</div><div class="text-caption text-medium-emphasis">按具体Setup、通用场景族或信号来源覆盖默认规则；未命中时继续使用上面的默认方案。</div></div><v-spacer/><v-btn color="primary" variant="tonal" prepend-icon="mdi-plus" @click="addSetupProfile">新增场景规则</v-btn></div>
           <v-alert v-if="!form.config.setup_profiles?.length" type="info" variant="tonal" density="compact" class="mt-4">当前没有场景覆盖，所有信号使用默认持仓管理规则。</v-alert>
@@ -269,6 +277,7 @@ const defaultConfig = () => ({
   initial_take_profit_rules: [{ type: 'risk_reward', value: 2 }],
   management_rules: [], min_risk_reward: 1, min_stop_percent: 0.1, max_stop_percent: 0.7,
   min_stop_distance: 0, max_stop_distance: 0,
+  loss_streak_circuit_breaker_enabled: true, loss_streak_limit: 3, loss_streak_pause_minutes: 10,
   setup_profiles: [],
 })
 const form = reactive({ policy_id: '', name: '', enabled: true, is_shared: false, config: defaultConfig() })

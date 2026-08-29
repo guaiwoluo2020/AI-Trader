@@ -57,6 +57,14 @@ from user_quotas import UserQuotaService
 from configuration_impact import ConfigurationImpactService
 from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
+from market.services.structure_analysis_service import (
+    list_configs as list_structure_configs,
+    save_configs as save_structure_configs,
+    get_results as get_structure_results,
+    trigger_if_configured as trigger_structure_analysis,
+)
+from market.services.market_structure_service import analyze as analyze_market_structure
+from market.services.market_structure_engine_v2 import analyze_incremental as analyze_market_structure_v2, restore_snapshot as restore_market_structure_snapshot, DEFAULT_CONFIG as MARKET_STRUCTURE_DEFAULT_CONFIG
 
 
 def _historical_kline_timestamp(value):
@@ -713,6 +721,7 @@ def create_market_routes(
                 all_klines = kline_service.get_all_kline_objects(symbol, period)
                 if all_klines:
                     pivot_service.update_pivots(symbol, period, all_klines)
+                    trigger_structure_analysis(engine, symbol, period, all_klines)
 
             cursor_row = get_storage().fetchone(
                 """
@@ -778,6 +787,9 @@ def create_market_routes(
                     all_klines = kline_service.get_all_kline_objects(symbol, period)
                     if all_klines:
                         pivot_service.update_pivots(symbol, period, all_klines)
+                        # LLM structure analysis is explicitly configured per symbol/period.
+                        # It is queued asynchronously and never blocks the EA upload response.
+                        trigger_structure_analysis(engine, symbol, period, all_klines)
 
             return {
                 "status": "ok",
@@ -791,6 +803,18 @@ def create_market_routes(
                 status_code=500,
                 content={"status": "error", "message": str(e)}
             )
+
+    @protected_router.get("/admin/llm/structure-analysis/config")
+    async def get_structure_analysis_config(user: AuthUser = Depends(require_admin)):
+        return {"status": "ok", "items": list_structure_configs()}
+
+    @protected_router.put("/admin/llm/structure-analysis/config")
+    async def put_structure_analysis_config(payload: Dict, user: AuthUser = Depends(require_admin)):
+        return {"status": "ok", "items": save_structure_configs(payload.get("items", []))}
+
+    @protected_router.get("/admin/llm/structure-analysis/results")
+    async def get_structure_analysis_results(user: AuthUser = Depends(require_auth)):
+        return {"status": "ok", "items": get_structure_results()}
 
     # ==================== 查询接口 ====================
 
@@ -823,6 +847,22 @@ def create_market_routes(
                         symbol = actual_symbol
                         break
 
+        # 结构分析不绑定某个交易账户；当主账户尚未接收该品种行情时，
+        # 从用户其他在线 MT5 账户读取同名/后缀匹配的行情，避免页面误显示为空。
+        if not klines:
+            for account in account_repo.list_for_user(user.user_id):
+                if account.account_type != "mt5" or account.status != "active":
+                    continue
+                try:
+                    candidate = engine_manager.get_engine(
+                        user.user_id, account.account_id
+                    ).kline_service.get_klines(symbol, period, count)
+                    if candidate:
+                        klines = candidate
+                        break
+                except Exception:
+                    continue
+
         return {
             "status": "ok",
             "symbol": symbol,
@@ -830,6 +870,57 @@ def create_market_routes(
             "count": len(klines),
             "data": klines
         }
+
+    @protected_router.get("/market/structure/{symbol}")
+    async def get_market_structure(symbol: str, period: str = Query("M5"), count: int = Query(600), user: AuthUser = Depends(require_auth)):
+        engine = engine_manager.get_engine_for_user(user.user_id)
+        rows = engine.kline_service.get_klines(symbol, period.upper(), min(1000, max(50, count)))
+        cfg_entity = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
+        cfg = dict(MARKET_STRUCTURE_DEFAULT_CONFIG)
+        stored = cfg_entity[-1] if cfg_entity else {}
+        cfg.update({k: v for k, v in stored.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG})
+        for profile in stored.get("profiles", []) if isinstance(stored, dict) else []:
+            if str(profile.get("symbol", "")).upper() == str(symbol).upper() and str(profile.get("period", "")).upper() == period.upper():
+                cfg.update({k: v for k, v in profile.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG})
+                break
+        snapshots = RuntimeStateRepository(user.user_id, int(getattr(engine, "account_id", 0) or 0)).list_entities("market_structure")
+        previous = next((x for x in reversed(snapshots) if str(x.get("symbol", "")).upper() == str(symbol).upper() and str(x.get("period", "")).upper() == period.upper()), None)
+        if previous:
+            restore_market_structure_snapshot(previous)
+        result = analyze_market_structure_v2(symbol, period.upper(), rows, cfg)
+        RuntimeStateRepository(user.user_id, int(getattr(engine, "account_id", 0) or 0)).upsert_entity(
+            "market_structure", f"{symbol}::{period.upper()}", result,
+            symbol=symbol, status=result.get("current_state", "undetermined"),
+        )
+        return {"status":"ok", "data": result}
+
+    @protected_router.get("/admin/market-structure/config")
+    async def get_market_structure_config(user: AuthUser = Depends(require_admin)):
+        items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
+        stored = items[-1] if items else {}
+        return {"status": "ok", "config": {**MARKET_STRUCTURE_DEFAULT_CONFIG, **{k:v for k,v in stored.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG}}, "profiles": stored.get("profiles", [])}
+
+    @protected_router.put("/admin/market-structure/config")
+    async def put_market_structure_config(payload: Dict, user: AuthUser = Depends(require_admin)):
+        cfg = dict(MARKET_STRUCTURE_DEFAULT_CONFIG)
+        for key in cfg:
+            if key in payload:
+                try: cfg[key] = max(1, float(payload[key]))
+                except (TypeError, ValueError): pass
+        cfg["pivot_legs"] = int(cfg["pivot_legs"]); cfg["break_confirm_bars"] = int(cfg["break_confirm_bars"])
+        profiles = payload.get("profiles", [])
+        normalized_profiles = []
+        for profile in profiles if isinstance(profiles, list) else []:
+            if not profile.get("symbol") or not profile.get("period"): continue
+            item = {"symbol": str(profile["symbol"]).strip(), "period": str(profile["period"]).upper()}
+            for key in MARKET_STRUCTURE_DEFAULT_CONFIG:
+                if key in profile:
+                    try: item[key] = float(profile[key])
+                    except (TypeError, ValueError): pass
+            normalized_profiles.append(item)
+        cfg["profiles"] = normalized_profiles
+        RuntimeStateRepository(0, 0).upsert_entity("market_structure_config", "default", cfg, status="active")
+        return {"status": "ok", "config": {k:v for k,v in cfg.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG}, "profiles": normalized_profiles}
 
     @protected_router.get("/market/pivots/{symbol}")
     async def get_pivots(

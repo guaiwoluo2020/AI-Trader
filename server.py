@@ -27,6 +27,7 @@ from market.services import (
     KeyLevelSignalGenerator, AIEntrySignalGenerator,
     MovingAverageSignalGenerator, AlphaFactorSignalGenerator,
     PivotSignalGenerator,
+    MultiTimeframeSignalGenerator,
 )
 from market.services import StatisticsService, PositionService, TradeHistoryService
 from market.services.strategy.transient_decision_store import transient_decision_store
@@ -233,6 +234,9 @@ class TradingServer:
         )
         self._signal_service.register_generator("pivot", pivot_generator)
 
+        multi_timeframe_generator = MultiTimeframeSignalGenerator(self.kline_store)
+        self._signal_service.register_generator("multi_timeframe", multi_timeframe_generator)
+
         # 关键点位信号生成器
         key_level_generator = KeyLevelSignalGenerator()
         self._signal_service.register_generator("key_level", key_level_generator)
@@ -427,6 +431,55 @@ class TradingServer:
                         "plan_instance_id": plan_instance_id,
                         "reason": "本次AI分析的该交易建议已在此实盘账户触发过，不重复开仓",
                     }
+
+        policy = PositionManagementPolicyRepository().get_for_strategy(
+            int(self.user_id), strategy
+        )
+        config = policy.config if policy is not None else {}
+        if not bool(config.get("loss_streak_circuit_breaker_enabled", True)):
+            return {"allowed": True, "loss_streak": 0, "scope": "deployment"}
+        limit = max(1, int(config.get("loss_streak_limit", 3) or 3))
+        pause_seconds = max(60, int(config.get("loss_streak_pause_minutes", 120) or 120) * 60)
+        # MT5 exits are grouped by position id so partial closes never count as
+        # independent losses. Attribution keeps strategies on the same account
+        # independent from each other.
+        candidates = storage.fetchall(
+            "SELECT profit, swap, commission, received_at, mt5_position_id, position_attribution_json "
+            "FROM live_trade_deals WHERE user_id = ? AND account_id = ? AND entry_type IN (1, 2, 3) "
+            "ORDER BY received_at DESC, id DESC LIMIT 1000",
+            (int(self.user_id), int(self.account_id)),
+        )
+        grouped = {}
+        for row in candidates:
+            try:
+                attribution = json.loads(row.get("position_attribution_json") or "{}")
+            except (TypeError, ValueError):
+                attribution = {}
+            if str(attribution.get("strategy_id") or "") != strategy.strategy_id:
+                continue
+            position_id = str(row.get("mt5_position_id") or "")
+            if not position_id:
+                continue
+            item = grouped.setdefault(position_id, {"net_profit": 0.0, "closed_at": 0})
+            item["net_profit"] += sum(float(row.get(key) or 0) for key in ("profit", "swap", "commission"))
+            item["closed_at"] = max(item["closed_at"], int(row.get("received_at") or 0))
+        rows = sorted(grouped.values(), key=lambda item: item["closed_at"], reverse=True)
+        streak = 0
+        for row in rows:
+            if float(row["net_profit"]) < 0:
+                streak += 1
+            else:
+                break
+        if streak < limit:
+            return {"allowed": True, "loss_streak": streak, "scope": "deployment"}
+        release_at = int(rows[0]["closed_at"] or 0) + pause_seconds
+        if int(time.time()) < release_at:
+            return {
+                "allowed": False, "loss_streak": streak, "scope": "deployment",
+                "release_at": release_at,
+                "reason": f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}",
+            }
+        return {"allowed": True, "loss_streak": streak, "scope": "deployment", "cooldown_completed": True}
 
         candidates = storage.fetchall(
             """

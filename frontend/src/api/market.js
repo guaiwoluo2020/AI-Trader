@@ -269,6 +269,18 @@ export const marketAPI = {
     })
     return response.data
   },
+  async getMarketStructure(symbol, period = 'M5', count = 600) {
+    const response = await api.get(`/market/structure/${encodeURIComponent(symbol)}`, { params: { period, count } })
+    return response.data
+  },
+  async getMarketStructureConfig() {
+    const response = await api.get('/admin/market-structure/config')
+    return response.data
+  },
+  async saveMarketStructureConfig(config) {
+    const response = await api.put('/admin/market-structure/config', config)
+    return response.data
+  },
 
   // 获取转折点数据
   async getPivots(symbol, period = null, direction = null, count = 50) {
@@ -619,6 +631,21 @@ export const marketAPI = {
     const response = await api.post('/llm/trigger', null, {
       params: accountId ? { account_id: accountId } : {},
     })
+    return response.data
+  },
+
+  async getStructureAnalysisConfig() {
+    const response = await api.get('/admin/llm/structure-analysis/config')
+    return response.data
+  },
+
+  async saveStructureAnalysisConfig(items) {
+    const response = await api.put('/admin/llm/structure-analysis/config', { items })
+    return response.data
+  },
+
+  async getStructureAnalysisResults() {
+    const response = await api.get('/admin/llm/structure-analysis/results')
     return response.data
   },
 

@@ -19,6 +19,7 @@ import BacktestTasks from '../views/BacktestTasks.vue'
 import Accounts from '../views/Accounts.vue'
 import PositionManagement from '../views/PositionManagement.vue'
 import AlphaResearch from '../views/AlphaResearch.vue'
+import StructureAnalysis from '../views/StructureAnalysis.vue'
 import { authState } from '../auth'
 
 const routes = [
@@ -74,6 +75,12 @@ const routes = [
     path: '/market',
     name: 'Market',
     component: Market,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/market-structure',
+    name: 'StructureAnalysis',
+    component: StructureAnalysis,
     meta: { requiresAuth: true }
   },
   {

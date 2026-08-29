@@ -5,6 +5,7 @@ EA 相关的接口路由
 """
 
 import random
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional, List, Dict
 from auth import AuthUser, require_auth
@@ -22,6 +23,8 @@ from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
 from routes_news import _normalize_calendar, _require_items, _validate_day
 from market_event_repository import MarketEventRepository
+
+logger = logging.getLogger(__name__)
 
 
 # 统计数据日志打印概率 (5%)
@@ -276,11 +279,23 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             day = _validate_day(payload.get("date"))
             source = str(payload.get("source") or "mt5_calendar").strip()
             events = _normalize_calendar(day, _require_items(payload, "events"))
-            count = MarketEventRepository().replace_calendar_day(day, events, source)
+            repository = MarketEventRepository()
+            count = repository.replace_calendar_day(day, events, source)
+            key_events = [
+                {**event, "title": event["name"], "category": "economic_calendar"}
+                for event in events
+                if int(event.get("importance", 0)) >= 2
+            ]
+            key_count = repository.replace_key_event_day(day, key_events, source)
+            logger.info(
+                "EA calendar received: user_id=%s account_id=%s date=%s events=%s key_events=%s source=%s",
+                identity.user_id, identity.account_id, day, count, key_count, source,
+            )
             return {
                 "status": "ok",
                 "date": day,
                 "count": count,
+                "key_event_count": key_count,
                 "scope": "global",
                 "publisher_user_id": identity.user_id,
             }
