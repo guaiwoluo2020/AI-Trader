@@ -6,7 +6,39 @@
     </section>
     <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
     <v-alert v-if="structureResult" type="info" variant="tonal" density="compact" class="mb-4"><strong>结构层级说明：</strong>背景主结构为 {{ stateLabel(structureResult.major_state || structureResult.current_state) }}；当前局部形态为 {{ localStateLabel(structureResult) }}。两者不一致时，表示大背景中的局部整理或回撤。</v-alert>
-    <v-card class="mb-4 plan-card"><v-card-title>结构交易计划</v-card-title><v-card-subtitle>行情层生成；策略执行中心会按策略配置筛选，并由 Tick 判断是否触发。</v-card-subtitle><v-card-text><div v-if="tradePlans.length" class="plan-grid"><article v-for="plan in tradePlans" :key="`${plan.plan_id}-${plan.strategy_id || ''}`"><div class="card-head"><v-chip size="small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><span>{{ plan.status==='active'?'等待价格':'等待确认' }}</span></div><div class="plan-values"><span>入场 {{ Number(plan.entry_price||0).toFixed(2) }}</span><span>止损 {{ Number(plan.stop_loss||0).toFixed(2) }}</span><span>止盈 {{ Number(plan.take_profit||0).toFixed(2) }}</span></div><p>{{ plan.reason || '结构条件尚未满足' }}</p><small>产生于 {{ plan.generated_at ? new Date(plan.generated_at*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) : '--' }} · 有效至 {{ plan.expires_at ? new Date(plan.expires_at*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) : '--' }}</small></article></div><div v-else class="empty">当前没有来自运行策略的结构交易计划</div></v-card-text></v-card>
+    <v-card class="mb-4 plan-card">
+      <v-card-title>结构交易计划</v-card-title>
+      <v-card-subtitle>行情层统一生成；每个匹配部署独立订阅，并按“计划 + 部署”最多消费一次。</v-card-subtitle>
+      <v-card-text>
+        <div v-if="tradePlans.length" class="plan-grid">
+          <article v-for="plan in tradePlans" :key="plan.plan_id">
+            <div class="card-head"><v-chip size="small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><span>{{ plan.status==='active'?'等待价格':'等待确认' }}</span></div>
+            <div class="plan-values"><span>入场 {{ Number(plan.entry_price||0).toFixed(2) }}</span><span>止损 {{ Number(plan.stop_loss||0).toFixed(2) }}</span><span>止盈 {{ Number(plan.take_profit||0).toFixed(2) }}</span></div>
+            <p>{{ plan.reason || '结构条件尚未满足' }}</p>
+            <small>产生于 {{ formatPlanTime(plan.generated_at) }} · 有效至 {{ formatPlanTime(plan.expires_at) }}</small>
+            <div class="subscription-summary">
+              <v-chip size="x-small" variant="tonal">订阅策略 {{ plan.subscription_summary?.strategy_count || 0 }}</v-chip>
+              <v-chip size="x-small" color="primary" variant="tonal">运行部署 {{ plan.subscription_summary?.deployment_count || 0 }}</v-chip>
+              <v-chip size="x-small" color="success" variant="tonal">已消费 {{ plan.subscription_summary?.consumed_count || 0 }}</v-chip>
+              <v-chip size="x-small" color="warning" variant="tonal">待消费 {{ plan.subscription_summary?.unconsumed_count || 0 }}</v-chip>
+            </div>
+            <v-expansion-panels v-if="plan.subscriptions?.length" variant="accordion" class="subscription-panel">
+              <v-expansion-panel>
+                <v-expansion-panel-title>查看 {{ plan.subscriptions.length }} 个部署的消费明细</v-expansion-panel-title>
+                <v-expansion-panel-text>
+                  <div v-for="item in plan.subscriptions" :key="item.deployment_id" class="subscription-row">
+                    <div><strong>{{ item.strategy_name }}</strong><small>{{ item.account_name }} · {{ modeLabel(item.execution_mode) }}</small></div>
+                    <div class="subscription-status"><v-chip size="x-small" :color="executionColor(item.execution_status)" variant="tonal">{{ executionLabel(item.execution_status) }}</v-chip><small v-if="item.order_id">订单 {{ item.order_id }}</small><small v-if="item.execution_reason">{{ item.execution_reason }}</small></div>
+                  </div>
+                </v-expansion-panel-text>
+              </v-expansion-panel>
+            </v-expansion-panels>
+            <small v-else class="no-subscriber">暂无正在运行的匹配部署；计划仍保留在行情层。</small>
+          </article>
+        </div>
+        <div v-else class="empty">当前没有结构交易计划</div>
+      </v-card-text>
+    </v-card>
     <v-card v-if="bars.length" class="chart-card mb-4"><v-card-title>K线与结构段</v-card-title><v-card-text><div ref="chartRef" class="chart" style="height:480px;width:100%"></div><div class="structure-strip-title">结构时间轴（按 K 线数量）</div><div class="structure-strip"><div v-for="(item,index) in segments" :key="`strip-${item.id}`" class="structure-strip-segment" :style="stripStyle(item,index)" :title="`${labels[item.type]||item.type} · ${item.start} → ${item.end} · 强度 ${item.strength ?? item.confidence ?? 0}%`"><span>{{ labels[item.type]||item.type }}</span></div></div><div class="legend"><span v-for="type in ['up','sideways','triangle','down','transition']" :key="type"><i :style="{background:legendColors[type]}"></i>{{ labels[type] }}</span></div></v-card-text></v-card>
     <v-row v-if="structureResult">
       <v-col cols="12" md="4"><v-card class="summary"><v-card-text><small>主结构状态</small><h2>{{ stateLabel(structureResult.current_state) }}</h2><div class="stats flex-wrap"><span>内部：{{ stateLabel(structureResult.internal_state) }}</span><span>大级别：{{ stateLabel(structureResult.external_state) }}</span><span>阶段：{{ detailLabel(structureResult.state_detail) }}</span><span>ATR {{ Number(structureResult.atr || 0).toFixed(2) }}</span></div><v-alert v-if="structureResult.active_candidate" type="warning" density="compact" variant="tonal" class="mt-3">正在等待{{ structureResult.active_candidate.direction === 'up' ? '向上' : '向下' }}反转确认；K线图以橙色虚线显示候选段</v-alert><v-alert v-if="structureResult.range?.status === 'failed_breakout'" type="info" density="compact" variant="tonal" class="mt-2">价格突破后重新收回区间，当前判定为假突破并恢复原区间</v-alert></v-card-text></v-card></v-col>
@@ -58,6 +90,10 @@ function build(rows){
   return merged.slice(-5).map((s,i,arr)=>{const part=rows.slice(s.startIndex,s.endIndex+1);return {...s,id:`s-${s.startIndex}`,bars:part.length,start:stamp(part[0]),end:stamp(part.at(-1)),support:Math.min(...part.map(x=>Number(x.low??x.low_price??closeOf(x)))),resistance:Math.max(...part.map(x=>Number(x.high??x.high_price??closeOf(x)))),confidence:s.type==='transition'?50:70,status:i===arr.length-1?'当前已确认':'已结束',reason:s.type==='up'?'高低点和收盘结构持续抬升（允许中途震荡/回撤）':s.type==='down'?'高低点和收盘结构持续下移（允许中途震荡/反弹）':s.type==='sideways'?'价格在区间内反复运行':'趋势证据发生冲突，等待确认'}})
 }
 const current=computed(()=>segments.value.at(-1)); async function loadTradePlans(){try{const response=await marketAPI.getStructureTradePlans(symbol.value,period.value);tradePlans.value=Array.isArray(response?.plans)?response.plans:[]}catch(e){tradePlans.value=[]}}
+const formatPlanTime=value=>value?new Date(Number(value)*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}):'--'
+const modeLabel=value=>value==='live'?'实盘':'模拟盘'
+const executionLabel=value=>({unconsumed:'待消费',claimed:'已领取',triggered:'已触发',ordered:'已下单',filled:'已成交',rejected:'已拒绝',expired:'已过期',canceled:'已取消',released:'已释放'}[value]||value||'待消费')
+const executionColor=value=>({unconsumed:'warning',claimed:'info',triggered:'info',ordered:'primary',filled:'success',rejected:'error',expired:'grey',canceled:'grey',released:'secondary'}[value]||'grey')
 const hierarchyLabels={internal:'Internal 内部结构',swing:'Swing 主结构',external:'External 外部结构'}
 const phaseLabel=(value,bias)=>{if(value==='reversal_confirmed')return bias==='down'?'反转确认后的下跌延续':bias==='up'?'反转确认后的上涨延续':'反转已确认';return {forming:'形成中',continuation:'延续',pullback:'回撤中',reversal_candidate:'反转候选'}[value]||value||'--'}
 const patternLabel=value=>({range:'箱体震荡',converging_triangle:'收敛三角形',diverging_triangle:'扩散三角形',ascending_triangle:'上升三角形',descending_triangle:'下降三角形',trendline:'趋势线'}[value]||value||'局部形态')
@@ -111,4 +147,19 @@ watch(period,()=>{load();loadTradePlans()});watch(symbol,()=>{load();loadTradePl
 .hierarchy-item small{display:block;color:#71837b;margin-top:3px}
 .pattern-list{grid-template-columns:repeat(2,1fr)}
 @media(max-width:850px){.hierarchy-grid,.pattern-list{grid-template-columns:1fr}}
+</style>
+<style scoped>
+.plan-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.plan-grid>article{padding:16px;border:1px solid #dbe8e1;border-radius:14px;background:#fbfdfb;min-width:0}
+.plan-grid p{margin:10px 0;color:#526860;font-size:.88rem}
+.plan-grid>article>small{color:#71837b}
+.plan-values{display:flex;gap:16px;flex-wrap:wrap;color:#304e44;font-size:.86rem;font-weight:600}
+.subscription-summary{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px dashed #d7e3dd}
+.subscription-panel{margin-top:10px}
+.subscription-row{display:flex;justify-content:space-between;gap:14px;padding:10px 0;border-bottom:1px solid #edf2ef}
+.subscription-row:last-child{border-bottom:0}
+.subscription-row small,.subscription-status small{display:block;color:#71837b;font-size:.75rem;margin-top:3px}
+.subscription-status{text-align:right;max-width:55%}
+.no-subscriber{display:block;margin-top:12px;color:#8a9a93}
+@media(max-width:900px){.plan-grid{grid-template-columns:1fr}}
 </style>

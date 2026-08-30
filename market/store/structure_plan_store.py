@@ -158,9 +158,92 @@ class StructureTradePlanRepository:
         return self.storage.fetchone(
             "SELECT execution_id FROM structure_plan_executions "
             "WHERE user_id=? AND account_id=? AND deployment_id=? AND plan_id=? "
-            "AND status IN ('triggered','ordered','filled') LIMIT 1",
+            "AND status<>'released' LIMIT 1",
             (user_id, account_id, deployment_id, plan_id),
         ) is not None
+
+    @staticmethod
+    def _execution_id(
+        user_id: int, account_id: int, deployment_id: str,
+        plan_id: str, plan_group_id: str = "",
+    ) -> str:
+        # Plans in one group are mutually exclusive alternatives.  Using the
+        # group as the deterministic primary-key scope makes concurrent Tick
+        # workers race on one database key, so only one direction can win for
+        # a deployment even when both become triggerable at nearly the same
+        # instant.
+        claim_scope = str(plan_group_id or plan_id)
+        return uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{user_id}:{account_id}:{deployment_id}:{claim_scope}",
+        ).hex[:32]
+
+    def claim_execution(
+        self, user_id: int, account_id: int, deployment_id: str,
+        strategy_id: str, plan_id: str, plan_group_id: str = "",
+        reason: str = "", payload: Optional[Dict] = None,
+    ) -> bool:
+        """Atomically claim one public plan for one deployment.
+
+        ``INSERT ... DO NOTHING`` is translated to ``INSERT IGNORE`` by the
+        MySQL adapter.  A random token in the row lets us distinguish our own
+        successful insert from a pre-existing claim without relying on a
+        driver-specific rowcount.
+        """
+        now = int(time.time())
+        claim_token = uuid.uuid4().hex
+        claim_payload = dict(payload or {})
+        claim_payload["claim_token"] = claim_token
+        execution_id = self._execution_id(
+            user_id, account_id, deployment_id, plan_id, plan_group_id,
+        )
+        claimed_sibling = self.storage.fetchone(
+            "SELECT plan_id FROM structure_plan_executions "
+            "WHERE execution_id=? LIMIT 1",
+            (execution_id,),
+        )
+        if claimed_sibling and str(claimed_sibling["plan_id"] or "") != str(plan_id):
+            return False
+        self.storage.execute(
+            """
+            INSERT INTO structure_plan_executions(
+                execution_id,user_id,account_id,deployment_id,strategy_id,
+                plan_id,plan_group_id,status,order_id,reason,payload_json,
+                created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                execution_id, user_id, account_id, deployment_id, strategy_id,
+                plan_id, plan_group_id, "claimed", "", reason,
+                json.dumps(claim_payload, ensure_ascii=False), now, now,
+            ),
+        )
+        row = self.storage.fetchone(
+            "SELECT plan_id,payload_json FROM structure_plan_executions "
+            "WHERE execution_id=? LIMIT 1",
+            (execution_id,),
+        )
+        if not row or str(row["plan_id"] or "") != str(plan_id):
+            return False
+        try:
+            stored_payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            stored_payload = {}
+        return stored_payload.get("claim_token") == claim_token
+
+    def release_claim(
+        self, user_id: int, account_id: int, deployment_id: str, plan_id: str,
+        reason: str = "技术失败，允许重新领取",
+    ) -> None:
+        # Only a claim that has not produced an order may be released. Delete
+        # it so the same unique key can be claimed again on the next Tick.
+        self.storage.execute(
+            "DELETE FROM structure_plan_executions "
+            "WHERE user_id=? AND account_id=? AND deployment_id=? AND plan_id=? "
+            "AND status='claimed'",
+            (user_id, account_id, deployment_id, plan_id),
+        )
 
     def record_execution(
         self, user_id: int, account_id: int, deployment_id: str,
@@ -168,10 +251,18 @@ class StructureTradePlanRepository:
         order_id: str = "", reason: str = "", payload: Optional[Dict] = None,
     ) -> None:
         now = int(time.time())
-        execution_id = uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"{user_id}:{account_id}:{deployment_id}:{plan_id}",
-        ).hex[:32]
+        execution_id = self._execution_id(
+            user_id, account_id, deployment_id, plan_id, plan_group_id,
+        )
+        claimed_sibling = self.storage.fetchone(
+            "SELECT plan_id FROM structure_plan_executions "
+            "WHERE execution_id=? LIMIT 1",
+            (execution_id,),
+        )
+        if claimed_sibling and str(claimed_sibling["plan_id"] or "") != str(plan_id):
+            # The opposite alternative in this group already owns the claim.
+            # Never let a late/legacy callback overwrite its execution row.
+            return
         self.storage.execute(
             """
             INSERT INTO structure_plan_executions(
@@ -190,14 +281,17 @@ class StructureTradePlanRepository:
                 json.dumps(payload or {}, ensure_ascii=False),now,now,
             ),
         )
-        if status in {"triggered", "ordered", "filled"} and plan_group_id:
-            self.storage.execute(
-                "UPDATE structure_trade_plans SET status='invalidated',updated_at=? "
-                "WHERE user_id=? AND account_id=? AND strategy_id=? "
-                "AND plan_group_id=? AND plan_id<>? "
-                "AND status IN ('active','watching')",
-                (
-                    now, user_id, account_id, strategy_id,
-                    plan_group_id, plan_id,
-                ),
-            )
+
+    def list_executions(self, user_id: int, plan_ids: List[str]) -> List[Dict]:
+        ids = [str(item) for item in plan_ids if str(item)]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.storage.fetchall(
+            "SELECT execution_id,user_id,account_id,deployment_id,strategy_id,"
+            "plan_id,plan_group_id,status,order_id,reason,created_at,updated_at "
+            f"FROM structure_plan_executions WHERE user_id=? AND plan_id IN ({placeholders}) "
+            "ORDER BY updated_at DESC",
+            (int(user_id), *ids),
+        )
+        return [dict(row) for row in rows]

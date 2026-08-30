@@ -24,6 +24,7 @@ from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
 from routes_news import _normalize_calendar, _require_items, _validate_day
 from market_event_repository import MarketEventRepository
+from market.store.structure_plan_store import StructureTradePlanRepository
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +276,28 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             report = TradeExecutionRepository().record(
                 identity.user_id, identity.account_id, payload
             )
+            attribution = report.get("position_attribution") or {}
+            trade_plan_id = str(attribution.get("trade_plan_id") or "")
+            strategy_id = str(attribution.get("strategy_id") or "")
+            if trade_plan_id and strategy_id:
+                plan_repo = StructureTradePlanRepository()
+                deployment = plan_repo.storage.fetchone(
+                    "SELECT deployment_id FROM strategy_deployments "
+                    "WHERE user_id=? AND account_id=? AND strategy_id=? "
+                    "AND execution_mode='live' ORDER BY updated_at DESC LIMIT 1",
+                    (identity.user_id, identity.account_id, strategy_id),
+                )
+                if deployment:
+                    plan_repo.record_execution(
+                        identity.user_id, identity.account_id,
+                        str(deployment["deployment_id"]), strategy_id,
+                        trade_plan_id,
+                        str(attribution.get("trade_plan_group_id") or ""),
+                        "filled" if report.get("success") else "rejected",
+                        order_id=str(report.get("order_id") or ""),
+                        reason=str(report.get("error_message") or ""),
+                        payload=attribution,
+                    )
             server = engine_manager.get_engine_for_ea(identity)
             action = str(report.get("action") or "").lower()
             if action == "position_modify_sl":

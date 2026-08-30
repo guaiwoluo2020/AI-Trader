@@ -21,6 +21,7 @@ from market.models import StatisticsData, PositionData, TradeDeal
 from market.store import KlineStore, PivotStore, LLMStore, TechStore
 from market.store import PendingOrderStore, TradingInstructionStore, SignalStore, StrategyStore
 from market.store import StatisticsStore, PositionStore, TradeHistoryStore
+from market.store.structure_plan_store import StructureTradePlanRepository
 from market.services import KlineService, PivotService, LLMService, TechService
 from market.services import PendingOrderService, TradingInstructionService
 from market.services import SignalService, StrategyService, RiskManager
@@ -68,6 +69,7 @@ class TradingServer:
         self.instrument_mappings = PlatformInstrumentMappingRepository()
         self._ai_signal_source_repository = AISignalSourceRepository()
         self.memberships = MembershipService()
+        self.structure_plans = StructureTradePlanRepository()
 
         # 线程锁
         self.lock = threading.RLock()
@@ -652,8 +654,53 @@ class TradingServer:
         for decision in decisions:
             # 3. 自动执行决策
             if decision.action != "none" and decision.status != "rejected":
-                order_id = self.strategy_service.execute_decision(decision)
+                summary = decision.signal_summary or {}
+                trade_plan_id = str(
+                    summary.get("selected_trade_plan_id") or ""
+                )
+                trade_plan_group_id = str(
+                    summary.get("selected_trade_plan_group_id") or ""
+                )
+                deployment = None
+                claimed_structure_plan = False
+                if trade_plan_id:
+                    deployment = self.structure_plans.storage.fetchone(
+                        "SELECT deployment_id FROM strategy_deployments "
+                        "WHERE user_id=? AND account_id=? AND strategy_id=? "
+                        "AND execution_mode='live' AND status='active' LIMIT 1",
+                        (
+                            int(self.user_id or 0), int(self.account_id or 0),
+                            str(decision.strategy_id),
+                        ),
+                    )
+                    if deployment:
+                        claimed_structure_plan = self.structure_plans.claim_execution(
+                            int(self.user_id or 0), int(self.account_id or 0),
+                            str(deployment["deployment_id"]),
+                            str(decision.strategy_id), trade_plan_id,
+                            trade_plan_group_id,
+                            reason=str(decision.decision_reason or ""),
+                            payload=summary,
+                        )
+                        if not claimed_structure_plan:
+                            decision.status = "rejected"
+                            decision.decision_reason = (
+                                "该公共结构计划已被当前实盘部署消费，不重复下单"
+                            )
+                order_id = (
+                    self.strategy_service.execute_decision(decision)
+                    if decision.status != "rejected" else None
+                )
                 if order_id:
+                    if trade_plan_id and deployment:
+                        self.structure_plans.record_execution(
+                            int(self.user_id or 0), int(self.account_id or 0),
+                            str(deployment["deployment_id"]),
+                            str(decision.strategy_id), trade_plan_id,
+                            trade_plan_group_id, "ordered", order_id=order_id,
+                            reason=str(decision.decision_reason or ""),
+                            payload=summary,
+                        )
                     pending_order = {
                         "order_id": order_id,
                         "symbol": decision.symbol,
@@ -668,6 +715,12 @@ class TradingServer:
                         "tp": decision.tp
                     }
                     result["pending_orders"].append(pending_order)
+                elif claimed_structure_plan and deployment:
+                    self.structure_plans.release_claim(
+                        int(self.user_id or 0), int(self.account_id or 0),
+                        str(deployment["deployment_id"]), trade_plan_id,
+                        reason="实盘待确认订单创建失败",
+                    )
 
             self._record_decision(decision)
 

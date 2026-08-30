@@ -831,7 +831,8 @@ class PaperTradingService:
         cutoff = int(now) - self.PENDING_ORDER_TIMEOUT_SECONDS
         orders = self.storage.fetchall(
             """
-            SELECT order_id, account_id, decision_id
+            SELECT order_id, account_id, decision_id, deployment_id,
+                   strategy_id, position_attribution_json
             FROM paper_orders
             WHERE user_id = ? AND symbol = ? AND status = 'pending'
               AND requested_at <= ?
@@ -855,6 +856,21 @@ class PaperTradingService:
                 user_id, int(order["account_id"]), str(order["decision_id"]),
                 str(order["order_id"]), status="expired", auto_executed=False,
             )
+            try:
+                attribution = json.loads(
+                    order["position_attribution_json"] or "{}"
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                attribution = {}
+            plan_id = str(attribution.get("trade_plan_id") or "")
+            if plan_id:
+                self.structure_plans.record_execution(
+                    int(user_id), int(order["account_id"]),
+                    str(order["deployment_id"]), str(order["strategy_id"]),
+                    plan_id, str(attribution.get("trade_plan_group_id") or ""),
+                    "expired", order_id=str(order["order_id"]), reason=reason,
+                    payload=attribution,
+                )
         return len(orders)
 
     def get_account_detail(self, user_id: int, account_id: int) -> Dict:
@@ -1566,6 +1582,23 @@ class PaperTradingService:
             reason = "止盈止损价格无效"
         order_id = uuid.uuid4().hex[:12]
         status = "rejected" if reason else "pending"
+        trade_plan_id = str(attribution.get("trade_plan_id") or "")
+        trade_plan_group_id = str(
+            attribution.get("trade_plan_group_id") or ""
+        )
+        claimed_structure_plan = False
+        if trade_plan_id and status == "pending":
+            claimed_structure_plan = self.structure_plans.claim_execution(
+                int(user_id), account_id, deployment_id,
+                str(deployment["strategy_id"]), trade_plan_id,
+                trade_plan_group_id,
+                reason=str(decision.get("decision_reason") or ""),
+                payload=attribution,
+            )
+            if not claimed_structure_plan:
+                # Another Tick/worker (or an earlier decision) has already
+                # consumed this public plan for the same deployment.
+                return False
         try:
             self.storage.execute(
                 """
@@ -1591,12 +1624,11 @@ class PaperTradingService:
                     reason, now, now, now,
                 ),
             )
-            trade_plan_id = str(attribution.get("trade_plan_id") or "")
             if trade_plan_id and status == "pending":
                 self.structure_plans.record_execution(
                     int(user_id), account_id, deployment["deployment_id"],
                     deployment["strategy_id"], trade_plan_id,
-                    str(attribution.get("trade_plan_group_id") or ""),
+                    trade_plan_group_id,
                     "ordered", order_id=order_id,
                     reason=str(decision.get("decision_reason") or ""),
                     payload=attribution,
@@ -1612,6 +1644,11 @@ class PaperTradingService:
                 )
             return True
         except Exception as exc:
+            if claimed_structure_plan:
+                self.structure_plans.release_claim(
+                    int(user_id), account_id, deployment_id, trade_plan_id,
+                    reason=f"模拟订单写入失败：{exc}",
+                )
             if "UNIQUE constraint failed" in str(exc):
                 return False
             raise
@@ -2077,6 +2114,30 @@ class PaperTradingService:
             self._sync_paper_decision_status(
                 user_id, account_id, decision_id, order_id,
                 status=status, auto_executed=auto_executed,
+            )
+        for order in pending:
+            try:
+                attribution = json.loads(
+                    order["position_attribution_json"] or "{}"
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                attribution = {}
+            plan_id = str(attribution.get("trade_plan_id") or "")
+            if not plan_id:
+                continue
+            outcome = self.storage.fetchone(
+                "SELECT status,rejection_reason FROM paper_orders WHERE order_id=?",
+                (str(order["order_id"]),),
+            )
+            if not outcome or outcome["status"] not in {"filled", "rejected"}:
+                continue
+            self.structure_plans.record_execution(
+                int(user_id), int(account_id), str(order["deployment_id"]),
+                str(order["strategy_id"]), plan_id,
+                str(attribution.get("trade_plan_group_id") or ""),
+                str(outcome["status"]), order_id=str(order["order_id"]),
+                reason=str(outcome["rejection_reason"] or ""),
+                payload=attribution,
             )
         if any(result.values()):
             parts = [

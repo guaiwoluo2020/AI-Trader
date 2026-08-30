@@ -986,15 +986,41 @@ class StructurePlanSignalGenerator:
     ) -> List[TradingSignal]:
         now = int(time.time())
         active, waiting = [], []
+        seen_plan_ids = set()
         for config in strategy.get_signal_sources("structure_plan", enabled_only=True):
+            params = dict(config.get("params") or {})
+            allowed_directions = {
+                str(item) for item in params.get(
+                    "allowed_directions", ["buy", "sell"]
+                ) if str(item) in {"buy", "sell"}
+            }
+            max_age_bars = max(0, int(params.get("max_plan_age_bars", 2) or 0))
+            period = str(config.get("period") or "M5").upper()
+            period_seconds = {
+                "M1": 60, "M5": 300, "M15": 900,
+                "H1": 3600, "H4": 14400,
+            }.get(period, 300)
             for plan in self._plans(symbol, strategy, config):
+                plan_id = str(plan.get("plan_id") or "")
+                if plan_id and plan_id in seen_plan_ids:
+                    continue
+                if plan_id:
+                    seen_plan_ids.add(plan_id)
+                direction = str(plan.get("direction") or "")
+                if direction in {"buy", "sell"} and direction not in allowed_directions:
+                    continue
+                valid_from = int(plan.get("valid_from") or 0)
+                if (
+                    max_age_bars > 0 and valid_from > 0
+                    and now - valid_from > max_age_bars * period_seconds
+                ):
+                    continue
                 if plan.get("status") != "active":
                     waiting.append(plan)
                     continue
                 if int(plan.get("expires_at") or 0) and now > int(plan["expires_at"]):
                     continue
                 invalid = _number(plan.get("invalidation_price"))
-                direction = str(plan.get("direction") or "")
                 if invalid and (
                     (direction == "buy" and current_price <= invalid)
                     or (direction == "sell" and current_price >= invalid)

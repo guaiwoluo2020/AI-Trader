@@ -1048,6 +1048,130 @@ def create_market_routes(
                     user.user_id, 0, "", MARKET_STRUCTURE_PLAN_SOURCE_ID,
                     symbol, period.upper(),
                 )
+        # A public market plan is shared by every matching strategy, but its
+        # consumption boundary is one deployment.  Return both sides of that
+        # relationship so the structure page can explain who subscribes and
+        # whether each deployment has claimed/ordered/filled the plan.
+        normalized_symbol = str(symbol).upper()
+        normalized_period = str(period).upper()
+        subscribed_strategies = []
+        strategy_by_id = {}
+        for strategy in StrategyConfigRepository(get_storage()).get_all_strategies(
+            user.user_id
+        ):
+            if str(strategy.symbol).upper() != normalized_symbol:
+                continue
+            sources = [
+                source for source in strategy.get_signal_sources(
+                    "structure_plan", enabled_only=True
+                )
+                if str(source.get("period") or "M5").upper()
+                == normalized_period
+            ]
+            if not sources:
+                continue
+            item = {
+                "strategy_id": strategy.strategy_id,
+                "strategy_name": strategy.strategy_name,
+                "period": normalized_period,
+                "deployment_count": 0,
+                "active_deployment_count": 0,
+                "deployments": [],
+            }
+            subscribed_strategies.append(item)
+            strategy_by_id[strategy.strategy_id] = item
+
+        deployments = get_storage().fetchall(
+            "SELECT d.deployment_id,d.strategy_id,d.account_id,d.execution_mode,"
+            "d.status,d.symbol,a.account_name,a.account_type,a.enabled,"
+            "a.trading_enabled,a.auto_trading_enabled "
+            "FROM strategy_deployments d "
+            "JOIN trading_accounts a ON a.id=d.account_id "
+            "WHERE d.user_id=?",
+            (user.user_id,),
+        )
+        deployment_by_id = {}
+        for row in deployments:
+            strategy_item = strategy_by_id.get(str(row["strategy_id"]))
+            if not strategy_item or str(row["symbol"]).upper() != normalized_symbol:
+                continue
+            active = bool(
+                row["status"] == "active" and row["enabled"]
+                and row["trading_enabled"] and row["auto_trading_enabled"]
+            )
+            deployment_item = {
+                "deployment_id": str(row["deployment_id"]),
+                "strategy_id": str(row["strategy_id"]),
+                "strategy_name": strategy_item["strategy_name"],
+                "account_id": int(row["account_id"]),
+                "account_name": str(row["account_name"] or ""),
+                "account_type": str(row["account_type"] or ""),
+                "execution_mode": str(row["execution_mode"] or ""),
+                "deployment_status": str(row["status"] or ""),
+                "active": active,
+            }
+            strategy_item["deployments"].append(deployment_item)
+            strategy_item["deployment_count"] += 1
+            if active:
+                strategy_item["active_deployment_count"] += 1
+            deployment_by_id[deployment_item["deployment_id"]] = deployment_item
+
+        executions = repo.list_executions(
+            user.user_id, [str(item.get("plan_id") or "") for item in items]
+        )
+        executions_by_plan = {}
+        for execution in executions:
+            executions_by_plan.setdefault(str(execution["plan_id"]), {})[
+                str(execution["deployment_id"])
+            ] = execution
+        active_deployments = [
+            deployment for strategy in subscribed_strategies
+            for deployment in strategy["deployments"] if deployment["active"]
+        ]
+        consumed_statuses = {
+            "claimed", "triggered", "ordered", "filled", "rejected",
+            "expired", "canceled",
+        }
+        for plan in items:
+            plan_executions = executions_by_plan.get(
+                str(plan.get("plan_id") or ""), {}
+            )
+            subscription_rows = []
+            status_counts = {}
+            for deployment in active_deployments:
+                execution = plan_executions.get(deployment["deployment_id"])
+                execution_status = (
+                    str(execution.get("status") or "")
+                    if execution else "unconsumed"
+                )
+                status_counts[execution_status] = (
+                    status_counts.get(execution_status, 0) + 1
+                )
+                subscription_rows.append({
+                    **deployment,
+                    "execution_status": execution_status,
+                    "order_id": str(execution.get("order_id") or "")
+                    if execution else "",
+                    "execution_reason": str(execution.get("reason") or "")
+                    if execution else "",
+                    "consumed_at": int(execution.get("updated_at") or 0)
+                    if execution else 0,
+                })
+            consumed_count = sum(
+                count for status, count in status_counts.items()
+                if status in consumed_statuses
+            )
+            plan["subscription_summary"] = {
+                "strategy_count": len(subscribed_strategies),
+                "deployment_count": len(active_deployments),
+                "consumed_count": consumed_count,
+                "unconsumed_count": max(
+                    0, len(active_deployments) - consumed_count
+                ),
+                "status_counts": status_counts,
+            }
+            plan["subscriptions"] = subscription_rows
+            plan["subscribed_strategies"] = subscribed_strategies
         return {"status": "ok", "symbol": symbol, "period": period.upper(), "plans": items}
 
     @protected_router.get("/admin/market-structure/config")
