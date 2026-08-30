@@ -61,7 +61,7 @@ from market.services.market_structure_service import analyze as analyze_market_s
 from market.services.market_structure_engine_v2 import analyze_incremental as analyze_market_structure_v2, restore_snapshot as restore_market_structure_snapshot, DEFAULT_CONFIG as MARKET_STRUCTURE_DEFAULT_CONFIG
 from market.services.market_structure_snapshot_store import current_path as market_structure_snapshot_path, load_current as load_market_structure_snapshot, save_checkpoint as save_market_structure_checkpoint
 from market.store.structure_plan_store import StructureTradePlanRepository
-from market.services.signal.structure_plan_signal import StructurePlanBuilder, STRUCTURE_PLAN_DEFAULT_CONFIG, resolve_structure_plan_config
+from market.services.signal.structure_plan_signal import StructurePlanBuilder, STRUCTURE_PLAN_DEFAULT_CONFIG, MARKET_STRUCTURE_PLAN_SOURCE_ID, resolve_structure_plan_config
 from market_data_source_policy import MarketDataSourcePolicy
 
 
@@ -1015,24 +1015,11 @@ def create_market_routes(
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """行情层结构计划；不绑定页面当前查看账户。"""
-        strategy_rows = strategy_repo.get_all_strategies(user.user_id)
         repo = StructureTradePlanRepository(get_storage())
-        items = []
-        source_ids = {
-            str(source.get("signal_source_id") or "")
-            for strategy in strategy_rows
-            for source in strategy.get_signal_sources(
-                "structure_plan", enabled_only=True
-            )
-            if str(source.get("period") or "").upper() == period.upper()
-        }
-        if not source_ids:
-            source_ids.add("market-structure")
-        for source_id in source_ids:
-            items.extend(repo.list_current(
-                user.user_id, 0, "", source_id, symbol, period.upper(),
-            ))
-        items = list({str(item.get("plan_id")): item for item in items}.values())
+        items = repo.list_current(
+            user.user_id, 0, "", MARKET_STRUCTURE_PLAN_SOURCE_ID,
+            symbol, period.upper(),
+        )
         # 结构分析页是行情层视图，即使当前没有绑定策略，也要展示
         # 基础结构计划；策略执行中心只在自己的部署作用域内筛选这些计划。
         if not items:
@@ -1046,7 +1033,7 @@ def create_market_routes(
                 items = StructurePlanBuilder(
                     resolve_structure_plan_config(symbol, period.upper())
                 ).build(
-                    "market-structure", symbol, period.upper(), rows[-600:], structure,
+                    MARKET_STRUCTURE_PLAN_SOURCE_ID, symbol, period.upper(), rows[-600:], structure,
                 )
                 bar_time = int(
                     float(rows[-1].get("timestamp") or rows[-1].get("time") or 0)
@@ -1054,11 +1041,11 @@ def create_market_routes(
                 if bar_time > 10_000_000_000:
                     bar_time //= 1000
                 repo.replace_scope(
-                    user.user_id, 0, "", "market-structure",
+                    user.user_id, 0, "", MARKET_STRUCTURE_PLAN_SOURCE_ID,
                     symbol, period.upper(), items, bar_time,
                 )
                 items = repo.list_current(
-                    user.user_id, 0, "", "market-structure",
+                    user.user_id, 0, "", MARKET_STRUCTURE_PLAN_SOURCE_ID,
                     symbol, period.upper(),
                 )
         return {"status": "ok", "symbol": symbol, "period": period.upper(), "plans": items}

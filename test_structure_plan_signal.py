@@ -37,8 +37,10 @@ class _Strategy:
 class _Repository:
     def __init__(self):
         self.plans = []
+        self.replace_calls = []
 
     def replace_scope(self, *args):
+        self.replace_calls.append(args)
         self.plans = list(args[-2])
         return self.plans
 
@@ -217,6 +219,19 @@ class StructurePlanTests(unittest.TestCase):
         self.assertTrue(signal.state_ready)
         self.assertEqual(signal.action, "buy")
         self.assertTrue(signal.trade_plan_id)
+
+    def test_multiple_strategy_instances_share_one_canonical_plan_scope(self):
+        repository = _Repository()
+        generator = StructurePlanSignalGenerator(self.store, repository, 1, 2)
+        first = _Strategy()
+        second = _Strategy()
+        second.config["signal_source_id"] = "source-2"
+
+        generator.refresh_plans("BTCUSD", "M5", first, _range_structure())
+        generator.refresh_plans("BTCUSD", "M5", second, _range_structure())
+
+        self.assertEqual(len(repository.replace_calls), 1)
+        self.assertEqual(repository.replace_calls[0][3], "market-structure")
 
     def test_stale_bos_does_not_create_trend_order_plan(self):
         structure = {

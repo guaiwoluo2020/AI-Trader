@@ -15,6 +15,7 @@ from sqlite_storage import RuntimeStateRepository
 
 
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
+MARKET_STRUCTURE_PLAN_SOURCE_ID = "market-structure"
 
 # Public, market-layer defaults.  These parameters describe how a structure
 # becomes a trade plan; they intentionally do not belong to a deployment.
@@ -917,7 +918,10 @@ class StructurePlanSignalGenerator:
         for config in strategy.get_signal_sources("structure_plan", enabled_only=True):
             if str(config.get("period") or "").upper() != period:
                 continue
-            source_id = str(config.get("signal_source_id") or "")
+            # One user/symbol/period has exactly one canonical market-layer
+            # plan set. Strategy signal-source instances merely subscribe to
+            # it and must not create duplicate plan rows.
+            source_id = MARKET_STRUCTURE_PLAN_SOURCE_ID
             # Market structure plans belong to the user/source/market, not to
             # an execution account or deployment. Every live/paper strategy
             # reads the same closed-bar plan and applies its own risk rules.
@@ -945,7 +949,7 @@ class StructurePlanSignalGenerator:
 
     def _plans(self, symbol: str, strategy, config: Dict) -> List[Dict]:
         period = str(config.get("period") or "M5").upper()
-        source_id = str(config.get("signal_source_id") or "")
+        source_id = MARKET_STRUCTURE_PLAN_SOURCE_ID
         key = (source_id, str(symbol).upper(), period)
         if key not in self._cache:
             self._cache[key] = self.repository.list_current(
