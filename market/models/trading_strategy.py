@@ -172,16 +172,20 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
     elif source == "structure_plan":
         params = {
             "enable_trend": True, "enable_range": True,
+            "enable_structure_location": True,
             "enable_range_boundary": True, "enable_range_breakout": True,
             "enable_false_breakout": True, "enable_liquidity_sweep": True,
             "min_structure_confidence": 60, "min_real_risk_reward": 2.0,
             "max_event_age_bars": 2, "min_breakout_displacement_atr": 0.2,
             "entry_zone_atr": 0.35, "stop_buffer_atr": 0.25,
+            "location_proximity_atr": 0.6, "min_trendline_touches": 2,
+            "require_location_reclaim": True,
             "target_buffer_atr": 0.1, "breakout_stop_inside_atr": 0.3,
             "breakout_stop_buffer_atr": 0.8,
             "breakout_stop_width_ratio": 0.15,
             "breakout_target_atr": 3.0,
             "range_plan_valid_bars": 12, "event_plan_valid_bars": 6,
+            "location_plan_valid_bars": 6,
             "breakout_retest_valid_bars": 6,
         }
     return {
@@ -365,6 +369,7 @@ def normalize_signal_sources(
         elif source == "structure_plan":
             for name in (
                 "enable_trend", "enable_range", "enable_range_boundary",
+                "enable_structure_location", "require_location_reclaim",
                 "enable_range_breakout", "enable_false_breakout",
                 "enable_liquidity_sweep",
             ):
@@ -374,6 +379,8 @@ def normalize_signal_sources(
             params["max_event_age_bars"] = max(0, min(10, int(params.get("max_event_age_bars", 2))))
             params["min_breakout_displacement_atr"] = max(0.0, min(5.0, float(params.get("min_breakout_displacement_atr", 0.2))))
             params["entry_zone_atr"] = max(0.0, min(3.0, float(params.get("entry_zone_atr", 0.35))))
+            params["location_proximity_atr"] = max(0.05, min(5.0, float(params.get("location_proximity_atr", 0.6))))
+            params["min_trendline_touches"] = max(2, min(20, int(params.get("min_trendline_touches", 2))))
             params["stop_buffer_atr"] = max(0.0, min(5.0, float(params.get("stop_buffer_atr", 0.25))))
             params["target_buffer_atr"] = max(0.0, min(3.0, float(params.get("target_buffer_atr", 0.1))))
             params["breakout_stop_inside_atr"] = max(0.1, min(5.0, float(params.get("breakout_stop_inside_atr", 0.3))))
@@ -382,6 +389,7 @@ def normalize_signal_sources(
             params["breakout_target_atr"] = max(1.0, min(10.0, float(params.get("breakout_target_atr", 3.0))))
             for name, default in (
                 ("range_plan_valid_bars", 12), ("event_plan_valid_bars", 6),
+                ("location_plan_valid_bars", 6),
                 ("breakout_retest_valid_bars", 6),
             ):
                 params[name] = max(1, min(100, int(params.get(name, default))))

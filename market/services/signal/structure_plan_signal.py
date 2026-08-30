@@ -39,9 +39,14 @@ class StructurePlanBuilder:
 
     def __init__(self, params: Optional[Dict] = None):
         self.params = params or {}
+        self._rejections: List[str] = []
 
     def _param(self, name, default):
         return self.params.get(name, default)
+
+    def _reject(self, reason: str) -> None:
+        if reason and reason not in self._rejections:
+            self._rejections.append(reason)
 
     @staticmethod
     def _layer_price(hierarchy: Dict, layer: str, name: str) -> float:
@@ -159,14 +164,23 @@ class StructurePlanBuilder:
             direction == "sell" and tp < entry < sl
         )
         if not valid:
+            self._reject("结构止损、入场和止盈价格关系无效")
             return None
         risk = abs(entry - sl)
         rr = abs(tp - entry) / risk if risk else 0
         if rr < max(1.0, _number(self._param("min_real_risk_reward", 2.0))):
+            self._reject(
+                f"真实盈亏比 {rr:.2f} 低于最低要求 "
+                f"{max(1.0, _number(self._param('min_real_risk_reward', 2.0))):.2f}"
+            )
             return None
         if int(kwargs.get("confidence") or 0) < int(
             self._param("min_structure_confidence", 60)
         ):
+            self._reject(
+                f"结构置信度 {int(kwargs.get('confidence') or 0)}% 低于最低要求 "
+                f"{int(self._param('min_structure_confidence', 60))}%"
+            )
             return None
         return self._plan(**kwargs)
 
@@ -176,6 +190,7 @@ class StructurePlanBuilder:
     ) -> List[Dict]:
         if not rows:
             return []
+        self._rejections = []
         bar_time = _bar_time(rows[-1])
         seconds = PERIOD_SECONDS.get(period, 300)
         atr = max(1e-9, _number(structure.get("atr")))
@@ -198,20 +213,201 @@ class StructurePlanBuilder:
         )
         if plans:
             return plans
+        plans = self._location_plans(
+            source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
+        )
+        if plans:
+            return plans
         plans = self._event_plans(
             source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
         )
         if plans:
             return plans
         state = str(structure.get("major_state") or "undetermined")
+        detail = "；".join(self._rejections[-3:])
+        reason = (
+            f"当前结构为 {state}，未生成计划：{detail}"
+            if detail else f"当前结构为 {state}，尚未形成满足条件的结构交易计划"
+        )
         return [self._plan(
             source_id=source_id, symbol=symbol, period=period, anchor=bar_time,
             setup_type="no_trade", direction="none", entry_mode="watch",
             status="watching", confidence=0,
-            reason=f"当前结构为 {state}，尚未形成满足条件的结构交易计划",
+            reason=reason,
             valid_from=bar_time, expires_at=bar_time + seconds,
             structure_snapshot=snapshot,
         )]
+
+    @staticmethod
+    def _latest_labeled_pivot(hierarchy: Dict, labels, kind: str) -> Optional[Dict]:
+        candidates = []
+        for layer_rank, layer in enumerate(("swing", "internal")):
+            for pivot in (hierarchy.get(layer) or {}).get("pivots") or []:
+                if pivot.get("kind") == kind and pivot.get("label") in labels:
+                    item = dict(pivot)
+                    item["layer"] = layer
+                    item["layer_rank"] = layer_rank
+                    candidates.append(item)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (
+            int(item.get("index", -1)), -int(item.get("layer_rank", 0))
+        ))
+
+    @staticmethod
+    def _projected_trendline(structure: Dict, direction: str, latest_index: int,
+                             min_touches: int) -> Optional[Dict]:
+        kind = "support" if direction == "buy" else "resistance"
+        candidates = []
+        for line in structure.get("trendlines") or []:
+            if line.get("kind") != kind or line.get("broken_at") is not None:
+                continue
+            if int(line.get("touches") or 0) < min_touches:
+                continue
+            slope = _number(line.get("slope"))
+            if (direction == "buy" and slope <= 0) or (
+                direction == "sell" and slope >= 0
+            ):
+                continue
+            anchor_price = _number(line.get("anchor_price"))
+            anchor_index = int(line.get("anchor_index") or 0)
+            projected = anchor_price + slope * (latest_index - anchor_index)
+            if projected <= 0:
+                continue
+            item = dict(line)
+            item["projected_price"] = projected
+            candidates.append(item)
+        return max(candidates, key=lambda item: _number(item.get("score"))) if candidates else None
+
+    def _location_candidates(self, rows: List[Dict], structure: Dict,
+                             direction: str) -> List[Dict]:
+        hierarchy = structure.get("structure_hierarchy") or {}
+        result = []
+        pivot = self._latest_labeled_pivot(
+            hierarchy,
+            {"HL"} if direction == "buy" else {"LH"},
+            "low" if direction == "buy" else "high",
+        )
+        if pivot and _number(pivot.get("price")) > 0:
+            result.append({
+                "price": _number(pivot["price"]),
+                "source": f"{pivot.get('layer')} {pivot.get('label')}",
+                "confidence": 72 if pivot.get("layer") == "swing" else 66,
+                "anchor_index": int(pivot.get("index") or len(rows) - 1),
+            })
+        protected_name = "protected_low" if direction == "buy" else "protected_high"
+        for layer, confidence in (("swing", 76), ("internal", 68)):
+            protected = (hierarchy.get(layer) or {}).get(protected_name) or {}
+            price = _number(protected.get("price"))
+            if price > 0:
+                result.append({
+                    "price": price, "source": f"{layer} {protected_name}",
+                    "confidence": confidence,
+                    "anchor_index": int(protected.get("index") or len(rows) - 1),
+                })
+        line = self._projected_trendline(
+            structure, direction, len(rows) - 1,
+            max(2, int(self._param("min_trendline_touches", 2))),
+        )
+        if line:
+            result.append({
+                "price": _number(line["projected_price"]),
+                "source": "上升支撑线" if direction == "buy" else "下降压力线",
+                "confidence": min(85, 62 + int(line.get("touches") or 0) * 4),
+                "anchor_index": int(line.get("anchor_index") or len(rows) - 1),
+            })
+        unique = {}
+        for item in result:
+            key = round(_number(item["price"]), 8)
+            if key not in unique or item["confidence"] > unique[key]["confidence"]:
+                unique[key] = item
+        return list(unique.values())
+
+    def _location_plans(
+        self, source_id, symbol, period, rows, structure, snapshot,
+        bar_time, seconds,
+    ) -> List[Dict]:
+        if not self._param("enable_structure_location", True):
+            return []
+        major = str(structure.get("major_state") or structure.get("current_state") or "")
+        if major not in {"up", "down"}:
+            self._reject("当前不是已确认的上涨或下跌主结构")
+            return []
+        candidate = structure.get("active_candidate") or {}
+        if candidate and str(candidate.get("direction") or "") not in {"", major}:
+            self._reject("主结构正处于反转候选阶段，等待 CHOCH/BOS 确认")
+            return []
+
+        direction = "buy" if major == "up" else "sell"
+        latest = rows[-1]
+        close = _number(latest.get("close") or latest.get("close_price"))
+        atr = max(1e-9, _number(structure.get("atr")))
+        hierarchy = structure.get("structure_hierarchy") or {}
+        protected_name = "protected_low" if direction == "buy" else "protected_high"
+        swing_protected = self._layer_price(hierarchy, "swing", protected_name)
+        if swing_protected and (
+            (direction == "buy" and close < swing_protected)
+            or (direction == "sell" and close > swing_protected)
+        ):
+            self._reject(
+                f"收盘价已{'跌破' if direction == 'buy' else '突破'} Swing "
+                f"{protected_name} {swing_protected:.2f}，原趋势位置计划失效"
+            )
+            return []
+        proximity = atr * max(0.05, _number(self._param("location_proximity_atr", 0.6)))
+        candidates = self._location_candidates(rows, structure, direction)
+        if not candidates:
+            self._reject("当前趋势没有可用的 HL/LH、保护点或有效趋势线")
+            return []
+        nearby = [item for item in candidates if abs(item["price"] - close) <= proximity]
+        if not nearby:
+            nearest = min(candidates, key=lambda item: abs(item["price"] - close))
+            self._reject(
+                f"当前价距最近结构位 {nearest['price']:.2f} 为 "
+                f"{abs(nearest['price'] - close) / atr:.2f} ATR，尚未进入位置区域"
+            )
+            return []
+        level = min(
+            nearby,
+            key=lambda item: (abs(item["price"] - close), -int(item["confidence"])),
+        )
+        entry = _number(level["price"])
+        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
+        protected = self._protected_reference(hierarchy, direction, entry)
+        if direction == "buy":
+            sl = min(entry, protected) - stop_buffer if protected else entry - stop_buffer
+        else:
+            sl = max(entry, protected) + stop_buffer if protected else entry + stop_buffer
+        target = self._next_target(hierarchy, direction, entry)
+        if not target:
+            self._reject("结构位附近具备入场位置，但前方没有有效的结构止盈目标")
+            return []
+        target = target - target_buffer if direction == "buy" else target + target_buffer
+        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+        valid_bars = max(1, int(self._param("location_plan_valid_bars", 6)))
+        entry_mode = (
+            "touch_and_reclaim"
+            if self._param("require_location_reclaim", True) else "touch_or_near"
+        )
+        plan = self._tradable_plan(
+            source_id=source_id, symbol=symbol, period=period,
+            anchor=_bar_time(rows[min(len(rows) - 1, max(0, level["anchor_index"]))]),
+            setup_type="structure_location_pullback", direction=direction,
+            entry_mode=entry_mode, status="active", entry=entry,
+            zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
+            stop_loss=sl, take_profit=target,
+            confidence=int(level["confidence"]),
+            reason=(
+                f"{period} {'上涨' if direction == 'buy' else '下跌'}主结构中，"
+                f"价格进入{level['source']} {entry:.2f} 附近，等待触及后"
+                f"{'回收' if entry_mode == 'touch_and_reclaim' else '确认'}顺势"
+                f"{'买入' if direction == 'buy' else '卖出'}"
+            ),
+            valid_from=bar_time, expires_at=bar_time + seconds * valid_bars,
+            invalidation_price=sl, structure_snapshot=snapshot,
+        )
+        return [plan] if plan else []
 
     def _range_plans(
         self, source_id, symbol, period, rows, structure, snapshot,
@@ -425,6 +621,7 @@ class StructurePlanBuilder:
             return []
         atr = max(1e-9, _number(structure.get("atr")))
         hierarchy = structure.get("structure_hierarchy") or {}
+        swing = hierarchy.get("swing") or {}
         latest = events[-1]
         event_index = int(latest.get("confirmed_at", latest.get("index", -1)) or -1)
         age = len(rows)-1-event_index

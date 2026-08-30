@@ -66,6 +66,49 @@ def _triangle_structure():
     return structure
 
 
+def _trend_structure(direction="down", close=110.0):
+    if direction == "down":
+        swing_pivots = [
+            {"kind": "high", "label": "LH", "price": 110.0, "index": 36},
+            {"kind": "low", "label": "LL", "price": 100.0, "index": 34},
+        ]
+        internal_pivots = [
+            {"kind": "high", "label": "LH", "price": 109.5, "index": 38},
+        ]
+        levels = {
+            "protected_high": {"price": 112.0, "index": 32},
+            "protected_low": {"price": 100.0, "index": 34},
+            "weak_low": {"price": 100.0, "index": 34},
+        }
+    else:
+        swing_pivots = [
+            {"kind": "low", "label": "HL", "price": 110.0, "index": 36},
+            {"kind": "high", "label": "HH", "price": 120.0, "index": 34},
+        ]
+        internal_pivots = [
+            {"kind": "low", "label": "HL", "price": 110.5, "index": 38},
+        ]
+        levels = {
+            "protected_low": {"price": 108.0, "index": 32},
+            "protected_high": {"price": 120.0, "index": 34},
+            "weak_high": {"price": 120.0, "index": 34},
+        }
+    return {
+        "atr": 2.0, "major_state": direction, "current_state": direction,
+        "internal_state": direction, "external_state": direction,
+        "active_candidate": None, "range": {}, "internal_events": [],
+        "structure_hierarchy": {
+            "swing": {"bias": direction, "phase": "continuation",
+                      "pivots": swing_pivots, **levels},
+            "internal": {"bias": direction, "phase": "pullback",
+                         "pivots": internal_pivots, **levels},
+            "external": {"bias": direction, "phase": "continuation",
+                         "pivots": [], **levels},
+        },
+        "trendlines": [], "test_close": close,
+    }
+
+
 class StructurePlanTests(unittest.TestCase):
     def setUp(self):
         self.store = _KlineStore()
@@ -183,6 +226,77 @@ class StructurePlanTests(unittest.TestCase):
             )[0]["setup_type"],
             "no_trade",
         )
+
+    def test_downtrend_near_lh_builds_sell_location_plan(self):
+        structure = _trend_structure("down")
+        self.store.rows[-1]["close"] = 109.7
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0]["setup_type"], "structure_location_pullback")
+        self.assertEqual(plans[0]["direction"], "sell")
+        self.assertEqual(plans[0]["entry_mode"], "touch_and_reclaim")
+
+    def test_uptrend_near_hl_builds_buy_location_plan(self):
+        structure = _trend_structure("up")
+        self.store.rows[-1]["close"] = 110.2
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "structure_location_pullback")
+        self.assertEqual(plans[0]["direction"], "buy")
+
+    def test_close_above_protected_high_invalidates_downtrend_location(self):
+        structure = _trend_structure("down")
+        self.store.rows[-1]["close"] = 112.1
+        plans = StructurePlanBuilder({"location_proximity_atr": 2}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("原趋势位置计划失效", plans[0]["reason"])
+
+    def test_broken_trendline_is_not_a_location_candidate(self):
+        structure = _trend_structure("down")
+        for layer in structure["structure_hierarchy"].values():
+            layer["pivots"] = []
+            layer.pop("protected_high", None)
+        structure["trendlines"] = [{
+            "kind": "resistance", "anchor_price": 111.0,
+            "anchor_index": 30, "slope": -0.1, "touches": 4,
+            "broken_at": 38, "score": 90,
+        }]
+        self.store.rows[-1]["close"] = 110.0
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("没有可用", plans[0]["reason"])
+
+    def test_location_plan_reports_low_risk_reward_rejection(self):
+        structure = _trend_structure("down")
+        structure["structure_hierarchy"]["swing"]["weak_low"]["price"] = 106.0
+        structure["structure_hierarchy"]["swing"]["protected_low"]["price"] = 106.0
+        structure["structure_hierarchy"]["external"]["weak_low"]["price"] = 106.0
+        structure["structure_hierarchy"]["external"]["protected_low"]["price"] = 106.0
+        self.store.rows[-1]["close"] = 109.8
+        plans = StructurePlanBuilder({"min_real_risk_reward": 2.0}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("真实盈亏比", plans[0]["reason"])
+
+    def test_fresh_bos_uses_swing_phase_without_name_error(self):
+        structure = _trend_structure("down")
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "down", "level": 109.0,
+            "confirmed_at": 39, "displacement_atr": 0.8,
+        }]
+        self.store.rows[-1]["close"] = 106.0
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "trend_continuation")
 
 
 if __name__ == "__main__":
