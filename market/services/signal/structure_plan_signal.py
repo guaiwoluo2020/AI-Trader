@@ -25,7 +25,8 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "enable_choch": True, "enable_liquidity_sweep": True, "enable_trend": True,
     "entry_zone_atr": 0.35, "location_proximity_atr": 0.6,
     "stop_buffer_atr": 0.25, "target_buffer_atr": 0.1,
-    "min_real_risk_reward": 1.2, "min_structure_confidence": 60,
+    "min_real_risk_reward": 1.2, "trend_min_real_risk_reward": 0.5,
+    "min_structure_confidence": 60,
     "breakout_stop_inside_atr": 0.3, "breakout_stop_buffer_atr": 0.8,
     "breakout_target_atr": 3.0, "breakout_retest_valid_bars": 6,
     "range_plan_valid_bars": 12, "location_plan_valid_bars": 6,
@@ -153,6 +154,7 @@ class StructurePlanBuilder:
         stop_loss: float = 0, take_profit: float = 0,
         confidence: int = 0, reason: str = "", valid_from: int = 0,
         expires_at: int = 0, invalidation_price: float = 0,
+        minimum_risk_reward: float = 0,
         structure_snapshot: Optional[Dict] = None,
     ) -> Dict:
         group = _hash(source_id, symbol, period, anchor, "group")
@@ -169,6 +171,7 @@ class StructurePlanBuilder:
             "stop_loss": round(stop_loss, 8), "take_profit": round(take_profit, 8),
             "invalidation_price": round(invalidation_price or stop_loss, 8),
             "risk_reward_ratio": round(reward / risk, 3) if risk else 0,
+            "minimum_risk_reward": round(float(minimum_risk_reward or 0), 3),
             "confidence": max(0, min(100, int(confidence))),
             "reason": reason,
             "valid_from": int(valid_from), "expires_at": int(expires_at),
@@ -200,6 +203,7 @@ class StructurePlanBuilder:
         return "trend_follow"
 
     def _tradable_plan(self, **kwargs) -> Optional[Dict]:
+        minimum_override = kwargs.pop("min_risk_reward_override", None)
         entry = _number(kwargs.get("entry"))
         sl = _number(kwargs.get("stop_loss"))
         tp = _number(kwargs.get("take_profit"))
@@ -214,10 +218,15 @@ class StructurePlanBuilder:
             return None
         risk = abs(entry - sl)
         rr = abs(tp - entry) / risk if risk else 0
-        if rr < max(1.0, _number(self._param("min_real_risk_reward", 1.2))):
+        minimum_rr = (
+            max(0.1, _number(minimum_override))
+            if minimum_override is not None
+            else max(1.0, _number(self._param("min_real_risk_reward", 1.2)))
+        )
+        if rr < minimum_rr:
             self._reject(
                 f"真实盈亏比 {rr:.2f} 低于最低要求 "
-                f"{max(1.0, _number(self._param('min_real_risk_reward', 1.2))):.2f}"
+                f"{minimum_rr:.2f}"
             )
             return None
         if int(kwargs.get("confidence") or 0) < int(
@@ -228,6 +237,7 @@ class StructurePlanBuilder:
                 f"{int(self._param('min_structure_confidence', 60))}%"
             )
             return None
+        kwargs["minimum_risk_reward"] = minimum_rr
         return self._plan(**kwargs)
 
     def build(
@@ -453,6 +463,9 @@ class StructurePlanBuilder:
             entry_mode=entry_mode, status="active", entry=entry,
             zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
             stop_loss=sl, take_profit=target,
+            min_risk_reward_override=self._param(
+                "trend_min_real_risk_reward", 0.5
+            ),
             confidence=int(level["confidence"]),
             reason=(
                 f"{period} {'上涨' if direction == 'buy' else '下跌'}主结构中，"
@@ -1051,6 +1064,7 @@ class StructurePlanSignalGenerator:
                 suggested_sl=_number(plan.get("stop_loss")),
                 suggested_tp=_number(plan.get("take_profit")),
                 risk_reward_ratio=_number(plan.get("risk_reward_ratio")),
+                minimum_risk_reward=_number(plan.get("minimum_risk_reward")),
                 trigger_reason=str(plan.get("reason") or "结构交易计划触发"),
                 trade_plan_id=str(plan.get("plan_id") or ""),
                 trade_plan_group_id=str(plan.get("plan_group_id") or ""),

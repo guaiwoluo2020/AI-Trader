@@ -187,7 +187,19 @@ class PositionManager:
             raise ValueError("没有止盈规则能够生成有效价格")
         reward = abs(take_profit - entry_price) if take_profit else 0
         rr = reward / risk if risk and take_profit else 0
-        if take_profit and rr < float(config.get("min_risk_reward", 0)):
+        minimum_rr = float(config.get("min_risk_reward", 0) or 0)
+        signal_minimum = float(
+            (setup_context or {}).get("signal_min_risk_reward", 0) or 0
+        )
+        if (
+            signal_minimum > 0
+            and str((setup_context or {}).get("signal_source") or "")
+            == "structure_plan"
+            and str((setup_context or {}).get("setup_type") or "")
+            == "structure_location_pullback"
+        ):
+            minimum_rr = signal_minimum
+        if take_profit and rr < minimum_rr:
             raise ValueError("生成的盈亏比低于持仓管理方案要求")
         policy_snapshot = policy.to_dict()
         policy_snapshot["config"] = copy.deepcopy(config)

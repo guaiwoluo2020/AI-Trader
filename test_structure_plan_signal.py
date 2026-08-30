@@ -331,11 +331,59 @@ class StructurePlanTests(unittest.TestCase):
         structure["structure_hierarchy"]["external"]["weak_low"]["price"] = 106.0
         structure["structure_hierarchy"]["external"]["protected_low"]["price"] = 106.0
         self.store.rows[-1]["close"] = 109.8
-        plans = StructurePlanBuilder({"min_real_risk_reward": 2.0}).build(
+        plans = StructurePlanBuilder({"trend_min_real_risk_reward": 2.0}).build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
         self.assertEqual(plans[0]["setup_type"], "no_trade")
         self.assertIn("真实盈亏比", plans[0]["reason"])
+
+    def test_uptrend_pullback_accepts_half_risk_reward(self):
+        structure = _trend_structure("up")
+        for layer in structure["structure_hierarchy"].values():
+            if layer.get("weak_high"):
+                layer["weak_high"]["price"] = 112.2
+            if layer.get("protected_high"):
+                layer["protected_high"]["price"] = 112.2
+        self.store.rows[-1]["close"] = 110.0
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "structure_location_pullback")
+        self.assertEqual(plans[0]["direction"], "buy")
+        self.assertGreaterEqual(plans[0]["risk_reward_ratio"], 0.5)
+        self.assertLess(plans[0]["risk_reward_ratio"], 1.2)
+        self.assertEqual(plans[0]["minimum_risk_reward"], 0.5)
+
+    def test_uptrend_pullback_still_rejects_below_half_risk_reward(self):
+        structure = _trend_structure("up")
+        for layer in structure["structure_hierarchy"].values():
+            if layer.get("weak_high"):
+                layer["weak_high"]["price"] = 111.9
+            if layer.get("protected_high"):
+                layer["protected_high"]["price"] = 111.9
+        self.store.rows[-1]["close"] = 110.0
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("最低要求 0.50", plans[0]["reason"])
+
+    def test_downtrend_rebound_accepts_half_risk_reward(self):
+        structure = _trend_structure("down")
+        for layer in structure["structure_hierarchy"].values():
+            if layer.get("weak_low"):
+                layer["weak_low"]["price"] = 107.7
+            if layer.get("protected_low"):
+                layer["protected_low"]["price"] = 107.7
+        self.store.rows[-1]["close"] = 110.0
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "structure_location_pullback")
+        self.assertEqual(plans[0]["direction"], "sell")
+        self.assertGreaterEqual(plans[0]["risk_reward_ratio"], 0.5)
+        self.assertLess(plans[0]["risk_reward_ratio"], 1.2)
+        self.assertEqual(plans[0]["minimum_risk_reward"], 0.5)
 
     def test_fresh_bos_uses_swing_phase_without_name_error(self):
         structure = _trend_structure("down")

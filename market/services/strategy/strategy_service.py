@@ -496,6 +496,9 @@ class StrategyService:
                 "setup_family": str(getattr(best_signal, "setup_family", "") or "generic"),
                 "setup_type": str(getattr(best_signal, "setup_type", "") or "generic_entry"),
                 "entry_mode": str(getattr(best_signal, "entry_mode", "") or "touch_or_near"),
+                "signal_min_risk_reward": float(
+                    getattr(best_signal, "minimum_risk_reward", 0) or 0
+                ),
             }
             plan = self.position_manager.create_plan(
                 position_policy, action, entry_price,

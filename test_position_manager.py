@@ -9,6 +9,35 @@ def policy(config):
 
 
 class PositionManagerTests(unittest.TestCase):
+    def test_structure_trend_pullback_uses_signal_half_rr_threshold(self):
+        config = {
+            "initial_stop_rules": [{"type": "signal"}],
+            "initial_take_profit_rules": [{"type": "signal"}],
+            "management_rules": [],
+            "min_risk_reward": 1.0,
+        }
+        plan = PositionManager().create_plan(
+            policy(config), "buy", 100,
+            signal_stop_loss=99.5, signal_take_profit=100.3,
+            setup_context={
+                "signal_source": "structure_plan",
+                "setup_type": "structure_location_pullback",
+                "signal_min_risk_reward": 0.5,
+            },
+        )
+        self.assertAlmostEqual(plan.risk_reward, 0.6)
+
+        with self.assertRaisesRegex(ValueError, "盈亏比"):
+            PositionManager().create_plan(
+                policy(config), "buy", 100,
+                signal_stop_loss=99.5, signal_take_profit=100.3,
+                setup_context={
+                    "signal_source": "ai_entry",
+                    "setup_type": "generic_entry",
+                    "signal_min_risk_reward": 0.5,
+                },
+            )
+
     def test_setup_profile_uses_exact_then_family_then_source(self):
         config = {
             "initial_stop_rules": [{"type": "fixed_percent", "value": 0.01}],
