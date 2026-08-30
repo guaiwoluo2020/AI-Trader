@@ -177,7 +177,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "require_range_boundary_reclaim": False,
             "enable_false_breakout": True, "enable_liquidity_sweep": True,
             "enable_choch": True, "min_choch_displacement_atr": 0.2,
-            "min_structure_confidence": 60, "min_real_risk_reward": 2.0,
+            "min_structure_confidence": 60, "min_real_risk_reward": 1.2,
             "max_event_age_bars": 2, "min_breakout_displacement_atr": 0.2,
             "entry_zone_atr": 0.35, "stop_buffer_atr": 0.25,
             "location_proximity_atr": 0.6, "min_trendline_touches": 2,
@@ -378,7 +378,7 @@ def normalize_signal_sources(
             ):
                 params[name] = bool(params.get(name, True))
             params["min_structure_confidence"] = max(0, min(100, int(params.get("min_structure_confidence", 60))))
-            params["min_real_risk_reward"] = max(1.0, min(10.0, float(params.get("min_real_risk_reward", 2.0))))
+            params["min_real_risk_reward"] = max(1.0, min(10.0, float(params.get("min_real_risk_reward", 1.2))))
             params["max_event_age_bars"] = max(0, min(10, int(params.get("max_event_age_bars", 2))))
             params["min_breakout_displacement_atr"] = max(0.0, min(5.0, float(params.get("min_breakout_displacement_atr", 0.2))))
             params["min_choch_displacement_atr"] = max(0.0, min(5.0, float(params.get("min_choch_displacement_atr", 0.2))))

@@ -41,6 +41,11 @@ class PivotSignalGenerator:
         self._signal_cooldowns: Dict[str, datetime] = {}
         self._configured_pivot_cache: Dict[tuple, List] = {}
         self._structure_regime_cache: Dict[tuple, tuple] = {}
+        # Breakouts are edge-triggered: remember the previous quote and the
+        # pivots that already emitted a breakout so a sustained price above a
+        # level cannot create repeated entries every cooldown interval.
+        self._last_tick_prices: Dict[tuple, float] = {}
+        self._triggered_breakout_pivots = set()
 
         print("[PivotSignalGenerator] 转折点信号生成器已初始化")
 
@@ -142,6 +147,13 @@ class PivotSignalGenerator:
         for config in strategy.get_signal_sources("pivot", enabled_only=True):
             period = config["period"]
             params = config.get("params") or {}
+            tick_key = (
+                str(getattr(strategy, "strategy_id", "") or ""),
+                str(config.get("signal_source_id") or ""),
+                str(symbol).upper(), str(period).upper(),
+            )
+            previous_tick_price = self._last_tick_prices.get(tick_key)
+            self._last_tick_prices[tick_key] = float(current_price)
             raw_klines = self.kline_store.get_all_klines(symbol, period)
             strength = max(1, int(params.get("confirmation_strength", 3)))
             merge_distance = float(params.get("merge_distance", 0.0004))
@@ -282,12 +294,31 @@ class PivotSignalGenerator:
                     (pivot.direction == "high" and current_price > pivot.price)
                     or (pivot.direction == "low" and current_price < pivot.price)
                 )
-                if distance <= threshold and (
-                    (signal_type in {"near", "both"} and is_near)
-                    or (signal_type in {"breakout", "both"} and is_breakout)
+                # Proximity is only for a near/reversal entry.  A breakout is
+                # an edge event between two consecutive ticks and must not be
+                # discarded merely because price moved more than the near
+                # threshold after crossing the pivot.
+                crossed = (
+                    previous_tick_price is not None
+                    and (
+                        (pivot.direction == "high"
+                         and previous_tick_price <= pivot.price < current_price)
+                        or (pivot.direction == "low"
+                            and previous_tick_price >= pivot.price > current_price)
+                    )
+                )
+                breakout_key = (
+                    str(config.get("signal_source_id") or ""),
+                    str(symbol).upper(), str(period).upper(),
+                    pivot_timestamp(pivot.timestamp), round(float(pivot.price), 8),
+                )
+                breakout_allowed = crossed and breakout_key not in self._triggered_breakout_pivots
+                if (
+                    (signal_type in {"near", "both"} and distance <= threshold and is_near)
+                    or (signal_type in {"breakout", "both"} and breakout_allowed)
                 ):
                     candidates.append((
-                        pivot_score, distance, pivot, is_breakout,
+                        pivot_score, distance, pivot, breakout_allowed,
                         age_bars, confirmation_count, recency_score,
                     ))
             if not candidates:
@@ -346,6 +377,12 @@ class PivotSignalGenerator:
                 )
             if signal:
                 self._signal_cooldowns[key] = datetime.now()
+                if is_breakout:
+                    self._triggered_breakout_pivots.add((
+                        str(config.get("signal_source_id") or ""),
+                        str(symbol).upper(), str(period).upper(),
+                        pivot_timestamp(pivot.timestamp), round(float(pivot.price), 8),
+                    ))
                 signal.signal_source_id = source_id
                 signals.append(signal)
         return signals

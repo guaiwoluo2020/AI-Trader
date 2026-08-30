@@ -60,9 +60,11 @@ def _range_structure(status="confirmed", direction=""):
     }
 
 
-def _triangle_structure():
+def _triangle_structure(pattern="converging_triangle", major_state="sideways"):
     structure = _range_structure()
-    structure["range"].update({"pattern": "converging_triangle"})
+    structure["major_state"] = major_state
+    structure["current_state"] = major_state
+    structure["range"].update({"pattern": pattern})
     return structure
 
 
@@ -167,6 +169,36 @@ class StructurePlanTests(unittest.TestCase):
         self.assertIn("range_lower_reversal", types)
         self.assertNotIn("range_upper_reversal", types)
         self.assertTrue(all(item["status"] == "active" for item in plans))
+
+    def test_directional_triangle_only_watches_its_breakout_side(self):
+        ascending = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows,
+            _triangle_structure("ascending_triangle", "up"),
+        )
+        self.assertEqual(len(ascending), 1)
+        self.assertEqual(ascending[0]["direction"], "buy")
+        self.assertEqual(ascending[0]["setup_type"], "triangle_breakout_watch")
+
+        descending = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows,
+            _triangle_structure("descending_triangle", "down"),
+        )
+        self.assertEqual(len(descending), 1)
+        self.assertEqual(descending[0]["direction"], "sell")
+        self.assertEqual(descending[0]["setup_type"], "triangle_breakout_watch")
+
+    def test_late_ascending_triangle_adds_support_entry_before_breakout(self):
+        structure = _triangle_structure("ascending_triangle", "up")
+        structure["range"].update({
+            "width_atr": 2.0, "low_slope": 0.01, "low_intercept": 109.61,
+        })
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual([item["direction"] for item in plans], ["buy", "buy"])
+        self.assertEqual(plans[0]["setup_type"], "triangle_prebreakout_pullback")
+        self.assertEqual(plans[1]["setup_type"], "triangle_breakout_watch")
+        self.assertEqual(plans[0]["entry_mode"], "touch_or_near")
 
     def test_tick_uses_persisted_plan_without_reanalyzing(self):
         repository = _Repository()

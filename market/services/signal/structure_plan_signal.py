@@ -175,10 +175,10 @@ class StructurePlanBuilder:
             return None
         risk = abs(entry - sl)
         rr = abs(tp - entry) / risk if risk else 0
-        if rr < max(1.0, _number(self._param("min_real_risk_reward", 2.0))):
+        if rr < max(1.0, _number(self._param("min_real_risk_reward", 1.2))):
             self._reject(
                 f"真实盈亏比 {rr:.2f} 低于最低要求 "
-                f"{max(1.0, _number(self._param('min_real_risk_reward', 2.0))):.2f}"
+                f"{max(1.0, _number(self._param('min_real_risk_reward', 1.2))):.2f}"
             )
             return None
         if int(kwargs.get("confidence") or 0) < int(
@@ -549,8 +549,72 @@ class StructurePlanBuilder:
         # remain observation-only by default because boundary risk expands.
         if pattern != "range":
             setup = "diverging_no_trade" if pattern == "broadening" else "triangle_breakout_watch"
-            directions = ("none",) if pattern == "broadening" else ("buy", "sell")
+            # A directional triangle carries a structural bias.  Do not expose
+            # the opposite breakout as an equally likely trade: an ascending
+            # triangle watches only the upper-boundary break, while a
+            # descending triangle watches only the lower-boundary break.
+            # Only a neutral/converging triangle remains two-sided until its
+            # closing-bar confirmation.
+            if pattern == "broadening":
+                directions = ("none",)
+            elif pattern in {"ascending_triangle", "ascending"}:
+                directions = ("buy",)
+            elif pattern in {"descending_triangle", "descending"}:
+                directions = ("sell",)
+            else:
+                directions = ("buy", "sell")
             result = []
+
+            # An ascending triangle can be entered once at the late-stage
+            # rising support before the breakout, then entered a second time
+            # after the upper-boundary close confirmation.  The early entry is
+            # deliberately limited to the convergence end and requires the
+            # price to be near the projected lower trendline; otherwise only
+            # the breakout watcher is exposed.
+            if pattern in {"ascending_triangle", "ascending", "descending_triangle", "descending"}:
+                close = _number(rows[-1].get("close") or rows[-1].get("close_price"))
+                low_slope = _number(box.get("low_slope"))
+                low_intercept = _number(box.get("low_intercept"))
+                high_slope = _number(box.get("high_slope"))
+                high_intercept = _number(box.get("high_intercept"))
+                is_ascending = pattern in {"ascending_triangle", "ascending"}
+                direction = "buy" if is_ascending else "sell"
+                level = (
+                    low_intercept + low_slope * (len(rows) - 1)
+                    if is_ascending else
+                    high_intercept + high_slope * (len(rows) - 1)
+                )
+                width_atr = _number(box.get("width_atr"))
+                late_convergence = width_atr > 0 and width_atr <= 2.5
+                near_entry_level = level > 0 and close > 0 and abs(close - level) <= entry_buffer
+                if late_convergence and near_entry_level:
+                    protected = self._protected_reference(
+                        structure.get("structure_hierarchy") or {}, direction, level
+                    )
+                    if direction == "buy":
+                        sl = min(level, protected) - stop_buffer if protected else level - stop_buffer
+                        tp = top - target_buffer
+                        setup_reason = "价格接近抬升支撑线"
+                    else:
+                        sl = max(level, protected) + stop_buffer if protected else level + stop_buffer
+                        tp = bottom + target_buffer
+                        setup_reason = "价格接近下降压力线"
+                    early = self._tradable_plan(
+                        source_id=source_id, symbol=symbol, period=period,
+                        anchor=anchor, setup_type="triangle_prebreakout_pullback",
+                        direction=direction, entry_mode="touch_or_near", status="active",
+                        entry=level, zone_lower=level-entry_buffer,
+                        zone_upper=level+entry_buffer, stop_loss=sl,
+                        take_profit=tp, confidence=min(90, confidence + 3),
+                        reason=(f"{period} {'上升' if is_ascending else '下降'}三角形收敛末端，"
+                                f"{setup_reason}，先布局{'买入' if is_ascending else '卖出'}；"
+                                f"止损置于最近{'HL/保护低点' if is_ascending else 'LH/保护高点'}外侧，"
+                                f"突破{'上沿' if is_ascending else '下沿'}后可再次{'买入' if is_ascending else '卖出'}"),
+                        valid_from=bar_time, expires_at=expires,
+                        invalidation_price=sl, structure_snapshot=snapshot,
+                    )
+                    if early:
+                        result.append(early)
             for direction in directions:
                 if direction == "none":
                     result.append(self._plan(
