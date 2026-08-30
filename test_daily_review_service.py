@@ -88,6 +88,40 @@ class DailyReviewCoordinatorTestCase(unittest.TestCase):
         saved = json.loads(storage.entities[(coordinator.BATCH_ENTITY, "2026-08-30")])
         self.assertEqual(saved["status"], "completed")
 
+    def test_strategy_review_includes_unconsumed_structure_plans(self):
+        class Storage(_MemoryStorage):
+            def fetchall(self, sql, params=()):
+                if "FROM structure_trade_plans" in sql:
+                    return [{
+                        "plan_id": "p1", "plan_group_id": "g1", "period": "M5",
+                        "setup_type": "range_boundary", "direction": "buy",
+                        "entry_mode": "touch_or_near", "status": "active",
+                        "structure_bar_time": 1900, "valid_from": 1900,
+                        "expires_at": 2500, "created_at": 1900, "updated_at": 1900,
+                        "payload_json": json.dumps({
+                            "entry_price": 100, "stop_loss": 95, "take_profit": 110,
+                            "risk_reward_ratio": 2, "reason": "箱体下沿买入",
+                        }),
+                    }]
+                if "FROM structure_plan_executions" in sql:
+                    return []
+                return []
+
+        class Strategy:
+            @staticmethod
+            def get_signal_sources(source_type, enabled_only=True):
+                return [{"type": source_type, "period": "M5", "enabled": True}]
+
+        coordinator = DailyReviewCoordinator(lambda _: None, storage=Storage())
+        context = coordinator._deployment_structure_context(
+            7, 17, "deployment-1", "BTCUSD", Strategy(), 1000,
+        )
+
+        self.assertTrue(context["enabled"])
+        self.assertEqual(context["metrics"]["structure_plan_count"], 1)
+        self.assertEqual(context["metrics"]["structure_plan_unconsumed_count"], 1)
+        self.assertEqual(context["plans"][0]["execution_status"], "unconsumed")
+
 
 if __name__ == "__main__":
     unittest.main()

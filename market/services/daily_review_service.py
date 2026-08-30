@@ -341,7 +341,9 @@ class DailyReviewCoordinator:
             if strategy:
                 base["strategy_name"] = strategy.strategy_name
             evidence = self._strategy_evidence(scope, now, strategy)
-            if not any(evidence["metrics"].get(key) for key in ("decision_count", "order_count", "trade_count")):
+            if not any(evidence["metrics"].get(key) for key in (
+                "decision_count", "order_count", "trade_count", "structure_plan_count",
+            )):
                 payload = {**base, "status": "skipped", "skip_reason": "过去24小时没有策略决策、订单或成交，已自动跳过复盘", "evidence": evidence}
                 RuntimeStateRepository(user_id, account_id, self.storage).upsert_entity(
                     self.STRATEGY_ENTITY, entity_id, payload,
@@ -416,18 +418,27 @@ class DailyReviewCoordinator:
                 continue
             if _epoch(payload.get("created_at") or payload.get("timestamp")) < start_at:
                 continue
-            decisions.append({key: payload.get(key) for key in (
+            decision = {key: payload.get(key) for key in (
                 "decision_id", "created_at", "action", "status", "decision_reason",
-                "confidence_score", "signal_summary", "order_id",
-            )})
-        plan_ids = []
+                "confidence_score", "order_id",
+            )}
+            summary = payload.get("signal_summary") or {}
+            decision.update({
+                "selected_trade_plan_id": summary.get("selected_trade_plan_id"),
+                "selected_trade_plan_group_id": summary.get("selected_trade_plan_group_id"),
+                "selected_setup_type": summary.get("selected_setup_type"),
+                "selected_entry_mode": summary.get("selected_entry_mode"),
+                "selected_signal_source": summary.get("selected_signal_source"),
+            })
+            decisions.append(decision)
         for item in orders + trades:
             attribution = _json(item.get("position_attribution_json"))
             item["position_attribution"] = attribution
             item.pop("position_attribution_json", None)
-            if attribution.get("trade_plan_id"):
-                plan_ids.append(str(attribution["trade_plan_id"]))
-        plan_executions = self.plan_repo.list_executions(user_id, plan_ids)
+        structure_context = self._deployment_structure_context(
+            user_id, account_id, deployment_id, str(scope["symbol"]),
+            strategy, start_at,
+        )
         return {
             "scope": {key: scope.get(key) for key in (
                 "deployment_id", "strategy_id", "symbol", "execution_mode", "account_name"
@@ -437,10 +448,104 @@ class DailyReviewCoordinator:
                 "trade_count": len(trades),
                 "net_profit": round(sum(float(item.get("net_profit") or item.get("profit") or 0) for item in trades), 2),
                 "rejected_order_count": sum(str(item.get("status")) in {"rejected", "0", "False"} for item in orders),
+                **structure_context["metrics"],
             },
             "strategy_config": strategy.to_dict() if strategy else {},
-            "structure_plan_executions": plan_executions[-100:],
+            "structure_plan_subscription": structure_context,
             "decisions": decisions[-60:], "orders": orders[-60:], "trades": trades[-60:],
+        }
+
+    def _deployment_structure_context(
+        self, user_id: int, account_id: int, deployment_id: str,
+        symbol: str, strategy, start_at: int,
+    ) -> Dict:
+        """Collect all public plans subscribed by a deployment, even if no order exists."""
+        sources = (
+            strategy.get_signal_sources("structure_plan", enabled_only=True)
+            if strategy else []
+        )
+        periods = sorted({
+            str(source.get("period") or "M5").upper() for source in sources
+        })
+        if not periods:
+            return {
+                "enabled": False, "periods": [], "plans": [], "executions": [],
+                "metrics": {
+                    "structure_plan_count": 0,
+                    "structure_plan_consumed_count": 0,
+                    "structure_plan_unconsumed_count": 0,
+                    "structure_plan_execution_status_counts": {},
+                },
+            }
+        placeholders = ",".join("?" for _ in periods)
+        plan_rows = self.storage.fetchall(
+            "SELECT plan_id,plan_group_id,period,setup_type,direction,entry_mode,status,"
+            "structure_bar_time,valid_from,expires_at,payload_json,created_at,updated_at "
+            "FROM structure_trade_plans WHERE user_id=? AND account_id=0 "
+            "AND strategy_id='' AND UPPER(symbol)=? "
+            f"AND period IN ({placeholders}) "
+            "AND (structure_bar_time>=? OR created_at>=? OR updated_at>=?) "
+            "ORDER BY structure_bar_time DESC,updated_at DESC LIMIT 500",
+            (int(user_id), str(symbol).upper(), *periods, start_at, start_at, start_at),
+        )
+        execution_rows = self.storage.fetchall(
+            "SELECT execution_id,plan_id,plan_group_id,status,order_id,reason,"
+            "created_at,updated_at FROM structure_plan_executions "
+            "WHERE user_id=? AND account_id=? AND deployment_id=? "
+            "AND (created_at>=? OR updated_at>=?) ORDER BY updated_at DESC LIMIT 500",
+            (int(user_id), int(account_id), str(deployment_id), start_at, start_at),
+        )
+        executions = [dict(row) for row in execution_rows]
+        execution_by_plan = {str(item["plan_id"]): item for item in executions}
+        plans = []
+        status_counts = Counter()
+        consumed_statuses = {
+            "claimed", "triggered", "ordered", "filled", "rejected",
+            "expired", "canceled",
+        }
+        for row in plan_rows:
+            payload = _json(row["payload_json"])
+            execution = execution_by_plan.get(str(row["plan_id"]))
+            execution_status = str(execution.get("status") or "") if execution else "unconsumed"
+            status_counts[execution_status] += 1
+            plans.append({
+                "plan_id": str(row["plan_id"]),
+                "plan_group_id": str(row["plan_group_id"] or ""),
+                "period": str(row["period"] or ""),
+                "setup_type": str(row["setup_type"] or ""),
+                "direction": str(row["direction"] or ""),
+                "entry_mode": str(row["entry_mode"] or ""),
+                "plan_status": str(row["status"] or ""),
+                "entry_price": float(payload.get("entry_price") or 0),
+                "stop_loss": float(payload.get("stop_loss") or 0),
+                "take_profit": float(payload.get("take_profit") or 0),
+                "risk_reward_ratio": float(payload.get("risk_reward_ratio") or 0),
+                "reason": str(payload.get("reason") or "")[:500],
+                "generated_at": int(payload.get("generated_at") or row["created_at"] or 0),
+                "valid_from": int(row["valid_from"] or 0),
+                "expires_at": int(row["expires_at"] or 0),
+                "execution_status": execution_status,
+                "execution_reason": str(execution.get("reason") or "")[:500] if execution else "",
+                "order_id": str(execution.get("order_id") or "") if execution else "",
+            })
+        consumed = sum(
+            count for status, count in status_counts.items()
+            if status in consumed_statuses
+        )
+        return {
+            "enabled": True,
+            "periods": periods,
+            # Keep the latest detailed samples while metrics still cover every
+            # row fetched for the 24-hour window. This prevents M1 strategies
+            # from producing an oversized LLM prompt.
+            "plans": plans[:120],
+            "executions": executions[:120],
+            "metrics": {
+                "structure_plan_count": len(plans),
+                "structure_plan_consumed_count": consumed,
+                "structure_plan_unconsumed_count": max(0, len(plans) - consumed),
+                "structure_plan_execution_status_counts": dict(status_counts),
+            },
         }
 
     def _call_llm(self, user_id: int, prompt: str, object_type: str, object_id: str) -> Dict:
