@@ -488,14 +488,14 @@ class TradingServer:
         if not bool(config.get("loss_streak_circuit_breaker_enabled", True)):
             return {"allowed": True, "loss_streak": 0, "scope": "deployment"}
         limit = max(1, int(config.get("loss_streak_limit", 3) or 3))
-        pause_seconds = max(60, int(config.get("loss_streak_pause_minutes", 120) or 120) * 60)
+        pause_seconds = max(60, int(config.get("loss_streak_pause_minutes", 10) or 10) * 60)
         # MT5 exits are grouped by position id so partial closes never count as
         # independent losses. Attribution keeps strategies on the same account
         # independent from each other.
         candidates = storage.fetchall(
-            "SELECT profit, swap, commission, received_at, mt5_position_id, position_attribution_json "
+            "SELECT profit, swap, commission, deal_timestamp, mt5_position_id, position_attribution_json "
             "FROM live_trade_deals WHERE user_id = ? AND account_id = ? AND entry_type IN (1, 2, 3) "
-            "ORDER BY received_at DESC, id DESC LIMIT 1000",
+            "ORDER BY deal_timestamp DESC, id DESC LIMIT 1000",
             (int(self.user_id), int(self.account_id)),
         )
         grouped = {}
@@ -511,7 +511,9 @@ class TradingServer:
                 continue
             item = grouped.setdefault(position_id, {"net_profit": 0.0, "closed_at": 0})
             item["net_profit"] += sum(float(row.get(key) or 0) for key in ("profit", "swap", "commission"))
-            item["closed_at"] = max(item["closed_at"], int(row.get("received_at") or 0))
+            item["closed_at"] = max(
+                item["closed_at"], int(row.get("deal_timestamp") or 0)
+            )
         rows = sorted(grouped.values(), key=lambda item: item["closed_at"], reverse=True)
         streak = 0
         for row in rows:
@@ -528,128 +530,8 @@ class TradingServer:
                 "release_at": release_at,
                 "reason": f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}",
             }
-        return {"allowed": True, "loss_streak": streak, "scope": "deployment", "cooldown_completed": True}
-
-        candidates = storage.fetchall(
-            """
-            SELECT profit, swap, commission, received_at, mt5_position_id,
-                   position_attribution_json
-            FROM live_trade_deals
-            WHERE user_id = ? AND account_id = ? AND symbol = ?
-              AND entry_type IN (1, 2, 3)
-            ORDER BY received_at DESC, id DESC
-            LIMIT 500
-            """,
-            (int(self.user_id), int(self.account_id), symbol),
-        )
-        grouped = {}
-        for row in candidates:
-            try:
-                attribution = json.loads(
-                    row.get("position_attribution_json") or "{}"
-                )
-            except (TypeError, ValueError):
-                attribution = {}
-            if (
-                str(attribution.get("strategy_id") or "") != strategy.strategy_id
-                or str(attribution.get("setup_type") or "") != setup_type
-                or str(attribution.get("direction") or "") != action
-            ):
-                continue
-            position_id = str(row.get("mt5_position_id") or "")
-            item = grouped.setdefault(position_id, {
-                "net_profit": 0.0,
-                "closed_at": int(row.get("received_at") or 0),
-                "position_attribution": attribution,
-            })
-            item["net_profit"] += sum(
-                float(row.get(key) or 0)
-                for key in ("profit", "swap", "commission")
-            )
-            item["closed_at"] = max(
-                item["closed_at"], int(row.get("received_at") or 0)
-            )
-        rows = sorted(
-            grouped.values(), key=lambda item: item["closed_at"], reverse=True
-        )[:20]
-        streak = 0
-        for row in rows:
-            if float(row.get("net_profit") or 0) < 0:
-                streak += 1
-            else:
-                break
-        if not rows or streak == 0:
-            return {
-                "allowed": True, "loss_streak": streak,
-                "scope": "live_setup", "setup_type": setup_type,
-            }
-        last_loss_at = int(rows[0].get("closed_at") or 0)
-        last_attribution = rows[0].get("position_attribution") or {}
-        last_plan_id = str(
-            last_attribution.get("trade_plan_id")
-            or last_attribution.get("ai_plan_id") or ""
-        )
-        period = str(getattr(signal, "source_period", "M1") or "M1").upper()
-        bar_seconds = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}.get(period, 60)
-        now = int(time.time())
-        if plan_id and plan_valid_from <= last_loss_at:
-            return {
-                "allowed": False, "loss_streak": streak,
-                "scope": "live_setup", "setup_type": setup_type,
-                "paused_direction": action,
-                "reason": (
-                    f"实盘 {setup_type} · {action} 上一笔亏损退出，"
-                    "等待该信号源生成下一份AI分析后再评估"
-                ),
-            }
-        if streak < 2:
-            return {
-                "allowed": True, "loss_streak": streak,
-                "scope": "live_setup", "setup_type": setup_type,
-                "reset_by": "new_analysis" if plan_id else "not_required",
-            }
-        if streak == 2 and now < last_loss_at + bar_seconds * 5:
-            return {
-                "allowed": False, "loss_streak": streak, "scope": "live_setup",
-                "setup_type": setup_type,
-                "release_at": last_loss_at + bar_seconds * 5,
-                "reason": f"实盘 {setup_type} · {action} 连续亏损 {streak} 次，冷却 5 根 {period} K线后再评估",
-            }
-        if streak >= 3:
-            if not plan_id:
-                release_at = last_loss_at + bar_seconds * 20
-                if now < release_at:
-                    return {
-                        "allowed": False, "loss_streak": streak,
-                        "scope": "live_setup", "setup_type": setup_type,
-                        "paused_direction": action, "release_at": release_at,
-                        "reason": (
-                            f"实盘 {setup_type} · {action} 连续亏损 {streak} 次，"
-                            f"非AI信号冷却 20 根 {period} K线后恢复"
-                        ),
-                    }
-                return {
-                    "allowed": True, "loss_streak": streak,
-                    "scope": "live_setup", "setup_type": setup_type,
-                    "cooldown_completed": True,
-                }
-            new_structure = bool(
-                plan_id and plan_id != last_plan_id
-                and plan_valid_from > last_loss_at
-            )
-            if not new_structure:
-                return {
-                    "allowed": False, "loss_streak": streak, "scope": "live_setup",
-                    "setup_type": setup_type,
-                    "paused_direction": action,
-                    "reason": (
-                        f"实盘 {setup_type} · {action} 连续亏损 {streak} 次，"
-                        "已暂停该Setup方向；等待结构和价格不同的新AI计划"
-                    ),
-                }
         return {
-            "allowed": True, "loss_streak": streak,
-            "scope": "live_setup", "setup_type": setup_type,
+            "allowed": True, "loss_streak": streak, "scope": "deployment",
             "cooldown_completed": True,
         }
 

@@ -543,38 +543,45 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             data = await request.json()
             deals = data.get('deals', [])
 
-            print(f"[trade_history] 收到 {len(deals)} 条成交记录")
-
             if not deals:
-                return {"status": "ok", "message": "无数据需要更新", "count": 0}
+                return {
+                    "status": "ok", "message": "无数据需要更新", "count": 0,
+                    "persisted": {"inserted": 0, "updated": 0, "unchanged": 0, "invalid": 0},
+                }
 
             # 使用新的交易历史服务
             server = engine_manager.get_engine_for_ea(identity)
             new_count = server.trade_history_service.process_deals(deals)
             # 成交历史不能只依赖运行时 24 小时缓存；账户页和策略回放需要
             # 在服务重启后仍可读取，因此同步写入 MySQL 持久化表。
-            persisted_count = LiveTradeDealRepository().record_many(
+            persisted = LiveTradeDealRepository().record_many(
                 identity.user_id, identity.account_id, deals
             )
 
-            # 记录日志
-            system_log = server.system_log
-            system_log.add_log(
-                "trade_history_update",
-                {
-                    "deals_received": len(deals),
-                    "deals_new": new_count,
-                    "deals_persisted": persisted_count,
-                    "total_deals": len(server.trade_history_store.get())
-                },
-                message=f"交易历史上报: 收到{len(deals)}条, 新增{new_count}条"
-            )
+            changed_count = persisted["inserted"] + persisted["updated"]
+            if new_count or changed_count:
+                server.system_log.add_log(
+                    "trade_history_update",
+                    {
+                        "deals_received": len(deals),
+                        "deals_new_runtime": new_count,
+                        "deals_inserted": persisted["inserted"],
+                        "deals_updated": persisted["updated"],
+                        "deals_unchanged": persisted["unchanged"],
+                        "total_deals": len(server.trade_history_store.get()),
+                    },
+                    message=(
+                        f"交易历史上报: 新增{persisted['inserted']}条, "
+                        f"更新{persisted['updated']}条"
+                    ),
+                )
 
             return {
                 "status": "ok",
                 "message": "交易历史已更新",
                 "count": new_count,
-                "persisted_count": persisted_count,
+                "persisted_count": changed_count,
+                "persisted": persisted,
             }
 
         except Exception as e:

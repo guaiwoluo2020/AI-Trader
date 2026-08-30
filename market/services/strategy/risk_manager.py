@@ -5,11 +5,12 @@
 """
 
 from typing import Dict
-from datetime import date, datetime
+from datetime import datetime
 import os
 import threading
 
 from ...models import TradingStrategy
+from ...risk_clock import risk_day_key, risk_day_start_timestamp
 from sqlite_storage import RuntimeStateRepository
 
 
@@ -46,7 +47,7 @@ class RiskManager:
         self._daily_realized_pnl: float = 0.0
         self._circuit_breaker: bool = False
         self._circuit_breaker_reason: str = ""
-        self._risk_date: str = date.today().isoformat()
+        self._risk_date: str = risk_day_key()
         self._recorded_order_ids = set()
 
         # 品种配置（点值、最小手数等）
@@ -380,7 +381,7 @@ class RiskManager:
         self._reset_if_new_day()
 
     def _reset_if_new_day(self) -> None:
-        today = date.today().isoformat()
+        today = risk_day_key()
         if self._risk_date == today:
             return
         self._risk_date = today
@@ -395,12 +396,14 @@ class RiskManager:
     def _refresh_daily_realized_pnl(self) -> None:
         if not self._trade_history_service:
             return
-        today = self._risk_date
-        deals = self._trade_history_service.get_deals(hours=24)
+        day_start = risk_day_start_timestamp()
+        deals = self._trade_history_service.get_deals(hours=25)
         realized = 0.0
         for deal in deals:
-            deal_time = str(deal.get("time") or "")
-            if not deal_time.startswith(today) or int(deal.get("entry", 0)) != 1:
+            if (
+                int(deal.get("deal_timestamp") or 0) < day_start
+                or int(deal.get("entry", 0)) not in (1, 2, 3)
+            ):
                 continue
             realized += (
                 float(deal.get("profit", 0))

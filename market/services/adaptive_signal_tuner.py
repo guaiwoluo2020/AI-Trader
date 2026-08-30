@@ -108,22 +108,63 @@ class AdaptiveSignalTuner:
     def _closed_trades(self, user_id: int, source_id: str) -> List[Dict]:
         rows = [dict(row) for row in self.storage.fetchall(
             "SELECT trade_id, net_profit, closed_at, position_attribution_json "
-            "FROM paper_trades WHERE user_id = ? "
+            "FROM paper_trades WHERE user_id = ? AND closed_at > 0 "
+            "AND exit_reason NOT IN ('partial_take_profit', 'signal_take_profit') "
             "ORDER BY closed_at DESC LIMIT 1000",
             (int(user_id),),
         )]
+        for row in rows:
+            row["trade_id"] = f"paper:{row.get('trade_id')}"
         try:
-            live_rows = [dict(row) for row in self.storage.fetchall(
-                "SELECT CAST(ticket AS CHAR) AS trade_id, "
-                "(profit + swap + commission) AS net_profit, received_at AS closed_at, "
-                "position_attribution_json "
-                "FROM live_trade_deals WHERE user_id = ? AND entry_type IN (1, 2) "
-                "ORDER BY received_at DESC LIMIT 1000",
+            live_deals = [dict(row) for row in self.storage.fetchall(
+                "SELECT account_id, ticket, mt5_position_id, entry_type, volume, "
+                "profit, swap, commission, deal_timestamp, position_attribution_json "
+                "FROM live_trade_deals WHERE user_id = ? AND mt5_position_id > 0 "
+                "ORDER BY deal_timestamp DESC LIMIT 5000",
                 (int(user_id),),
             )]
-            rows.extend(live_rows)
+            positions = {}
+            for deal in live_deals:
+                key = (
+                    int(deal.get("account_id") or 0),
+                    int(deal.get("mt5_position_id") or 0),
+                )
+                item = positions.setdefault(key, {
+                    "entry_volume": 0.0, "exit_volume": 0.0,
+                    "net_profit": 0.0, "closed_at": 0,
+                    "position_attribution_json": "{}",
+                })
+                entry_type = int(deal.get("entry_type") or 0)
+                if entry_type == 0:
+                    item["entry_volume"] += float(deal.get("volume") or 0)
+                elif entry_type in (1, 2, 3):
+                    item["exit_volume"] += float(deal.get("volume") or 0)
+                    item["net_profit"] += sum(
+                        float(deal.get(name) or 0)
+                        for name in ("profit", "swap", "commission")
+                    )
+                    item["closed_at"] = max(
+                        item["closed_at"], int(deal.get("deal_timestamp") or 0)
+                    )
+                    if deal.get("position_attribution_json"):
+                        item["position_attribution_json"] = deal[
+                            "position_attribution_json"
+                        ]
+            for (account_id, position_id), item in positions.items():
+                if (
+                    item["entry_volume"] <= 0
+                    or item["exit_volume"] + 1e-9 < item["entry_volume"]
+                    or item["closed_at"] <= 0
+                ):
+                    continue
+                rows.append({
+                    "trade_id": f"live:{account_id}:{position_id}",
+                    "net_profit": item["net_profit"],
+                    "closed_at": item["closed_at"],
+                    "position_attribution_json": item["position_attribution_json"],
+                })
         except Exception:
-            # Older deployments may not have attribution on live deals yet.
+            # A temporary data-source failure must not stop other users' tuning.
             pass
         for row in rows:
             row["position_attribution"] = self._attribution(row)

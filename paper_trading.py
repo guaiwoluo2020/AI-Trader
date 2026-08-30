@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from market.models import PositionManagementPolicy, StrategyLifecycle, TradingStrategy
+from market.risk_clock import risk_day_start_timestamp
 from market.services.position_manager import PositionManager
 from market.services.position_attribution import (
     build_position_attribution, close_position_attribution,
@@ -590,7 +591,7 @@ class PaperTradingService:
         if not bool(config.get("loss_streak_circuit_breaker_enabled", True)):
             return {"allowed": True, "loss_streak": 0, "scope": "deployment"}
         limit = max(1, int(config.get("loss_streak_limit", 3) or 3))
-        pause_seconds = max(60, int(config.get("loss_streak_pause_minutes", 120) or 120) * 60)
+        pause_seconds = max(60, int(config.get("loss_streak_pause_minutes", 10) or 10) * 60)
         # A paper trade is written once when the complete position closes;
         # partial take-profits are separate rows and must not affect the streak.
         rows = self.storage.fetchall(
@@ -615,126 +616,9 @@ class PaperTradingService:
                 "release_at": release_at,
                 "reason": f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}",
             }
-        return {"allowed": True, "loss_streak": streak, "scope": "deployment", "cooldown_completed": True}
-
-        candidates = self.storage.fetchall(
-            """
-            SELECT t.net_profit, t.closed_at, t.position_attribution_json
-            FROM paper_trades t
-            JOIN paper_orders o ON o.order_id = t.order_id
-            WHERE t.user_id = ? AND t.account_id = ?
-              AND t.deployment_id = ? AND t.symbol = ?
-              AND o.direction = ?
-              AND t.exit_reason NOT IN ('partial_take_profit', 'signal_take_profit')
-            ORDER BY t.closed_at DESC, t.created_at DESC
-            LIMIT 100
-            """,
-            (
-                int(user_id), int(account_id), deployment["deployment_id"],
-                symbol, action,
-            ),
-        )
-        rows = []
-        for row in candidates:
-            row = dict(row)
-            try:
-                attribution = json.loads(
-                    row.get("position_attribution_json") or "{}"
-                )
-            except (TypeError, ValueError):
-                attribution = {}
-            if str(attribution.get("setup_type") or "") != setup_type:
-                continue
-            item = dict(row)
-            item["position_attribution"] = attribution
-            rows.append(item)
-            if len(rows) >= 20:
-                break
-
-        streak = 0
-        for row in rows:
-            if float(row.get("net_profit") or 0) < 0:
-                streak += 1
-            else:
-                break
-        if not rows or streak == 0:
-            return {
-                "allowed": True, "loss_streak": streak,
-                "scope": "paper_setup", "setup_type": setup_type,
-            }
-
-        latest = rows[0]
-        last_loss_at = int(latest.get("closed_at") or 0)
-        last_attribution = latest.get("position_attribution") or {}
-        last_plan_id = str(
-            last_attribution.get("trade_plan_id")
-            or last_attribution.get("ai_plan_id") or ""
-        )
-        period = str(getattr(signal, "source_period", "M1") or "M1").upper()
-        bar_seconds = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}.get(period, 60)
-        now = int(time.time())
-        if plan_id and plan_valid_from <= last_loss_at:
-            return {
-                "allowed": False, "loss_streak": streak,
-                "scope": "paper_setup", "setup_type": setup_type,
-                "paused_direction": action,
-                "reason": (
-                    f"{setup_type} · {action} 上一笔亏损退出，"
-                    "等待该信号源生成下一份AI分析后再评估"
-                ),
-            }
-        if streak < 2:
-            return {
-                "allowed": True, "loss_streak": streak,
-                "scope": "paper_setup", "setup_type": setup_type,
-                "reset_by": "new_analysis" if plan_id else "not_required",
-            }
-        if streak == 2:
-            release_at = last_loss_at + bar_seconds * 5
-            if now < release_at:
-                return {
-                    "allowed": False, "loss_streak": streak, "scope": "paper_setup",
-                    "setup_type": setup_type,
-                    "release_at": release_at,
-                    "reason": f"连续止损 {streak} 次，冷却 5 根 {period} K线后再评估",
-                }
-            return {"allowed": True, "loss_streak": streak, "scope": "paper_setup", "setup_type": setup_type, "cooldown_completed": True}
-
-        if not plan_id:
-            release_at = last_loss_at + bar_seconds * 20
-            if now < release_at:
-                return {
-                    "allowed": False, "loss_streak": streak,
-                    "scope": "paper_setup", "setup_type": setup_type,
-                    "paused_direction": action, "release_at": release_at,
-                    "reason": (
-                        f"{setup_type} · {action} 连续亏损 {streak} 次，"
-                        f"非AI信号冷却 20 根 {period} K线后恢复"
-                    ),
-                }
-            return {
-                "allowed": True, "loss_streak": streak,
-                "scope": "paper_setup", "setup_type": setup_type,
-                "cooldown_completed": True,
-            }
-
-        new_structure_plan = bool(
-            plan_id and plan_id != last_plan_id
-            and plan_valid_from > last_loss_at
-        )
-        if new_structure_plan:
-            return {
-                "allowed": True, "loss_streak": streak, "scope": "paper_setup",
-                "setup_type": setup_type, "reset_by": "new_structure_plan",
-            }
         return {
-            "allowed": False, "loss_streak": streak, "scope": "paper_setup",
-            "setup_type": setup_type,
-            "paused_direction": action,
-            "reason": (
-                f"{setup_type} · {action} 连续止损 {streak} 次，已暂停该Setup方向；"
-                "等待结构和价格不同的新AI交易计划后恢复"
-            ),
+            "allowed": True, "loss_streak": streak, "scope": "deployment",
+            "cooldown_completed": True,
         }
 
     def process_strategy_signals(
@@ -1550,7 +1434,7 @@ class PaperTradingService:
         else:
             if float(volume) > float(account["max_single_volume"]):
                 warnings.append("超过账户单笔最大手数")
-            today_start = int(time.time()) - int(time.time()) % 86400
+            today_start = risk_day_start_timestamp()
             daily = self.storage.fetchone(
                 """
                 SELECT COUNT(*) AS order_count,

@@ -3122,17 +3122,20 @@ class LiveTradeDealRepository:
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
 
-    def record_many(self, user_id: int, account_id: int, deals: List[Dict]) -> int:
+    def record_many(
+        self, user_id: int, account_id: int, deals: List[Dict]
+    ) -> Dict[str, int]:
+        stats = {"inserted": 0, "updated": 0, "unchanged": 0, "invalid": 0}
         if not deals:
-            return 0
+            return stats
         received_at = _now_ts()
-        count = 0
         for deal in deals:
             from market.models.trade_history import TradeDeal
             parsed_deal = TradeDeal.from_ea_data(deal).to_dict()
             canonical_deal = {**deal, **parsed_deal}
             ticket = int(deal.get("ticket", 0) or 0)
             if ticket <= 0:
+                stats["invalid"] += 1
                 continue
             mt5_order = int(deal.get("order", 0) or 0)
             mt5_position_id = int(
@@ -3178,8 +3181,15 @@ class LiveTradeDealRepository:
                     exit_reason,
                     realized_r,
                 )
-            values = (
-                int(user_id), int(account_id), ticket,
+            payload_json = json.dumps(
+                canonical_deal, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )
+            attribution_json = json.dumps(
+                attribution, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )
+            comparable = (
                 mt5_order, mt5_position_id,
                 str(deal.get("symbol", "") or ""),
                 int(deal.get("type", 0) or 0), int(deal.get("entry", 0) or 0),
@@ -3189,9 +3199,59 @@ class LiveTradeDealRepository:
                 str(canonical_deal.get("time_beijing", "") or ""),
                 int(canonical_deal.get("deal_timestamp", 0) or 0),
                 int(deal.get("broker_utc_offset_seconds", 0) or 0),
-                str(deal.get("comment", "") or ""), received_at,
-                json.dumps(canonical_deal, ensure_ascii=False),
-                json.dumps(attribution, ensure_ascii=False),
+                str(deal.get("comment", "") or ""), payload_json,
+                attribution_json,
+            )
+            existing = self.storage.fetchone(
+                "SELECT mt5_order, mt5_position_id, symbol, deal_type, entry_type, "
+                "volume, price, profit, swap, commission, deal_time, deal_timestamp, "
+                "broker_utc_offset_seconds, comment, payload_json, "
+                "position_attribution_json FROM live_trade_deals "
+                "WHERE account_id = ? AND ticket = ?",
+                (int(account_id), ticket),
+            )
+            if existing:
+                existing = dict(existing)
+
+                def normalized_json(value):
+                    if isinstance(value, (dict, list)):
+                        return value
+                    try:
+                        return json.loads(value or "{}")
+                    except (TypeError, ValueError):
+                        return {}
+
+                existing_comparable = (
+                    int(existing.get("mt5_order") or 0),
+                    int(existing.get("mt5_position_id") or 0),
+                    str(existing.get("symbol") or ""),
+                    int(existing.get("deal_type") or 0),
+                    int(existing.get("entry_type") or 0),
+                    float(existing.get("volume") or 0),
+                    float(existing.get("price") or 0),
+                    float(existing.get("profit") or 0),
+                    float(existing.get("swap") or 0),
+                    float(existing.get("commission") or 0),
+                    str(existing.get("deal_time") or ""),
+                    int(existing.get("deal_timestamp") or 0),
+                    int(existing.get("broker_utc_offset_seconds") or 0),
+                    str(existing.get("comment") or ""),
+                    json.dumps(
+                        normalized_json(existing.get("payload_json")),
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        normalized_json(existing.get("position_attribution_json")),
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    ),
+                )
+                if existing_comparable == comparable:
+                    stats["unchanged"] += 1
+                    continue
+
+            values = (
+                int(user_id), int(account_id), ticket,
+                *comparable[:14], received_at, payload_json, attribution_json,
             )
             self.storage.execute(
                 """
@@ -3213,13 +3273,13 @@ class LiveTradeDealRepository:
                     deal_timestamp = excluded.deal_timestamp,
                     broker_utc_offset_seconds = excluded.broker_utc_offset_seconds,
                     comment = excluded.comment,
-                    received_at = excluded.received_at, payload_json = excluded.payload_json
+                    payload_json = excluded.payload_json
                     , position_attribution_json = excluded.position_attribution_json
                 """,
                 values,
             )
-            count += 1
-        return count
+            stats["updated" if existing else "inserted"] += 1
+        return stats
 
     def list_for_account(self, user_id: int, account_id: int, count: int = 100) -> List[Dict]:
         rows = self.storage.fetchall(

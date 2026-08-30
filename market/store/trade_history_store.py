@@ -103,7 +103,7 @@ class TradeHistoryStore:
             # 清理过期数据
             cutoff = now - timedelta(hours=self._retention_hours)
             self._deals = [d for d in self._deals if d.time and d.time > cutoff]
-            if self._repository:
+            if self._repository and new_count:
                 self._repository.delete_entities(self.ENTITY_TYPE)
                 for deal in self._deals:
                     self._persist(deal)
