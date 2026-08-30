@@ -25,7 +25,7 @@ SETUP_FAMILIES = {
 }
 SIGNAL_SOURCES = {
     "ai_entry", "pivot", "key_level", "moving_average",
-    "alpha_factor", "multi_timeframe", "manual",
+    "alpha_factor", "manual",
 }
 
 

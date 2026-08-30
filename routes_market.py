@@ -57,14 +57,49 @@ from user_quotas import UserQuotaService
 from configuration_impact import ConfigurationImpactService
 from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
-from market.services.structure_analysis_service import (
-    list_configs as list_structure_configs,
-    save_configs as save_structure_configs,
-    get_results as get_structure_results,
-    trigger_if_configured as trigger_structure_analysis,
-)
 from market.services.market_structure_service import analyze as analyze_market_structure
 from market.services.market_structure_engine_v2 import analyze_incremental as analyze_market_structure_v2, restore_snapshot as restore_market_structure_snapshot, DEFAULT_CONFIG as MARKET_STRUCTURE_DEFAULT_CONFIG
+from market.services.market_structure_snapshot_store import current_path as market_structure_snapshot_path, load_current as load_market_structure_snapshot, save_checkpoint as save_market_structure_checkpoint
+
+
+def _compact_market_structure_snapshot(result: Dict) -> Dict:
+    """Persist state-machine context without overflowing MySQL TEXT payloads."""
+    if not isinstance(result, dict):
+        return {}
+    keep = {
+        "symbol", "period", "engine_version", "config", "config_signature",
+        "window_signature", "calculation_mode", "previous_last_bar_time",
+        "last_bar_time", "analyzed_at", "atr", "major_state", "external_state",
+        "internal_state", "active_candidate", "locked_segment_count",
+        "structure_levels", "machine_context", "swings", "pivot_levels",
+        "trendlines", "events", "internal_events", "major_events", "external_events",
+        "candidates", "structure_hierarchy", "local_patterns", "evidence", "state_detail",
+    }
+    snapshot = {key: value for key, value in result.items() if key in keep}
+    # Keep enough chart facts for a refresh, but never persist the full
+    # calculation window and all intermediate objects. This bounded snapshot
+    # avoids MySQL payload failures while preserving visible overlays.
+    snapshot["swings"] = list(result.get("swings") or [])[-120:]
+    snapshot["pivot_levels"] = {
+        name: list(items or [])[-80:]
+        for name, items in (result.get("pivot_levels") or {}).items()
+    }
+    for field, limit in (("events", 120), ("internal_events", 120),
+                         ("major_events", 120), ("external_events", 120),
+                         ("candidates", 30), ("trendlines", 20),
+                         ("local_patterns", 20), ("segment_history", 10)):
+        snapshot[field] = list(result.get(field) or [])[-limit:]
+    snapshot["segments"] = list(result.get("segments") or [])[-5:]
+    if len(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")) <= 60000:
+        return snapshot
+    snapshot.pop("structure_levels", None)
+    for segment in snapshot.get("segment_history", []) + snapshot.get("segments", []):
+        if isinstance(segment, dict) and isinstance(segment.get("evidence"), dict):
+            segment["evidence"] = {
+                key: value for key, value in segment["evidence"].items()
+                if key not in {"bars", "pivots", "closes", "highs", "lows"}
+            }
+    return snapshot
 
 
 def _historical_kline_timestamp(value):
@@ -478,7 +513,7 @@ def create_market_routes(
             "signal_config", "signal_sources", "signal_weights", "period_weights",
             "min_confidence", "consistency_requirement",
             "conflict_resolution", "fixed_volume", "volume_mode",
-            "risk_percent", "max_risk_points", "max_positions",
+            "risk_percent", "max_positions",
             "max_same_direction", "position_management_policy_id",
             "min_risk_reward", "max_risk_reward", "trading_hours",
             "position_conflict",
@@ -721,7 +756,6 @@ def create_market_routes(
                 all_klines = kline_service.get_all_kline_objects(symbol, period)
                 if all_klines:
                     pivot_service.update_pivots(symbol, period, all_klines)
-                    trigger_structure_analysis(engine, symbol, period, all_klines)
 
             cursor_row = get_storage().fetchone(
                 """
@@ -787,9 +821,6 @@ def create_market_routes(
                     all_klines = kline_service.get_all_kline_objects(symbol, period)
                     if all_klines:
                         pivot_service.update_pivots(symbol, period, all_klines)
-                        # LLM structure analysis is explicitly configured per symbol/period.
-                        # It is queued asynchronously and never blocks the EA upload response.
-                        trigger_structure_analysis(engine, symbol, period, all_klines)
 
             return {
                 "status": "ok",
@@ -803,18 +834,6 @@ def create_market_routes(
                 status_code=500,
                 content={"status": "error", "message": str(e)}
             )
-
-    @protected_router.get("/admin/llm/structure-analysis/config")
-    async def get_structure_analysis_config(user: AuthUser = Depends(require_admin)):
-        return {"status": "ok", "items": list_structure_configs()}
-
-    @protected_router.put("/admin/llm/structure-analysis/config")
-    async def put_structure_analysis_config(payload: Dict, user: AuthUser = Depends(require_admin)):
-        return {"status": "ok", "items": save_structure_configs(payload.get("items", []))}
-
-    @protected_router.get("/admin/llm/structure-analysis/results")
-    async def get_structure_analysis_results(user: AuthUser = Depends(require_auth)):
-        return {"status": "ok", "items": get_structure_results()}
 
     # ==================== 查询接口 ====================
 
@@ -850,8 +869,28 @@ def create_market_routes(
         # 结构分析不绑定某个交易账户；当主账户尚未接收该品种行情时，
         # 从用户其他在线 MT5 账户读取同名/后缀匹配的行情，避免页面误显示为空。
         if not klines:
+            # 服务重启或 EA 暂停上报后，内存可能为空，但最近 7 天的行情已
+            # 持久化到 MySQL。优先恢复同一用户、同一品种/周期的历史收盘K线。
+            historical = get_storage().fetchall(
+                """
+                SELECT timestamp, timestamp_utc, broker_utc_offset_seconds,
+                       open_price AS open, high_price AS high,
+                       low_price AS low, close_price AS close, volume
+                FROM historical_klines
+                WHERE user_id = ? AND symbol = ? AND period = ?
+                  AND (timestamp_utc >= ? OR (timestamp_utc = 0 AND timestamp >= ?))
+                ORDER BY COALESCE(NULLIF(timestamp_utc, 0), timestamp) DESC
+                LIMIT ?
+                """,
+                (user.user_id, symbol, period, int(time.time()) - 7 * 86400,
+                 int(time.time()) - 7 * 86400, min(1000, max(1, count))),
+            )
+            if historical:
+                klines = [dict(row) for row in reversed(historical)]
+
+        if not klines:
             for account in account_repo.list_for_user(user.user_id):
-                if account.account_type != "mt5" or account.status != "active":
+                if account.account_type != "mt5":
                     continue
                 try:
                     candidate = engine_manager.get_engine(
@@ -863,6 +902,7 @@ def create_market_routes(
                 except Exception:
                     continue
 
+        print(f"[MarketAPI] K线查询 symbol={symbol} period={period} count={len(klines)}")
         return {
             "status": "ok",
             "symbol": symbol,
@@ -875,6 +915,48 @@ def create_market_routes(
     async def get_market_structure(symbol: str, period: str = Query("M5"), count: int = Query(600), user: AuthUser = Depends(require_auth)):
         engine = engine_manager.get_engine_for_user(user.user_id)
         rows = engine.kline_service.get_klines(symbol, period.upper(), min(1000, max(50, count)))
+        if not rows:
+            # 结构分析必须严格匹配品种名称；GOLD、GOLD_、GOLDm 不互相替代。
+            store = getattr(engine.kline_service, "store", None)
+            stored = getattr(store, "_klines", {})
+            for actual_symbol in stored.keys():
+                if str(actual_symbol) == str(symbol):
+                    rows = engine.kline_service.get_klines(actual_symbol, period.upper(), min(1000, max(50, count)))
+                    if rows:
+                        break
+        if not rows:
+            historical = get_storage().fetchall(
+                """
+                SELECT timestamp, timestamp_utc, broker_utc_offset_seconds,
+                       open_price AS open, high_price AS high,
+                       low_price AS low, close_price AS close, volume
+                FROM historical_klines
+                WHERE user_id = ? AND symbol = ? AND period = ?
+                  AND (timestamp_utc >= ? OR (timestamp_utc = 0 AND timestamp >= ?))
+                ORDER BY COALESCE(NULLIF(timestamp_utc, 0), timestamp) DESC
+                LIMIT ?
+                """,
+                (user.user_id, symbol, period.upper(), int(time.time()) - 7 * 86400,
+                 int(time.time()) - 7 * 86400, min(1000, max(50, count))),
+            )
+            if historical:
+                rows = [dict(row) for row in reversed(historical)]
+
+        if not rows:
+            for account in account_repo.list_for_user(user.user_id):
+                # 行情是否可用取决于该账户最近是否上报，而不是账户管理页的
+                # active 标记。模拟账户可能被标记为 inactive，但仍有 EA 行情流。
+                if account.account_type != "mt5":
+                    continue
+                try:
+                    candidate_engine = engine_manager.get_engine(user.user_id, account.account_id)
+                    rows = candidate_engine.kline_service.get_klines(symbol, period.upper(), min(1000, max(50, count)))
+                    if rows:
+                        engine = candidate_engine
+                        break
+                except Exception:
+                    continue
+        print(f"[MarketAPI] 结构查询 symbol={symbol} period={period.upper()} count={len(rows)}")
         cfg_entity = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
         cfg = dict(MARKET_STRUCTURE_DEFAULT_CONFIG)
         stored = cfg_entity[-1] if cfg_entity else {}
@@ -883,14 +965,27 @@ def create_market_routes(
             if str(profile.get("symbol", "")).upper() == str(symbol).upper() and str(profile.get("period", "")).upper() == period.upper():
                 cfg.update({k: v for k, v in profile.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG})
                 break
-        snapshots = RuntimeStateRepository(user.user_id, int(getattr(engine, "account_id", 0) or 0)).list_entities("market_structure")
-        previous = next((x for x in reversed(snapshots) if str(x.get("symbol", "")).upper() == str(symbol).upper() and str(x.get("period", "")).upper() == period.upper()), None)
-        if previous:
+        account_id = int(getattr(engine, "account_id", 0) or 0)
+        previous = load_market_structure_snapshot(user.user_id, account_id, symbol, period.upper())
+        # Older compact snapshots did not contain chart overlays. Restoring
+        # those snapshots makes the next refresh render candles without Pivot,
+        # BOS/CHoCH, sweep, or trendline markers; force a full recalculation.
+        if previous and all(key in previous for key in ("swings", "events", "trendlines", "local_patterns")):
             restore_market_structure_snapshot(previous)
         result = analyze_market_structure_v2(symbol, period.upper(), rows, cfg)
-        RuntimeStateRepository(user.user_id, int(getattr(engine, "account_id", 0) or 0)).upsert_entity(
-            "market_structure", f"{symbol}::{period.upper()}", result,
-            symbol=symbol, status=result.get("current_state", "undetermined"),
+        try:
+            save_market_structure_checkpoint(result, user.user_id, account_id)
+        except Exception as snapshot_error:
+            print(f"[MarketAPI] 本地结构快照保存失败（不影响接口返回）: {snapshot_error}")
+        RuntimeStateRepository(user.user_id, account_id).upsert_entity(
+            "market_structure", f"{symbol}::{period.upper()}", {
+                "symbol": symbol, "period": period.upper(),
+                "engine_version": result.get("engine_version"),
+                "snapshot_path": str(market_structure_snapshot_path(user.user_id, account_id, symbol, period.upper())),
+                "last_bar_time": result.get("last_bar_time"),
+                "config_signature": result.get("config_signature"),
+                "updated_at": result.get("analyzed_at"),
+            }, symbol=symbol, status=result.get("current_state", "undetermined"),
         )
         return {"status":"ok", "data": result}
 
@@ -903,11 +998,18 @@ def create_market_routes(
     @protected_router.put("/admin/market-structure/config")
     async def put_market_structure_config(payload: Dict, user: AuthUser = Depends(require_admin)):
         cfg = dict(MARKET_STRUCTURE_DEFAULT_CONFIG)
+        integer_keys = {
+            "pivot_legs", "medium_pivot_legs", "large_pivot_legs",
+            "break_confirm_bars", "retest_bars", "range_min_touches",
+            "range_min_bars", "min_segment_bars", "trendline_min_touches",
+            "trendline_min_bars",
+        }
         for key in cfg:
             if key in payload:
-                try: cfg[key] = max(1, float(payload[key]))
+                try:
+                    value = float(payload[key])
+                    cfg[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
                 except (TypeError, ValueError): pass
-        cfg["pivot_legs"] = int(cfg["pivot_legs"]); cfg["break_confirm_bars"] = int(cfg["break_confirm_bars"])
         profiles = payload.get("profiles", [])
         normalized_profiles = []
         for profile in profiles if isinstance(profiles, list) else []:
@@ -915,7 +1017,9 @@ def create_market_routes(
             item = {"symbol": str(profile["symbol"]).strip(), "period": str(profile["period"]).upper()}
             for key in MARKET_STRUCTURE_DEFAULT_CONFIG:
                 if key in profile:
-                    try: item[key] = float(profile[key])
+                    try:
+                        value = float(profile[key])
+                        item[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
                     except (TypeError, ValueError): pass
             normalized_profiles.append(item)
         cfg["profiles"] = normalized_profiles

@@ -245,6 +245,36 @@ class PositionManagerTests(unittest.TestCase):
         self.assertEqual(action.stop_loss, 100)
         self.assertEqual(action.level_id, "tp1")
 
+    def test_completed_break_even_is_not_triggered_again(self):
+        action = PositionManager().evaluate({
+            "management_rules": [{
+                "type": "break_even", "activation_r": 1, "offset_r": 0,
+            }],
+        }, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 100,
+            "initial_risk": 5, "favorable_price": 106,
+            "break_even_done": True,
+        }, {"price": 106})
+        self.assertEqual(action.action, "none")
+        self.assertEqual(action.events, [])
+
+    def test_completed_partial_level_is_not_triggered_again(self):
+        action = PositionManager().evaluate({
+            "management_rules": [{
+                "type": "partial_take_profit",
+                "levels": [{
+                    "level_id": "tp1", "trigger_r": 1,
+                    "close_percent": 30, "move_sl": "break_even",
+                }],
+            }],
+        }, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5, "remaining_volume": 0.7,
+            "favorable_price": 106, "partial_levels_done": ["tp1"],
+        }, {"price": 106})
+        self.assertEqual(action.action, "none")
+        self.assertEqual(action.events, [])
+
     def test_reverse_signal_and_time_limit_close_position(self):
         manager = PositionManager()
         position = {

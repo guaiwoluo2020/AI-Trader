@@ -509,6 +509,10 @@ class PaperTradingServiceTests(unittest.TestCase):
 
         class FakeDecision:
             status = "pending"
+            action = "buy"
+            decision_type = "single_signal"
+            strategy_id = "strategy-1"
+            symbol = "GOLD_"
 
             def __init__(self, decision_id):
                 self.decision_id = decision_id
@@ -554,7 +558,7 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertTrue(all(callable(call["position_checker"]) for call in runtime.calls))
         self.assertTrue(all(callable(call["risk_checker"]) for call in runtime.calls))
 
-    def test_paper_deployment_refreshes_strategy_signals_even_when_cached(self):
+    def test_paper_deployment_uses_current_generator_result_not_cached_signals(self):
         self.update_strategy_config({
             "signal_sources": [{
                 "signal_source_id": "pivot-m1",
@@ -599,7 +603,51 @@ class PaperTradingServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(runtime.signal_service.generate_calls, 1)
-        self.assertEqual(runtime.force_signals, [cached])
+        self.assertEqual(runtime.force_signals, [])
+
+    def test_paper_deployment_reuses_live_tick_signal_snapshot(self):
+        self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        snapshot = SimpleNamespace(
+            strategy_id="strategy-1",
+            signal_source_id="pivot-m1",
+            suggested_sl=2990,
+            suggested_tp=3020,
+        )
+
+        class FakeSignals:
+            def __init__(self):
+                self.generate_calls = 0
+
+            def get_active_signals(self, symbol):
+                return []
+
+            def generate_signals_for_strategy(self, symbol, price, strategy):
+                self.generate_calls += 1
+                return []
+
+        class FakeStrategyService:
+            def __init__(self):
+                self.signal_service = FakeSignals()
+                self.force_signals = None
+
+            def make_decision(self, *args, **kwargs):
+                self.force_signals = kwargs["force_signals"]
+                return None
+
+        runtime = FakeStrategyService()
+        self.service.process_strategy_signals(
+            self.user.user_id,
+            "GOLD_",
+            3000,
+            runtime,
+            signal_snapshots={"strategy-1": [snapshot]},
+        )
+
+        self.assertEqual(runtime.signal_service.generate_calls, 0)
+        self.assertEqual(runtime.force_signals, [snapshot])
+        self.assertIsNot(runtime.force_signals[0], snapshot)
 
     def test_report_summarizes_closed_trades(self):
         self.service.deploy(self.user.user_id, self.account.account_id, "strategy-1")

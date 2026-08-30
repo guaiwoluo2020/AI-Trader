@@ -10,6 +10,7 @@ from typing import List, Dict, Optional, Set
 from datetime import datetime
 import threading
 import asyncio
+import copy
 import json
 import time
 
@@ -27,7 +28,6 @@ from market.services import (
     KeyLevelSignalGenerator, AIEntrySignalGenerator,
     MovingAverageSignalGenerator, AlphaFactorSignalGenerator,
     PivotSignalGenerator,
-    MultiTimeframeSignalGenerator,
 )
 from market.services import StatisticsService, PositionService, TradeHistoryService
 from market.services.strategy.transient_decision_store import transient_decision_store
@@ -68,6 +68,11 @@ class TradingServer:
 
         # 线程锁
         self.lock = threading.RLock()
+        # The EA route evaluates live and paper deployments sequentially for
+        # one quote.  Keep the exact per-strategy signal objects produced by
+        # the live pass so the paper pass does not run stateful generators a
+        # second time and accidentally receive a different trading plan.
+        self._tick_signal_snapshots: Dict[str, Dict] = {}
         self.system_log = SystemLog(user_id=user_id, account_id=account_id)
 
         # ==================== 行情模块（内部） ====================
@@ -233,9 +238,6 @@ class TradingServer:
             user_id=self.user_id, account_id=self.account_id,
         )
         self._signal_service.register_generator("pivot", pivot_generator)
-
-        multi_timeframe_generator = MultiTimeframeSignalGenerator(self.kline_store)
-        self._signal_service.register_generator("multi_timeframe", multi_timeframe_generator)
 
         # 关键点位信号生成器
         key_level_generator = KeyLevelSignalGenerator()
@@ -625,6 +627,14 @@ class TradingServer:
             "pending_orders": [],
         }
 
+        snapshot_key = str(symbol or "").upper()
+        with self.lock:
+            self._tick_signal_snapshots[snapshot_key] = {
+                "price": float(current_price or 0),
+                "captured_at": time.monotonic(),
+                "strategies": {},
+            }
+
         if not self.trade_config.enabled:
             return result
 
@@ -648,18 +658,38 @@ class TradingServer:
             )
 
         allow_new_orders = self._live_entries_allowed()
+        if not allow_new_orders:
+            try:
+                self.memberships.assert_live_trading(self.user_id, self.account_id)
+                gate_reason = "实盘授权校验通过，但当前入口未允许新单"
+            except Exception as exc:
+                gate_reason = str(exc)
+            print(
+                f"[TradingServer] 实盘决策门禁阻止新单 user={self.user_id} "
+                f"account={self.account_id} symbol={symbol}: {gate_reason}"
+            )
 
         # Each deployed strategy owns its signal generation and cooldown state.
         strategy_ids = self._active_strategy_ids("live")
         self.strategy_service.set_allowed_strategy_ids(strategy_ids)
         allowed_ids = set(strategy_ids)
         decisions = []
-        for strategy in self._strategies_for_quote(symbol):
+        matched_strategies = self._strategies_for_quote(symbol)
+        if not matched_strategies:
+            print(
+                f"[TradingServer] 未匹配到策略 user={self.user_id} "
+                f"account={self.account_id} symbol={symbol} mode=live"
+            )
+        for strategy in matched_strategies:
             if strategy.strategy_id not in allowed_ids:
                 continue
             signals = self._signal_service.generate_signals_for_strategy(
                 symbol, current_price, strategy
             )
+            with self.lock:
+                self._tick_signal_snapshots[snapshot_key]["strategies"][
+                    strategy.strategy_id
+                ] = copy.deepcopy(list(signals or []))
             self._manage_strategy_positions(
                 strategy, symbol, current_price, signals
             )
@@ -728,6 +758,27 @@ class TradingServer:
             result["pending_order"] = result["pending_orders"][0]
 
         return result
+
+    def get_tick_signal_snapshots(
+        self, symbol: str, current_price: Optional[float] = None,
+    ) -> Dict[str, List[TradingSignal]]:
+        """Return the immutable signal snapshot from the immediately prior Tick."""
+        key = str(symbol or "").upper()
+        with self.lock:
+            snapshot = self._tick_signal_snapshots.get(key) or {}
+            if not snapshot:
+                return {}
+            if current_price is not None:
+                expected = float(current_price)
+                actual = float(snapshot.get("price", 0) or 0)
+                tolerance = max(1e-9, abs(expected) * 1e-12)
+                if abs(actual - expected) > tolerance:
+                    return {}
+            # A route consumes this immediately; the age guard prevents a
+            # caller from reusing a previous request after an early return.
+            if time.monotonic() - float(snapshot.get("captured_at", 0)) > 5:
+                return {}
+            return copy.deepcopy(snapshot.get("strategies") or {})
 
     def _strategies_for_quote(self, quote_symbol: str):
         """Match strategy symbols to the EA's native quote symbol."""
@@ -810,6 +861,9 @@ class TradingServer:
                 "remaining_volume": float(position.volume),
                 "initial_risk": abs(float(position.price_open) - float(position.sl)),
                 "favorable_price": float(position.price_open),
+                "partial_levels_done": [],
+                "break_even_done": False,
+                "pending_stop_loss": 0.0,
                 "holding_bars": 0,
                 "opened_at": position.opened_at or datetime.now(),
                 "position_attribution": attribution,
@@ -849,7 +903,19 @@ class TradingServer:
                 )
             state["volume"] = float(position.volume)
             state["remaining_volume"] = float(position.volume)
-            state["stop_loss"] = float(position.sl or state["stop_loss"])
+            broker_sl = float(position.sl or 0)
+            pending_sl = float(state.get("pending_stop_loss") or 0)
+            if broker_sl:
+                if position.is_buy:
+                    state["stop_loss"] = max(float(state["stop_loss"]), broker_sl)
+                    if pending_sl and broker_sl >= pending_sl:
+                        state["pending_stop_loss"] = 0.0
+                else:
+                    state["stop_loss"] = min(float(state["stop_loss"]), broker_sl)
+                    if pending_sl and broker_sl <= pending_sl:
+                        state["pending_stop_loss"] = 0.0
+            if state.get("pending_stop_loss"):
+                state["stop_loss"] = float(state["pending_stop_loss"])
             state["take_profit"] = float(position.tp or state["take_profit"])
             state["favorable_price"] = (
                 max(state["favorable_price"], current_price)
@@ -874,6 +940,16 @@ class TradingServer:
                     )
                 ),
             )
+            # 将一次性管理动作写入内存状态，防止后续 TICK 重复触发。
+            for event in action.events:
+                if event.get("status") != "triggered":
+                    continue
+                if event.get("rule_type") == "break_even":
+                    state["break_even_done"] = True
+                if event.get("rule_type") == "partial_take_profit" and event.get("level_id"):
+                    done = set(state.get("partial_levels_done") or [])
+                    done.add(str(event["level_id"]))
+                    state["partial_levels_done"] = sorted(done)
             TradingServer._record_position_management_events(
                 self,
                 symbol, ticket, state, action.events
@@ -883,6 +959,7 @@ class TradingServer:
                 self._managed_position_state.pop(ticket, None)
             elif action.action == "modify_sl" and action.stop_loss:
                 state["stop_loss"] = float(action.stop_loss)
+                state["pending_stop_loss"] = float(action.stop_loss)
                 self._position_update_instructions[symbol][ticket] = {
                     "ticket": ticket, "sl": round(float(action.stop_loss), 8),
                     "tp": round(float(position.tp or 0), 8),
@@ -899,6 +976,7 @@ class TradingServer:
                     if action.stop_loss or action.level_id == "signal_take_profit":
                         if action.stop_loss:
                             state["stop_loss"] = float(action.stop_loss)
+                            state["pending_stop_loss"] = float(action.stop_loss)
                         if action.level_id == "signal_take_profit":
                             state["take_profit"] = 0.0
                         self._position_update_instructions[symbol][ticket] = {
@@ -942,7 +1020,11 @@ class TradingServer:
                 rule_type=event.get("rule_type", ""),
                 status=event.get("status", ""),
                 price=event.get("price", 0),
-                stop_loss=state.get("stop_loss", 0),
+                stop_loss=(
+                    event.get("new_stop_loss")
+                    or event.get("candidate_stop_loss")
+                    or state.get("stop_loss", 0)
+                ),
                 take_profit=state.get("take_profit", 0),
                 volume=state.get("remaining_volume") or state.get("volume", 0),
                 payload=event,

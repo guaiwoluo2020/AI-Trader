@@ -700,15 +700,42 @@ void ParseAndExecuteTrades(string jsonData)
             int objectEnd = StringFind(updatesJson, "}", objectStart);
             if(objectStart == -1 || objectEnd == -1) break;
             string updateJson = StringSubstr(updatesJson, objectStart, objectEnd - objectStart + 1);
-            long ticket = (long)ExtractJsonDouble(updateJson, "ticket");
-            double sl = ExtractJsonDouble(updateJson, "sl");
-            double tp = ExtractJsonDouble(updateJson, "tp");
-            if(ticket > 0 && PositionSelectByTicket(ticket))
-              {
-               if(trade.PositionModify(ticket, sl, tp))
-                  Print("[持仓更新成功] Ticket: ", ticket, " SL: ", sl, " TP: ", tp);
+               long ticket = (long)ExtractJsonDouble(updateJson, "ticket");
+               double sl = ExtractJsonDouble(updateJson, "sl");
+               double tp = ExtractJsonDouble(updateJson, "tp");
+               if(ticket > 0 && PositionSelectByTicket(ticket))
+                 {
+                  string updateSymbol = PositionGetString(POSITION_SYMBOL);
+               bool modifyOk = trade.PositionModify(ticket, sl, tp);
+               long modifyRetcode = (long)trade.ResultRetcode();
+               // PositionModify 返回 true 只表示请求已被交易类接受；以 retcode
+               // 作为最终结果依据，并把结果回报后端，供审计链显示。
+               bool modifySuccess = modifyOk && (
+                  modifyRetcode == TRADE_RETCODE_DONE ||
+                  modifyRetcode == TRADE_RETCODE_DONE_PARTIAL ||
+                  modifyRetcode == TRADE_RETCODE_NO_CHANGES
+               );
+               double actualSl = 0;
+               double actualTp = 0;
+               if(PositionSelectByTicket(ticket))
+                 {
+                  actualSl = PositionGetDouble(POSITION_SL);
+                  actualTp = PositionGetDouble(POSITION_TP);
+                 }
+               if(modifySuccess)
+                  Print("[持仓更新成功] Ticket: ", ticket, " SL: ", sl, " TP: ", tp,
+                        " Retcode: ", modifyRetcode);
                else
-                  Print("[持仓更新失败] Ticket: ", ticket, " Retcode: ", trade.ResultRetcodeDescription());
+                  Print("[持仓更新失败] Ticket: ", ticket, " Retcode: ",
+                        trade.ResultRetcodeDescription());
+               SendTradeExecutionReport(
+                  "position-sl-" + IntegerToString(ticket) + "-" + IntegerToString((long)TimeCurrent()),
+                  "position-" + IntegerToString(ticket), updateSymbol, "position_modify_sl",
+                  modifySuccess, sl, actualSl, 0, 0,
+                  (long)trade.ResultOrder(), (long)trade.ResultDeal(), ticket,
+                  modifyRetcode,
+                  modifySuccess ? "" : trade.ResultRetcodeDescription()
+               );
               }
            cursor = objectEnd + 1;
            }

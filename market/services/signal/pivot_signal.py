@@ -17,7 +17,7 @@ from .pivot_repository import (
     ConfiguredPivotRepository, PERIOD_SECONDS, calculate_pivot_score,
     pivot_config_fingerprint, pivot_timestamp,
 )
-from ..regime_classifier import classify_main_period_regime
+from ..market_structure_engine_v2 import analyze as analyze_market_structure
 
 
 class PivotSignalGenerator:
@@ -40,6 +40,7 @@ class PivotSignalGenerator:
         # 已生成的信号冷却记录
         self._signal_cooldowns: Dict[str, datetime] = {}
         self._configured_pivot_cache: Dict[tuple, List] = {}
+        self._structure_regime_cache: Dict[tuple, tuple] = {}
 
         print("[PivotSignalGenerator] 转折点信号生成器已初始化")
 
@@ -221,9 +222,27 @@ class PivotSignalGenerator:
                 0, min(100, int(params.get("min_pivot_score", 0)))
             )
             trend_filter_enabled = bool(params.get("trend_filter_enabled", True))
-            main_period_regime = (
-                classify_main_period_regime(raw_klines) if trend_filter_enabled else "sideways"
-            )
+            # 转折点策略与结构分析使用同一套主周期状态，避免信号层再次
+            # 用简化的首尾涨跌判断趋势而造成口径不一致。中级别 Swing
+            # 状态是执行过滤依据；结构未确认时按震荡处理，不过滤任何方向。
+            if trend_filter_enabled:
+                try:
+                    latest_time = str(raw_klines[-1].get("timestamp") or raw_klines[-1].get("time") or "") if raw_klines else ""
+                    cache_key = (symbol, period)
+                    cached = self._structure_regime_cache.get(cache_key)
+                    if cached and cached[0] == latest_time:
+                        main_period_regime = cached[1]
+                    else:
+                        structure = analyze_market_structure(symbol, period, raw_klines)
+                        main_period_regime = structure.get("major_state") or structure.get("current_state") or "sideways"
+                        if main_period_regime not in {"up", "down", "sideways"}:
+                            main_period_regime = "sideways"
+                        self._structure_regime_cache[cache_key] = (latest_time, main_period_regime)
+                except Exception as exc:
+                    print(f"[PivotSignalGenerator] 结构状态计算失败，按震荡处理: {exc}")
+                    main_period_regime = "sideways"
+            else:
+                main_period_regime = "sideways"
             pivots = sorted(
                 pivots, key=lambda item: pivot_timestamp(item.timestamp), reverse=True
             )[:candidate_limit]

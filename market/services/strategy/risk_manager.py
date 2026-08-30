@@ -166,10 +166,10 @@ class RiskManager:
         else:
             volume = strategy.fixed_volume
 
-        # 应用最大风险点数限制
-        if risk_points > strategy.max_risk_points:
-            print(f"[RiskManager] 风险点数 {risk_points} 超过最大限制 {strategy.max_risk_points}")
-            return 0.0
+        # 止损距离上下限统一由持仓管理方案按品种价格比例处理。
+        # 这里不能再使用策略层遗留的固定 max_risk_points：同一个固定点数
+        # 对 BTC、黄金和外汇含义完全不同，也会造成实盘返回 0 手、而模拟盘
+        # 正常创建订单的执行分叉。
 
         # 限制手数范围
         volume = max(min_volume, min(volume, max_volume))

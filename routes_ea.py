@@ -121,6 +121,10 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         """
         server = engine_manager.get_engine_for_ea(identity)
         result = server.get_trades_by_symbol(symbol, price)
+        signal_snapshots = (
+            server.get_tick_signal_snapshots(symbol, price)
+            if price is not None and float(price) > 0 else {}
+        )
         paper_execution = {"filled": 0, "closed": 0, "rejected": 0}
         if price is not None and float(price) > 0:
             try:
@@ -137,6 +141,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             paper_orders_created = engine_manager.paper_trading.process_strategy_signals(
                 identity.user_id, symbol, price, server.strategy_service,
                 quote_account_id=identity.account_id,
+                signal_snapshots=signal_snapshots,
             )
         except Exception as exc:
             # 模拟账户故障不能阻断 EA 获取真实交易指令。
@@ -231,15 +236,26 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 identity.user_id, identity.account_id, payload
             )
             server = engine_manager.get_engine_for_ea(identity)
+            action = str(report.get("action") or "").lower()
+            if action == "position_modify_sl":
+                message = (
+                    f"止损调整成功: ticket={report.get('mt5_position_id')}，"
+                    f"实际SL={report.get('executed_price')}"
+                    if report["success"] else
+                    f"止损调整失败: ticket={report.get('mt5_position_id')}，"
+                    f"{report['error_message']}"
+                )
+            else:
+                message = (
+                    f"MT5 成交 #{report['mt5_deal']}，滑点 {report['slippage']:.5f}"
+                    if report["success"]
+                    else f"MT5 下单失败: {report['error_message']}"
+                )
             server.system_log.add_log(
                 "trade_execution_success" if report["success"] else "trade_execution_failed",
                 report,
                 symbol=report["symbol"],
-                message=(
-                    f"MT5 成交 #{report['mt5_deal']}，滑点 {report['slippage']:.5f}"
-                    if report["success"]
-                    else f"MT5 下单失败: {report['error_message']}"
-                ),
+                message=message,
             )
             return {"status": "ok", "report": report}
         except (TypeError, ValueError) as exc:

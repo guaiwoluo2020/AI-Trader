@@ -5,7 +5,7 @@ import vuetify from './plugins/vuetify'
 
 import './style.css'
 
-document.documentElement.dataset.build = '2026-08-18.2'
+document.documentElement.dataset.build = '2026-08-30.3'
 
 const app = createApp(App)
 

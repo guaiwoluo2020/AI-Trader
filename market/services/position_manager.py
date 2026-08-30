@@ -314,15 +314,22 @@ class PositionManager:
                     holding_bars=holding_bars,
                 )
             if kind == "break_even" and risk > 0:
+                if position.get("break_even_done"):
+                    continue
                 if profit >= risk * float(rule["activation_r"]):
                     offset = risk * float(rule.get("offset_r", 0))
                     candidate = entry + offset if direction == "buy" else entry - offset
-                    candidates.append(candidate)
-                    add_event(
-                        kind, "triggered",
-                        f"浮盈 {profit_r:.2f}R 达到保本 {rule['activation_r']}R",
-                        candidate_stop_loss=candidate,
+                    can_tighten = (
+                        current_sl < candidate < price if direction == "buy"
+                        else price < candidate < current_sl
                     )
+                    if can_tighten:
+                        candidates.append(candidate)
+                        add_event(
+                            kind, "triggered",
+                            f"浮盈 {profit_r:.2f}R 达到保本 {rule['activation_r']}R",
+                            candidate_stop_loss=candidate,
+                        )
                 else:
                     add_event(
                         kind, "checked",

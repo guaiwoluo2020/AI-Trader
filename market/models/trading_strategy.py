@@ -169,14 +169,6 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "min_confidence": 60,
             "cooldown_seconds": 180,
         }
-    elif source == "multi_timeframe":
-        params = {
-            "trend_period": "M15", "trend_kline_count": 70,
-            "entry_period": period, "entry_kline_count": 40,
-            "confirmation_period": "", "entry_mode": "pullback",
-            "proximity_threshold": 0.0008, "min_trend_confidence": 60,
-            "risk_reward_ratio": 2.0, "cooldown_seconds": 180,
-        }
     return {
         "signal_source_id": uuid.uuid4().hex[:12],
         "source": source,
@@ -234,7 +226,6 @@ def normalize_signal_sources(
         if "key_level" in sources and (
             "ai_entry" in sources or "moving_average" in sources
             or "alpha_factor" in sources or "pivot" in sources
-            or "multi_timeframe" in sources
         ):
             raise ValueError(
                 "关键点位信号源不能和AI/均线信号源同时存在，也不能和Alpha信号源同时存在"
@@ -245,8 +236,11 @@ def normalize_signal_sources(
     for raw in items:
         raw = raw or {}
         source = str(raw.get("source", "")).strip()
+        # 多周期信号源已下线；旧配置在读取时直接丢弃，避免阻断策略加载。
+        if source == "multi_timeframe":
+            continue
         period = str(raw.get("period", "")).upper()
-        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor", "pivot", "multi_timeframe"}:
+        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor", "pivot"}:
             raise ValueError(f"不支持的信号源类型: {source}")
         if source == "key_level":
             period = "M1"
@@ -435,23 +429,6 @@ def normalize_signal_sources(
                 if not params["shared_runtime_id"]:
                     raise ValueError("共享引用模式必须选择一条共享AI运行数据")
                 params["reference_runtime_ids"] = []
-        elif source == "multi_timeframe":
-            params["trend_period"] = str(params.get("trend_period") or "M15").upper()
-            params["entry_period"] = str(params.get("entry_period") or period).upper()
-            params["confirmation_period"] = str(params.get("confirmation_period") or "").upper()
-            if params["trend_period"] not in SIGNAL_PERIODS or params["entry_period"] not in SIGNAL_PERIODS:
-                raise ValueError("多周期趋势/入场周期无效")
-            if params["confirmation_period"] and params["confirmation_period"] not in SIGNAL_PERIODS:
-                raise ValueError("多周期确认周期无效")
-            params["trend_kline_count"] = max(20, min(288, int(params.get("trend_kline_count", 70))))
-            params["entry_kline_count"] = max(20, min(288, int(params.get("entry_kline_count", 40))))
-            params["entry_mode"] = str(params.get("entry_mode") or "pullback").lower()
-            if params["entry_mode"] not in {"pullback", "range_reversal", "breakout_retest"}:
-                raise ValueError("多周期入场方式无效")
-            params["proximity_threshold"] = max(0.0, min(0.05, float(params.get("proximity_threshold", 0.0008))))
-            params["min_trend_confidence"] = max(0, min(100, int(params.get("min_trend_confidence", 60))))
-            params["risk_reward_ratio"] = max(1.0, min(10.0, float(params.get("risk_reward_ratio", 2.0))))
-            params["cooldown_seconds"] = max(0, min(86400, int(params.get("cooldown_seconds", 180))))
         elif source == "moving_average":
             params["fast_period"] = max(1, min(500, int(params["fast_period"])))
             params["slow_period"] = max(2, min(1000, int(params["slow_period"])))
@@ -564,8 +541,6 @@ class TradingStrategy:
     fixed_volume: float = 0.01
     volume_mode: str = VolumeMode.FIXED
     risk_percent: float = 1.0
-    max_risk_points: float = 50.0
-
     max_positions: int = 3
     max_same_direction: int = 2
 
@@ -670,7 +645,7 @@ class TradingStrategy:
             "signal_config", "signal_sources", "signal_weights", "period_weights",
             "min_confidence", "consistency_requirement",
             "conflict_resolution", "fixed_volume", "volume_mode",
-            "risk_percent", "max_risk_points", "max_positions",
+            "risk_percent", "max_positions",
             "max_same_direction", "position_management_policy_id",
             "min_risk_reward", "max_risk_reward", "trading_hours",
             "position_conflict",
@@ -890,7 +865,6 @@ class TradingStrategy:
             "fixed_volume": self.fixed_volume,
             "volume_mode": self.volume_mode,
             "risk_percent": self.risk_percent,
-            "max_risk_points": self.max_risk_points,
             "max_positions": self.max_positions,
             "max_same_direction": self.max_same_direction,
             "position_management_policy_id": self.position_management_policy_id,
@@ -967,7 +941,6 @@ class TradingStrategy:
             fixed_volume=data.get('fixed_volume', 0.01),
             volume_mode=data.get('volume_mode', VolumeMode.FIXED),
             risk_percent=data.get('risk_percent', 1.0),
-            max_risk_points=data.get('max_risk_points', 50.0),
             max_positions=data.get('max_positions', 3),
             max_same_direction=data.get('max_same_direction', 2),
             position_management_policy_id=data.get(

@@ -634,21 +634,6 @@ export const marketAPI = {
     return response.data
   },
 
-  async getStructureAnalysisConfig() {
-    const response = await api.get('/admin/llm/structure-analysis/config')
-    return response.data
-  },
-
-  async saveStructureAnalysisConfig(items) {
-    const response = await api.put('/admin/llm/structure-analysis/config', { items })
-    return response.data
-  },
-
-  async getStructureAnalysisResults() {
-    const response = await api.get('/admin/llm/structure-analysis/results')
-    return response.data
-  },
-
   // 配置大模型参数
   async configureLLM(config) {
     const response = await api.post('/llm/configure', config)

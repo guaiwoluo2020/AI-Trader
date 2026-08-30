@@ -365,6 +365,7 @@ function profileFamily(profile) {
 function recommendedManagementRules(family) {
   if (['reversal', 'mean_reversion'].includes(family)) return [
     { type: 'break_even', activation_r: 1, offset_r: 0 },
+    { type: 'trailing_stop', activation_r: 1, distance_r: 0.8 },
     { type: 'partial_take_profit', levels: [{ level_id: 'reversal_tp1', trigger_r: 1, close_percent: 50, move_sl: 'break_even' }] },
   ]
   if (family === 'breakout') return [

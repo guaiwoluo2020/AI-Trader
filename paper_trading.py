@@ -9,6 +9,7 @@ import statistics
 import threading
 import time
 import uuid
+import copy
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -715,8 +716,9 @@ class PaperTradingService:
     def process_strategy_signals(
         self, user_id: int, symbol: str, current_price: float, strategy_service,
         quote_account_id: Optional[int] = None,
+        signal_snapshots: Optional[Dict[str, List]] = None,
     ) -> int:
-        """按每个模拟部署独立生成决策，不复用实盘风控或实盘冷却。"""
+        """Use one signal snapshot per strategy, then apply account-level checks."""
         self._expire_deployments(user_id)
         self._expire_stale_pending_orders(user_id, symbol, int(time.time()))
         deployments = self.storage.fetchall(
@@ -734,6 +736,10 @@ class PaperTradingService:
             return 0
         created = 0
         now = int(time.time())
+        tick_signals = {
+            str(strategy_id): copy.deepcopy(list(signals or []))
+            for strategy_id, signals in (signal_snapshots or {}).items()
+        }
         for deployment in deployments:
             try:
                 runtime_strategy = self._deployment_strategy(user_id, deployment)
@@ -744,22 +750,27 @@ class PaperTradingService:
                 user_id, strategy, symbol, quote_account_id
             ):
                 continue
-            generator = getattr(
-                strategy_service.signal_service,
-                "generate_signals_for_strategy",
-                None,
-            )
-            if generator is not None:
-                # Active signals are a short-lived decision cache, not proof that
-                # the deployment's generators ran for this tick.  Always refresh
-                # the deployment first so pivot/price-state sources can observe
-                # the latest quote and Kline fingerprint.
-                generator(symbol, current_price, strategy)
-            signals = [
-                signal for signal in
-                strategy_service.signal_service.get_active_signals(symbol)
-                if getattr(signal, "strategy_id", "") == strategy.strategy_id
-            ]
+            strategy_key = str(strategy.strategy_id)
+            if strategy_key not in tick_signals:
+                generator = getattr(
+                    strategy_service.signal_service,
+                    "generate_signals_for_strategy",
+                    None,
+                )
+                generated = (
+                    generator(symbol, current_price, strategy)
+                    if generator is not None else None
+                )
+                if generated is None:
+                    generated = [
+                        signal for signal in
+                        strategy_service.signal_service.get_active_signals(symbol)
+                        if getattr(signal, "strategy_id", "") == strategy.strategy_id
+                    ]
+                # Multiple paper accounts deploying the same strategy must use
+                # the same source result for this Tick as well.
+                tick_signals[strategy_key] = copy.deepcopy(list(generated or []))
+            signals = copy.deepcopy(tick_signals[strategy_key])
             account_id = int(deployment["account_id"])
             policy_snapshot = runtime_strategy["position_management_policy_snapshot"]
             reverse_enabled = any(
@@ -1885,6 +1896,14 @@ class PaperTradingService:
                     )
                     position_state["partial_levels_done"] = json.loads(
                         position["partial_levels_done_json"] or "[]"
+                    )
+                    # 保本止损不单独占用表字段：根据当前保护价是否已到
+                    # 入场价判断，兼容已有模拟持仓并避免每个 TICK 重复触发。
+                    entry_price = float(position["entry_price"])
+                    current_sl = float(position["stop_loss"] or 0)
+                    position_state["break_even_done"] = bool(
+                        (position["direction"] == "buy" and current_sl >= entry_price)
+                        or (position["direction"] == "sell" and current_sl <= entry_price)
                     )
                     max_bars = 0
                     period_seconds = {

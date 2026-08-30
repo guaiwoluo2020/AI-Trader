@@ -155,7 +155,7 @@ class StrategyAdmissionService:
     @staticmethod
     def _has_enabled_direct_paper_signal(strategy_data: Dict) -> bool:
         return any(
-            source.get("source") in {"ai_entry", "pivot", "key_level", "multi_timeframe"}
+            source.get("source") in {"ai_entry", "pivot", "key_level"}
             and source.get("enabled", True)
             for source in (strategy_data.get("signal_sources") or [])
         ) and strategy_data.get("lifecycle_status") != "retired"
