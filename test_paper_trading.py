@@ -108,6 +108,40 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertTrue(result["allowed"])
         self.assertNotIn("模拟账户可用保证金不足", result["warnings"])
 
+    def test_same_direction_limit_does_not_count_another_symbol_or_deployment(self):
+        deployment = self.service.deploy(
+            self.user.user_id, self.account.account_id, "strategy-1"
+        )
+        deployment_id = deployment["deployment_id"]
+        now = int(time.time())
+        for index in range(2):
+            self.storage.execute(
+                """
+                INSERT INTO paper_orders(
+                    order_id,user_id,account_id,deployment_id,strategy_id,
+                    decision_id,symbol,direction,status,requested_volume,
+                    requested_price,stop_loss,take_profit,requested_at,
+                    created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    f"gold-sell-{index}", self.user.user_id,
+                    self.account.account_id, deployment_id, "strategy-1",
+                    f"gold-decision-{index}", "GOLD_", "sell", "pending",
+                    0.1, 3000, 3010, 2990, now, now, now,
+                ),
+            )
+        strategy = SimpleNamespace(
+            max_positions=3, max_same_direction=2, position_conflict="allow",
+        )
+
+        result = self.service._paper_position_check(
+            self.account.account_id, "BTCUSD", strategy, "sell", "btc-deployment"
+        )
+
+        self.assertTrue(result["allowed"])
+        self.assertNotIn("模拟账户已达到同方向最大持仓数", result["warnings"])
+
     def test_ai_strategy_can_deploy_to_paper_without_backtest(self):
         self.update_strategy_config({
             "lifecycle_status": "draft",

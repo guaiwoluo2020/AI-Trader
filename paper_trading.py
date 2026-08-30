@@ -713,8 +713,10 @@ class PaperTradingService:
                 volume_calculator=lambda s, risk, st, aid=account_id: (
                     self._paper_volume(aid, s, risk, st)
                 ),
-                position_checker=lambda s, st, action, aid=account_id: (
-                    self._paper_position_check(aid, s, st, action)
+                position_checker=lambda s, st, action, aid=account_id, dep=deployment: (
+                    self._paper_position_check(
+                        aid, s, st, action, str(dep["deployment_id"])
+                    )
                 ),
                 risk_checker=lambda s, volume, risk, st, aid=account_id, px=current_price: (
                     self._paper_risk_check(aid, s, volume, px)
@@ -1387,16 +1389,22 @@ class PaperTradingService:
         raw = risk_amount / max(risk_points * contract_size, 0.000001)
         return max(0.01, math.floor(raw * 100) / 100)
 
-    def _paper_position_check(self, account_id, symbol, strategy, action) -> Dict:
+    def _paper_position_check(
+        self, account_id, symbol, strategy, action, deployment_id: str = "",
+    ) -> Dict:
+        scope_sql = " AND deployment_id = ?" if deployment_id else ""
+        scope_params = (account_id, symbol, deployment_id) if deployment_id else (
+            account_id, symbol,
+        )
         rows = self.storage.fetchall(
             "SELECT direction FROM paper_positions WHERE account_id = ? "
-            "AND symbol = ? AND status = 'open'",
-            (account_id, symbol),
+            f"AND symbol = ? AND status = 'open'{scope_sql}",
+            scope_params,
         )
         pending = self.storage.fetchall(
             "SELECT direction FROM paper_orders WHERE account_id = ? "
-            "AND symbol = ? AND status = 'pending'",
-            (account_id, symbol),
+            f"AND symbol = ? AND status = 'pending'{scope_sql}",
+            scope_params,
         )
         directions = [row["direction"] for row in rows + pending]
         warnings = []
@@ -1473,7 +1481,7 @@ class PaperTradingService:
         ):
             return False
         strategy = self._deployment_strategy(user_id, deployment)
-        open_count = int(self.storage.fetchone(
+        account_open_count = int(self.storage.fetchone(
             "SELECT COUNT(*) AS count FROM paper_positions WHERE account_id = ? AND status = 'open'",
             (account_id,),
         )["count"])
@@ -1481,7 +1489,7 @@ class PaperTradingService:
             "SELECT max_total_positions, max_single_volume FROM trading_accounts WHERE id = ?",
             (account_id,),
         )
-        pending_count = int(self.storage.fetchone(
+        account_pending_count = int(self.storage.fetchone(
             "SELECT COUNT(*) AS count FROM paper_orders WHERE account_id = ? AND status = 'pending'",
             (account_id,),
         )["count"])
@@ -1489,25 +1497,42 @@ class PaperTradingService:
             str(decision.get("decision_reason") or "模拟盘独立风控未通过")
             if decision.get("status") == "rejected" else ""
         )
-        max_positions = min(
-            max(1, int(strategy.get("max_positions", 3))),
-            int(account_limits["max_total_positions"]),
-        )
-        if not reason and open_count + pending_count >= max_positions:
+        if not reason and account_open_count + account_pending_count >= int(
+            account_limits["max_total_positions"]
+        ):
+            reason = "已达到账户最大持仓数"
+        deployment_id = str(deployment["deployment_id"])
+        strategy_count = int(self.storage.fetchone(
+            """
+            SELECT (
+                SELECT COUNT(*) FROM paper_positions
+                WHERE account_id = ? AND deployment_id = ? AND status = 'open'
+            ) + (
+                SELECT COUNT(*) FROM paper_orders
+                WHERE account_id = ? AND deployment_id = ? AND status = 'pending'
+            ) AS count
+            """,
+            (account_id, deployment_id, account_id, deployment_id),
+        )["count"])
+        if not reason and strategy_count >= max(
+            1, int(strategy.get("max_positions", 3))
+        ):
             reason = "已达到策略最大持仓数"
         same_direction = int(self.storage.fetchone(
             """
             SELECT (
                 SELECT COUNT(*) FROM paper_positions
-                WHERE account_id = ? AND status = 'open' AND direction = ?
+                WHERE account_id = ? AND deployment_id = ? AND symbol = ?
+                  AND status = 'open' AND direction = ?
             ) + (
                 SELECT COUNT(*) FROM paper_orders
-                WHERE account_id = ? AND status = 'pending' AND direction = ?
+                WHERE account_id = ? AND deployment_id = ? AND symbol = ?
+                  AND status = 'pending' AND direction = ?
             ) AS count
             """,
             (
-                account_id, decision["action"],
-                account_id, decision["action"],
+                account_id, deployment_id, decision["symbol"], decision["action"],
+                account_id, deployment_id, decision["symbol"], decision["action"],
             ),
         )["count"])
         if not reason and same_direction >= max(
@@ -1629,8 +1654,33 @@ class PaperTradingService:
                     self._reject_order(conn, order["order_id"], "来源策略已删除", now)
                     result["rejected"] += 1
                     continue
-                if open_count >= max(1, int(strategy.get("max_positions", 3))):
-                    self._reject_order(conn, order["order_id"], "成交时已达到最大持仓数", now)
+                if open_count >= int(account["max_total_positions"]):
+                    self._reject_order(conn, order["order_id"], "成交时已达到账户最大持仓数", now)
+                    result["rejected"] += 1
+                    continue
+                deployment_open_count = int(conn.execute(
+                    "SELECT COUNT(*) AS count FROM paper_positions "
+                    "WHERE account_id = ? AND deployment_id = ? AND status = 'open'",
+                    (account_id, order["deployment_id"]),
+                ).fetchone()["count"])
+                if deployment_open_count >= max(
+                    1, int(strategy.get("max_positions", 3))
+                ):
+                    self._reject_order(conn, order["order_id"], "成交时已达到策略最大持仓数", now)
+                    result["rejected"] += 1
+                    continue
+                deployment_direction_count = int(conn.execute(
+                    "SELECT COUNT(*) AS count FROM paper_positions "
+                    "WHERE account_id = ? AND deployment_id = ? AND symbol = ? "
+                    "AND status = 'open' AND direction = ?",
+                    (account_id, order["deployment_id"], symbol, order["direction"]),
+                ).fetchone()["count"])
+                if deployment_direction_count >= max(
+                    1, int(strategy.get("max_same_direction", 2))
+                ):
+                    self._reject_order(
+                        conn, order["order_id"], "成交时已达到同方向最大持仓数", now
+                    )
                     result["rejected"] += 1
                     continue
                 fill_price = ask + slippage if order["direction"] == "buy" else bid - slippage
