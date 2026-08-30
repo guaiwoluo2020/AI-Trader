@@ -39,6 +39,25 @@
         <div v-else class="empty">当前没有结构交易计划</div>
       </v-card-text>
     </v-card>
+    <v-card class="mb-4 review-card">
+      <v-card-title class="d-flex align-center ga-2"><v-icon color="primary">mdi-calendar-search</v-icon>结构信号每日复盘</v-card-title>
+      <v-card-subtitle>每天北京时间 06:00 集中复盘前24小时结构计划；过去12小时无行情时自动跳过并记录原因。</v-card-subtitle>
+      <v-card-text>
+        <div v-if="latestStructureReview">
+          <div class="review-head"><strong>{{ latestStructureReview.review_date }}</strong><v-chip size="small" :color="reviewStatusColor(latestStructureReview.status)" variant="tonal">{{ reviewStatusLabel(latestStructureReview.status) }}</v-chip><span>最后行情 {{ formatPlanTime(latestStructureReview.latest_market_at) }}</span></div>
+          <v-alert v-if="latestStructureReview.status==='skipped'" type="warning" variant="tonal" density="compact" class="mt-3">{{ latestStructureReview.skip_reason }}</v-alert>
+          <v-alert v-else-if="latestStructureReview.status==='failed'" type="error" variant="tonal" density="compact" class="mt-3">{{ latestStructureReview.error }}</v-alert>
+          <template v-else-if="latestStructureReview.review">
+            <p class="review-summary">{{ latestStructureReview.review.summary || '复盘已完成' }}</p>
+            <div class="review-metrics"><span>计划 {{ latestStructureReview.evidence?.metrics?.plan_count || 0 }}</span><span>可交易 {{ latestStructureReview.evidence?.metrics?.tradable_plan_count || 0 }}</span><span>触发 {{ latestStructureReview.evidence?.metrics?.triggered_count || 0 }}</span><span>止盈 {{ latestStructureReview.evidence?.metrics?.target_hit_count || 0 }}</span><span>止损 {{ latestStructureReview.evidence?.metrics?.stop_hit_count || 0 }}</span></div>
+            <h3>问题分析</h3><div v-if="latestStructureReview.review.problems?.length" class="review-list"><article v-for="(item,index) in latestStructureReview.review.problems" :key="`problem-${index}`"><v-chip size="x-small" :color="severityColor(item.severity)" variant="tonal">{{ item.severity || 'medium' }}</v-chip><strong>{{ item.category }}</strong><p>{{ item.analysis }}</p><small>证据：{{ item.evidence }}</small></article></div><div v-else class="empty">本次未发现明确问题</div>
+            <h3>改进计划</h3><div v-if="latestStructureReview.review.improvement_plan?.length" class="review-list"><article v-for="(item,index) in latestStructureReview.review.improvement_plan" :key="`improvement-${index}`"><strong>{{ item.parameter }}</strong><p>{{ item.current_value }} → {{ item.suggested_value }}</p><small>{{ item.reason }}；验证：{{ item.validation }}</small></article></div><div v-else class="empty">本次没有可靠的调参建议</div>
+          </template>
+          <div v-if="structureReviews.length>1" class="review-history"><span>最近记录</span><v-chip v-for="item in structureReviews.slice(0,7)" :key="item.review_id" size="x-small" :color="reviewStatusColor(item.status)" variant="tonal" @click="selectedReviewId=item.review_id">{{ item.review_date }}</v-chip></div>
+        </div>
+        <div v-else class="empty">尚未生成每日结构信号复盘，首次任务将在北京时间 06:00 执行。</div>
+      </v-card-text>
+    </v-card>
     <v-card v-if="bars.length" class="chart-card mb-4"><v-card-title>K线与结构段</v-card-title><v-card-text><div ref="chartRef" class="chart" style="height:480px;width:100%"></div><div class="structure-strip-title">结构时间轴（按 K 线数量）</div><div class="structure-strip"><div v-for="(item,index) in segments" :key="`strip-${item.id}`" class="structure-strip-segment" :style="stripStyle(item,index)" :title="`${labels[item.type]||item.type} · ${item.start} → ${item.end} · 强度 ${item.strength ?? item.confidence ?? 0}%`"><span>{{ labels[item.type]||item.type }}</span></div></div><div class="legend"><span v-for="type in ['up','sideways','triangle','down','transition']" :key="type"><i :style="{background:legendColors[type]}"></i>{{ labels[type] }}</span></div></v-card-text></v-card>
     <v-row v-if="structureResult">
       <v-col cols="12" md="4"><v-card class="summary"><v-card-text><small>主结构状态</small><h2>{{ stateLabel(structureResult.current_state) }}</h2><div class="stats flex-wrap"><span>内部：{{ stateLabel(structureResult.internal_state) }}</span><span>大级别：{{ stateLabel(structureResult.external_state) }}</span><span>阶段：{{ detailLabel(structureResult.state_detail) }}</span><span>ATR {{ Number(structureResult.atr || 0).toFixed(2) }}</span></div><v-alert v-if="structureResult.active_candidate" type="warning" density="compact" variant="tonal" class="mt-3">正在等待{{ structureResult.active_candidate.direction === 'up' ? '向上' : '向下' }}反转确认；K线图以橙色虚线显示候选段</v-alert><v-alert v-if="structureResult.range?.status === 'failed_breakout'" type="info" density="compact" variant="tonal" class="mt-2">价格突破后重新收回区间，当前判定为假突破并恢复原区间</v-alert></v-card-text></v-card></v-col>
@@ -68,7 +87,7 @@ import { useRoute } from 'vue-router'
 import { marketAPI } from '../api/market'
 import * as echarts from 'echarts'
 
-const route = useRoute(); const symbol = ref(String(route.query.symbol || 'BTCUSD')); const period = ref(String(route.query.period || 'M5')); const periods=['M1','M5','M15','H1','H4']; const symbols=ref([symbol.value]); const loading=ref(false); const error=ref(''); const segments=ref([]); const bars=ref([]); const structureResult=ref(null); const tradePlans=ref([]); const chartRef=ref(null); let chart=null; let refreshTimer=null
+const route = useRoute(); const symbol = ref(String(route.query.symbol || 'BTCUSD')); const period = ref(String(route.query.period || 'M5')); const periods=['M1','M5','M15','H1','H4']; const symbols=ref([symbol.value]); const loading=ref(false); const error=ref(''); const segments=ref([]); const bars=ref([]); const structureResult=ref(null); const tradePlans=ref([]); const structureReviews=ref([]); const selectedReviewId=ref(''); const chartRef=ref(null); let chart=null; let refreshTimer=null
 const labels={up:'上涨趋势',down:'下跌趋势',sideways:'箱体震荡',triangle:'收敛三角形',transition:'结构过渡'}; const colors={up:'success',down:'error',sideways:'info',triangle:'secondary',transition:'warning'}; const legendColors={up:'#3aa675',down:'#d95d55',sideways:'#4f91c4',triangle:'#8968b7',transition:'#d4a24c'}
 const closeOf=x=>Number(x.close ?? x.close_price ?? 0); const timeOf=x=>{const utc=x?.timestamp_utc;const raw=(utc!==undefined&&utc!==null&&Number(utc)>0)?utc:(x?.timestamp??x?.time??0);const numeric=typeof raw==='number'?raw:(typeof raw==='string'&&/^\d+(\.\d+)?$/.test(raw)?Number(raw):NaN);if(Number.isFinite(numeric))return numeric>1e12?numeric:numeric*1000;const parsed=Date.parse(raw);return Number.isFinite(parsed)?parsed:0}; const stamp=x=>new Date(timeOf(x)).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})
 const periodMs=p=>({M1:60000,M5:300000,M15:900000,H1:3600000,H4:14400000}[String(p).toUpperCase()]||300000)
@@ -90,10 +109,15 @@ function build(rows){
   return merged.slice(-5).map((s,i,arr)=>{const part=rows.slice(s.startIndex,s.endIndex+1);return {...s,id:`s-${s.startIndex}`,bars:part.length,start:stamp(part[0]),end:stamp(part.at(-1)),support:Math.min(...part.map(x=>Number(x.low??x.low_price??closeOf(x)))),resistance:Math.max(...part.map(x=>Number(x.high??x.high_price??closeOf(x)))),confidence:s.type==='transition'?50:70,status:i===arr.length-1?'当前已确认':'已结束',reason:s.type==='up'?'高低点和收盘结构持续抬升（允许中途震荡/回撤）':s.type==='down'?'高低点和收盘结构持续下移（允许中途震荡/反弹）':s.type==='sideways'?'价格在区间内反复运行':'趋势证据发生冲突，等待确认'}})
 }
 const current=computed(()=>segments.value.at(-1)); async function loadTradePlans(){try{const response=await marketAPI.getStructureTradePlans(symbol.value,period.value);tradePlans.value=Array.isArray(response?.plans)?response.plans:[]}catch(e){tradePlans.value=[]}}
+const latestStructureReview=computed(()=>structureReviews.value.find(item=>item.review_id===selectedReviewId.value)||structureReviews.value[0]||null)
+async function loadStructureReviews(){try{const response=await marketAPI.getStructureSignalReviews(symbol.value,period.value,30);structureReviews.value=Array.isArray(response?.reviews)?response.reviews:[];if(!structureReviews.value.some(item=>item.review_id===selectedReviewId.value))selectedReviewId.value=structureReviews.value[0]?.review_id||''}catch(e){structureReviews.value=[]}}
 const formatPlanTime=value=>value?new Date(Number(value)*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}):'--'
 const modeLabel=value=>value==='live'?'实盘':'模拟盘'
 const executionLabel=value=>({unconsumed:'待消费',claimed:'已领取',triggered:'已触发',ordered:'已下单',filled:'已成交',rejected:'已拒绝',expired:'已过期',canceled:'已取消',released:'已释放'}[value]||value||'待消费')
 const executionColor=value=>({unconsumed:'warning',claimed:'info',triggered:'info',ordered:'primary',filled:'success',rejected:'error',expired:'grey',canceled:'grey',released:'secondary'}[value]||'grey')
+const reviewStatusLabel=value=>({completed:'已完成',skipped:'已跳过',failed:'失败',running:'执行中'}[value]||value||'未知')
+const reviewStatusColor=value=>({completed:'success',skipped:'warning',failed:'error',running:'info'}[value]||'grey')
+const severityColor=value=>({high:'error',medium:'warning',low:'info'}[value]||'grey')
 const hierarchyLabels={internal:'Internal 内部结构',swing:'Swing 主结构',external:'External 外部结构'}
 const phaseLabel=(value,bias)=>{if(value==='reversal_confirmed')return bias==='down'?'反转确认后的下跌延续':bias==='up'?'反转确认后的上涨延续':'反转已确认';return {forming:'形成中',continuation:'延续',pullback:'回撤中',reversal_candidate:'反转候选'}[value]||value||'--'}
 const patternLabel=value=>({range:'箱体震荡',converging_triangle:'收敛三角形',diverging_triangle:'扩散三角形',ascending_triangle:'上升三角形',descending_triangle:'下降三角形',trendline:'趋势线'}[value]||value||'局部形态')
@@ -130,7 +154,7 @@ function safeRenderChart(){try{renderChartUnsafe()}catch(err){console.error('[St
 function renderChart(){safeRenderChart()}
 async function load(){loading.value=true;error.value='';try{const res=await marketAPI.getKlines(symbol.value,period.value,600);const raw=Array.isArray(res?.data)?res.data:(Array.isArray(res?.klines)?res.klines:(Array.isArray(res?.results)?res.results:(Array.isArray(res?.data?.klines)?res.data.klines:(Array.isArray(res?.data?.data)?res.data.data:[]))));const now=Date.now()+periodMs(period.value);const filtered=raw.filter(x=>{const t=timeOf(x);return t>0&&t<=now});const rows=(filtered.length?filtered:raw).slice().sort((a,b)=>timeOf(a)-timeOf(b));bars.value=rows;if(!rows.length){error.value=`暂无可用K线（${symbol.value} · ${period.value}）`;return}let backend=null;try{const sr=await marketAPI.getMarketStructure(symbol.value,period.value,600);backend=sr?.data;structureResult.value=backend||null}catch(structureError){structureResult.value=null;error.value='结构分析暂时不可用，已显示原始K线'}if(Array.isArray(backend?.segments)&&backend.segments.length){segments.value=backend.segments.slice(-5).map((s,i)=>{const p=rows.slice(s.start_index,s.end_index+1);const confirmationIndex=s.evidence?.confirmation_index;return {...s,id:`backend-${s.start_index}`,type:s.type,bars:p.length,start:stamp(p[0]),end:stamp(p.at(-1)),confirmation:Number.isInteger(confirmationIndex)&&rows[confirmationIndex]?stamp(rows[confirmationIndex]):'',support:Math.min(...p.map(x=>Number(x.low??x.low_price??closeOf(x)))),resistance:Math.max(...p.map(x=>Number(x.high??x.high_price??closeOf(x)))),confidence:s.strength??70,strength:s.strength??70,status:s.locked?'已确认并锁定':(s.status==='candidate'?'等待确认':'当前已确认'),reason:s.reason||'结构证据已计算'}})}else segments.value=build(rows);await nextTick();renderChart()}catch(e){error.value=e?.response?.data?.detail||'K线数据加载失败'}finally{loading.value=false}}
 async function loadSymbols(){try{const res=await marketAPI.getSymbols();const values=(res?.symbols||res?.data||[]).map(item=>typeof item==='string'?item:(item.symbol||item.value||'')).filter(Boolean);symbols.value=Array.from(new Set([symbol.value,...values]))}catch(e){/* 保留当前品种，行情接口失败不阻断页面 */}}
-watch(period,()=>{load();loadTradePlans()});watch(symbol,()=>{load();loadTradePlans()});onMounted(async()=>{await loadSymbols();await load();await loadTradePlans();refreshTimer=setInterval(()=>{load();loadTradePlans()},30000)});onUnmounted(()=>{if(refreshTimer)clearInterval(refreshTimer);window.removeEventListener('resize',resizeChart);chart?.dispose()})
+watch(period,()=>{load();loadTradePlans();loadStructureReviews()});watch(symbol,()=>{load();loadTradePlans();loadStructureReviews()});onMounted(async()=>{await loadSymbols();await load();await loadTradePlans();await loadStructureReviews();refreshTimer=setInterval(()=>{load();loadTradePlans();loadStructureReviews()},30000)});onUnmounted(()=>{if(refreshTimer)clearInterval(refreshTimer);window.removeEventListener('resize',resizeChart);chart?.dispose()})
 </script>
 <style scoped>
 .structure-strip-title,.structure-strip{display:none !important}
@@ -162,4 +186,11 @@ watch(period,()=>{load();loadTradePlans()});watch(symbol,()=>{load();loadTradePl
 .subscription-status{text-align:right;max-width:55%}
 .no-subscriber{display:block;margin-top:12px;color:#8a9a93}
 @media(max-width:900px){.plan-grid{grid-template-columns:1fr}}
+</style>
+<style scoped>
+.review-card{border:1px solid #dce8e2;background:linear-gradient(145deg,#fff,#f7fbf8)}
+.review-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:#60736b}.review-head strong{color:#29483f;font-size:1rem}
+.review-summary{margin:14px 0;color:#29483f;font-size:1rem}.review-metrics{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}.review-metrics span{padding:6px 10px;border-radius:8px;background:#edf5f1;color:#42665a;font-size:.8rem}
+.review-card h3{margin:15px 0 8px;color:#315f50;font-size:.95rem}.review-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.review-list article{padding:12px;border:1px solid #e0ebe5;border-radius:10px;background:#fff}.review-list article strong{margin-left:6px;color:#315f50}.review-list p{margin:7px 0;color:#526860}.review-list small{color:#71837b}.review-history{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:16px;padding-top:12px;border-top:1px dashed #d7e3dd;color:#71837b;font-size:.8rem}
+@media(max-width:850px){.review-list{grid-template-columns:1fr}}
 </style>

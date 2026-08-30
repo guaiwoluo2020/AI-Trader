@@ -12,6 +12,7 @@ from typing import Callable, Dict, Optional, Tuple
 from background_scheduler import SharedTaskScheduler
 from data_retention import DataRetentionService
 from market.services.adaptive_signal_tuner import AdaptiveSignalTuner
+from market.services.daily_review_service import DailyReviewCoordinator, CHINA_TZ
 from ea_auth import EAIdentity
 from paper_trading import PaperTradingService
 from server import TradingServer
@@ -52,6 +53,9 @@ class TradingEngineManager:
         self.adaptive_signal_tuner = AdaptiveSignalTuner(
             refresh_callback=self.refresh_user_strategies,
         )
+        self.daily_reviews = DailyReviewCoordinator(
+            engine_provider=self.get_market_engine,
+        )
         self._idle_timeout_seconds = float(
             idle_timeout_seconds
             if idle_timeout_seconds is not None
@@ -73,6 +77,7 @@ class TradingEngineManager:
         self._next_data_retention_at = time.monotonic() + 60
         self._next_adaptive_tuning_at = time.monotonic() + 120
         self._last_data_retention_date = ""
+        self._last_daily_review_date = ""
 
     def _create_engine(self, user_id: int, account_id: int) -> TradingServer:
         market_source = (
@@ -224,7 +229,7 @@ class TradingEngineManager:
             scheduler.submit(
                 ("paper", "maintenance"), self.paper_trading.run_maintenance
             )
-        current_wall = datetime.now()
+        current_wall = datetime.now(CHINA_TZ)
         retention_due = (
             self._data_retention_enabled
             and current_wall.hour == 2
@@ -236,6 +241,17 @@ class TradingEngineManager:
             scheduler.submit(
                 ("system", "data_retention"),
                 self.data_retention.run_maintenance,
+            )
+        review_date = current_wall.date().isoformat()
+        review_due = (
+            current_wall.hour == 6
+            and self._last_daily_review_date != review_date
+        )
+        if review_due:
+            self._last_daily_review_date = review_date
+            scheduler.submit(
+                ("system", "daily_reviews"),
+                lambda: self.daily_reviews.run_once(review_date),
             )
         if now >= self._next_adaptive_tuning_at:
             # A completed sample is fingerprinted, so running every five

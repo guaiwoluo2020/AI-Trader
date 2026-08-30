@@ -1174,6 +1174,22 @@ def create_market_routes(
             plan["subscribed_strategies"] = subscribed_strategies
         return {"status": "ok", "symbol": symbol, "period": period.upper(), "plans": items}
 
+    @protected_router.get("/market/structure/{symbol}/signal-reviews")
+    async def get_structure_signal_reviews(
+        symbol: str,
+        period: str = Query("M5"),
+        limit: int = Query(30, ge=1, le=90),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Return persisted daily structure-signal reviews for one scope."""
+        items = engine_manager.daily_reviews.list_structure_reviews(
+            user.user_id, symbol, period.upper(), limit,
+        )
+        return {
+            "status": "ok", "symbol": symbol, "period": period.upper(),
+            "reviews": items,
+        }
+
     @protected_router.get("/admin/market-structure/config")
     async def get_market_structure_config(user: AuthUser = Depends(require_admin)):
         items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
@@ -2799,6 +2815,31 @@ def create_market_routes(
                 "generated_at": now,
             },
         }
+
+    @protected_router.get("/strategy/{strategy_id}/daily-reviews")
+    async def get_daily_strategy_reviews(
+        strategy_id: str,
+        deployment_id: str = Query(""),
+        limit: int = Query(30, ge=1, le=90),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        strategy = strategy_repo.get_strategy_by_id(user.user_id, strategy_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="策略不存在或不属于当前用户")
+        deployments = strategy_deployment_repo.list_for_strategy(
+            user.user_id, strategy_id,
+        )
+        selected = next(
+            (item for item in deployments if not deployment_id or str(item.get("deployment_id")) == deployment_id),
+            None,
+        )
+        if selected is None:
+            return {"status": "ok", "reviews": []}
+        items = engine_manager.daily_reviews.list_strategy_reviews(
+            user.user_id, int(selected["account_id"]), strategy_id,
+            str(selected["deployment_id"]), limit,
+        )
+        return {"status": "ok", "reviews": items}
 
     @protected_router.get("/strategy/{strategy_id}/ai-review/{job_id}")
     async def get_strategy_review_status(
