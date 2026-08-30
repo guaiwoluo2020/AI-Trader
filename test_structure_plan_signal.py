@@ -196,7 +196,7 @@ class StructurePlanTests(unittest.TestCase):
             }],
             "structure_hierarchy": {},
         }
-        plans = StructurePlanBuilder().build(
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
         self.assertEqual([item["setup_type"] for item in plans], ["no_trade"])
@@ -210,7 +210,7 @@ class StructurePlanTests(unittest.TestCase):
                 "level": 110.0, "confirmed_at": 39,
             }],
         }
-        plans = StructurePlanBuilder().build(
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
         self.assertEqual([item["setup_type"] for item in plans], ["no_trade"])
@@ -301,6 +301,38 @@ class StructurePlanTests(unittest.TestCase):
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
         self.assertEqual(plans[0]["setup_type"], "trend_continuation")
+
+    def test_confirmed_choch_builds_reversal_plan(self):
+        structure = _trend_structure("down")
+        # A confirmed reversal should have a nearby protected low; using the
+        # old deep downtrend low would correctly fail the real-RR guard.
+        for layer in structure["structure_hierarchy"].values():
+            if layer.get("protected_low"):
+                layer["protected_low"]["price"] = 109.7
+        structure["internal_events"] = [{
+            "type": "choch", "direction": "up", "level": 110.0,
+            "confirmed_at": 39, "displacement_atr": 0.8,
+        }]
+        self.store.rows[-1]["close"] = 110.0
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0]["setup_type"], "choch_reversal")
+        self.assertEqual(plans[0]["direction"], "buy")
+        self.assertEqual(plans[0]["entry_mode"], "breakout_retest")
+
+    def test_weak_choch_is_observation_only(self):
+        structure = _trend_structure("down")
+        structure["internal_events"] = [{
+            "type": "choch", "direction": "up", "level": 110.0,
+            "confirmed_at": 39, "displacement_atr": 0.05,
+        }]
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("CHOCH 位移", plans[0]["reason"])
 
 
 if __name__ == "__main__":

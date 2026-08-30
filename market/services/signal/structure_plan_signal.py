@@ -220,11 +220,21 @@ class StructurePlanBuilder:
         )
         if plans:
             return plans
-        plans = self._location_plans(
-            source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
-        )
-        if plans:
-            return plans
+        # A fresh CHOCH is a reversal candidate and must be evaluated before
+        # ordinary trend-location plans, otherwise the old trend could mask it.
+        latest_event = (structure.get("internal_events") or [])[-1:]
+        if latest_event and latest_event[0].get("type") == "choch":
+            plans = self._event_plans(
+                source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
+            )
+            if plans:
+                return plans
+        else:
+            plans = self._location_plans(
+                source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
+            )
+            if plans:
+                return plans
         plans = self._event_plans(
             source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
         )
@@ -640,6 +650,56 @@ class StructurePlanBuilder:
         stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
         target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
         expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
+
+        if latest.get("type") == "choch" and self._param("enable_choch", True):
+            direction_state = str(latest.get("direction") or "")
+            if direction_state not in {"up", "down"}:
+                self._reject("CHOCH 事件没有明确的反转方向")
+                return []
+            displacement = _number(latest.get("displacement_atr"))
+            minimum = max(0.0, _number(
+                self._param("min_choch_displacement_atr", 0.2)
+            ))
+            if displacement < minimum:
+                self._reject(
+                    f"CHOCH 位移 {displacement:.2f} ATR 低于最低确认要求 {minimum:.2f} ATR"
+                )
+                return []
+            direction = "buy" if direction_state == "up" else "sell"
+            entry = _number(latest.get("level"))
+            if entry <= 0:
+                self._reject("CHOCH 没有有效的突破结构位")
+                return []
+            protected = self._protected_reference(hierarchy, direction, entry)
+            sl = (
+                protected - stop_buffer if direction == "buy" else protected + stop_buffer
+            ) if protected else (
+                entry - stop_buffer if direction == "buy" else entry + stop_buffer
+            )
+            target = self._next_target(hierarchy, direction, entry)
+            risk = abs(entry - sl)
+            if not target:
+                target = entry + risk * 2 if direction == "buy" else entry - risk * 2
+            elif direction == "buy":
+                target -= target_buffer
+            else:
+                target += target_buffer
+            plan = self._tradable_plan(
+                source_id=source_id, symbol=symbol, period=period, anchor=anchor,
+                setup_type="choch_reversal", direction=direction,
+                entry_mode="breakout_retest", status="active", entry=entry,
+                zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
+                stop_loss=sl, take_profit=target,
+                confidence=max(65, min(95, int(65 + displacement * 20))),
+                reason=(
+                    f"{period} {('向上' if direction == 'buy' else '向下')} CHOCH 收盘确认，"
+                    f"等待反转位 {entry:.2f} 回踩后"
+                    f"{'买入' if direction == 'buy' else '卖出'}"
+                ),
+                valid_from=bar_time, expires_at=expires,
+                invalidation_price=sl, structure_snapshot=snapshot,
+            )
+            return [plan] if plan else []
 
         if latest.get("type") == "liquidity_sweep" and self._param("enable_liquidity_sweep", True):
             swept = str(latest.get("direction") or "")
