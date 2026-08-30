@@ -1123,33 +1123,9 @@
           <template v-else-if="newSignalSource.source === 'structure_plan'">
             <v-row dense class="mt-3">
               <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">每根已收盘 K 线按“背景方向 + 当前形态 + 所处位置 + 确认证据”生成或更新一个最相关计划，Tick 只判断触及与回收。覆盖趋势结构位回踩、箱体边界、突破回踩、假突破和流动性扫单；没有可靠机会时会显示具体拦截原因。</v-alert></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_trend" label="趋势延续与反转" hide-details></v-checkbox></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_choch" label="CHOCH 反转计划" hide-details></v-checkbox></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_structure_location" label="结构位置回踩" hide-details></v-checkbox></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range" label="箱体与三角形" hide-details></v-checkbox></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range_boundary" label="箱体边界反转" hide-details></v-checkbox></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.require_range_boundary_reclaim" label="箱体边界要求回收确认" hint="关闭时进入边界附近区域即可触发，避免价格未精确触及边界后直接反弹而错过机会" persistent-hint></v-checkbox></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range_breakout" label="收盘突破与回踩" hide-details></v-checkbox></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_false_breakout" label="假突破回归" hide-details></v-checkbox></v-col>
-              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_liquidity_sweep" label="流动性扫单回收" hide-details></v-checkbox></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_structure_confidence" label="最低结构置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_real_risk_reward" label="最低真实盈亏比" type="number" min="1.2" max="10" step="0.1" hint="按结构止损与下一真实障碍计算，默认至少 1.2R" persistent-hint></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_event_age_bars" label="结构事件最大时效" type="number" min="0" max="10" suffix="根K线"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_breakout_displacement_atr" label="最小突破位移" type="number" min="0" max="5" step="0.05" suffix="ATR" hint="过滤力度过弱的结构突破，默认 0.2 ATR" persistent-hint></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_choch_displacement_atr" label="CHOCH 最小确认位移" type="number" min="0" max="5" step="0.05" suffix="ATR" hint="反转事件至少达到该位移才生成反转计划" persistent-hint></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.entry_zone_atr" label="入场区域宽度" type="number" min="0" max="3" step="0.05" suffix="ATR"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.location_proximity_atr" label="结构位置接近范围" type="number" min="0.05" max="5" step="0.05" suffix="ATR" hint="当前收盘价进入该范围后才生成 HL/LH、保护点或趋势线回踩计划" persistent-hint></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_trendline_touches" label="趋势线最少触碰" type="number" min="2" max="20" suffix="次"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-checkbox v-model="newSignalSource.params.require_location_reclaim" label="位置入场要求触及后回收" hint="开启后，Tick 必须先触及结构位，再回到结构内才触发" persistent-hint></v-checkbox></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.stop_buffer_atr" label="结构止损缓冲" type="number" min="0" max="3" step="0.05" suffix="ATR"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.target_buffer_atr" label="结构止盈缓冲" type="number" min="0" max="3" step="0.05" suffix="ATR" hint="止盈放在下一压力/支撑之前，禁止跨越结构位机械扩展" persistent-hint></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.breakout_stop_inside_atr" label="突破止损回置深度" type="number" min="0.1" max="3" step="0.05" suffix="ATR"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.breakout_stop_buffer_atr" label="突破最小止损距离" type="number" min="0.1" max="5" step="0.1" suffix="ATR" hint="突破计划止损至少与边界保持该 ATR 距离，默认 0.8" persistent-hint></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.breakout_target_atr" label="突破最小止盈距离" type="number" min="1" max="10" step="0.5" suffix="ATR" hint="止盈至少达到该 ATR 距离，默认 3.0" persistent-hint></v-text-field></v-col>
-              <v-col cols="12" sm="4"><v-text-field v-model.number="newSignalSource.params.range_plan_valid_bars" label="箱体计划有效期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
-              <v-col cols="12" sm="4"><v-text-field v-model.number="newSignalSource.params.event_plan_valid_bars" label="事件计划有效期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
-              <v-col cols="12" sm="4"><v-text-field v-model.number="newSignalSource.params.location_plan_valid_bars" label="位置计划有效期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
-              <v-col cols="12" sm="4"><v-text-field v-model.number="newSignalSource.params.breakout_retest_valid_bars" label="突破回踩有效期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-select v-model="newSignalSource.params.allowed_directions" :items="[{title:'买入和卖出',value:['buy','sell']},{title:'仅买入',value:['buy']},{title:'仅卖出',value:['sell']}]" label="允许方向" multiple chips></v-select></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_plan_age_bars" label="计划最大时效" type="number" min="0" max="20" suffix="根K线" hint="仅限制策略读取计划的时效，结构计划参数在市场结构配置中统一维护" persistent-hint></v-text-field></v-col>
+              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">结构计划的识别、入场、止损、止盈和三角形/箱体参数已统一移至“系统结构识别 → 结构交易计划参数”，并支持按品种和周期覆盖。此处仅保留策略执行筛选。</v-alert></v-col>
             </v-row>
           </template>
 
