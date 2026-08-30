@@ -32,6 +32,16 @@ SIGNAL_SOURCES = {
 
 def default_position_management_config() -> Dict:
     return {
+        "management_mode": "standard",
+        "multi_level_exit": {
+            "disaster_stop_buffer_atr": 0.50,
+            "stop_close_percent": {
+                "internal": 30, "swing": 40, "external": 100,
+            },
+            "take_profit_close_percent": {
+                "internal": 30, "swing": 30, "external": 100,
+            },
+        },
         "initial_stop_rules": [
             {"type": "pivot", "period": "M5", "selection": "nearest",
              "max_age_bars": 100,
@@ -82,6 +92,25 @@ def _positive(value, label: str, allow_zero: bool = False) -> float:
 
 def normalize_position_management_config(config: Optional[Dict]) -> Dict:
     normalized = copy.deepcopy(config or default_position_management_config())
+    mode = str(normalized.get("management_mode") or "standard").strip().lower()
+    normalized["management_mode"] = (
+        "multi_level_exit" if mode == "multi_level_exit" else "standard"
+    )
+    multi = copy.deepcopy(normalized.get("multi_level_exit") or {})
+    multi["disaster_stop_buffer_atr"] = _positive(
+        multi.get("disaster_stop_buffer_atr", 0.50), "灾难止损ATR缓冲", True
+    )
+    for key, defaults in (
+        ("stop_close_percent", {"internal": 30, "swing": 40, "external": 100}),
+        ("take_profit_close_percent", {"internal": 30, "swing": 30, "external": 100}),
+    ):
+        values = copy.deepcopy(multi.get(key) or {})
+        for layer, default in defaults.items():
+            values[layer] = min(100.0, max(
+                0.0, float(values.get(layer, default) or 0)
+            ))
+        multi[key] = values
+    normalized["multi_level_exit"] = multi
     stop_rules = list(normalized.get("initial_stop_rules") or [])
     take_rules = list(normalized.get("initial_take_profit_rules") or [])
     management_rules = list(normalized.get("management_rules") or [])
@@ -222,6 +251,7 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
             "management_rules", "min_risk_reward",
             "min_stop_percent", "max_stop_percent",
             "min_stop_distance", "max_stop_distance",
+            "management_mode", "multi_level_exit",
         }
         overrides = {
             key: value for key, value in overrides.items()
@@ -380,6 +410,9 @@ class PositionPlan:
     # When the signal-provided stop is tighter than the policy floor, the
     # runtime widens it to the floor and records the change for audit/UI.
     stop_adjustment: Optional[Dict] = None
+    exit_levels: List[Dict] = field(default_factory=list)
+    disaster_stop_loss: float = 0.0
+    reference_take_profit: float = 0.0
 
 
 @dataclass
@@ -390,5 +423,6 @@ class PositionAction:
     close_percent: float = 0.0
     close_volume: float = 0.0
     level_id: str = ""
+    level_ids: List[str] = field(default_factory=list)
     reason: str = ""
     events: List[Dict] = field(default_factory=list)

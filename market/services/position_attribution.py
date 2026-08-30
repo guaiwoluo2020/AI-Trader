@@ -17,6 +17,7 @@ def build_position_attribution(
     entry_reason: str = "",
     initial_stop_loss: float = 0,
     initial_take_profit: float = 0,
+    initial_volume: float = 0,
 ) -> Dict:
     summary = signal_summary or {}
     management = summary.get("position_management") or {}
@@ -76,6 +77,14 @@ def build_position_attribution(
         "initial_stop_loss": float(initial_stop_loss or 0),
         "initial_take_profit": float(initial_take_profit or 0),
         "initial_risk": initial_risk,
+        "initial_volume": float(initial_volume or 0),
+        "exit_levels": copy.deepcopy(management.get("exit_levels") or []),
+        "disaster_stop_loss": float(
+            management.get("disaster_stop_loss") or initial_stop_loss or 0
+        ),
+        "reference_take_profit": float(
+            management.get("reference_take_profit") or initial_take_profit or 0
+        ),
         "entry_reason": str(entry_reason or ""),
         "exit_reason": "",
         "realized_r": 0.0,

@@ -6,9 +6,14 @@
         <h1>持仓管理</h1>
         <p>把止损、止盈和持仓后的保护动作组合成可复用方案。</p>
       </div>
-      <v-btn color="primary" size="large" prepend-icon="mdi-plus" @click="openCreate">
-        新建方案
-      </v-btn>
+      <div class="d-flex ga-3 flex-wrap">
+        <v-btn variant="outlined" size="large" prepend-icon="mdi-plus" @click="openCreate">
+          新建方案
+        </v-btn>
+        <v-btn color="primary" size="large" prepend-icon="mdi-layers-triple" @click="openCreateMulti">
+          新建多层结构方案
+        </v-btn>
+      </div>
     </div>
 
     <v-alert v-if="message" :type="messageType" closable class="mb-4" @click:close="message = ''">
@@ -38,6 +43,7 @@
               <v-chip :color="policy.enabled ? 'success' : 'grey'" size="small">
                 {{ policy.enabled ? '启用' : '停用' }}
               </v-chip>
+              <v-chip v-if="policy.config.management_mode === 'multi_level_exit'" color="deep-purple" size="small" variant="tonal">多层结构</v-chip>
               <v-chip :color="policy.is_shared ? 'teal' : 'grey'" size="small" variant="tonal">
                 {{ policy.readonly_reference ? '共享引用' : (policy.is_shared ? '已共享' : '私有') }}
               </v-chip>
@@ -131,6 +137,24 @@
             <v-col cols="12" md="4"><v-switch v-model="form.enabled" color="success" label="启用方案" /></v-col>
             <v-col cols="12" md="4"><v-switch v-model="form.is_shared" color="success" label="共享到平台方案库" /></v-col>
           </v-row>
+          <v-alert v-if="form.config.management_mode === 'multi_level_exit'" type="success" variant="tonal" class="mb-4">
+            多层结构持仓管理：Internal、Swing、External 点位由后端虚拟执行分批止损/止盈；MT5 只设置位于最外层结构之外的灾难保护止损，不设置固定止盈。
+          </v-alert>
+          <template v-if="form.config.management_mode === 'multi_level_exit'">
+            <div class="section-title mt-4">多层结构退出</div>
+            <v-row>
+              <v-col cols="12" md="3"><v-text-field v-model.number="form.config.multi_level_exit.disaster_stop_buffer_atr" label="灾难止损缓冲" suffix="ATR" type="number" min="0" step="0.1" /></v-col>
+            </v-row>
+            <div class="multi-level-grid">
+              <div class="multi-level-head">结构层级</div><div class="multi-level-head">分批止损</div><div class="multi-level-head">分批止盈</div>
+              <template v-for="layer in structureLayers" :key="layer.value">
+                <strong>{{ layer.title }}</strong>
+                <v-text-field v-model.number="form.config.multi_level_exit.stop_close_percent[layer.value]" suffix="%" type="number" min="0" max="100" density="compact" hide-details />
+                <v-text-field v-model.number="form.config.multi_level_exit.take_profit_close_percent[layer.value]" suffix="%" type="number" min="0" max="100" density="compact" hide-details />
+              </template>
+            </div>
+            <v-alert type="info" variant="tonal" density="compact" class="mt-3">最外层有效点位始终平掉全部剩余仓位；前两层比例按初始仓位计算，行情跳价跨越多个层级时会合并执行。</v-alert>
+          </template>
           <RuleChain v-model="form.config.initial_stop_rules" title="初始止损规则链" kind="stop" />
           <RuleChain v-model="form.config.initial_take_profit_rules" title="初始止盈规则链" kind="take" />
           <div class="section-title mt-6">持仓后管理</div>
@@ -208,6 +232,11 @@ import { computed, defineComponent, h, onMounted, reactive, ref } from 'vue'
 import { marketAPI } from '../api/market'
 
 const periods = ['M1', 'M5', 'M15', 'H1', 'H4']
+const structureLayers = [
+  { title: 'Internal 内部结构', value: 'internal' },
+  { title: 'Swing 主结构', value: 'swing' },
+  { title: 'External 外部结构', value: 'external' },
+]
 const labels = { signal: '信号建议', pivot: '转折点', atr: 'ATR', fixed_points: '固定点数', fixed_percent: '固定百分比', risk_reward: '盈亏比', none: '不设固定止盈', break_even: '保本', pivot_trailing: '转折跟进', trailing_stop: '移动止损', partial_take_profit: '分批止盈', reverse_signal: '反向退出', max_holding_bars: '时间退出' }
 const partialMoveOptions = [
   { title: '不调整', value: 'none' },
@@ -250,6 +279,7 @@ const signalSources = [
   { title: '关键位', value: 'key_level' },
   { title: '均线', value: 'moving_average' },
   { title: 'Alpha 因子', value: 'alpha_factor' },
+  { title: '结构交易计划', value: 'structure_plan' },
   { title: '手工信号', value: 'manual' },
 ]
 const setupTypeFamilies = {
@@ -276,6 +306,12 @@ const usedSharedPolicyKeys = computed(() => new Set(
 ))
 
 const defaultConfig = () => ({
+  management_mode: 'standard',
+  multi_level_exit: {
+    disaster_stop_buffer_atr: 0.5,
+    stop_close_percent: { internal: 30, swing: 40, external: 100 },
+    take_profit_close_percent: { internal: 30, swing: 30, external: 100 },
+  },
   initial_stop_rules: [{ type: 'pivot', period: 'M5', selection: 'nearest', max_age_bars: 100, buffer: { type: 'fixed_points', value: 0 } }, { type: 'fixed_percent', value: 0.003 }],
   initial_take_profit_rules: [{ type: 'risk_reward', value: 2 }],
   management_rules: [], min_risk_reward: 1, min_stop_percent: 0.1, max_stop_percent: 0.7,
@@ -526,6 +562,14 @@ function isSharedPolicyUsed(policy) {
   return usedSharedPolicyKeys.value.has(sharedPolicyKey(policy))
 }
 function openCreate() { Object.assign(form, { policy_id: '', name: '', enabled: true, is_shared: false, config: defaultConfig() }); syncManagement([{ type: 'break_even', activation_r: 1 }, { type: 'pivot_trailing', period: 'M5' }, { type: 'structure_trailing', structure_layer: 'swing', buffer_type: 'atr', buffer_value: 0.15, min_improvement_atr: 0.10 }, { type: 'trailing_stop', activation_r: 1, distance_r: 0.8 }, { type: 'partial_take_profit', levels: [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }, { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' }] }]); hydrateSetupProfiles(); dialog.value = true }
+function openCreateMulti() {
+  openCreate()
+  form.name = '多层结构持仓管理'
+  form.config.management_mode = 'multi_level_exit'
+  // Structure levels own partial exits; generic R-based partial exits would
+  // otherwise compete for the same remaining volume.
+  syncManagement([])
+}
 function openEdit(policy) { Object.assign(form, deepClone(policy)); form.config.setup_profiles ||= []; syncManagement(form.config.management_rules); hydrateSetupProfiles(); dialog.value = true }
 async function save() { saving.value = true; try { const payload = { name: form.name, enabled: form.enabled, visibility: form.is_shared ? 'shared' : 'private', config: serializeConfig() }; if (form.policy_id) await marketAPI.updatePositionManagementPolicy(form.policy_id, payload); else await marketAPI.createPositionManagementPolicy(payload); dialog.value = false; messageType.value = 'success'; message.value = '持仓管理方案已保存'; await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } finally { saving.value = false } }
 async function remove(policy) { if (!confirm(`确定删除“${policy.name}”吗？`)) return; try { await marketAPI.deletePositionManagementPolicy(policy.policy_id); await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } }
@@ -571,6 +615,8 @@ onMounted(load)
 .section-title { font-size:14px; font-weight:800; color:#26483d; }.rule-chain { padding:18px; border:1px solid #dce7e0; border-radius:16px; background:#f8fbf9; }
 .rule-row { display:grid; grid-template-columns:32px minmax(160px,1fr) 110px 110px 62px; gap:10px; align-items:center; margin-top:8px; }.rule-row select,.rule-row input { height:40px; border:1px solid #c9d6ce; border-radius:8px; padding:0 10px; background:white; }.percent-input { position:relative; }.percent-input input { width:100%; padding-right:28px; }.percent-suffix { position:absolute; right:10px; top:50%; transform:translateY(-50%); color:#607269; font-size:13px; pointer-events:none; }.rule-index { width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#245d4c;color:white;font-size:12px; }.add-rule,.remove-rule { border:0;background:transparent;color:#23745c;cursor:pointer;font-weight:700; }.remove-rule { color:#b84b43; }
 .partial-levels { display:grid; gap:10px; padding:16px; border:1px solid #dce7e0; border-radius:16px; background:#fbfdfb; }
+.multi-level-grid { display:grid; grid-template-columns:minmax(190px,1.4fr) repeat(2,minmax(150px,1fr)); gap:10px; align-items:center; padding:16px; border:1px solid #cfe1d7; border-radius:16px; background:#f4faf6; }
+.multi-level-head { color:#607269; font-size:12px; font-weight:800; }
 .partial-row { display:grid; grid-template-columns:32px 1fr 1fr 1fr 44px; gap:10px; align-items:center; }
 .setup-profile { padding:20px; border:1px solid #cddfd5; border-radius:18px; background:linear-gradient(145deg,#fbfdfb,#f1f7f3); }
 .setup-profile-title { display:flex; flex-direction:column; gap:3px; color:#254b3f; }.setup-profile-title small { color:#74837c; font-size:11px; }

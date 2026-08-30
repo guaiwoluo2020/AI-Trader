@@ -7,7 +7,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import uuid
 
 
@@ -61,6 +61,8 @@ class TradingSignal:
     suggested_tp: float = 0.0         # 建议止盈
     risk_reward_ratio: float = 0.0    # 风险回报比
     minimum_risk_reward: float = 0.0  # 当前信号计划允许的最低风险回报比
+    stop_candidates: List[Dict] = field(default_factory=list)
+    target_candidates: List[Dict] = field(default_factory=list)
 
     # ==================== 来源特有参数 ====================
     # Pivot信号
@@ -187,6 +189,8 @@ class TradingSignal:
             "suggested_tp": self.suggested_tp,
             "risk_reward_ratio": self.risk_reward_ratio,
             "minimum_risk_reward": self.minimum_risk_reward,
+            "stop_candidates": self.stop_candidates,
+            "target_candidates": self.target_candidates,
             "pivot_price": self.pivot_price,
             "pivot_type": self.pivot_type,
             "pivot_confirmation_count": self.pivot_confirmation_count,
@@ -262,6 +266,8 @@ class TradingSignal:
             suggested_tp=data.get('suggested_tp', 0.0),
             risk_reward_ratio=data.get('risk_reward_ratio', 0.0),
             minimum_risk_reward=float(data.get('minimum_risk_reward', 0) or 0),
+            stop_candidates=list(data.get('stop_candidates') or []),
+            target_candidates=list(data.get('target_candidates') or []),
             pivot_price=data.get('pivot_price'),
             pivot_type=data.get('pivot_type'),
             pivot_confirmation_count=int(data.get('pivot_confirmation_count') or 0),

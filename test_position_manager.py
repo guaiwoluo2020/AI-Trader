@@ -9,6 +9,95 @@ def policy(config):
 
 
 class PositionManagerTests(unittest.TestCase):
+    def test_multi_level_structure_plan_uses_virtual_exits_and_disaster_stop(self):
+        plan = PositionManager().create_plan(
+            policy({
+                "management_mode": "multi_level_exit",
+                "multi_level_exit": {
+                    "disaster_stop_buffer_atr": 0.5,
+                    "stop_close_percent": {
+                        "internal": 30, "swing": 40, "external": 100,
+                    },
+                    "take_profit_close_percent": {
+                        "internal": 30, "swing": 30, "external": 100,
+                    },
+                },
+                "initial_stop_rules": [{"type": "signal"}],
+                "initial_take_profit_rules": [{"type": "signal"}],
+                "management_rules": [], "min_risk_reward": 0.5,
+                "min_stop_percent": 0, "max_stop_percent": 0,
+            }),
+            "buy", 100, signal_stop_loss=98, signal_take_profit=104,
+            atr=2,
+            setup_context={"signal_source": "structure_plan"},
+            signal_stop_candidates=[
+                {"level_id": "sl-i", "structure_layer": "internal", "price": 99},
+                {"level_id": "sl-s", "structure_layer": "swing", "price": 98},
+                {"level_id": "sl-e", "structure_layer": "external", "price": 96},
+            ],
+            signal_target_candidates=[
+                {"level_id": "tp-i", "structure_layer": "internal", "price": 102},
+                {"level_id": "tp-s", "structure_layer": "swing", "price": 104},
+                {"level_id": "tp-e", "structure_layer": "external", "price": 108},
+            ],
+        )
+        self.assertEqual(plan.stop_loss, 95)
+        self.assertEqual(plan.take_profit, 0)
+        self.assertEqual(plan.reference_take_profit, 102)
+        self.assertEqual(len(plan.exit_levels), 6)
+        self.assertTrue(plan.exit_levels[2]["close_remaining"])
+
+    def test_multi_level_exit_aggregates_crossed_levels_once(self):
+        levels = [
+            {"type": "stop_loss", "level_id": "sl-i", "price": 99,
+             "close_percent": 30},
+            {"type": "stop_loss", "level_id": "sl-s", "price": 98,
+             "close_percent": 40},
+            {"type": "stop_loss", "level_id": "sl-e", "price": 96,
+             "close_percent": 100, "close_remaining": True},
+            {"type": "take_profit", "level_id": "tp-i", "price": 102,
+             "close_percent": 30},
+        ]
+        action = PositionManager().evaluate(
+            {"management_rules": []},
+            {"direction": "buy", "entry_price": 100, "stop_loss": 95,
+             "initial_risk": 5, "volume": 1, "initial_volume": 1,
+             "remaining_volume": 1, "exit_levels": levels,
+             "partial_levels_done": []},
+            {"price": 97.5},
+        )
+        self.assertEqual(action.action, "partial_close")
+        self.assertAlmostEqual(action.close_volume, 0.7)
+        self.assertEqual(action.level_ids, ["sl-i", "sl-s"])
+
+        no_repeat = PositionManager().evaluate(
+            {"management_rules": []},
+            {"direction": "buy", "entry_price": 100, "stop_loss": 95,
+             "initial_risk": 5, "volume": 1, "initial_volume": 1,
+             "remaining_volume": 0.3, "exit_levels": levels,
+             "partial_levels_done": ["sl-i", "sl-s"]},
+            {"price": 97.5},
+        )
+        self.assertEqual(no_repeat.action, "none")
+
+    def test_multi_level_exit_is_symmetric_for_sell_targets(self):
+        action = PositionManager().evaluate(
+            {"management_mode": "multi_level_exit", "management_rules": []},
+            {"direction": "sell", "entry_price": 100, "stop_loss": 106,
+             "initial_risk": 6, "volume": 1, "initial_volume": 1,
+             "remaining_volume": 1, "partial_levels_done": [],
+             "exit_levels": [
+                 {"type": "take_profit", "level_id": "tp-i", "price": 98,
+                  "close_percent": 30},
+                 {"type": "take_profit", "level_id": "tp-s", "price": 96,
+                  "close_percent": 40},
+             ]},
+            {"price": 95.5},
+        )
+        self.assertEqual(action.action, "partial_close")
+        self.assertAlmostEqual(action.close_volume, 0.7)
+        self.assertEqual(action.reason, "multi_level_take_profit")
+
     def test_structure_trend_pullback_uses_signal_half_rr_threshold(self):
         config = {
             "initial_stop_rules": [{"type": "signal"}],

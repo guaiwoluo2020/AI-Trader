@@ -28,7 +28,7 @@ class MT5EADistributionTest(unittest.TestCase):
         source = EA_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('#property version   "2.07"', source)
-        self.assertIn('#define EA_API_VERSION "2.0.7"', source)
+        self.assertIn('#define EA_API_VERSION "2.0.8"', source)
         self.assertIn('X-EA-Version: " + EA_API_VERSION', source)
         self.assertIn("CheckHistoricalDataTask();", source)
         self.assertIn("CopyRates(\n      _Symbol, PERIOD_M1", source)

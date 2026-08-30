@@ -147,6 +147,75 @@ class StructurePlanBuilder:
             }
         return result
 
+    def _exit_candidates(
+        self, structure_snapshot: Dict, direction: str, entry: float,
+    ) -> tuple[List[Dict], List[Dict]]:
+        """Build ordered structural stop/target candidates for position control."""
+        levels = structure_snapshot.get("structure_levels") or {}
+        atr = max(0.0, _number(structure_snapshot.get("atr")))
+        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
+        stop_name = "protected_low" if direction == "buy" else "protected_high"
+        target_names = (
+            ("weak_high", "protected_high")
+            if direction == "buy" else ("weak_low", "protected_low")
+        )
+        stops, targets = [], []
+        for rank, layer in enumerate(("internal", "swing", "external"), start=1):
+            item = levels.get(layer) or {}
+            reference = _number(item.get(stop_name))
+            stop = (
+                reference - stop_buffer if direction == "buy"
+                else reference + stop_buffer
+            )
+            if reference > 0 and (
+                (direction == "buy" and stop < entry)
+                or (direction == "sell" and stop > entry)
+            ):
+                stops.append({
+                    "level_id": f"structure_sl_{layer}",
+                    "structure_layer": layer,
+                    "price": round(stop, 8),
+                    "reference_price": round(reference, 8),
+                    "rank": rank,
+                    "reason": f"{layer} {stop_name}",
+                })
+            for target_name in target_names:
+                reference = _number(item.get(target_name))
+                target = (
+                    reference - target_buffer if direction == "buy"
+                    else reference + target_buffer
+                )
+                if reference > 0 and (
+                    (direction == "buy" and target > entry)
+                    or (direction == "sell" and target < entry)
+                ):
+                    targets.append({
+                        "level_id": f"structure_tp_{layer}",
+                        "structure_layer": layer,
+                        "price": round(target, 8),
+                        "reference_price": round(reference, 8),
+                        "rank": rank,
+                        "reason": f"{layer} {target_name}",
+                    })
+                    break
+
+        def unique(items: List[Dict], reverse: bool) -> List[Dict]:
+            result = {}
+            for item in items:
+                result.setdefault(round(_number(item["price"]), 8), item)
+            return sorted(
+                result.values(), key=lambda item: _number(item["price"]),
+                reverse=reverse,
+            )
+
+        # Stops are ordered from the closest protection to the furthest one;
+        # targets are ordered from the nearest realization point outwards.
+        return (
+            unique(stops, direction == "buy"),
+            unique(targets, direction == "sell"),
+        )
+
     def _plan(
         self, *, source_id: str, symbol: str, period: str, anchor: int,
         setup_type: str, direction: str, entry_mode: str, status: str,
@@ -179,6 +248,30 @@ class StructurePlanBuilder:
             "structure_anchor_time": int(anchor),
             "structure_snapshot": structure_snapshot or {},
         }
+        if direction in {"buy", "sell"} and entry > 0:
+            stop_candidates, target_candidates = self._exit_candidates(
+                structure_snapshot or {}, direction, entry,
+            )
+            if not stop_candidates and stop_loss > 0:
+                stop_candidates = [{
+                    "level_id": "structure_sl_internal",
+                    "structure_layer": "internal",
+                    "price": round(stop_loss, 8),
+                    "reference_price": round(stop_loss, 8),
+                    "rank": 1,
+                    "reason": "当前交易形态失效点",
+                }]
+            if not target_candidates and take_profit > 0:
+                target_candidates = [{
+                    "level_id": "structure_tp_internal",
+                    "structure_layer": "internal",
+                    "price": round(take_profit, 8),
+                    "reference_price": round(take_profit, 8),
+                    "rank": 1,
+                    "reason": "当前交易形态目标点",
+                }]
+            payload["stop_candidates"] = stop_candidates
+            payload["target_candidates"] = target_candidates
         payload["fingerprint"] = _hash(
             json.dumps({
                 k: v for k, v in payload.items()
@@ -1065,6 +1158,8 @@ class StructurePlanSignalGenerator:
                 suggested_tp=_number(plan.get("take_profit")),
                 risk_reward_ratio=_number(plan.get("risk_reward_ratio")),
                 minimum_risk_reward=_number(plan.get("minimum_risk_reward")),
+                stop_candidates=list(plan.get("stop_candidates") or []),
+                target_candidates=list(plan.get("target_candidates") or []),
                 trigger_reason=str(plan.get("reason") or "结构交易计划触发"),
                 trade_plan_id=str(plan.get("plan_id") or ""),
                 trade_plan_group_id=str(plan.get("plan_group_id") or ""),

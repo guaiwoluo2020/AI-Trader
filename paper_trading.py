@@ -1574,6 +1574,7 @@ class PaperTradingService:
             entry_reason=str(decision.get("decision_reason") or ""),
             initial_stop_loss=sl,
             initial_take_profit=tp,
+            initial_volume=max(0.01, float(decision.get("volume", 0.01))),
         )
         requested_volume = max(0.01, float(decision.get("volume", 0.01)))
         if requested_volume > float(account_limits["max_single_volume"]):
@@ -1810,6 +1811,10 @@ class PaperTradingService:
                             "policy_id": policy_snapshot.get("policy_id", ""),
                             "policy_name": policy_snapshot.get("name", ""),
                             "initial_risk": abs(fill_price - float(order["stop_loss"])),
+                            "exit_levels": policy_snapshot.get("exit_levels", []),
+                            "disaster_stop_loss": policy_snapshot.get(
+                                "disaster_stop_loss", float(order["stop_loss"])
+                            ),
                             "stop_rule": (
                                 policy_snapshot.get("config", {})
                                 .get("initial_stop_rules", [{}])[0]
@@ -1909,6 +1914,7 @@ class PaperTradingService:
                     position_state["remaining_volume"] = float(
                         position["remaining_volume"] or position["volume"]
                     )
+                    position_state["initial_volume"] = float(position["volume"])
                     position_state["partial_levels_done"] = json.loads(
                         position["partial_levels_done_json"] or "[]"
                     )
@@ -1931,6 +1937,9 @@ class PaperTradingService:
                             max_bars = max(max_bars, (now - int(position["opened_at"])) // seconds)
                     position_state["holding_bars"] = max_bars
                     attribution = json.loads(position["position_attribution_json"] or "{}")
+                    position_state["exit_levels"] = list(
+                        attribution.get("exit_levels") or []
+                    )
                     structure_period = str(attribution.get("signal_source_period") or "M5").upper()
                     structure = structures.get(structure_period) or {}
                     action = self.position_manager.evaluate(
@@ -1978,13 +1987,13 @@ class PaperTradingService:
                             risk_amount = float(position["initial_risk"] or 0) * close_volume * contract_size
                             trade_attribution = close_position_attribution(
                                 json.loads(position["position_attribution_json"] or "{}"),
-                                "partial_take_profit",
+                                action.reason or "partial_take_profit",
                                 net / risk_amount if risk_amount > 0 else 0,
                             )
                             balance += gross - commission
                             trade_id = uuid.uuid4().hex[:12]
                             done = set(position_state["partial_levels_done"])
-                            done.add(action.level_id)
+                            done.update(action.level_ids or [action.level_id])
                             conn.execute(
                                 """
                                 INSERT INTO paper_trades(
@@ -2000,7 +2009,8 @@ class PaperTradingService:
                                     position["position_id"], position["deployment_id"],
                                     position["strategy_id"], symbol, position["direction"],
                                     close_volume, position["entry_price"], mark,
-                                    gross, commission, net, "partial_take_profit",
+                                    gross, commission, net,
+                                    action.reason or "partial_take_profit",
                                     position["opened_at"], now, now,
                                     json.dumps(trade_attribution, ensure_ascii=False),
                                 ),

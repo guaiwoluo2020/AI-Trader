@@ -507,6 +507,8 @@ class StrategyService:
                 pivots=pivots or [], atr=float(context.get("atr", 0)),
                 current_time=int(context.get("time", 0) or 0),
                 setup_context=setup_context,
+                signal_stop_candidates=getattr(best_signal, "stop_candidates", None),
+                signal_target_candidates=getattr(best_signal, "target_candidates", None),
             )
         except ValueError as exc:
             print(f"[StrategyService] 持仓管理方案无法生成开仓计划: {exc}")
@@ -538,6 +540,9 @@ class StrategyService:
             "initial_risk": plan.initial_risk,
             "explanation": plan.explanation,
             "stop_adjustment": plan.stop_adjustment,
+            "exit_levels": plan.exit_levels,
+            "disaster_stop_loss": plan.disaster_stop_loss,
+            "reference_take_profit": plan.reference_take_profit,
             "setup_context": setup_context,
             "applied_setup_profile": plan.policy_snapshot.get(
                 "applied_setup_profile"
@@ -557,10 +562,16 @@ class StrategyService:
 
         # 计算风险
         risk_points = abs(entry_price - sl)
-        reward_points = abs(tp - entry_price) if has_fixed_take_profit else 0
+        reward_points = (
+            abs(plan.reference_take_profit - entry_price)
+            if plan.reference_take_profit else
+            (abs(tp - entry_price) if has_fixed_take_profit else 0)
+        )
         rr_ratio = (
-            reward_points / risk_points
-            if risk_points > 0 and has_fixed_take_profit else 0
+            plan.risk_reward
+            if plan.exit_levels else
+            (reward_points / risk_points
+             if risk_points > 0 and has_fixed_take_profit else 0)
         )
 
         # 检查风险回报比
@@ -916,6 +927,7 @@ class StrategyService:
             entry_reason=decision.decision_reason,
             initial_stop_loss=decision.sl,
             initial_take_profit=decision.tp,
+            initial_volume=decision.volume,
         )
 
         # 创建订单

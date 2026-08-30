@@ -297,6 +297,11 @@ class StructurePlanTests(unittest.TestCase):
         )
         self.assertEqual(plans[0]["setup_type"], "structure_location_pullback")
         self.assertEqual(plans[0]["direction"], "buy")
+        self.assertTrue(plans[0]["stop_candidates"])
+        self.assertTrue(plans[0]["target_candidates"])
+        self.assertEqual(
+            plans[0]["stop_candidates"][0]["structure_layer"], "internal"
+        )
 
     def test_close_above_protected_high_invalidates_downtrend_location(self):
         structure = _trend_structure("down")

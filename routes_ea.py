@@ -300,6 +300,37 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     )
             server = engine_manager.get_engine_for_ea(identity)
             action = str(report.get("action") or "").lower()
+            if action == "partial_close":
+                instruction_id = str(report.get("instruction_id") or "")
+                parts = instruction_id.split("-")
+                if len(parts) >= 3 and parts[0] == "exit" and parts[1].isdigit():
+                    ticket = int(parts[1])
+                    state = server._managed_position_state.get(ticket) or {}
+                    level_ids = parts[2:]
+                    if not report.get("success"):
+                        done = set(state.get("partial_levels_done") or [])
+                        done.difference_update(level_ids)
+                        state["partial_levels_done"] = sorted(done)
+                    server._position_event_repository.record(
+                        int(identity.user_id), int(identity.account_id), str(ticket),
+                        "multi_level_exit_execution",
+                        (
+                            "多层结构退出已由MT5执行"
+                            if report.get("success") else
+                            f"多层结构退出执行失败，将重试：{report.get('error_message') or '未知原因'}"
+                        ),
+                        symbol=str(report.get("symbol") or ""), ticket=ticket,
+                        rule_type="multi_level_exit_execution",
+                        status="executed" if report.get("success") else "failed",
+                        price=float(report.get("executed_price") or 0),
+                        volume=float(report.get("executed_volume") or 0),
+                        payload={
+                            "instruction_id": instruction_id,
+                            "level_ids": level_ids,
+                            "retcode": report.get("retcode"),
+                            "error_message": report.get("error_message", ""),
+                        },
+                    )
             if action == "position_modify_sl":
                 message = (
                     f"止损调整成功: ticket={report.get('mt5_position_id')}，"

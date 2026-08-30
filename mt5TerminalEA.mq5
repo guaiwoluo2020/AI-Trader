@@ -6,7 +6,7 @@
 #property copyright "wwananggxxxx"
 #property link      "https://www.mql5.com"
 #property version   "2.07"
-#define EA_API_VERSION "2.0.7"
+#define EA_API_VERSION "2.0.8"
 #property strict
 
 //--- 需要访问Web请求权限
@@ -760,6 +760,9 @@ void ParseAndExecuteTrades(string jsonData)
             long ticket = (long)ExtractJsonDouble(partialJson, "ticket");
             double volume = ExtractJsonDouble(partialJson, "volume");
             string levelId = ExtractJsonString(partialJson, "level_id");
+            string instructionId = ExtractJsonString(partialJson, "instruction_id");
+            if(instructionId == "")
+               instructionId = "position-partial-" + IntegerToString(ticket) + "-" + levelId;
             if(ticket > 0 && volume > 0 && PositionSelectByTicket(ticket))
               {
                string positionSymbol = PositionGetString(POSITION_SYMBOL);
@@ -773,7 +776,7 @@ void ParseAndExecuteTrades(string jsonData)
                   Print("[分批止盈成功] Ticket: ", ticket, " Volume: ", volume, " Level: ", levelId);
                   long resultPositionId = ResolvePositionId((long)trade.ResultDeal(), positionSymbol);
                   SendTradeExecutionReport(
-                     "position-partial-" + IntegerToString(ticket) + "-" + IntegerToString(trade.ResultDeal()),
+                     instructionId,
                      "position-" + IntegerToString(ticket), positionSymbol, "partial_close",
                      true, requestedPrice, trade.ResultPrice(), volume, trade.ResultVolume(),
                      (long)trade.ResultOrder(), (long)trade.ResultDeal(),
@@ -785,7 +788,7 @@ void ParseAndExecuteTrades(string jsonData)
                  {
                   Print("[分批止盈失败] Ticket: ", ticket, " Volume: ", volume, " Retcode: ", trade.ResultRetcodeDescription());
                   SendTradeExecutionReport(
-                     "position-partial-failed-" + IntegerToString(ticket) + "-" + IntegerToString((long)TimeCurrent()),
+                     instructionId,
                      "position-" + IntegerToString(ticket), positionSymbol, "partial_close",
                      false, requestedPrice, 0, volume, 0,
                      (long)trade.ResultOrder(), (long)trade.ResultDeal(), positionId,

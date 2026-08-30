@@ -843,6 +843,9 @@ class TradingServer:
                 "stop_loss": float(position.sl),
                 "take_profit": float(position.tp),
                 "volume": float(position.volume),
+                "initial_volume": float(
+                    attribution.get("initial_volume") or position.volume
+                ),
                 "remaining_volume": float(position.volume),
                 "initial_risk": abs(float(position.price_open) - float(position.sl)),
                 "favorable_price": float(position.price_open),
@@ -855,8 +858,24 @@ class TradingServer:
                 "position_policy_snapshot": attribution.get(
                     "position_policy_snapshot", {}
                 ),
+                "exit_levels": copy.deepcopy(attribution.get("exit_levels") or []),
             })
             if is_new_position:
+                restored_levels = set()
+                for historical_event in self._position_event_repository.list_for_position(
+                    int(self.user_id or 0), int(self.account_id or 0), str(ticket),
+                    limit=500,
+                ):
+                    payload = historical_event.get("payload") or {}
+                    event_levels = {str(item) for item in (
+                        payload.get("level_ids")
+                        or ([payload.get("level_id")] if payload.get("level_id") else [])
+                    )}
+                    if historical_event.get("status") == "failed":
+                        restored_levels.difference_update(event_levels)
+                    elif historical_event.get("status") in {"triggered", "executed"}:
+                        restored_levels.update(event_levels)
+                state["partial_levels_done"] = sorted(restored_levels)
                 policy_snapshot = attribution.get("position_policy_snapshot") or {}
                 self._position_event_repository.record(
                     int(self.user_id or 0), int(self.account_id or 0), str(ticket),
@@ -880,13 +899,18 @@ class TradingServer:
                         "initial_risk": abs(
                             float(position.price_open) - float(position.sl or 0)
                         ),
+                        "exit_levels": copy.deepcopy(
+                            attribution.get("exit_levels") or []
+                        ),
+                        "disaster_stop_loss": float(
+                            attribution.get("disaster_stop_loss") or position.sl or 0
+                        ),
                         "setup_type": attribution.get("setup_type", ""),
                         "setup_family": attribution.get("setup_family", ""),
                         "setup_profile_id": attribution.get("setup_profile_id", ""),
                         "setup_profile_name": attribution.get("setup_profile_name", ""),
                     },
                 )
-            state["volume"] = float(position.volume)
             state["remaining_volume"] = float(position.volume)
             broker_sl = float(position.sl or 0)
             pending_sl = float(state.get("pending_stop_loss") or 0)
@@ -940,10 +964,6 @@ class TradingServer:
                     continue
                 if event.get("rule_type") == "break_even":
                     state["break_even_done"] = True
-                if event.get("rule_type") == "partial_take_profit" and event.get("level_id"):
-                    done = set(state.get("partial_levels_done") or [])
-                    done.add(str(event["level_id"]))
-                    state["partial_levels_done"] = sorted(done)
             TradingServer._record_position_management_events(
                 self,
                 symbol, ticket, state, action.events
@@ -961,11 +981,12 @@ class TradingServer:
                 }
             elif action.action == "partial_close" and action.close_volume > 0:
                 done = set(state.get("partial_levels_done") or [])
-                if action.level_id not in done:
+                level_ids = action.level_ids or [action.level_id]
+                if not all(level_id in done for level_id in level_ids):
                     close_volume = round(float(action.close_volume), 2)
                     if close_volume <= 0:
                         continue
-                    done.add(action.level_id)
+                    done.update(level_ids)
                     state["partial_levels_done"] = sorted(done)
                     if action.stop_loss or action.level_id == "signal_take_profit":
                         if action.stop_loss:
@@ -987,11 +1008,15 @@ class TradingServer:
                             ),
                         }
                     self._position_partial_instructions[symbol][
-                        f"{ticket}:{action.level_id}"
+                        f"{ticket}:{'|'.join(level_ids)}"
                     ] = {
                         "ticket": ticket,
                         "volume": close_volume,
                         "level_id": action.level_id,
+                        "level_ids": level_ids,
+                        "instruction_id": (
+                            f"exit-{ticket}-{'-'.join(level_ids)}"
+                        ),
                         "reason": action.reason,
                     }
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from market.models.position_management import (
     PositionAction, PositionManagementPolicy, PositionPlan,
@@ -28,6 +28,71 @@ class PositionManager:
     """Stateless calculations; callers persist the returned plan and state."""
 
     PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
+
+    @staticmethod
+    def _multi_level_exit_plan(
+        direction: str, entry_price: float, config: Dict,
+        stop_candidates: Iterable[Dict], target_candidates: Iterable[Dict],
+        atr: float,
+    ) -> Tuple[float, float, List[Dict]]:
+        settings = config.get("multi_level_exit") or {}
+        stops, targets = [], []
+        for kind, candidates, percentages in (
+            ("stop_loss", stop_candidates, settings.get("stop_close_percent") or {}),
+            ("take_profit", target_candidates, settings.get("take_profit_close_percent") or {}),
+        ):
+            seen_layers = set()
+            for candidate in candidates or []:
+                layer = str(candidate.get("structure_layer") or "").lower()
+                price = float(candidate.get("price") or 0)
+                if layer not in {"internal", "swing", "external"} or layer in seen_layers:
+                    continue
+                valid = (
+                    direction == "buy" and (
+                        price < entry_price if kind == "stop_loss" else price > entry_price
+                    )
+                ) or (
+                    direction == "sell" and (
+                        price > entry_price if kind == "stop_loss" else price < entry_price
+                    )
+                )
+                if not valid:
+                    continue
+                seen_layers.add(layer)
+                item = copy.deepcopy(candidate)
+                item.update({
+                    "type": kind,
+                    "level_id": str(candidate.get("level_id") or f"structure_{kind}_{layer}"),
+                    "structure_layer": layer,
+                    "price": price,
+                    "close_percent": min(100.0, max(
+                        0.0, float(percentages.get(layer, 0) or 0)
+                    )),
+                    "status": "waiting",
+                })
+                (stops if kind == "stop_loss" else targets).append(item)
+        if not stops or not targets:
+            raise ValueError("多层结构持仓管理需要有效的结构止损和止盈候选点")
+
+        stops.sort(
+            key=lambda item: abs(float(item["price"]) - entry_price)
+        )
+        targets.sort(
+            key=lambda item: abs(float(item["price"]) - entry_price)
+        )
+        # The furthest available structure level always closes the remainder.
+        stops[-1]["close_remaining"] = True
+        targets[-1]["close_remaining"] = True
+        furthest_stop = float(stops[-1]["price"])
+        disaster_buffer = max(0.0, float(atr or 0)) * max(
+            0.0, float(settings.get("disaster_stop_buffer_atr", 0.50) or 0)
+        )
+        disaster_stop = (
+            furthest_stop - disaster_buffer
+            if direction == "buy" else furthest_stop + disaster_buffer
+        )
+        reference_target = float(targets[0]["price"])
+        return disaster_stop, reference_target, stops + targets
 
     @staticmethod
     def _timestamp(value) -> int:
@@ -132,6 +197,8 @@ class PositionManager:
         signal_take_profit: float = 0, pivots=None, atr: float = 0,
         current_time: int = 0,
         setup_context: Optional[Dict] = None,
+        signal_stop_candidates: Optional[Iterable[Dict]] = None,
+        signal_target_candidates: Optional[Iterable[Dict]] = None,
     ) -> PositionPlan:
         direction = str(direction).lower()
         if direction not in {"buy", "sell"} or entry_price <= 0:
@@ -145,6 +212,34 @@ class PositionManager:
         )
         if stop is None:
             raise ValueError("没有止损规则能够生成有效价格")
+        multi_level = (
+            config.get("management_mode") == "multi_level_exit"
+            and str((setup_context or {}).get("signal_source") or "")
+            == "structure_plan"
+        )
+        exit_levels: List[Dict] = []
+        reference_take_profit = 0.0
+        reference_stop = stop
+        if multi_level:
+            stop, reference_take_profit, exit_levels = self._multi_level_exit_plan(
+                direction, entry_price, config,
+                signal_stop_candidates or [], signal_target_candidates or [], atr,
+            )
+            reference_stop = float(next(
+                item["price"] for item in exit_levels
+                if item.get("type") == "stop_loss"
+            ))
+            stop_rule = {
+                "type": "multi_level_disaster_stop",
+                "reference_price": float(exit_levels[
+                    len([item for item in exit_levels if item.get("type") == "stop_loss"]) - 1
+                ]["price"]),
+                "buffer_atr": float(
+                    (config.get("multi_level_exit") or {}).get(
+                        "disaster_stop_buffer_atr", 0.50
+                    ) or 0
+                ),
+            }
         risk = abs(entry_price - stop)
         minimum = entry_price * float(config.get("min_stop_percent", 0.1) or 0) / 100.0
         maximum = entry_price * float(config.get("max_stop_percent", 0.7) or 0) / 100.0
@@ -185,8 +280,15 @@ class PositionManager:
         )
         if take_profit is None:
             raise ValueError("没有止盈规则能够生成有效价格")
-        reward = abs(take_profit - entry_price) if take_profit else 0
-        rr = reward / risk if risk and take_profit else 0
+        if multi_level:
+            take_profit = reference_take_profit
+            take_rule = {"type": "multi_level_structure_targets"}
+            reference_risk = abs(entry_price - reference_stop)
+            reward = abs(take_profit - entry_price)
+            rr = reward / reference_risk if reference_risk else 0
+        else:
+            reward = abs(take_profit - entry_price) if take_profit else 0
+            rr = reward / risk if risk and take_profit else 0
         minimum_rr = float(config.get("min_risk_reward", 0) or 0)
         signal_minimum = float(
             (setup_context or {}).get("signal_min_risk_reward", 0) or 0
@@ -205,6 +307,10 @@ class PositionManager:
         policy_snapshot["config"] = copy.deepcopy(config)
         policy_snapshot["setup_context"] = copy.deepcopy(setup_context or {})
         policy_snapshot["applied_setup_profile"] = copy.deepcopy(applied_profile)
+        if multi_level:
+            policy_snapshot["exit_levels"] = copy.deepcopy(exit_levels)
+            policy_snapshot["disaster_stop_loss"] = float(stop)
+            policy_snapshot["reference_take_profit"] = float(reference_take_profit)
         explanation = [
             f"止损使用 {stop_rule['type']} 规则",
             f"止盈使用 {take_rule['type']} 规则",
@@ -214,12 +320,16 @@ class PositionManager:
         if applied_profile:
             explanation.insert(0, f"匹配场景规则：{applied_profile.get('name')}")
         return PositionPlan(
-            stop_loss=stop, take_profit=take_profit, initial_risk=risk,
+            stop_loss=stop, take_profit=0.0 if multi_level else take_profit,
+            initial_risk=risk,
             risk_reward=rr, policy_id=policy.policy_id,
             policy_snapshot=policy_snapshot, stop_rule=dict(stop_rule),
             take_profit_rule=dict(take_rule),
             explanation=explanation,
             stop_adjustment=stop_adjustment,
+            exit_levels=copy.deepcopy(exit_levels),
+            disaster_stop_loss=float(stop) if multi_level else 0.0,
+            reference_take_profit=float(reference_take_profit) if multi_level else 0.0,
         )
 
     def evaluate(
@@ -256,6 +366,61 @@ class PositionManager:
                 "profit_r": round(profit_r, 4),
                 **payload,
             })
+
+        # Structure multi-level exits are virtual: MT5 only carries the remote
+        # disaster stop.  Tick crossings close configured slices here.
+        exit_levels = list(position.get("exit_levels") or [])
+        if exit_levels and volume > 0:
+            stop_hits, target_hits = [], []
+            for level in exit_levels:
+                level_id = str(level.get("level_id") or "")
+                if not level_id or level_id in triggered_partials:
+                    continue
+                trigger = float(level.get("price") or 0)
+                if trigger <= 0:
+                    continue
+                hit = (
+                    price <= trigger if direction == "buy" and level.get("type") == "stop_loss"
+                    else price >= trigger if direction == "sell" and level.get("type") == "stop_loss"
+                    else price >= trigger if direction == "buy" and level.get("type") == "take_profit"
+                    else price <= trigger if direction == "sell" and level.get("type") == "take_profit"
+                    else False
+                )
+                if hit:
+                    (stop_hits if level.get("type") == "stop_loss" else target_hits).append(level)
+            hits = stop_hits or target_hits
+            if hits:
+                hits.sort(key=lambda item: abs(float(item["price"]) - entry))
+                initial_volume = float(
+                    position.get("initial_volume") or position.get("volume") or volume
+                )
+                close_remaining = any(item.get("close_remaining") for item in hits)
+                close_volume = volume if close_remaining else min(
+                    volume,
+                    sum(
+                        initial_volume * float(item.get("close_percent") or 0) / 100.0
+                        for item in hits
+                    ),
+                )
+                level_ids = [str(item["level_id"]) for item in hits]
+                kind = "multi_level_stop_loss" if stop_hits else "multi_level_take_profit"
+                action_name = "close" if close_volume >= volume - 1e-9 else "partial_close"
+                label = "分批止损" if stop_hits else "分批止盈"
+                add_event(
+                    kind, "triggered",
+                    f"价格触发 {len(hits)} 个结构{label}层级，"
+                    f"{'平掉剩余仓位' if action_name == 'close' else f'平 {close_volume:.2f} 手'}",
+                    level_id=level_ids[-1], level_ids=level_ids,
+                    close_volume=close_volume,
+                    triggered_levels=copy.deepcopy(hits),
+                    execution_key="|".join(level_ids),
+                )
+                return PositionAction(
+                    action_name, close_volume=close_volume,
+                    close_percent=(close_volume / volume * 100.0 if volume else 0),
+                    level_id=level_ids[-1], level_ids=level_ids,
+                    reason=kind, events=events,
+                )
 
         # An AI take-profit is a staged exit: close the configured portion at
         # the signal price, then let the remaining volume be managed by the
@@ -296,6 +461,16 @@ class PositionManager:
             if not rule.get("enabled", True):
                 continue
             kind = rule.get("type")
+            if (
+                policy_config.get("management_mode") == "multi_level_exit"
+                and kind in {
+                    "break_even", "pivot_trailing", "structure_trailing",
+                    "trailing_stop", "partial_take_profit",
+                }
+            ):
+                # Broker-side SL remains the fixed disaster guard. Structure
+                # layers above already own all staged stop/target execution.
+                continue
             if kind == "reverse_signal" and reverse_signal:
                 add_event(kind, "triggered", "出现反向信号，触发退出")
                 return PositionAction(
