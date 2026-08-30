@@ -123,6 +123,10 @@ class StructurePlanTests(unittest.TestCase):
             "range_lower_reversal", "range_breakout_watch",
         })
         self.assertEqual(sum(item["status"] == "active" for item in plans), 1)
+        self.assertEqual(
+            next(item for item in plans if item["status"] == "active")["entry_mode"],
+            "touch_or_near",
+        )
 
     def test_confirmed_breakout_waits_for_boundary_retest(self):
         plans = StructurePlanBuilder().build(

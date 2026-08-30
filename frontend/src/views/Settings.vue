@@ -1117,6 +1117,7 @@
               <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_structure_location" label="结构位置回踩" hide-details></v-checkbox></v-col>
               <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range" label="箱体与三角形" hide-details></v-checkbox></v-col>
               <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range_boundary" label="箱体边界反转" hide-details></v-checkbox></v-col>
+              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.require_range_boundary_reclaim" label="箱体边界要求回收确认" hint="关闭时进入边界附近区域即可触发，避免价格未精确触及边界后直接反弹而错过机会" persistent-hint></v-checkbox></v-col>
               <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range_breakout" label="收盘突破与回踩" hide-details></v-checkbox></v-col>
               <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_false_breakout" label="假突破回归" hide-details></v-checkbox></v-col>
               <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_liquidity_sweep" label="流动性扫单回收" hide-details></v-checkbox></v-col>
@@ -2493,7 +2494,7 @@ export default {
                 cooldown_seconds: 180
             }
             : source === 'structure_plan'
-              ? { enable_trend: true, enable_structure_location: true, enable_range: true, enable_range_boundary: true, enable_range_breakout: true, enable_false_breakout: true, enable_liquidity_sweep: true, require_location_reclaim: true, min_structure_confidence: 60, min_real_risk_reward: 2, max_event_age_bars: 2, min_breakout_displacement_atr: 0.2, entry_zone_atr: 0.35, location_proximity_atr: 0.6, min_trendline_touches: 2, stop_buffer_atr: 0.25, target_buffer_atr: 0.1, breakout_stop_inside_atr: 0.3, breakout_stop_buffer_atr: 0.8, breakout_stop_width_ratio: 0.15, breakout_target_atr: 3, range_plan_valid_bars: 12, event_plan_valid_bars: 6, location_plan_valid_bars: 6, breakout_retest_valid_bars: 6 }
+              ? { enable_trend: true, enable_structure_location: true, enable_range: true, enable_range_boundary: true, require_range_boundary_reclaim: false, enable_range_breakout: true, enable_false_breakout: true, enable_liquidity_sweep: true, require_location_reclaim: true, min_structure_confidence: 60, min_real_risk_reward: 2, max_event_age_bars: 2, min_breakout_displacement_atr: 0.2, entry_zone_atr: 0.35, location_proximity_atr: 0.6, min_trendline_touches: 2, stop_buffer_atr: 0.25, target_buffer_atr: 0.1, breakout_stop_inside_atr: 0.3, breakout_stop_buffer_atr: 0.8, breakout_stop_width_ratio: 0.15, breakout_target_atr: 3, range_plan_valid_bars: 12, event_plan_valid_bars: 6, location_plan_valid_bars: 6, breakout_retest_valid_bars: 6 }
             : source === 'alpha_factor'
               ? {
                   alpha_id: '', alpha_version: 1, alpha_name: '',

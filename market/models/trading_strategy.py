@@ -174,6 +174,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "enable_trend": True, "enable_range": True,
             "enable_structure_location": True,
             "enable_range_boundary": True, "enable_range_breakout": True,
+            "require_range_boundary_reclaim": False,
             "enable_false_breakout": True, "enable_liquidity_sweep": True,
             "min_structure_confidence": 60, "min_real_risk_reward": 2.0,
             "max_event_age_bars": 2, "min_breakout_displacement_atr": 0.2,
@@ -370,6 +371,7 @@ def normalize_signal_sources(
             for name in (
                 "enable_trend", "enable_range", "enable_range_boundary",
                 "enable_structure_location", "require_location_reclaim",
+                "require_range_boundary_reclaim",
                 "enable_range_breakout", "enable_false_breakout",
                 "enable_liquidity_sweep",
             ):

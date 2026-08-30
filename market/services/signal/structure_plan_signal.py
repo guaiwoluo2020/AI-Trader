@@ -48,6 +48,13 @@ class StructurePlanBuilder:
         if reason and reason not in self._rejections:
             self._rejections.append(reason)
 
+    def _range_entry_mode(self) -> str:
+        return (
+            "touch_and_reclaim"
+            if self._param("require_range_boundary_reclaim", False)
+            else "touch_or_near"
+        )
+
     @staticmethod
     def _layer_price(hierarchy: Dict, layer: str, name: str) -> float:
         return _number(((hierarchy.get(layer) or {}).get(name) or {}).get("price"))
@@ -492,7 +499,7 @@ class StructurePlanBuilder:
                 lower = self._tradable_plan(
                     source_id=source_id, symbol=symbol, period=period, anchor=anchor,
                     setup_type="range_lower_reversal", direction="buy",
-                    entry_mode="touch_and_reclaim", status="active", entry=bottom,
+                    entry_mode=self._range_entry_mode(), status="active", entry=bottom,
                     zone_lower=bottom-entry_buffer, zone_upper=bottom+entry_buffer,
                     stop_loss=bottom-stop_buffer, take_profit=top-target_buffer,
                     confidence=confidence,
@@ -506,7 +513,7 @@ class StructurePlanBuilder:
                 upper = self._tradable_plan(
                     source_id=source_id, symbol=symbol, period=period, anchor=anchor,
                     setup_type="range_upper_reversal", direction="sell",
-                    entry_mode="touch_and_reclaim", status="active", entry=top,
+                    entry_mode=self._range_entry_mode(), status="active", entry=top,
                     zone_lower=top-entry_buffer, zone_upper=top+entry_buffer,
                     stop_loss=top+stop_buffer, take_profit=bottom+target_buffer,
                     confidence=confidence,
@@ -572,7 +579,7 @@ class StructurePlanBuilder:
             lower = self._tradable_plan(
                 source_id=source_id, symbol=symbol, period=period, anchor=anchor,
                 setup_type="range_lower_reversal", direction="buy",
-                entry_mode="touch_and_reclaim", status="active", entry=bottom,
+                entry_mode=self._range_entry_mode(), status="active", entry=bottom,
                 zone_lower=bottom-entry_buffer, zone_upper=bottom+entry_buffer,
                 stop_loss=bottom-stop_buffer, take_profit=top-target_buffer,
                 confidence=confidence,
@@ -583,7 +590,7 @@ class StructurePlanBuilder:
             upper = self._tradable_plan(
                 source_id=source_id, symbol=symbol, period=period, anchor=anchor,
                 setup_type="range_upper_reversal", direction="sell",
-                entry_mode="touch_and_reclaim", status="active", entry=top,
+                entry_mode=self._range_entry_mode(), status="active", entry=top,
                 zone_lower=top-entry_buffer, zone_upper=top+entry_buffer,
                 stop_loss=top+stop_buffer, take_profit=bottom+target_buffer,
                 confidence=confidence,
