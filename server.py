@@ -27,7 +27,7 @@ from market.services import SignalService, StrategyService, RiskManager
 from market.services import (
     KeyLevelSignalGenerator, AIEntrySignalGenerator,
     MovingAverageSignalGenerator, AlphaFactorSignalGenerator,
-    PivotSignalGenerator,
+    PivotSignalGenerator, StructureContinuationSignalGenerator,
 )
 from market.services import StatisticsService, PositionService, TradeHistoryService
 from market.services.strategy.transient_decision_store import transient_decision_store
@@ -238,6 +238,9 @@ class TradingServer:
             user_id=self.user_id, account_id=self.account_id,
         )
         self._signal_service.register_generator("pivot", pivot_generator)
+        self._signal_service.register_generator(
+            "structure_continuation", StructureContinuationSignalGenerator(self.kline_store)
+        )
 
         # 关键点位信号生成器
         key_level_generator = KeyLevelSignalGenerator()

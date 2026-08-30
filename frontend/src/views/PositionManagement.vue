@@ -142,6 +142,9 @@
             <v-col cols="6" md="2"><v-text-field v-model.number="management.trailingR" label="移动距离" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
             <v-col cols="12" md="4"><v-switch v-model="management.pivotTrailing" color="success" label="按新转折点跟进" /></v-col>
             <v-col cols="6" md="2"><v-select v-model="management.pivotPeriod" :items="periods" label="转折周期" /></v-col>
+            <v-col cols="12" md="4"><v-switch v-model="management.structureTrailing" color="success" label="按结构保护点跟进" /></v-col>
+            <v-col cols="6" md="2"><v-text-field v-model.number="management.structureBuffer" label="ATR缓冲" suffix="ATR" type="number" min="0" step="0.05" /></v-col>
+            <v-col cols="6" md="2"><v-text-field v-model.number="management.structureImprove" label="最小改善" suffix="ATR" type="number" min="0" step="0.05" /></v-col>
             <v-col cols="12" md="3"><v-switch v-model="management.reverse" color="success" label="反向信号退出" /></v-col>
             <v-col cols="12" md="3"><v-switch v-model="management.timeout" color="success" label="最大持仓时间" /></v-col>
             <v-col cols="6" md="2"><v-text-field v-model.number="management.timeoutBars" label="K线数量" type="number" min="1" /></v-col>
@@ -290,6 +293,7 @@ const management = reactive({
     { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' },
   ],
   pivotTrailing: true, pivotPeriod: 'M5',
+  structureTrailing: true, structureBuffer: 0.15, structureImprove: 0.10,
   reverse: false, timeout: false, timeoutBars: 120, timeoutPeriod: 'M1'
 })
 
@@ -337,6 +341,7 @@ function syncManagement(rules = []) {
   const trail = find('trailing_stop'); management.trailing = Boolean(trail); management.trailingActivationR = trail?.activation_r || 1; management.trailingR = trail?.distance_r || 0.8
   const partial = find('partial_take_profit'); management.partialTakeProfit = Boolean(partial); management.partialLevels = deepClone(partial?.levels?.length ? partial.levels : [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }])
   const pivot = find('pivot_trailing'); management.pivotTrailing = Boolean(pivot); management.pivotPeriod = pivot?.period || 'M5'
+  const structure = find('structure_trailing'); management.structureTrailing = Boolean(structure); management.structureBuffer = structure?.buffer_value ?? 0.15; management.structureImprove = structure?.min_improvement_atr ?? 0.10
   management.reverse = Boolean(find('reverse_signal'))
   const timeout = find('max_holding_bars'); management.timeout = Boolean(timeout); management.timeoutBars = timeout?.bars || 120; management.timeoutPeriod = timeout?.period || 'M1'
 }
@@ -470,6 +475,7 @@ function buildManagementRules() {
   const rules = []
   if (management.breakEven) rules.push({ type: 'break_even', activation_r: management.breakEvenR, offset_r: 0 })
   if (management.pivotTrailing) rules.push({ type: 'pivot_trailing', period: management.pivotPeriod, buffer: { type: 'fixed_points', value: 0 } })
+  if (management.structureTrailing) rules.push({ type: 'structure_trailing', structure_layer: 'swing', buffer_type: 'atr', buffer_value: Number(management.structureBuffer) || 0.15, min_improvement_atr: Number(management.structureImprove) || 0.10, confirm_bars: 1, cooldown_seconds: 30 })
   if (management.trailing) rules.push({ type: 'trailing_stop', activation_r: management.trailingActivationR, distance_r: management.trailingR })
   if (management.partialTakeProfit) rules.push({ type: 'partial_take_profit', levels: deepClone(management.partialLevels) })
   if (management.reverse) rules.push({ type: 'reverse_signal' })
@@ -518,7 +524,7 @@ function sharedPolicyKey(policy) {
 function isSharedPolicyUsed(policy) {
   return usedSharedPolicyKeys.value.has(sharedPolicyKey(policy))
 }
-function openCreate() { Object.assign(form, { policy_id: '', name: '', enabled: true, is_shared: false, config: defaultConfig() }); syncManagement([{ type: 'break_even', activation_r: 1 }, { type: 'pivot_trailing', period: 'M5' }, { type: 'trailing_stop', activation_r: 1, distance_r: 0.8 }, { type: 'partial_take_profit', levels: [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }, { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' }] }]); hydrateSetupProfiles(); dialog.value = true }
+function openCreate() { Object.assign(form, { policy_id: '', name: '', enabled: true, is_shared: false, config: defaultConfig() }); syncManagement([{ type: 'break_even', activation_r: 1 }, { type: 'pivot_trailing', period: 'M5' }, { type: 'structure_trailing', structure_layer: 'swing', buffer_type: 'atr', buffer_value: 0.15, min_improvement_atr: 0.10 }, { type: 'trailing_stop', activation_r: 1, distance_r: 0.8 }, { type: 'partial_take_profit', levels: [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }, { level_id: 'tp2', trigger_r: 2, close_percent: 30, move_sl: 'trail' }] }]); hydrateSetupProfiles(); dialog.value = true }
 function openEdit(policy) { Object.assign(form, deepClone(policy)); form.config.setup_profiles ||= []; syncManagement(form.config.management_rules); hydrateSetupProfiles(); dialog.value = true }
 async function save() { saving.value = true; try { const payload = { name: form.name, enabled: form.enabled, visibility: form.is_shared ? 'shared' : 'private', config: serializeConfig() }; if (form.policy_id) await marketAPI.updatePositionManagementPolicy(form.policy_id, payload); else await marketAPI.createPositionManagementPolicy(payload); dialog.value = false; messageType.value = 'success'; message.value = '持仓管理方案已保存'; await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } finally { saving.value = false } }
 async function remove(policy) { if (!confirm(`确定删除“${policy.name}”吗？`)) return; try { await marketAPI.deletePositionManagementPolicy(policy.policy_id); await load() } catch (error) { messageType.value = 'error'; message.value = error.response?.data?.detail || error.message } }

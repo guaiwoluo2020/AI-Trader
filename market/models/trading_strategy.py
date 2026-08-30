@@ -169,6 +169,16 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "min_confidence": 60,
             "cooldown_seconds": 180,
         }
+    elif source == "structure_continuation":
+        params = {
+            "structure_layer": "swing", "entry_mode": "internal_reversal_bos",
+            "require_confirmed_structure": True, "min_structure_confidence": 60,
+            "max_pullback_atr": 2.5, "max_pullback_bars": 12,
+            "breakout_buffer_atr": 0.15, "require_close_confirmation": True,
+            "require_protected_level_intact": True, "allow_liquidity_sweep_recovery": True,
+            "stop_buffer_ratio": 0.0005, "risk_reward_ratio": 2.0,
+            "cooldown_seconds": 180, "one_signal_per_pullback": True,
+        }
     return {
         "signal_source_id": uuid.uuid4().hex[:12],
         "source": source,
@@ -240,7 +250,7 @@ def normalize_signal_sources(
         if source == "multi_timeframe":
             continue
         period = str(raw.get("period", "")).upper()
-        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor", "pivot"}:
+        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor", "pivot", "structure_continuation"}:
             raise ValueError(f"不支持的信号源类型: {source}")
         if source == "key_level":
             period = "M1"
@@ -346,6 +356,19 @@ def normalize_signal_sources(
             params["cooldown_seconds"] = max(
                 0, min(86400, int(params.get("cooldown_seconds", 180)))
             )
+        elif source == "structure_continuation":
+            params["structure_layer"] = "swing"
+            params["entry_mode"] = str(params.get("entry_mode") or "internal_reversal_bos")
+            if params["entry_mode"] not in {"internal_reversal_bos", "protected_level_rebound"}:
+                raise ValueError("结构趋势延续入场方式无效")
+            params["require_confirmed_structure"] = bool(params.get("require_confirmed_structure", True))
+            params["min_structure_confidence"] = max(0, min(100, int(params.get("min_structure_confidence", 60))))
+            params["max_pullback_atr"] = max(0.5, min(10.0, float(params.get("max_pullback_atr", 2.5))))
+            params["max_pullback_bars"] = max(1, min(100, int(params.get("max_pullback_bars", 12))))
+            params["breakout_buffer_atr"] = max(0.0, min(3.0, float(params.get("breakout_buffer_atr", 0.15))))
+            params["stop_buffer_ratio"] = max(0.0, min(0.05, float(params.get("stop_buffer_ratio", 0.0005))))
+            params["risk_reward_ratio"] = max(1.0, min(10.0, float(params.get("risk_reward_ratio", 2.0))))
+            params["cooldown_seconds"] = max(0, min(86400, int(params.get("cooldown_seconds", 180))))
         elif source == "ai_entry":
             params["analysis_mode"] = str(
                 params.get("analysis_mode") or "self_analysis"

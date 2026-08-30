@@ -18,6 +18,7 @@ class SignalSource:
     AI_ENTRY = "ai_entry"        # AI入场信号
     MOVING_AVERAGE = "moving_average"  # 均线交叉信号
     ALPHA_FACTOR = "alpha_factor"  # 已验证 Alpha 因子信号
+    STRUCTURE_CONTINUATION = "structure_continuation"  # 结构趋势延续
 
 
 class SignalStatus:

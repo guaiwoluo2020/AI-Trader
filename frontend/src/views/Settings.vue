@@ -1110,6 +1110,19 @@
             </v-row>
           </template>
 
+          <template v-else-if="newSignalSource.source === 'structure_continuation'">
+            <v-row dense class="mt-3">
+              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">仅在已确认的上涨或下跌主结构中，等待内部回撤结束并收盘确认 BOS 后顺势入场；震荡和未确认结构不生成趋势延续信号。</v-alert></v-col>
+              <v-col cols="12" sm="6"><v-select v-model="newSignalSource.params.entry_mode" :items="[{title:'内部反转 + BOS',value:'internal_reversal_bos'},{title:'保护位反弹',value:'protected_level_rebound'}]" label="入场方式"></v-select></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_structure_confidence" label="最低结构置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_pullback_atr" label="最大回撤幅度" type="number" min="0.5" max="10" step="0.1" suffix="ATR" hint="回撤超过此幅度，当前延续计划失效" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_pullback_bars" label="最大回撤周期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.stop_buffer_percent" label="保护位止损缓冲" type="number" min="0" max="5" step="0.01" suffix="%"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.risk_reward_ratio" label="建议盈亏比" type="number" min="1" max="10" step="0.1"></v-text-field></v-col>
+              <v-col cols="12"><v-checkbox v-model="newSignalSource.params.require_close_confirmation" label="必须收盘确认突破" hide-details></v-checkbox><v-checkbox v-model="newSignalSource.params.one_signal_per_pullback" label="同一轮回撤只触发一次" hide-details></v-checkbox></v-col>
+            </v-row>
+          </template>
+
           <template v-else-if="newSignalSource.source === 'alpha_factor'">
             <v-row dense class="mt-3">
               <v-col cols="12">
@@ -2235,6 +2248,7 @@ export default {
       pivot: { label: '转折点信号', color: 'primary', icon: 'mdi-chart-timeline-variant-shimmer' },
       moving_average: { label: '均线交叉信号', color: 'orange-darken-2', icon: 'mdi-chart-bell-curve' },
       alpha_factor: { label: '已验证 Alpha', color: 'teal-darken-1', icon: 'mdi-atom-variant' },
+      structure_continuation: { label: '结构趋势延续', color: 'deep-orange', icon: 'mdi-trending-up' },
     }
     const sourceMetaFor = (source) => signalSourceMeta[source] || {
       label: source || '未知信号源',
@@ -2461,6 +2475,8 @@ export default {
                 min_confidence: 70,
                 cooldown_seconds: 180
             }
+            : source === 'structure_continuation'
+              ? { structure_layer: 'swing', entry_mode: 'internal_reversal_bos', require_confirmed_structure: true, min_structure_confidence: 60, max_pullback_atr: 2.5, max_pullback_bars: 12, breakout_buffer_atr: 0.15, require_close_confirmation: true, require_protected_level_intact: true, allow_liquidity_sweep_recovery: true, stop_buffer_ratio: 0.0005, stop_buffer_percent: 0.05, risk_reward_ratio: 2, cooldown_seconds: 180, one_signal_per_pullback: true }
             : source === 'alpha_factor'
               ? {
                   alpha_id: '', alpha_version: 1, alpha_name: '',
@@ -3135,6 +3151,10 @@ export default {
         delete clean.params.levels_text
       }
       if (clean.source === 'pivot') serializePivotPercentParams(clean.params)
+      if (clean.source === 'structure_continuation' && clean.params.stop_buffer_percent !== undefined) {
+        clean.params.stop_buffer_ratio = Math.max(0, Math.min(5, Number(clean.params.stop_buffer_percent || 0))) / 100
+        delete clean.params.stop_buffer_percent
+      }
       return clean
     })
 

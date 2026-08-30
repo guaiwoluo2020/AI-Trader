@@ -428,6 +428,26 @@ class PositionManager:
                     )
                 else:
                     add_event(kind, "checked", "暂无可用转折点跟进止损")
+            if kind == "structure_trailing":
+                hierarchy = market.get("structure_hierarchy") or (market.get("structure") or {}).get("structure_hierarchy") or {}
+                layer = hierarchy.get(rule.get("structure_layer", "swing")) or {}
+                level_key = "protected_low" if direction == "buy" else "protected_high"
+                protected = layer.get(level_key) or {}
+                level = float(protected.get("price") or 0)
+                if level > 0:
+                    buffer_type = rule.get("buffer_type", "atr")
+                    value = float(rule.get("buffer_value", 0.15) or 0)
+                    buffer = float(market.get("atr", 0) or 0) * value if buffer_type == "atr" else (price * value / 100 if buffer_type == "fixed_percent" else value)
+                    candidate = level - buffer if direction == "buy" else level + buffer
+                    valid_side = candidate < price if direction == "buy" else candidate > price
+                    improves = candidate > current_sl if direction == "buy" else candidate < current_sl
+                    if valid_side and improves:
+                        candidates.append(candidate)
+                        add_event(kind, "triggered", f"结构保护点更新，候选止损 {candidate:.5f}", candidate_stop_loss=candidate, protected_level=level, structure_layer=rule.get("structure_layer", "swing"))
+                    else:
+                        add_event(kind, "checked", "结构保护点未产生更有利的止损", protected_level=level, candidate_stop_loss=candidate)
+                else:
+                    add_event(kind, "checked", "暂无可用结构保护点")
         valid = [candidate for candidate in candidates if (
             current_sl < candidate < price if direction == "buy"
             else price < candidate < current_sl

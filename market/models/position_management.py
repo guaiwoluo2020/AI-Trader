@@ -16,6 +16,7 @@ RULE_TYPES = {
 }
 MANAGEMENT_RULE_TYPES = {
     "break_even", "pivot_trailing", "trailing_stop",
+    "structure_trailing",
     "partial_take_profit", "reverse_signal", "max_holding_bars",
 }
 PERIODS = {"M1", "M5", "M15", "H1", "H4"}
@@ -44,6 +45,10 @@ def default_position_management_config() -> Dict:
             {"type": "break_even", "activation_r": 1.0, "offset_r": 0.0},
             {"type": "pivot_trailing", "period": "M5",
              "buffer": {"type": "fixed_points", "value": 0}},
+            {"type": "structure_trailing", "structure_layer": "swing",
+             "buffer_type": "atr", "buffer_value": 0.15,
+             "min_improvement_atr": 0.10, "confirm_bars": 1,
+             "cooldown_seconds": 30},
             {"type": "trailing_stop", "activation_r": 1.0,
              "distance_r": 0.8},
             {"type": "partial_take_profit", "levels": [
@@ -110,6 +115,17 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
             if period not in PERIODS:
                 raise ValueError(f"转折点周期无效: {period}")
             rule["period"] = period
+        elif rule_type == "structure_trailing":
+            rule["structure_layer"] = str(rule.get("structure_layer") or "swing").lower()
+            if rule["structure_layer"] not in {"internal", "swing", "external"}:
+                raise ValueError("结构移动止损层级无效")
+            rule["buffer_type"] = str(rule.get("buffer_type") or "atr").lower()
+            if rule["buffer_type"] not in {"atr", "fixed_points", "fixed_percent"}:
+                raise ValueError("结构移动止损缓冲类型无效")
+            rule["buffer_value"] = _positive(rule.get("buffer_value", 0.15), "结构止损缓冲")
+            rule["min_improvement_atr"] = _positive(rule.get("min_improvement_atr", 0.10), "结构止损最小改善")
+            rule["confirm_bars"] = max(1, min(10, int(rule.get("confirm_bars", 1))))
+            rule["cooldown_seconds"] = max(0, min(86400, int(rule.get("cooldown_seconds", 30))))
         elif rule_type == "break_even":
             rule["activation_r"] = _positive(rule.get("activation_r", 1), "保本启动R")
             rule["offset_r"] = _positive(rule.get("offset_r", 0), "保本偏移R", True)
