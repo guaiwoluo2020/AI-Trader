@@ -20,6 +20,7 @@ from market.services.position_attribution import (
 )
 from market.services.account_strategy_performance import build_paper_performance
 from market.services.strategy.transient_decision_store import transient_decision_store
+from market.store.structure_plan_store import StructureTradePlanRepository
 from membership import MembershipService
 from sqlite_storage import (
     PositionManagementEventRepository,
@@ -61,6 +62,7 @@ class PaperTradingService:
         self.position_policies = PositionManagementPolicyRepository(self.storage)
         self.position_manager = PositionManager()
         self.position_events = PositionManagementEventRepository(self.storage)
+        self.structure_plans = StructureTradePlanRepository(self.storage)
         self.memberships = MembershipService(self.storage)
         self._lock = threading.RLock()
         self._quotes: Dict[Tuple[int, str], Tuple[float, float]] = {}
@@ -138,7 +140,7 @@ class PaperTradingService:
     def _direct_paper_eligible(strategy_data: Dict) -> bool:
         return (
             any(
-                source.get("source") in {"ai_entry", "pivot", "key_level"}
+                source.get("source") in {"ai_entry", "pivot", "key_level", "structure_plan"}
                 and source.get("enabled", True)
                 for source in (strategy_data.get("signal_sources") or [])
             )
@@ -443,6 +445,14 @@ class PaperTradingService:
             if strategy is not None:
                 item["strategy_name"] = strategy.strategy_name
                 configured_lifecycle = strategy.lifecycle_status
+                item["strategy_offline"] = False
+            else:
+                # Keep historical deployment rows for audit, but make it
+                # explicit that a deleted strategy can no longer be started.
+                item["strategy_name"] = "策略已下线"
+                item["strategy_offline"] = True
+                item["configured_lifecycle_status"] = "offline"
+                configured_lifecycle = "offline"
             item["configured_lifecycle_status"] = configured_lifecycle
 
             # The account page describes a deployment, not merely its source
@@ -525,10 +535,15 @@ class PaperTradingService:
             getattr(signal, "setup_type", "") or "generic_entry"
         )
         setup_family = str(getattr(signal, "setup_family", "") or "generic")
-        plan_id = str(getattr(signal, "ai_plan_id", "") or "")
-        plan_valid_from = int(
-            getattr(signal, "ai_plan_valid_from", 0) or 0
+        plan_id = str(
+            getattr(signal, "trade_plan_id", "")
+            or getattr(signal, "ai_plan_id", "") or ""
         )
+        plan_valid_from = int(
+            getattr(signal, "trade_plan_valid_from", 0)
+            or getattr(signal, "ai_plan_valid_from", 0) or 0
+        )
+        plan_group_id = str(getattr(signal, "trade_plan_group_id", "") or "")
         plan_instance_id = (
             f"{plan_id}:{plan_valid_from}"
             if plan_id and plan_valid_from else plan_id
@@ -541,10 +556,9 @@ class PaperTradingService:
             previous_orders = self.storage.fetchall(
                 "SELECT position_attribution_json FROM paper_orders "
                 "WHERE user_id = ? AND account_id = ? AND deployment_id = ? "
-                "AND direction = ? ORDER BY requested_at DESC LIMIT 200",
+                "ORDER BY requested_at DESC LIMIT 200",
                 (
                     int(user_id), int(account_id), deployment["deployment_id"],
-                    action,
                 ),
             )
             for order in previous_orders:
@@ -555,14 +569,21 @@ class PaperTradingService:
                     )
                 except (TypeError, ValueError):
                     attribution = {}
-                if str(attribution.get("ai_plan_instance_id") or "") == plan_instance_id:
+                previous_plan = str(
+                    attribution.get("trade_plan_instance_id")
+                    or attribution.get("ai_plan_instance_id") or ""
+                )
+                previous_group = str(attribution.get("trade_plan_group_id") or "")
+                if previous_plan == plan_instance_id or (
+                    plan_group_id and previous_group == plan_group_id
+                ):
                     return {
                         "allowed": False,
                         "scope": "paper_setup",
                         "setup_type": setup_type,
                         "setup_family": setup_family,
                         "plan_instance_id": plan_instance_id,
-                        "reason": "本次AI分析的该交易建议已经触发过，不重复开仓",
+                        "reason": "本交易计划已经触发过，不在该模拟部署重复开仓",
                     }
 
         config = policy_config or {}
@@ -645,7 +666,10 @@ class PaperTradingService:
         latest = rows[0]
         last_loss_at = int(latest.get("closed_at") or 0)
         last_attribution = latest.get("position_attribution") or {}
-        last_plan_id = str(last_attribution.get("ai_plan_id") or "")
+        last_plan_id = str(
+            last_attribution.get("trade_plan_id")
+            or last_attribution.get("ai_plan_id") or ""
+        )
         period = str(getattr(signal, "source_period", "M1") or "M1").upper()
         bar_seconds = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}.get(period, 60)
         now = int(time.time())
@@ -877,6 +901,7 @@ class PaperTradingService:
         ask: Optional[float] = None,
         timestamp: Optional[int] = None,
         pivots: Optional[List[Dict]] = None,
+        structures: Optional[Dict[str, Dict]] = None,
     ) -> Dict:
         bid = float(bid)
         ask = float(ask if ask is not None else bid)
@@ -908,7 +933,7 @@ class PaperTradingService:
             summary = {"filled": 0, "closed": 0, "rejected": 0}
             for row in account_rows:
                 result = self._process_account_tick(
-                    user_id, int(row["id"]), symbol, bid, ask, now, pivots or []
+                    user_id, int(row["id"]), symbol, bid, ask, now, pivots or [], structures or {}
                 )
                 for key in summary:
                     summary[key] += result[key]
@@ -1001,7 +1026,7 @@ class PaperTradingService:
             FROM paper_orders o
             LEFT JOIN paper_positions p ON p.order_id = o.order_id
             WHERE o.account_id = ?
-            ORDER BY o.requested_at DESC, o.order_id DESC LIMIT 100
+            ORDER BY o.requested_at DESC, o.order_id DESC LIMIT 30
             """,
             (account_id,),
         )]
@@ -1040,7 +1065,7 @@ class PaperTradingService:
             FROM paper_trades t
             LEFT JOIN paper_orders o ON o.order_id = t.order_id
             WHERE t.account_id = ?
-            ORDER BY t.closed_at DESC, t.trade_id DESC LIMIT 100
+            ORDER BY t.closed_at DESC, t.trade_id DESC LIMIT 20
             """,
             (account_id,),
         )]
@@ -1657,6 +1682,16 @@ class PaperTradingService:
                     reason, now, now, now,
                 ),
             )
+            trade_plan_id = str(attribution.get("trade_plan_id") or "")
+            if trade_plan_id and status == "pending":
+                self.structure_plans.record_execution(
+                    int(user_id), account_id, deployment["deployment_id"],
+                    deployment["strategy_id"], trade_plan_id,
+                    str(attribution.get("trade_plan_group_id") or ""),
+                    "ordered", order_id=order_id,
+                    reason=str(decision.get("decision_reason") or ""),
+                    payload=attribution,
+                )
             return True
         except Exception as exc:
             if "UNIQUE constraint failed" in str(exc):
@@ -1665,7 +1700,7 @@ class PaperTradingService:
 
     def _process_account_tick(
         self, user_id: int, account_id: int, symbol: str,
-        bid: float, ask: float, now: int, pivots: List[Dict],
+        bid: float, ask: float, now: int, pivots: List[Dict], structures: Dict[str, Dict],
     ) -> Dict:
         point_size, contract_size = market_spec(symbol)
         settings = self._settings(account_id)
@@ -1915,9 +1950,14 @@ class PaperTradingService:
                             seconds = period_seconds.get(rule.get("period", "M1"), 60)
                             max_bars = max(max_bars, (now - int(position["opened_at"])) // seconds)
                     position_state["holding_bars"] = max_bars
+                    attribution = json.loads(position["position_attribution_json"] or "{}")
+                    structure_period = str(attribution.get("signal_source_period") or "M5").upper()
+                    structure = structures.get(structure_period) or {}
                     action = self.position_manager.evaluate(
                         policy_snapshot.get("config", {}), position_state,
-                        {"price": mark, "time": now}, pivots=pivots,
+                        {"price": mark, "time": now,
+                         "atr": float(structure.get("atr") or 0),
+                         "structure_hierarchy": structure.get("structure_hierarchy") or {}}, pivots=pivots,
                     )
                     for event in action.events:
                         if event.get("status") == "triggered":

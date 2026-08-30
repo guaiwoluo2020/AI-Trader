@@ -204,7 +204,7 @@ class TradingEngineManagerTestCase(unittest.TestCase):
         self.assertEqual(engine.llm_runs, 1)
         manager.close_all()
 
-    def test_binding_migrates_temporary_user_engine(self):
+    def test_binding_preserves_shared_market_engine(self):
         manager = TradingEngineManager(
             engine_factory=lambda user_id, account_id: _FakeEngine(
                 user_id,
@@ -219,10 +219,11 @@ class TradingEngineManagerTestCase(unittest.TestCase):
 
         bound = manager.bind_account(self.admin.user_id, account.account_id)
 
-        self.assertIs(bound, temporary)
+        self.assertIsNot(bound, temporary)
+        self.assertEqual(temporary.account_id, 0)
         self.assertEqual(bound.account_id, account.account_id)
         self.assertEqual(
-            manager.get_engine_for_user(self.admin.user_id).values,
+            manager.get_market_engine(self.admin.user_id).values,
             ["before-binding"],
         )
 
@@ -357,13 +358,13 @@ class TradingEngineManagerTestCase(unittest.TestCase):
             ),
             idle_timeout_seconds=1,
         )
-        first = manager.get_engine(self.admin.user_id, 0)
+        first = manager.get_engine(self.admin.user_id, 999)
 
         manager.run_maintenance_once(time.monotonic() + 2)
 
         self.assertTrue(first.closed)
         self.assertEqual(manager.get_status()["engine_count"], 0)
-        second = manager.get_engine(self.admin.user_id, 0)
+        second = manager.get_engine(self.admin.user_id, 999)
         self.assertIsNot(first, second)
         manager.close_all()
 

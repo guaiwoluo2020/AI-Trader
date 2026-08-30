@@ -65,8 +65,19 @@
                 <v-chip size="small" variant="tonal" :color="statusMeta(account).color">
                   {{ statusMeta(account).label }}
                 </v-chip>
+                <v-chip v-if="account.account_type === 'mt5' && account.market_source" size="small" variant="tonal" :color="marketSourceMeta(account.market_source).color">
+                  {{ marketSourceMeta(account.market_source).label }}
+                </v-chip>
               </div>
             </div>
+
+            <v-alert
+              v-if="account.account_type === 'mt5' && ['reuse', 'blocked'].includes(account.market_source?.mode)"
+              :type="account.market_source.mode === 'blocked' ? 'error' : 'info'"
+              variant="tonal"
+              density="compact"
+              class="mb-4"
+            >{{ account.market_source.message }}</v-alert>
 
             <div class="balance-row">
               <div><span>余额</span><strong>{{ money(account.balance, account.currency) }}</strong></div>
@@ -89,7 +100,7 @@
               <div v-if="account.deployments?.length" class="bound-strategy-list">
                 <div v-for="deployment in account.deployments" :key="deployment.deployment_id" class="bound-strategy-item">
                   <v-chip size="x-small" :color="deploymentHealthMeta(deployment).color" variant="tonal">
-                    {{ deployment.strategy_name || deployment.strategy_id }}
+                    {{ deployment.strategy_name || deployment.strategy_id }}<v-chip v-if="deployment.strategy_offline" size="x-small" color="grey" variant="tonal" class="ml-2">策略已下线</v-chip>
                   </v-chip>
                   <span class="bound-strategy-meta" :class="{ 'text-error': deploymentHealthMeta(deployment).alert }">
                     {{ lifecycleLabel(deployment.lifecycle_status) }} ·
@@ -222,7 +233,7 @@
             <div>
               <article v-for="deployment in paperDetail.deployments" :key="deployment.deployment_id">
                 <v-icon :color="deploymentStatusColor(deployment.status)" size="16">mdi-play-circle</v-icon>
-                <strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong>
+                <strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong><v-chip v-if="deployment.strategy_offline" size="x-small" color="grey" variant="tonal" class="ml-2">策略已下线</v-chip>
                 <small>{{ deployment.symbol }} · Paper</small>
                 <v-chip size="x-small" :color="deploymentStatusColor(deployment.status)">{{ deploymentStatusLabel(deployment.status) }}</v-chip>
               </article>
@@ -383,9 +394,9 @@
               </div>
             </div>
             <div class="runtime-table-card">
-              <div class="runtime-section-title"><h3>最近成交</h3><span>最多显示 100 笔</span></div>
+              <div class="runtime-section-title"><h3>最近成交</h3><span>最多显示 20 笔</span></div>
               <div v-if="!paperDetail.trades.length" class="runtime-empty compact">暂无成交</div>
-              <div v-for="trade in paperDetail.trades.slice(0, 100)" :key="trade.trade_id" class="runtime-row trade-row">
+              <div v-for="trade in paperDetail.trades.slice(0, 20)" :key="trade.trade_id" class="runtime-row trade-row">
                 <span>{{ formatTime(trade.closed_at) }}</span>
                 <b>{{ trade.symbol }} · {{ trade.direction === 'buy' ? '买入' : '卖出' }}</b>
                 <span>持仓 {{ trade.position_id || '--' }}</span>
@@ -398,9 +409,9 @@
           </section>
 
           <section class="runtime-table-card orders-card">
-            <div class="runtime-section-title"><h3>模拟订单流水</h3><span>最近 100 条 · 包含拒单和取消订单</span></div>
+            <div class="runtime-section-title"><h3>模拟订单流水</h3><span>最近 30 条 · 包含拒单和取消订单</span></div>
             <div v-if="!paperDetail.orders.length" class="runtime-empty compact">暂无订单</div>
-            <div v-for="order in paperDetail.orders.slice(0, 100)" :key="order.order_id" class="runtime-row order-row">
+            <div v-for="order in paperDetail.orders.slice(0, 30)" :key="order.order_id" class="runtime-row order-row">
               <span>{{ formatTime(order.requested_at) }}</span>
               <b :class="order.direction === 'buy' ? 'positive' : 'negative'">{{ order.direction === 'buy' ? '买入' : '卖出' }}</b>
               <span>{{ order.symbol }} · {{ order.requested_volume }} 手 · 持仓 {{ order.position_id || '成交后生成' }}</span>
@@ -511,9 +522,9 @@
               </div>
             </div>
             <div class="runtime-table-card">
-              <div class="runtime-section-title"><h3>最近 MT5 成交</h3><span>最多 100 笔</span></div>
+              <div class="runtime-section-title"><h3>最近 MT5 成交</h3><span>最多 20 笔</span></div>
               <div v-if="!liveDetail.trades.length" class="runtime-empty compact">暂无成交上报</div>
-              <div v-for="trade in liveDetail.trades" :key="trade.ticket" class="runtime-row trade-row">
+              <div v-for="trade in liveDetail.trades.slice(0, 20)" :key="trade.ticket" class="runtime-row trade-row">
                 <span>{{ trade.time || '--' }}</span>
                 <b :class="trade.type === 0 ? 'positive' : 'negative'">{{ trade.type_text }} · {{ trade.symbol }}</b>
                 <span>Position {{ trade.mt5_position_id || '--' }} · {{ trade.entry_text }} · {{ trade.order_source }}</span>
@@ -780,10 +791,18 @@ function toggleLivePosition(ticket) {
   expandedLivePositions.value = next
 }
 function deploymentStatusLabel(status) {
-  return { active: '运行中', paused: '已暂停', completed: '已结束' }[status] || status
+  return { active: '运行中', paused: '已暂停', completed: '已结束', offline: '策略已下线' }[status] || status
 }
 function deploymentStatusColor(status) {
   return { active: 'success', paused: 'warning', completed: 'grey' }[status] || 'grey'
+}
+function marketSourceMeta(source) {
+  return {
+    primary: { label: '行情主源', color: 'success' },
+    reuse: { label: '复用行情', color: 'info' },
+    blocked: { label: '行情冲突', color: 'error' },
+    pending: { label: '待识别行情', color: 'grey' },
+  }[source?.mode] || { label: '待识别行情', color: 'grey' }
 }
 function lifecycleLabel(status) {
   return {

@@ -11,6 +11,7 @@ from typing import Optional, List, Dict
 from auth import AuthUser, require_auth
 from ea_auth import EAIdentity, ensure_supported_ea_version, require_ea_auth
 from models import TradeInstruction
+from market_data_source_policy import MarketDataSourcePolicy
 from sqlite_storage import (
     EAActivationRepository,
     LiveTradeDealRepository,
@@ -39,6 +40,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
     创建 EA 相关路由
     """
     router = APIRouter()
+    market_source_policy = MarketDataSourcePolicy()
 
     @router.post("/ea/activate")
     async def activate_ea(request: Request) -> Dict:
@@ -68,6 +70,9 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
 
         account, ea_token = result
         engine_manager.bind_account(account.user_id, account.account_id)
+        market_notice = market_source_policy.activation_notice(
+            account.user_id, account.account_id,
+        )
         user = UserRepository().get_by_id(account.user_id)
         return {
             "status": "ok",
@@ -75,6 +80,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             "account_id": account.account_id,
             "ea_token": ea_token,
             "is_admin": bool(user and user.role == "admin"),
+            "market_source": market_notice,
         }
 
     @router.get("/get_trades")
@@ -120,24 +126,57 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         ```
         """
         server = engine_manager.get_engine_for_ea(identity)
-        result = server.get_trades_by_symbol(symbol, price)
+        market_policy = market_source_policy.resolve(
+            identity.user_id, identity.account_id, symbol,
+        )
+        tick_results = {}
+        if (
+            price is not None and float(price) > 0
+            and market_policy.get("is_market_primary")
+        ):
+            tick_results = engine_manager.process_user_market_tick(
+                identity.user_id,
+                market_source_policy.execution_account_ids(
+                    identity.user_id, market_policy.get("broker_name", ""),
+                ),
+                symbol, float(price),
+            )
+        result = server.get_trades_by_symbol(
+            symbol, price, evaluate_price=False,
+        )
+        result["process_result"] = tick_results.get(identity.account_id, {})
+        result["market_source"] = market_policy
+        if market_policy.get("mode") == "blocked":
+            server.trading_instruction_service.clear_by_symbol(symbol)
+            server.pending_order_service.clear_all()
+            result["trades"] = []
+            result["pending_orders"] = []
         signal_snapshots = (
             server.get_tick_signal_snapshots(symbol, price)
-            if price is not None and float(price) > 0 else {}
+            if price is not None and float(price) > 0
+            and market_policy.get("is_market_primary") else {}
         )
         paper_execution = {"filled": 0, "closed": 0, "rejected": 0}
-        if price is not None and float(price) > 0:
+        if price is not None and float(price) > 0 and market_policy.get("is_market_primary"):
             try:
                 # EA 的 get_trades 轮询就是实时 Tick 通道。先用本次报价撮合
                 # 上一 Tick 产生的模拟订单，再评估本 Tick 的新策略信号。
+                structures = {}
+                for structure_period in ("M1", "M5", "M15", "H1", "H4"):
+                    structure = server.get_structure_context(symbol, structure_period)
+                    if structure:
+                        structures[structure_period] = structure
                 paper_execution = engine_manager.paper_trading.process_tick(
-                    identity.user_id, symbol, float(price), float(price)
+                    identity.user_id, symbol, float(price), float(price),
+                    structures=structures,
                 )
             except Exception as exc:
                 # 模拟账户故障不能阻断 EA 获取真实交易指令。
                 print(f"[PaperTrading] 模拟撮合失败: {exc}")
         paper_orders_created = 0
         try:
+            if not market_policy.get("is_market_primary"):
+                raise RuntimeError("非主行情账户不重复驱动模拟策略")
             paper_orders_created = engine_manager.paper_trading.process_strategy_signals(
                 identity.user_id, symbol, price, server.strategy_service,
                 quote_account_id=identity.account_id,
@@ -145,7 +184,8 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             )
         except Exception as exc:
             # 模拟账户故障不能阻断 EA 获取真实交易指令。
-            print(f"[PaperTrading] 创建模拟订单失败: {exc}")
+            if market_policy.get("is_market_primary"):
+                print(f"[PaperTrading] 创建模拟订单失败: {exc}")
         result["paper_orders_created"] = paper_orders_created
         result["paper_execution"] = paper_execution
 

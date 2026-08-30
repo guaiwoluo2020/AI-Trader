@@ -10,7 +10,7 @@ from .ai_entry_signal import AIEntrySignalGenerator
 from .moving_average_signal import MovingAverageSignalGenerator
 from .alpha_factor_signal import AlphaFactorSignalGenerator, AlphaRuntimeExecutor
 from .pivot_signal import PivotSignalGenerator
-from .structure_continuation_signal import StructureContinuationSignalGenerator
+from .structure_plan_signal import StructurePlanSignalGenerator, StructurePlanBuilder
 
 __all__ = [
     'SignalService',
@@ -20,5 +20,6 @@ __all__ = [
     'AlphaFactorSignalGenerator',
     'AlphaRuntimeExecutor',
     'PivotSignalGenerator',
-    'StructureContinuationSignalGenerator',
+    'StructurePlanSignalGenerator',
+    'StructurePlanBuilder',
 ]

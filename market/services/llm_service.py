@@ -382,10 +382,6 @@ class LLMService:
         ):
             if bool((source.get("config") or {}).get("analysis_paused")):
                 continue
-            if int(source.get("market_data_account_id") or 0) != int(
-                getattr(self.llm_store, "_account_id", 0) or 0
-            ):
-                continue
             self._append_independent_ai_source_to_plan(
                 plan, source, due_only, seen_sources, available
             )

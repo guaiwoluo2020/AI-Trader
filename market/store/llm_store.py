@@ -182,12 +182,7 @@ class LLMStore:
     def get_analysis_result_for_source(
         self, symbol: str, signal_source_id: str,
     ) -> Optional[LLMAnalysisResult]:
-        """按 AI 信号源绑定的行情账户读取最新分析。
-
-        策略部署账户与行情采集账户可以不同（例如行情账户 1、模拟账户 9）。
-        当前账户缓存没有结果时，不能把“无报告”误判成“没有交易建议”；应从
-        信号源所有者的 ``market_data_account_id`` 运行快照中读取。
-        """
+        """Read the latest user-scoped result for one AI signal source."""
         source_id = str(signal_source_id or "").strip()
         if not source_id:
             return None
@@ -199,13 +194,10 @@ class LLMStore:
             )
             if not source:
                 return None
-            source_account_id = int(source.get("market_data_account_id") or 0)
             source_user_id = int(source.get("user_id") or self._user_id)
-            if not source_account_id:
-                return None
-            if source_user_id == int(self._user_id) and source_account_id == self._account_id:
+            if source_user_id == int(self._user_id):
                 return self.get_analysis_result(symbol)
-            repository = RuntimeStateRepository(source_user_id, source_account_id)
+            repository = RuntimeStateRepository(source_user_id, 0)
             for payload in repository.list_entities("llm_analysis"):
                 if str(payload.get("symbol") or "").upper() != str(symbol).upper():
                     continue

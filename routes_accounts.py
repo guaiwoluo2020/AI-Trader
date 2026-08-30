@@ -19,6 +19,7 @@ from sqlite_storage import (
     TradingAccountRepository,
 )
 from trading_engine_manager import TradingEngineManager
+from market_data_source_policy import MarketDataSourcePolicy
 
 
 def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -27,6 +28,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     strategy_repository = StrategyConfigRepository()
     trade_config_repository = TradeConfigRepository()
     memberships = MembershipService()
+    market_source_policy = MarketDataSourcePolicy()
 
     def deployment_warnings(user_id: int, account_id: int, strategy_id: str) -> List[str]:
         """Non-blocking preflight for a deployment's quote binding."""
@@ -43,6 +45,9 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         )
         fresh = {str(row["symbol"]): int(row["updated_at"] or 0) for row in rows}
         warnings = []
+        market_status = market_source_policy.account_status(user_id, account_id)
+        if market_status.get("mode") == "blocked":
+            warnings.append(market_status.get("message") or "该账户存在跨交易商行情冲突")
         if symbol not in fresh:
             reported = "、".join(list(fresh)[:6]) or "暂无最近15分钟K线"
             warnings.append(
@@ -85,6 +90,11 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             payloads.append({
                 **account_payload,
                 "deployments": deployments,
+                "market_source": (
+                    market_source_policy.account_status(
+                        user.user_id, account.account_id,
+                    ) if account.account_type == "mt5" else None
+                ),
             })
         # 账户页以运行中的策略为首要排序依据；无运行策略的账户放在后面。
         # 同组内优先显示在线账户，再按最近更新时间倒序。
@@ -230,7 +240,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             user.user_id, account_id, 100,
         )
         trades = LiveTradeDealRepository().list_for_account(
-            user.user_id, account_id, 100,
+            user.user_id, account_id, 20,
         )
         # 成交回报通过 MT5 deal/order/position 与策略指令关联。老 EA 没有
         # position_id 时仍可用 deal/order 关联，不影响历史展示。
@@ -326,6 +336,13 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     ) -> Dict:
         try:
             payload = await request.json()
+            market_status = market_source_policy.account_status(
+                user.user_id, account_id,
+            )
+            if market_status.get("mode") == "blocked":
+                raise ValueError(
+                    market_status.get("message") or "该实盘账户存在行情冲突，不能部署策略"
+                )
             deployment = engine_manager.paper_trading.deploy(
                 user.user_id,
                 account_id,

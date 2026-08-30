@@ -281,6 +281,8 @@ class PositionManager:
             )
 
         for rule in policy_config.get("management_rules", []):
+            if not rule.get("enabled", True):
+                continue
             kind = rule.get("type")
             if kind == "reverse_signal" and reverse_signal:
                 add_event(kind, "triggered", "出现反向信号，触发退出")
@@ -441,11 +443,13 @@ class PositionManager:
                     candidate = level - buffer if direction == "buy" else level + buffer
                     valid_side = candidate < price if direction == "buy" else candidate > price
                     improves = candidate > current_sl if direction == "buy" else candidate < current_sl
-                    if valid_side and improves:
+                    improvement = candidate - current_sl if direction == "buy" else current_sl - candidate
+                    minimum_improvement = float(market.get("atr", 0) or 0) * float(rule.get("min_improvement_atr", 0.10) or 0)
+                    if valid_side and improves and improvement >= minimum_improvement:
                         candidates.append(candidate)
                         add_event(kind, "triggered", f"结构保护点更新，候选止损 {candidate:.5f}", candidate_stop_loss=candidate, protected_level=level, structure_layer=rule.get("structure_layer", "swing"))
                     else:
-                        add_event(kind, "checked", "结构保护点未产生更有利的止损", protected_level=level, candidate_stop_loss=candidate)
+                        add_event(kind, "checked", "结构保护点未产生足够改善的止损", protected_level=level, candidate_stop_loss=candidate, minimum_improvement=minimum_improvement)
                 else:
                     add_event(kind, "checked", "暂无可用结构保护点")
         valid = [candidate for candidate in candidates if (

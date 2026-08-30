@@ -151,7 +151,7 @@ class PivotSignalGenerator:
                 if raw_klines else None
             )
             cache_key = (
-                strategy.strategy_id, config["signal_source_id"], symbol,
+                config["signal_source_id"], symbol,
                 period, str(latest_time), len(raw_klines), fingerprint,
             )
             pivots = self._configured_pivot_cache.get(cache_key)
@@ -181,14 +181,14 @@ class PivotSignalGenerator:
                 complete_window = len(raw_klines) >= 2 * strength + 1
                 if repository is not None and complete_window:
                     repository.replace_scope(
-                        self.user_id, self.account_id, strategy.strategy_id,
+                        self.user_id, 0, "",
                         config["signal_source_id"], symbol, period, fingerprint,
                         pivots, strength, max_age_bars,
                         reference_time=market_now,
                     )
                 elif repository is not None and not complete_window:
                     pivots = repository.list_active(
-                        self.user_id, self.account_id, strategy.strategy_id,
+                        self.user_id, 0, "",
                         config["signal_source_id"], fingerprint, now,
                     )
                 self._configured_pivot_cache[cache_key] = pivots
@@ -351,7 +351,7 @@ class PivotSignalGenerator:
         return signals
 
     def _repository(self):
-        if not self.user_id or not self.account_id:
+        if not self.user_id:
             return self.repository
         if self.repository is None:
             self.repository = ConfiguredPivotRepository()

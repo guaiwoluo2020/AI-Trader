@@ -297,6 +297,58 @@ class PositionManagerTests(unittest.TestCase):
         self.assertEqual(action.action, "close")
         self.assertEqual(action.reason, "max_holding_bars")
 
+    def test_structure_trailing_uses_swing_protected_low(self):
+        action = PositionManager().evaluate({
+            "management_rules": [{
+                "type": "structure_trailing", "structure_layer": "swing",
+                "buffer_type": "atr", "buffer_value": 0.15,
+                "min_improvement_atr": 0.10,
+            }],
+        }, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5, "favorable_price": 110,
+        }, {
+            "price": 109, "atr": 2,
+            "structure_hierarchy": {
+                "swing": {"protected_low": {"price": 103}},
+            },
+        })
+        self.assertEqual(action.action, "modify_sl")
+        self.assertAlmostEqual(action.stop_loss, 102.7)
+
+    def test_structure_trailing_never_loosens_stop(self):
+        action = PositionManager().evaluate({
+            "management_rules": [{
+                "type": "structure_trailing", "structure_layer": "swing",
+                "buffer_type": "atr", "buffer_value": 0.15,
+                "min_improvement_atr": 0.10,
+            }],
+        }, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 104,
+            "initial_risk": 5, "favorable_price": 110,
+        }, {
+            "price": 109, "atr": 2,
+            "structure_hierarchy": {
+                "swing": {"protected_low": {"price": 103}},
+            },
+        })
+        self.assertEqual(action.action, "none")
+
+    def test_disabled_trailing_rule_preserves_config_without_execution(self):
+        action = PositionManager().evaluate({
+            "management_rules": [{
+                "type": "pivot_trailing", "enabled": False,
+                "period": "M1", "buffer": {"type": "fixed_points", "value": 0},
+            }],
+        }, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5, "favorable_price": 110,
+        }, {"price": 109, "atr": 2}, pivots=[{
+            "period": "M1", "direction": "low", "price": 103,
+        }])
+        self.assertEqual(action.action, "none")
+        self.assertEqual(action.events, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -74,9 +74,14 @@ class TradingEngineManager:
         self._next_adaptive_tuning_at = time.monotonic() + 120
         self._last_data_retention_date = ""
 
-    @staticmethod
-    def _create_engine(user_id: int, account_id: int) -> TradingServer:
-        return TradingServer(user_id=user_id, account_id=account_id or None)
+    def _create_engine(self, user_id: int, account_id: int) -> TradingServer:
+        market_source = (
+            None if not account_id else self.get_engine(user_id, 0)
+        )
+        return TradingServer(
+            user_id=user_id, account_id=account_id or None,
+            market_data_source=market_source,
+        )
 
     def get_engine(self, user_id: int, account_id: int) -> TradingServer:
         key = EngineKey(user_id=int(user_id), account_id=int(account_id))
@@ -103,6 +108,20 @@ class TradingEngineManager:
     def get_engine_for_ea(self, identity: EAIdentity) -> TradingServer:
         return self.get_engine(identity.user_id, identity.account_id)
 
+    def get_market_engine(self, user_id: int) -> TradingServer:
+        """Return the user's account-independent market-data engine."""
+        return self.get_engine(user_id, 0)
+
+    def process_user_market_tick(
+        self, user_id: int, account_ids, symbol: str, price: float,
+    ) -> Dict[int, Dict]:
+        """Drive every eligible live account once from one authoritative Tick."""
+        results = {}
+        for account_id in dict.fromkeys(int(value) for value in account_ids):
+            engine = self.get_engine(int(user_id), account_id)
+            results[account_id] = engine.process_price(symbol, float(price))
+        return results
+
     def get_engine_for_user(self, user_id: int) -> TradingServer:
         account = self._account_repo.get_primary_mt5(user_id)
         if account is None:
@@ -112,27 +131,16 @@ class TradingEngineManager:
         return self.get_engine(user_id, account_id)
 
     def bind_account(self, user_id: int, account_id: int) -> TradingServer:
-        """将绑定前的临时用户引擎迁移到正式 MT5 账户。"""
-        temporary_key = EngineKey(user_id=int(user_id), account_id=0)
+        """Bind an execution account without consuming the shared market engine."""
         account_key = EngineKey(user_id=int(user_id), account_id=int(account_id))
         with self._lock:
             account_runtime = self._engines.get(account_key)
             if account_runtime is not None:
                 account_runtime.last_active_at = time.monotonic()
                 return account_runtime.engine
-
-            temporary_runtime = self._engines.pop(temporary_key, None)
-            if temporary_runtime is not None:
-                temporary_engine = temporary_runtime.engine
-                set_scope = getattr(temporary_engine, "set_scope", None)
-                if set_scope is not None:
-                    set_scope(account_key.user_id, account_key.account_id)
-                else:
-                    temporary_engine.account_id = account_key.account_id
-                temporary_runtime.last_active_at = time.monotonic()
-                self._engines[account_key] = temporary_runtime
-                return temporary_engine
-
+        # account_id=0 is a durable user-level market runtime. The account
+        # engine created below references its K-lines, Pivot, structure and AI
+        # stores while retaining isolated positions, risk and order state.
         return self.get_engine(account_key.user_id, account_key.account_id)
 
     def set_event_loop(self, loop) -> None:
@@ -258,7 +266,10 @@ class TradingEngineManager:
                 if callback:
                     scheduler.submit((key, "signal_cleanup"), callback)
 
-            if now >= runtime.next_llm_analysis_at:
+            # AI market analysis is user-scoped and runs only once on the
+            # account-independent market engine. Execution engines consume
+            # the same stored result and must never schedule duplicate calls.
+            if key.account_id == 0 and now >= runtime.next_llm_analysis_at:
                 kline_service = getattr(engine, "kline_service", None)
                 get_symbols = getattr(kline_service, "get_symbols", None)
                 if get_symbols is not None and not get_symbols():
@@ -281,6 +292,12 @@ class TradingEngineManager:
         now: float,
         scheduler: SharedTaskScheduler,
     ) -> bool:
+        # The user-level market engine owns shared K-lines, Pivot, structure
+        # plans and AI analysis scheduling. Account engines retain references
+        # to these objects, so evicting account_id=0 would silently stop AI
+        # refreshes while deployed strategies are still running.
+        if key.account_id == 0:
+            return False
         if self._idle_timeout_seconds <= 0:
             return False
         if now - runtime.last_active_at < self._idle_timeout_seconds:

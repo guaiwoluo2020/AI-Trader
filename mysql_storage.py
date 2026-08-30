@@ -207,6 +207,97 @@ class MySQLStorage:
                 )
                 conn.execute(
                     """
+                CREATE TABLE IF NOT EXISTS structure_trade_plans (
+                    plan_id VARCHAR(64) NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    strategy_id VARCHAR(64) NOT NULL,
+                    signal_source_id VARCHAR(64) NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    period VARCHAR(16) NOT NULL,
+                    plan_group_id VARCHAR(64) NOT NULL,
+                    setup_type VARCHAR(64) NOT NULL,
+                    direction VARCHAR(16) NOT NULL,
+                    entry_mode VARCHAR(32) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    structure_bar_time BIGINT NOT NULL,
+                    valid_from BIGINT NOT NULL,
+                    expires_at BIGINT NOT NULL,
+                    fingerprint VARCHAR(64) NOT NULL,
+                    payload_json LONGTEXT NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (plan_id),
+                    KEY idx_structure_plans_runtime (
+                        user_id, account_id, strategy_id, signal_source_id,
+                        symbol, period, status, expires_at
+                    ),
+                    KEY idx_structure_plans_group (plan_group_id, status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS market_data_sources (
+                    user_id BIGINT NOT NULL,
+                    canonical_symbol VARCHAR(64) NOT NULL,
+                    primary_account_id BIGINT NOT NULL,
+                    broker_name VARCHAR(120) NOT NULL,
+                    native_symbol VARCHAR(64) NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (user_id, canonical_symbol),
+                    KEY idx_market_source_account (user_id, primary_account_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS market_data_account_policies (
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    broker_name VARCHAR(120) NOT NULL,
+                    mode VARCHAR(24) NOT NULL,
+                    primary_account_id BIGINT NOT NULL DEFAULT 0,
+                    conflict_symbols_json LONGTEXT NOT NULL,
+                    message VARCHAR(512) NOT NULL DEFAULT '',
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (user_id, account_id),
+                    KEY idx_market_policy_mode (user_id, mode)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS structure_plan_executions (
+                    execution_id VARCHAR(64) NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    deployment_id VARCHAR(64) NOT NULL,
+                    strategy_id VARCHAR(64) NOT NULL,
+                    plan_id VARCHAR(64) NOT NULL,
+                    plan_group_id VARCHAR(64) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    order_id VARCHAR(64) NOT NULL DEFAULT '',
+                    reason VARCHAR(512) NOT NULL DEFAULT '',
+                    payload_json LONGTEXT NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (execution_id),
+                    UNIQUE KEY uq_structure_plan_deployment (
+                        user_id, account_id, deployment_id, plan_id
+                    ),
+                    KEY idx_structure_plan_execution_group (
+                        user_id, account_id, deployment_id, plan_group_id, status
+                    )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
                 CREATE TABLE IF NOT EXISTS live_trade_deals (
                     id BIGINT NOT NULL AUTO_INCREMENT,
                     user_id BIGINT NOT NULL,
@@ -373,27 +464,6 @@ class MySQLStorage:
                     except Exception as exc:
                         if getattr(exc, "args", (None,))[0] != 1061:
                             raise
-                conn.execute(
-                    """
-                    UPDATE ai_signal_sources AS source
-                    SET market_data_account_id = (
-                        SELECT account.id FROM trading_accounts AS account
-                        WHERE account.user_id = source.user_id
-                          AND account.account_type = 'mt5'
-                          AND account.status = 'active'
-                        ORDER BY COALESCE(account.last_seen_at, 0) DESC,
-                                 account.id DESC
-                        LIMIT 1
-                    )
-                    WHERE source.market_data_account_id = 0
-                      AND EXISTS (
-                        SELECT 1 FROM trading_accounts AS account
-                        WHERE account.user_id = source.user_id
-                          AND account.account_type = 'mt5'
-                          AND account.status = 'active'
-                    )
-                    """
-                )
             self._initialized = True
 
     def execute(self, sql: str, params: tuple = ()) -> None:

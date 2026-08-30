@@ -411,6 +411,18 @@ class StrategyService:
             "selected_entry_mode": str(
                 getattr(best_signal, "entry_mode", "") or "touch_or_near"
             ),
+            "selected_trade_plan_id": str(
+                getattr(best_signal, "trade_plan_id", "") or ""
+            ),
+            "selected_trade_plan_group_id": str(
+                getattr(best_signal, "trade_plan_group_id", "") or ""
+            ),
+            "selected_trade_plan_valid_from": int(
+                getattr(best_signal, "trade_plan_valid_from", 0) or 0
+            ),
+            "selected_trade_plan_expires_at": int(
+                getattr(best_signal, "trade_plan_expires_at", 0) or 0
+            ),
             "selected_ai_plan_id": str(
                 getattr(best_signal, "ai_plan_id", "") or ""
             ),

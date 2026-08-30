@@ -1110,16 +1110,28 @@
             </v-row>
           </template>
 
-          <template v-else-if="newSignalSource.source === 'structure_continuation'">
+          <template v-else-if="newSignalSource.source === 'structure_plan'">
             <v-row dense class="mt-3">
-              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">仅在已确认的上涨或下跌主结构中，等待内部回撤结束并收盘确认 BOS 后顺势入场；震荡和未确认结构不生成趋势延续信号。</v-alert></v-col>
-              <v-col cols="12" sm="6"><v-select v-model="newSignalSource.params.entry_mode" :items="[{title:'内部反转 + BOS',value:'internal_reversal_bos'},{title:'保护位反弹',value:'protected_level_rebound'}]" label="入场方式"></v-select></v-col>
+              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">每根已收盘 K 线生成或更新结构交易计划，Tick 只判断价格是否进入计划区域。覆盖趋势延续、结构反转、箱体边界、箱体/三角形突破、假突破和流动性扫单；没有可靠机会时明确保持观察。</v-alert></v-col>
+              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_trend" label="趋势延续与反转" hide-details></v-checkbox></v-col>
+              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range" label="箱体与三角形" hide-details></v-checkbox></v-col>
+              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range_boundary" label="箱体边界反转" hide-details></v-checkbox></v-col>
+              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_range_breakout" label="收盘突破与回踩" hide-details></v-checkbox></v-col>
+              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_false_breakout" label="假突破回归" hide-details></v-checkbox></v-col>
+              <v-col cols="12" sm="4"><v-checkbox v-model="newSignalSource.params.enable_liquidity_sweep" label="流动性扫单回收" hide-details></v-checkbox></v-col>
               <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_structure_confidence" label="最低结构置信度" type="number" min="0" max="100" suffix="%"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_pullback_atr" label="最大回撤幅度" type="number" min="0.5" max="10" step="0.1" suffix="ATR" hint="回撤超过此幅度，当前延续计划失效" persistent-hint></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_pullback_bars" label="最大回撤周期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.stop_buffer_percent" label="保护位止损缓冲" type="number" min="0" max="5" step="0.01" suffix="%"></v-text-field></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.risk_reward_ratio" label="建议盈亏比" type="number" min="1" max="10" step="0.1"></v-text-field></v-col>
-              <v-col cols="12"><v-checkbox v-model="newSignalSource.params.require_close_confirmation" label="必须收盘确认突破" hide-details></v-checkbox><v-checkbox v-model="newSignalSource.params.one_signal_per_pullback" label="同一轮回撤只触发一次" hide-details></v-checkbox></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_real_risk_reward" label="最低真实盈亏比" type="number" min="1" max="10" step="0.1" hint="按结构止损与下一真实障碍计算，不机械扩展止盈" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_event_age_bars" label="结构事件最大时效" type="number" min="0" max="10" suffix="根K线"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.min_breakout_displacement_atr" label="最小突破位移" type="number" min="0" max="5" step="0.05" suffix="ATR" hint="过滤力度过弱的结构突破，默认 0.2 ATR" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.entry_zone_atr" label="入场区域宽度" type="number" min="0" max="3" step="0.05" suffix="ATR"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.stop_buffer_atr" label="结构止损缓冲" type="number" min="0" max="3" step="0.05" suffix="ATR"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.target_buffer_atr" label="结构止盈缓冲" type="number" min="0" max="3" step="0.05" suffix="ATR" hint="止盈放在下一压力/支撑之前，禁止跨越结构位机械扩展" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.breakout_stop_inside_atr" label="突破止损回置深度" type="number" min="0.1" max="3" step="0.05" suffix="ATR"></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.breakout_stop_buffer_atr" label="突破最小止损距离" type="number" min="0.1" max="5" step="0.1" suffix="ATR" hint="突破计划止损至少与边界保持该 ATR 距离，默认 0.8" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.breakout_target_atr" label="突破最小止盈距离" type="number" min="1" max="10" step="0.5" suffix="ATR" hint="止盈至少达到该 ATR 距离，默认 3.0" persistent-hint></v-text-field></v-col>
+              <v-col cols="12" sm="4"><v-text-field v-model.number="newSignalSource.params.range_plan_valid_bars" label="箱体计划有效期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
+              <v-col cols="12" sm="4"><v-text-field v-model.number="newSignalSource.params.event_plan_valid_bars" label="事件计划有效期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
+              <v-col cols="12" sm="4"><v-text-field v-model.number="newSignalSource.params.breakout_retest_valid_bars" label="突破回踩有效期" type="number" min="1" max="100" suffix="根K线"></v-text-field></v-col>
             </v-row>
           </template>
 
@@ -2248,7 +2260,7 @@ export default {
       pivot: { label: '转折点信号', color: 'primary', icon: 'mdi-chart-timeline-variant-shimmer' },
       moving_average: { label: '均线交叉信号', color: 'orange-darken-2', icon: 'mdi-chart-bell-curve' },
       alpha_factor: { label: '已验证 Alpha', color: 'teal-darken-1', icon: 'mdi-atom-variant' },
-      structure_continuation: { label: '结构趋势延续', color: 'deep-orange', icon: 'mdi-trending-up' },
+      structure_plan: { label: '结构交易计划', color: 'deep-orange', icon: 'mdi-chart-box-outline' },
     }
     const sourceMetaFor = (source) => signalSourceMeta[source] || {
       label: source || '未知信号源',
@@ -2475,8 +2487,8 @@ export default {
                 min_confidence: 70,
                 cooldown_seconds: 180
             }
-            : source === 'structure_continuation'
-              ? { structure_layer: 'swing', entry_mode: 'internal_reversal_bos', require_confirmed_structure: true, min_structure_confidence: 60, max_pullback_atr: 2.5, max_pullback_bars: 12, breakout_buffer_atr: 0.15, require_close_confirmation: true, require_protected_level_intact: true, allow_liquidity_sweep_recovery: true, stop_buffer_ratio: 0.0005, stop_buffer_percent: 0.05, risk_reward_ratio: 2, cooldown_seconds: 180, one_signal_per_pullback: true }
+            : source === 'structure_plan'
+              ? { enable_trend: true, enable_range: true, enable_range_boundary: true, enable_range_breakout: true, enable_false_breakout: true, enable_liquidity_sweep: true, min_structure_confidence: 60, min_real_risk_reward: 2, max_event_age_bars: 2, min_breakout_displacement_atr: 0.2, entry_zone_atr: 0.35, stop_buffer_atr: 0.25, target_buffer_atr: 0.1, breakout_stop_inside_atr: 0.3, breakout_stop_buffer_atr: 0.8, breakout_stop_width_ratio: 0.15, breakout_target_atr: 3, range_plan_valid_bars: 12, event_plan_valid_bars: 6, breakout_retest_valid_bars: 6 }
             : source === 'alpha_factor'
               ? {
                   alpha_id: '', alpha_version: 1, alpha_name: '',
@@ -3151,10 +3163,6 @@ export default {
         delete clean.params.levels_text
       }
       if (clean.source === 'pivot') serializePivotPercentParams(clean.params)
-      if (clean.source === 'structure_continuation' && clean.params.stop_buffer_percent !== undefined) {
-        clean.params.stop_buffer_ratio = Math.max(0, Math.min(5, Number(clean.params.stop_buffer_percent || 0))) / 100
-        delete clean.params.stop_buffer_percent
-      }
       return clean
     })
 

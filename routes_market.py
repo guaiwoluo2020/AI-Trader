@@ -60,6 +60,9 @@ from system_event_log import SystemEventLogRepository
 from market.services.market_structure_service import analyze as analyze_market_structure
 from market.services.market_structure_engine_v2 import analyze_incremental as analyze_market_structure_v2, restore_snapshot as restore_market_structure_snapshot, DEFAULT_CONFIG as MARKET_STRUCTURE_DEFAULT_CONFIG
 from market.services.market_structure_snapshot_store import current_path as market_structure_snapshot_path, load_current as load_market_structure_snapshot, save_checkpoint as save_market_structure_checkpoint
+from market.store.structure_plan_store import StructureTradePlanRepository
+from market.services.signal.structure_plan_signal import StructurePlanBuilder
+from market_data_source_policy import MarketDataSourcePolicy
 
 
 def _compact_market_structure_snapshot(result: Dict) -> Dict:
@@ -161,7 +164,7 @@ def _persist_historical_klines(
         if utc_timestamp is None and int(offset or 0) != 0:
             utc_timestamp = broker_wall_epoch_to_utc(timestamp, offset)
         try:
-            rows.append((identity.user_id, identity.account_id, symbol, period, timestamp,
+            rows.append((identity.user_id, 0, symbol, period, timestamp,
                          int(utc_timestamp or 0), int(offset or 0),
                          float(item.get("open", 0)), float(item.get("high", 0)),
                          float(item.get("low", 0)), float(item.get("close", 0)),
@@ -202,7 +205,7 @@ def _restore_kline_memory(identity, symbol, period, kline_service) -> int:
         WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
         ORDER BY timestamp DESC LIMIT ?
         """,
-        (identity.user_id, identity.account_id, symbol, period, limits.get(period, 1200)),
+        (identity.user_id, 0, symbol, period, limits.get(period, 1200)),
     )
     if not rows:
         return 0
@@ -313,20 +316,9 @@ def collect_ai_signal_symbols(
             pass
 
     try:
-        add_engine_symbols(engine_manager.get_engine_for_user(user_id))
+        add_engine_symbols(engine_manager.get_market_engine(user_id))
     except Exception:
         pass
-
-    if account_repo is not None:
-        for account in account_repo.list_for_user(user_id):
-            if account.account_type != "mt5" or account.status != "active":
-                continue
-            try:
-                add_engine_symbols(
-                    engine_manager.get_engine(user_id, account.account_id)
-                )
-            except Exception:
-                continue
 
     config = trade_config_repo.get_config(user_id)
     symbols.update(config.get("symbol_config", {}).keys())
@@ -366,6 +358,7 @@ def create_market_routes(
     memberships = MembershipService()
     shared_notifications = SharedReferenceNotificationService()
     impact_service = ConfigurationImpactService()
+    market_source_policy = MarketDataSourcePolicy()
 
     def strategy_payload(strategy, user_id: int) -> Dict:
         payload = strategy.to_dict()
@@ -612,6 +605,11 @@ def create_market_routes(
         period = period.upper()
         if period not in {"H4", "H1", "M15", "M5", "M1"}:
             raise HTTPException(status_code=400, detail=f"不支持的周期: {period}")
+        market_policy = market_source_policy.resolve(
+            identity.user_id, identity.account_id, symbol,
+        )
+        if market_policy.get("mode") == "blocked":
+            raise HTTPException(status_code=409, detail=market_policy)
         engine = engine_manager.get_engine_for_ea(identity)
         restored_count = _restore_kline_memory(
             identity, symbol, period, engine.kline_service,
@@ -622,7 +620,7 @@ def create_market_routes(
             FROM historical_klines
             WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
             """,
-            (identity.user_id, identity.account_id, symbol, period),
+            (identity.user_id, 0, symbol, period),
         )
         return {
             "status": "ok",
@@ -631,6 +629,7 @@ def create_market_routes(
             "server_last_bar_time": int(row["last_bar_time"]) if row and row["last_bar_time"] else 0,
             "stored_bar_count": int(row["bar_count"] or 0) if row else 0,
             "memory_restored_count": restored_count,
+            "market_source": market_policy,
         }
 
     @router.post("/ea/kline/{period}")
@@ -659,6 +658,20 @@ def create_market_routes(
             symbol = data.get('symbol', 'GOLD')
             is_full = data.get('is_full', False)
             klines = data.get('klines', [])
+            market_policy = market_source_policy.resolve(
+                identity.user_id, identity.account_id, symbol,
+            )
+            if market_policy.get("mode") == "blocked":
+                return JSONResponse(
+                    status_code=409,
+                    content={"status": "error", "code": "MARKET_SOURCE_CONFLICT", **market_policy},
+                )
+            if market_policy.get("mode") == "reuse":
+                return {
+                    "status": "ok", "count": 0, "ignored": True,
+                    "message": market_policy.get("message"),
+                    "market_source": market_policy,
+                }
 
             # 服务重启后先用MySQL恢复内存行情，再接受缺口增量。
             if not kline_service.is_initialized(symbol, period):
@@ -756,6 +769,9 @@ def create_market_routes(
                 all_klines = kline_service.get_all_kline_objects(symbol, period)
                 if all_klines:
                     pivot_service.update_pivots(symbol, period, all_klines)
+                result["structure_plan_count"] = engine.refresh_structure_plans(
+                    symbol, period
+                )
 
             cursor_row = get_storage().fetchone(
                 """
@@ -763,7 +779,7 @@ def create_market_routes(
                 FROM historical_klines
                 WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
                 """,
-                (identity.user_id, identity.account_id, symbol, period),
+                (identity.user_id, 0, symbol, period),
             )
             result["server_last_bar_time"] = (
                 int(cursor_row["last_bar_time"])
@@ -821,6 +837,9 @@ def create_market_routes(
                     all_klines = kline_service.get_all_kline_objects(symbol, period)
                     if all_klines:
                         pivot_service.update_pivots(symbol, period, all_klines)
+                    result["structure_plan_count"] = engine.refresh_structure_plans(
+                        symbol, period
+                    )
 
             return {
                 "status": "ok",
@@ -845,7 +864,7 @@ def create_market_routes(
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取K线数据"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        engine = engine_manager.get_market_engine(user.user_id)
         period = period.upper()
         klines = engine.kline_service.get_klines(symbol, period, count)
         # MT5 broker suffixes (for example BTCUSD/BTCUSDm) can differ from
@@ -877,7 +896,7 @@ def create_market_routes(
                        open_price AS open, high_price AS high,
                        low_price AS low, close_price AS close, volume
                 FROM historical_klines
-                WHERE user_id = ? AND symbol = ? AND period = ?
+                WHERE user_id = ? AND account_id = 0 AND symbol = ? AND period = ?
                   AND (timestamp_utc >= ? OR (timestamp_utc = 0 AND timestamp >= ?))
                 ORDER BY COALESCE(NULLIF(timestamp_utc, 0), timestamp) DESC
                 LIMIT ?
@@ -913,7 +932,7 @@ def create_market_routes(
 
     @protected_router.get("/market/structure/{symbol}")
     async def get_market_structure(symbol: str, period: str = Query("M5"), count: int = Query(600), user: AuthUser = Depends(require_auth)):
-        engine = engine_manager.get_engine_for_user(user.user_id)
+        engine = engine_manager.get_market_engine(user.user_id)
         rows = engine.kline_service.get_klines(symbol, period.upper(), min(1000, max(50, count)))
         if not rows:
             # 结构分析必须严格匹配品种名称；GOLD、GOLD_、GOLDm 不互相替代。
@@ -931,7 +950,7 @@ def create_market_routes(
                        open_price AS open, high_price AS high,
                        low_price AS low, close_price AS close, volume
                 FROM historical_klines
-                WHERE user_id = ? AND symbol = ? AND period = ?
+                WHERE user_id = ? AND account_id = 0 AND symbol = ? AND period = ?
                   AND (timestamp_utc >= ? OR (timestamp_utc = 0 AND timestamp >= ?))
                 ORDER BY COALESCE(NULLIF(timestamp_utc, 0), timestamp) DESC
                 LIMIT ?
@@ -988,6 +1007,59 @@ def create_market_routes(
             }, symbol=symbol, status=result.get("current_state", "undetermined"),
         )
         return {"status":"ok", "data": result}
+
+    @protected_router.get("/market/structure/{symbol}/trade-plans")
+    async def get_structure_trade_plans(
+        symbol: str,
+        period: str = Query("M5"),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """行情层结构计划；不绑定页面当前查看账户。"""
+        strategy_rows = strategy_repo.get_all_strategies(user.user_id)
+        repo = StructureTradePlanRepository(get_storage())
+        items = []
+        source_ids = {
+            str(source.get("signal_source_id") or "")
+            for strategy in strategy_rows
+            for source in strategy.get_signal_sources(
+                "structure_plan", enabled_only=True
+            )
+            if str(source.get("period") or "").upper() == period.upper()
+        }
+        if not source_ids:
+            source_ids.add("market-structure")
+        for source_id in source_ids:
+            items.extend(repo.list_current(
+                user.user_id, 0, "", source_id, symbol, period.upper(),
+            ))
+        items = list({str(item.get("plan_id")): item for item in items}.values())
+        # 结构分析页是行情层视图，即使当前没有绑定策略，也要展示
+        # 基础结构计划；策略执行中心只在自己的部署作用域内筛选这些计划。
+        if not items:
+            # 行情层统一取该用户主实盘引擎；非实盘账户不再维护副本。
+            engine = engine_manager.get_market_engine(user.user_id)
+            rows = engine.kline_store.get_all_klines(symbol, period.upper())
+            if rows:
+                structure = analyze_market_structure_v2(
+                    symbol, period.upper(), rows[-600:], MARKET_STRUCTURE_DEFAULT_CONFIG
+                )
+                items = StructurePlanBuilder().build(
+                    "market-structure", symbol, period.upper(), rows[-600:], structure,
+                )
+                bar_time = int(
+                    float(rows[-1].get("timestamp") or rows[-1].get("time") or 0)
+                )
+                if bar_time > 10_000_000_000:
+                    bar_time //= 1000
+                repo.replace_scope(
+                    user.user_id, 0, "", "market-structure",
+                    symbol, period.upper(), items, bar_time,
+                )
+                items = repo.list_current(
+                    user.user_id, 0, "", "market-structure",
+                    symbol, period.upper(),
+                )
+        return {"status": "ok", "symbol": symbol, "period": period.upper(), "plans": items}
 
     @protected_router.get("/admin/market-structure/config")
     async def get_market_structure_config(user: AuthUser = Depends(require_admin)):
@@ -1962,11 +2034,7 @@ def create_market_routes(
                 source_engine, requested_symbol, source_account_id=None,
             ):
                 """在当前账户优先读取，必要时兼容 MT5 经纪商后缀。"""
-                chart_account_id = int(
-                    source_account_id
-                    if source_account_id is not None
-                    else account_id
-                )
+                chart_account_id = 0
                 historical = get_storage().fetchall(
                     """
                     SELECT timestamp, timestamp_utc, broker_utc_offset_seconds,
@@ -3516,14 +3584,7 @@ def create_market_routes(
             )
         except Exception:
             available_symbols = []
-        market_data_accounts = []
-        for account in TradingAccountRepository().list_for_user(user.user_id):
-            if account.account_type != "mt5" or account.status != "active":
-                continue
-            market_data_accounts.append({
-                "value": account.account_id,
-                "title": account.account_name,
-            })
+        market_data_accounts = [{"value": 0, "title": "用户共享行情"}]
         return {
             "status": "ok",
             "access_granted": access["access_granted"],
@@ -3557,12 +3618,7 @@ def create_market_routes(
         config = data.get("config") or {}
         if not symbol or period not in {"M1", "M5", "M15", "H1", "H4"}:
             raise ValueError("请填写交易品种并选择有效的分析周期")
-        market_data_account_id = int(data.get("market_data_account_id") or 0)
-        market_account = TradingAccountRepository().get_by_id(
-            user.user_id, market_data_account_id
-        )
-        if market_account is None or market_account.account_type != "mt5":
-            raise ValueError("请选择自己的 MT5 行情来源账户")
+        data["market_data_account_id"] = 0
         mode = str(config.get("analysis_mode") or "self_analysis")
         if mode != "self_analysis":
             raise ValueError("AI 信号源仅支持自主 AI 分析")
@@ -3696,6 +3752,7 @@ def create_market_routes(
         """Generate a source-specific prompt candidate from unsaved form data."""
         try:
             data = await request.json()
+            data["market_data_account_id"] = 0
             context = prompt_candidate_context(data)
             if not context["symbol"] or context["period"] not in {
                 "M1", "M5", "M15", "H1", "H4",
@@ -3813,6 +3870,7 @@ def create_market_routes(
     async def create_ai_signal_source(request: Request, user: AuthUser = Depends(require_auth)) -> Dict:
         try:
             data = await request.json()
+            data["market_data_account_id"] = 0
             config = dict(data.get("config") or {})
             normalize_ai_signal_kline_count(config)
             normalize_reference_market_data(config)
@@ -3843,6 +3901,7 @@ def create_market_routes(
             normalize_ai_signal_prompt_config(candidate_config)
             candidate["config"] = candidate_config
             validate_independent_ai_signal_source(user, candidate)
+            data["market_data_account_id"] = 0
             data["config"] = candidate_config
             impact = impact_service.analyze(user.user_id, "ai_signal_source", signal_source_id)
             if not impact["allowed"]:
@@ -3959,7 +4018,7 @@ def create_market_routes(
         symbol: Optional[str] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        """Aggregate AI sources by their configured market-data account."""
+        """Aggregate user-scoped AI market sources."""
         access = llm_access_repo.get_status(user.user_id, user.role)
         effective_config = llm_config_repo.get_effective_config(user.user_id)
         access = {
@@ -3971,16 +4030,10 @@ def create_market_routes(
         }
         own_cards = []
         reported_symbols = set()
-        accounts = TradingAccountRepository()
+        engine = engine_manager.get_market_engine(user.user_id)
         for source in ai_signal_source_repo.list(user.user_id):
             if symbol and source.get("symbol") != symbol:
                 continue
-            account = accounts.get_by_id(
-                user.user_id, int(source.get("market_data_account_id") or 0)
-            )
-            if account is None or account.account_type != "mt5":
-                continue
-            engine = engine_manager.get_engine(user.user_id, account.account_id)
             reported_symbols.update(engine.kline_service.get_symbols())
             analysis = engine.get_llm_analysis(source.get("symbol")) or {}
             card = engine._independent_ai_market_card(source, analysis)
@@ -3988,9 +4041,9 @@ def create_market_routes(
                 str(source.get("signal_source_id") or "")
             )
             card["market_data_account"] = {
-                "account_id": account.account_id,
-                "account_name": account.account_name,
-                "mt5_server": account.mt5_server or "",
+                "account_id": 0,
+                "account_name": "用户共享行情",
+                "mt5_server": "",
             }
             own_cards.append(card)
         shared_cards = []

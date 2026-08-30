@@ -26,7 +26,7 @@ SETUP_FAMILIES = {
 }
 SIGNAL_SOURCES = {
     "ai_entry", "pivot", "key_level", "moving_average",
-    "alpha_factor", "manual",
+    "alpha_factor", "structure_plan", "manual",
 }
 
 
@@ -110,6 +110,7 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
         if rule_type not in MANAGEMENT_RULE_TYPES:
             raise ValueError(f"包含不支持的持仓管理规则: {rule_type}")
         rule["type"] = rule_type
+        rule["enabled"] = bool(rule.get("enabled", True))
         if rule_type == "pivot_trailing":
             period = str(rule.get("period", "M5")).upper()
             if period not in PERIODS:

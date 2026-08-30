@@ -169,15 +169,20 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "min_confidence": 60,
             "cooldown_seconds": 180,
         }
-    elif source == "structure_continuation":
+    elif source == "structure_plan":
         params = {
-            "structure_layer": "swing", "entry_mode": "internal_reversal_bos",
-            "require_confirmed_structure": True, "min_structure_confidence": 60,
-            "max_pullback_atr": 2.5, "max_pullback_bars": 12,
-            "breakout_buffer_atr": 0.15, "require_close_confirmation": True,
-            "require_protected_level_intact": True, "allow_liquidity_sweep_recovery": True,
-            "stop_buffer_ratio": 0.0005, "risk_reward_ratio": 2.0,
-            "cooldown_seconds": 180, "one_signal_per_pullback": True,
+            "enable_trend": True, "enable_range": True,
+            "enable_range_boundary": True, "enable_range_breakout": True,
+            "enable_false_breakout": True, "enable_liquidity_sweep": True,
+            "min_structure_confidence": 60, "min_real_risk_reward": 2.0,
+            "max_event_age_bars": 2, "min_breakout_displacement_atr": 0.2,
+            "entry_zone_atr": 0.35, "stop_buffer_atr": 0.25,
+            "target_buffer_atr": 0.1, "breakout_stop_inside_atr": 0.3,
+            "breakout_stop_buffer_atr": 0.8,
+            "breakout_stop_width_ratio": 0.15,
+            "breakout_target_atr": 3.0,
+            "range_plan_valid_bars": 12, "event_plan_valid_bars": 6,
+            "breakout_retest_valid_bars": 6,
         }
     return {
         "signal_source_id": uuid.uuid4().hex[:12],
@@ -236,6 +241,7 @@ def normalize_signal_sources(
         if "key_level" in sources and (
             "ai_entry" in sources or "moving_average" in sources
             or "alpha_factor" in sources or "pivot" in sources
+            or "structure_plan" in sources
         ):
             raise ValueError(
                 "关键点位信号源不能和AI/均线信号源同时存在，也不能和Alpha信号源同时存在"
@@ -250,7 +256,7 @@ def normalize_signal_sources(
         if source == "multi_timeframe":
             continue
         period = str(raw.get("period", "")).upper()
-        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor", "pivot", "structure_continuation"}:
+        if source not in {"key_level", "ai_entry", "moving_average", "alpha_factor", "pivot", "structure_plan"}:
             raise ValueError(f"不支持的信号源类型: {source}")
         if source == "key_level":
             period = "M1"
@@ -356,19 +362,29 @@ def normalize_signal_sources(
             params["cooldown_seconds"] = max(
                 0, min(86400, int(params.get("cooldown_seconds", 180)))
             )
-        elif source == "structure_continuation":
-            params["structure_layer"] = "swing"
-            params["entry_mode"] = str(params.get("entry_mode") or "internal_reversal_bos")
-            if params["entry_mode"] not in {"internal_reversal_bos", "protected_level_rebound"}:
-                raise ValueError("结构趋势延续入场方式无效")
-            params["require_confirmed_structure"] = bool(params.get("require_confirmed_structure", True))
+        elif source == "structure_plan":
+            for name in (
+                "enable_trend", "enable_range", "enable_range_boundary",
+                "enable_range_breakout", "enable_false_breakout",
+                "enable_liquidity_sweep",
+            ):
+                params[name] = bool(params.get(name, True))
             params["min_structure_confidence"] = max(0, min(100, int(params.get("min_structure_confidence", 60))))
-            params["max_pullback_atr"] = max(0.5, min(10.0, float(params.get("max_pullback_atr", 2.5))))
-            params["max_pullback_bars"] = max(1, min(100, int(params.get("max_pullback_bars", 12))))
-            params["breakout_buffer_atr"] = max(0.0, min(3.0, float(params.get("breakout_buffer_atr", 0.15))))
-            params["stop_buffer_ratio"] = max(0.0, min(0.05, float(params.get("stop_buffer_ratio", 0.0005))))
-            params["risk_reward_ratio"] = max(1.0, min(10.0, float(params.get("risk_reward_ratio", 2.0))))
-            params["cooldown_seconds"] = max(0, min(86400, int(params.get("cooldown_seconds", 180))))
+            params["min_real_risk_reward"] = max(1.0, min(10.0, float(params.get("min_real_risk_reward", 2.0))))
+            params["max_event_age_bars"] = max(0, min(10, int(params.get("max_event_age_bars", 2))))
+            params["min_breakout_displacement_atr"] = max(0.0, min(5.0, float(params.get("min_breakout_displacement_atr", 0.2))))
+            params["entry_zone_atr"] = max(0.0, min(3.0, float(params.get("entry_zone_atr", 0.35))))
+            params["stop_buffer_atr"] = max(0.0, min(5.0, float(params.get("stop_buffer_atr", 0.25))))
+            params["target_buffer_atr"] = max(0.0, min(3.0, float(params.get("target_buffer_atr", 0.1))))
+            params["breakout_stop_inside_atr"] = max(0.1, min(5.0, float(params.get("breakout_stop_inside_atr", 0.3))))
+            params["breakout_stop_buffer_atr"] = max(0.1, min(5.0, float(params.get("breakout_stop_buffer_atr", 0.8))))
+            params["breakout_stop_width_ratio"] = max(0.05, min(0.8, float(params.get("breakout_stop_width_ratio", 0.15))))
+            params["breakout_target_atr"] = max(1.0, min(10.0, float(params.get("breakout_target_atr", 3.0))))
+            for name, default in (
+                ("range_plan_valid_bars", 12), ("event_plan_valid_bars", 6),
+                ("breakout_retest_valid_bars", 6),
+            ):
+                params[name] = max(1, min(100, int(params.get(name, default))))
         elif source == "ai_entry":
             params["analysis_mode"] = str(
                 params.get("analysis_mode") or "self_analysis"

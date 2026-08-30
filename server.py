@@ -27,7 +27,7 @@ from market.services import SignalService, StrategyService, RiskManager
 from market.services import (
     KeyLevelSignalGenerator, AIEntrySignalGenerator,
     MovingAverageSignalGenerator, AlphaFactorSignalGenerator,
-    PivotSignalGenerator, StructureContinuationSignalGenerator,
+    PivotSignalGenerator, StructurePlanSignalGenerator,
 )
 from market.services import StatisticsService, PositionService, TradeHistoryService
 from market.services.strategy.transient_decision_store import transient_decision_store
@@ -57,7 +57,10 @@ class TradingServer:
     - 对外：只暴露策略服务接口
     """
 
-    def __init__(self, user_id: int = None, account_id: int = None):
+    def __init__(
+        self, user_id: int = None, account_id: int = None,
+        market_data_source=None,
+    ):
         self.user_id = user_id
         self.account_id = account_id
         self.strategy_deployments = StrategyDeploymentRepository()
@@ -77,16 +80,40 @@ class TradingServer:
 
         # ==================== 行情模块（内部） ====================
         # 存储层
-        self.kline_store = KlineStore()
-        self.pivot_store = PivotStore()
-        self.llm_store = LLMStore(user_id=user_id, account_id=account_id)
-        self.tech_store = TechStore()
+        self.kline_store = (
+            market_data_source.kline_store
+            if market_data_source is not None else KlineStore()
+        )
+        self.pivot_store = (
+            market_data_source.pivot_store
+            if market_data_source is not None else PivotStore()
+        )
+        self.llm_store = (
+            market_data_source.llm_store
+            if market_data_source is not None
+            else LLMStore(user_id=user_id, account_id=0)
+        )
+        self.tech_store = (
+            market_data_source.tech_store
+            if market_data_source is not None else TechStore()
+        )
 
         # 服务层
-        self.kline_service = KlineService(self.kline_store)
-        self.pivot_service = PivotService(self.pivot_store, self.kline_store)
+        self.kline_service = (
+            market_data_source.kline_service
+            if market_data_source is not None else KlineService(self.kline_store)
+        )
+        self.pivot_service = (
+            market_data_source.pivot_service
+            if market_data_source is not None
+            else PivotService(self.pivot_store, self.kline_store)
+        )
         self.llm_service = LLMService(self.llm_store, self.kline_service)
-        self.tech_service = TechService(self.tech_store, self.kline_store, self.pivot_store)
+        self.tech_service = (
+            market_data_source.tech_service
+            if market_data_source is not None
+            else TechService(self.tech_store, self.kline_store, self.pivot_store)
+        )
 
         # LLM 分析器
         self.llm_analyzer = LLMAnalyzer(self.llm_service)
@@ -169,6 +196,7 @@ class TradingServer:
         self._position_update_instructions = defaultdict(dict)
         self._position_partial_instructions = defaultdict(dict)
         self._managed_position_state = {}
+        self._structure_context_cache = {}
         self._position_event_repository = PositionManagementEventRepository()
         self._position_policy_repository = PositionManagementPolicyRepository()
         self._ma_trailing_extremes = {}
@@ -238,8 +266,12 @@ class TradingServer:
             user_id=self.user_id, account_id=self.account_id,
         )
         self._signal_service.register_generator("pivot", pivot_generator)
+        self._structure_plan_generator = StructurePlanSignalGenerator(
+            self.kline_store, user_id=self.user_id or 0,
+            account_id=self.account_id or 0,
+        )
         self._signal_service.register_generator(
-            "structure_continuation", StructureContinuationSignalGenerator(self.kline_store)
+            "structure_plan", self._structure_plan_generator
         )
 
         # 关键点位信号生成器
@@ -394,10 +426,15 @@ class TradingServer:
             getattr(signal, "setup_type", "") or "generic_entry"
         )
         setup_family = str(getattr(signal, "setup_family", "") or "generic")
-        plan_id = str(getattr(signal, "ai_plan_id", "") or "")
-        plan_valid_from = int(
-            getattr(signal, "ai_plan_valid_from", 0) or 0
+        plan_id = str(
+            getattr(signal, "trade_plan_id", "")
+            or getattr(signal, "ai_plan_id", "") or ""
         )
+        plan_valid_from = int(
+            getattr(signal, "trade_plan_valid_from", 0)
+            or getattr(signal, "ai_plan_valid_from", 0) or 0
+        )
+        plan_group_id = str(getattr(signal, "trade_plan_group_id", "") or "")
         plan_instance_id = (
             f"{plan_id}:{plan_valid_from}"
             if plan_id and plan_valid_from else plan_id
@@ -425,16 +462,23 @@ class TradingServer:
                     payload.get("position_attribution") or payload
                     if isinstance(payload, dict) else {}
                 )
+                previous_plan = str(
+                    attribution.get("trade_plan_instance_id")
+                    or attribution.get("ai_plan_instance_id") or ""
+                )
+                previous_group = str(attribution.get("trade_plan_group_id") or "")
                 if (
                     str(attribution.get("strategy_id") or "") == strategy.strategy_id
-                    and str(attribution.get("ai_plan_instance_id") or "")
-                    == plan_instance_id
+                    and (
+                        previous_plan == plan_instance_id
+                        or (plan_group_id and previous_group == plan_group_id)
+                    )
                 ):
                     return {
                         "allowed": False, "scope": "live_setup",
                         "setup_type": setup_type, "setup_family": setup_family,
                         "plan_instance_id": plan_instance_id,
-                        "reason": "本次AI分析的该交易建议已在此实盘账户触发过，不重复开仓",
+                        "reason": "本交易计划已在此实盘部署触发过，不重复开仓",
                     }
 
         policy = PositionManagementPolicyRepository().get_for_strategy(
@@ -541,7 +585,10 @@ class TradingServer:
             }
         last_loss_at = int(rows[0].get("closed_at") or 0)
         last_attribution = rows[0].get("position_attribution") or {}
-        last_plan_id = str(last_attribution.get("ai_plan_id") or "")
+        last_plan_id = str(
+            last_attribution.get("trade_plan_id")
+            or last_attribution.get("ai_plan_id") or ""
+        )
         period = str(getattr(signal, "source_period", "M1") or "M1").upper()
         bar_seconds = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}.get(period, 60)
         now = int(time.time())
@@ -930,9 +977,17 @@ class TradingServer:
             active_config = snapshot_config or (policy.config if policy else {})
             if not active_config:
                 continue
+            source_config = next((item for item in strategy.get_signal_sources() if str(item.get("signal_source_id") or "") == str(source_id)), {})
+            structure_period = str(
+                attribution.get("signal_source_period")
+                or source_config.get("period") or "M5"
+            ).upper()
+            structure = self.get_structure_context(symbol, structure_period)
             action = manager.evaluate(
                 active_config, state,
-                {"price": current_price, "time": int(datetime.now().timestamp())},
+                {"price": current_price, "time": int(datetime.now().timestamp()),
+                 "atr": float(structure.get("atr") or 0),
+                 "structure_hierarchy": structure.get("structure_hierarchy") or {}},
                 pivots=pivots,
                 reverse_signal=(
                     reverse and any(
@@ -943,6 +998,7 @@ class TradingServer:
                     )
                 ),
             )
+
             # 将一次性管理动作写入内存状态，防止后续 TICK 重复触发。
             for event in action.events:
                 if event.get("status") != "triggered":
@@ -1004,6 +1060,41 @@ class TradingServer:
                         "reason": action.reason,
                     }
 
+    def get_structure_context(self, symbol: str, period: str) -> Dict:
+        """Return one cached structure result per closed K-line."""
+        rows = self.kline_store.get_all_klines(symbol, period)
+        if not rows:
+            return {}
+        latest = rows[-1]
+        latest_time = str(latest.get("timestamp") or latest.get("time") or "")
+        key = (str(symbol), str(period).upper())
+        cached = self._structure_context_cache.get(key)
+        if cached and cached[0] == latest_time:
+            return cached[1]
+        from market.services.market_structure_engine_v2 import analyze as analyze_structure
+        result = analyze_structure(symbol, period, rows[-600:])
+        self._structure_context_cache[key] = (latest_time, result)
+        return result
+
+    def refresh_structure_plans(self, symbol: str, period: str) -> int:
+        """Regenerate persisted plans once after a newly closed K-line arrives."""
+        structure = self.get_structure_context(symbol, period)
+        if not structure:
+            return 0
+        refreshed = 0
+        for strategy in self._strategies_for_quote(symbol):
+            try:
+                plans = self._structure_plan_generator.refresh_plans(
+                    symbol, period, strategy, structure
+                )
+                refreshed += len(plans)
+            except Exception as exc:
+                print(
+                    f"[TradingServer] 刷新结构交易计划失败: "
+                    f"{symbol} {period} {strategy.strategy_id}: {exc}"
+                )
+        return refreshed
+
     def _record_position_management_events(
         self, symbol: str, ticket: int, state: Dict, events: List[Dict],
     ) -> None:
@@ -1063,7 +1154,10 @@ class TradingServer:
 
     # ==================== EA 接口 ====================
 
-    def get_trades_by_symbol(self, symbol: str, price: Optional[float] = None) -> Dict:
+    def get_trades_by_symbol(
+        self, symbol: str, price: Optional[float] = None,
+        evaluate_price: bool = True,
+    ) -> Dict:
         """
         EA获取交易数据
 
@@ -1074,7 +1168,7 @@ class TradingServer:
         """
         # 处理价格（生成信号和决策）
         process_result = {}
-        if price is not None:
+        if evaluate_price and price is not None:
             process_result = self.process_price(symbol, price)
 
         if self._live_entries_allowed():

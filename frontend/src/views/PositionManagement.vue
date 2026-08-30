@@ -340,8 +340,8 @@ function syncManagement(rules = []) {
   const be = find('break_even'); management.breakEven = Boolean(be); management.breakEvenR = be?.activation_r || 1
   const trail = find('trailing_stop'); management.trailing = Boolean(trail); management.trailingActivationR = trail?.activation_r || 1; management.trailingR = trail?.distance_r || 0.8
   const partial = find('partial_take_profit'); management.partialTakeProfit = Boolean(partial); management.partialLevels = deepClone(partial?.levels?.length ? partial.levels : [{ level_id: 'tp1', trigger_r: 1, close_percent: 30, move_sl: 'break_even' }])
-  const pivot = find('pivot_trailing'); management.pivotTrailing = Boolean(pivot); management.pivotPeriod = pivot?.period || 'M5'
-  const structure = find('structure_trailing'); management.structureTrailing = Boolean(structure); management.structureBuffer = structure?.buffer_value ?? 0.15; management.structureImprove = structure?.min_improvement_atr ?? 0.10
+  const pivot = find('pivot_trailing'); management.pivotTrailing = Boolean(pivot && pivot.enabled !== false); management.pivotPeriod = pivot?.period || 'M5'
+  const structure = find('structure_trailing'); management.structureTrailing = Boolean(structure && structure.enabled !== false); management.structureBuffer = structure?.buffer_value ?? 0.15; management.structureImprove = structure?.min_improvement_atr ?? 0.10
   management.reverse = Boolean(find('reverse_signal'))
   const timeout = find('max_holding_bars'); management.timeout = Boolean(timeout); management.timeoutBars = timeout?.bars || 120; management.timeoutPeriod = timeout?.period || 'M1'
 }
@@ -414,8 +414,9 @@ function enableProfileCustomization(profile) {
 }
 function restoreRecommendedProfile(profile) { applyRecommendedProfile(profile) }
 function managementRulesText(rules = []) {
-  if (!rules.length) return '继承默认持仓后管理'
-  return rules.map(rule => {
+  const enabledRules = rules.filter(rule => rule.enabled !== false)
+  if (!enabledRules.length) return '继承默认持仓后管理'
+  return enabledRules.map(rule => {
     if (rule.type === 'break_even') return `${rule.activation_r}R 保本`
     if (rule.type === 'trailing_stop') return `${rule.activation_r}R 启动、${rule.distance_r}R 移动止损`
     if (rule.type === 'partial_take_profit') return (rule.levels || []).map(level => `${level.trigger_r}R 平仓 ${level.close_percent}%`).join('，')
@@ -474,8 +475,8 @@ function removeSetupProfile(index) { form.config.setup_profiles.splice(index, 1)
 function buildManagementRules() {
   const rules = []
   if (management.breakEven) rules.push({ type: 'break_even', activation_r: management.breakEvenR, offset_r: 0 })
-  if (management.pivotTrailing) rules.push({ type: 'pivot_trailing', period: management.pivotPeriod, buffer: { type: 'fixed_points', value: 0 } })
-  if (management.structureTrailing) rules.push({ type: 'structure_trailing', structure_layer: 'swing', buffer_type: 'atr', buffer_value: Number(management.structureBuffer) || 0.15, min_improvement_atr: Number(management.structureImprove) || 0.10, confirm_bars: 1, cooldown_seconds: 30 })
+  rules.push({ type: 'pivot_trailing', enabled: management.pivotTrailing, period: management.pivotPeriod, buffer: { type: 'fixed_points', value: 0 } })
+  rules.push({ type: 'structure_trailing', enabled: management.structureTrailing, structure_layer: 'swing', buffer_type: 'atr', buffer_value: Number(management.structureBuffer) || 0.15, min_improvement_atr: Number(management.structureImprove) || 0.10, confirm_bars: 1, cooldown_seconds: 30 })
   if (management.trailing) rules.push({ type: 'trailing_stop', activation_r: management.trailingActivationR, distance_r: management.trailingR })
   if (management.partialTakeProfit) rules.push({ type: 'partial_take_profit', levels: deepClone(management.partialLevels) })
   if (management.reverse) rules.push({ type: 'reverse_signal' })
@@ -548,7 +549,7 @@ async function useShared(policy) {
     usingSharedId.value = ''
   }
 }
-function ruleNames(rules = []) { return rules.map(rule => labels[rule.type] || rule.type).join(' → ') }
+function ruleNames(rules = []) { return rules.filter(rule => rule.enabled !== false).map(rule => labels[rule.type] || rule.type).join(' → ') }
 onMounted(load)
 </script>
 

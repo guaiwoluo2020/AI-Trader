@@ -26,6 +26,8 @@ def build_position_attribution(
     initial_risk = float(management.get("initial_risk") or 0)
     ai_plan_id = str(summary.get("selected_ai_plan_id") or "")
     ai_plan_valid_from = int(summary.get("selected_ai_plan_valid_from") or 0)
+    trade_plan_id = str(summary.get("selected_trade_plan_id") or "")
+    trade_plan_valid_from = int(summary.get("selected_trade_plan_valid_from") or 0)
     return {
         "decision_id": str(decision_id or ""),
         "strategy_id": str(strategy_id or ""),
@@ -36,6 +38,7 @@ def build_position_attribution(
             or summary.get("selected_signal_source") or ""
         ),
         "signal_source_id": str(summary.get("selected_signal_source_id") or ""),
+        "signal_source_period": str(summary.get("selected_signal_period") or ""),
         "setup_type": str(
             setup.get("setup_type")
             or summary.get("selected_setup_type") or "generic_entry"
@@ -47,6 +50,14 @@ def build_position_attribution(
         "entry_mode": str(
             setup.get("entry_mode")
             or summary.get("selected_entry_mode") or "touch_or_near"
+        ),
+        "trade_plan_id": trade_plan_id,
+        "trade_plan_group_id": str(summary.get("selected_trade_plan_group_id") or ""),
+        "trade_plan_valid_from": trade_plan_valid_from,
+        "trade_plan_expires_at": int(summary.get("selected_trade_plan_expires_at") or 0),
+        "trade_plan_instance_id": (
+            f"{trade_plan_id}:{trade_plan_valid_from}"
+            if trade_plan_id and trade_plan_valid_from else trade_plan_id
         ),
         "ai_plan_id": ai_plan_id,
         "ai_plan_valid_from": ai_plan_valid_from,

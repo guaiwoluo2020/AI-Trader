@@ -18,7 +18,7 @@ class SignalSource:
     AI_ENTRY = "ai_entry"        # AI入场信号
     MOVING_AVERAGE = "moving_average"  # 均线交叉信号
     ALPHA_FACTOR = "alpha_factor"  # 已验证 Alpha 因子信号
-    STRUCTURE_CONTINUATION = "structure_continuation"  # 结构趋势延续
+    STRUCTURE_PLAN = "structure_plan"  # K线结构交易计划
 
 
 class SignalStatus:
@@ -89,6 +89,12 @@ class TradingSignal:
     ai_plan_status: str = ""
     ai_plan_valid_from: int = 0
     ai_plan_expires_at: int = 0
+
+    # Generic structure/AI trade-plan identity
+    trade_plan_id: str = ""
+    trade_plan_group_id: str = ""
+    trade_plan_valid_from: int = 0
+    trade_plan_expires_at: int = 0
 
     # MovingAverage信号
     fast_ma: Optional[float] = None
@@ -201,6 +207,10 @@ class TradingSignal:
             "ai_plan_status": self.ai_plan_status,
             "ai_plan_valid_from": self.ai_plan_valid_from,
             "ai_plan_expires_at": self.ai_plan_expires_at,
+            "trade_plan_id": self.trade_plan_id,
+            "trade_plan_group_id": self.trade_plan_group_id,
+            "trade_plan_valid_from": self.trade_plan_valid_from,
+            "trade_plan_expires_at": self.trade_plan_expires_at,
             "fast_ma": self.fast_ma,
             "slow_ma": self.slow_ma,
             "status": self.status,
@@ -271,6 +281,10 @@ class TradingSignal:
             ai_plan_status=str(data.get('ai_plan_status') or ''),
             ai_plan_valid_from=int(data.get('ai_plan_valid_from', 0) or 0),
             ai_plan_expires_at=int(data.get('ai_plan_expires_at', 0) or 0),
+            trade_plan_id=str(data.get('trade_plan_id') or ''),
+            trade_plan_group_id=str(data.get('trade_plan_group_id') or ''),
+            trade_plan_valid_from=int(data.get('trade_plan_valid_from', 0) or 0),
+            trade_plan_expires_at=int(data.get('trade_plan_expires_at', 0) or 0),
             fast_ma=data.get('fast_ma'),
             slow_ma=data.get('slow_ma'),
             signal_id=data.get('signal_id', ''),
