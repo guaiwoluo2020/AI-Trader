@@ -337,6 +337,7 @@ class PaperTradingServiceTests(unittest.TestCase):
         self.assertEqual(len(detail["equity_curve"]), 2)
 
     def test_stale_pending_order_is_canceled_before_it_can_fill(self):
+        self.assertEqual(self.service.PENDING_ORDER_TIMEOUT_SECONDS, 60)
         self.service.deploy(
             self.user.user_id, self.account.account_id, "strategy-1"
         )

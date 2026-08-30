@@ -54,7 +54,7 @@ class PaperTradingService:
 
     # paper_orders.pending 只是等待下一次 Tick 撮合的短暂状态，不是长期限价单。
     # 报价链路中断时必须释放风险额度，避免旧订单永久阻塞后续信号。
-    PENDING_ORDER_TIMEOUT_SECONDS = 180
+    PENDING_ORDER_TIMEOUT_SECONDS = 60
 
     def __init__(self, storage: Optional[SQLiteStorage] = None):
         self.storage = storage or get_storage()
@@ -853,7 +853,7 @@ class PaperTradingService:
             )
             self._sync_paper_decision_status(
                 user_id, int(order["account_id"]), str(order["decision_id"]),
-                str(order["order_id"]), status="canceled", auto_executed=False,
+                str(order["order_id"]), status="expired", auto_executed=False,
             )
         return len(orders)
 
@@ -1601,6 +1601,15 @@ class PaperTradingService:
                     reason=str(decision.get("decision_reason") or ""),
                     payload=attribution,
                 )
+            if status == "rejected":
+                # The order can be rejected by the creation-time second guard
+                # after the decision audit was persisted as pending.  Reflect
+                # that terminal result immediately instead of leaving the
+                # execution centre showing "等待模拟撮合" indefinitely.
+                self._sync_paper_decision_status(
+                    int(user_id), account_id, str(decision.get("decision_id") or ""),
+                    order_id, status="rejected", auto_executed=False,
+                )
             return True
         except Exception as exc:
             if "UNIQUE constraint failed" in str(exc):
@@ -2092,7 +2101,7 @@ class PaperTradingService:
             SELECT decision_id, order_id, status
             FROM paper_orders
             WHERE user_id = ? AND account_id = ?
-              AND status IN ('filled', 'rejected')
+              AND status IN ('filled', 'rejected', 'canceled')
             ORDER BY updated_at DESC
             LIMIT 1000
             """,
@@ -2102,7 +2111,11 @@ class PaperTradingService:
             self._sync_paper_decision_status(
                 user_id, account_id, str(order["decision_id"]),
                 str(order["order_id"]),
-                status="confirmed" if order["status"] == "filled" else "rejected",
+                status=(
+                    "confirmed" if order["status"] == "filled"
+                    else "expired" if order["status"] == "canceled"
+                    else "rejected"
+                ),
                 auto_executed=order["status"] == "filled",
             )
 
