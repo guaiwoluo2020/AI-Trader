@@ -89,6 +89,16 @@
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_min_efficiency" type="number" min="0.1" max="1" step="0.05" label="趋势方向效率" hint="净位移/结构路径的最低比例" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_min_net_change_atr" type="number" min="0.5" max="10" step="0.5" label="趋势最小净位移（ATR）" hint="主导方向还需达到的整体位移" persistent-hint density="compact" variant="outlined" /></v-col>
             </v-row>
+            <div class="llm-section-head compact mt-4"><div><h3>结构交易计划参数</h3><p>行情层统一生成计划；按品种/周期专属配置覆盖默认值，策略仅负责引用和执行筛选。</p></div></div>
+            <v-row class="mt-2">
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.entry_zone_atr" type="number" min="0" max="3" step="0.05" label="入场区域（ATR）" hint="计划入场价允许的接近范围" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.stop_buffer_atr" type="number" min="0" max="5" step="0.05" label="止损缓冲（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.min_real_risk_reward" type="number" min="1" max="10" step="0.1" label="最低真实盈亏比" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.breakout_target_atr" type="number" min="1" max="10" step="0.5" label="突破目标（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.breakout_retest_valid_bars" type="number" min="1" max="50" label="突破回踩有效K线数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.enable_triangle_prebreakout" color="primary" inset hide-details label="启用三角形提前入场" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.require_location_reclaim" color="primary" inset hide-details label="结构位置要求回收确认" /></v-col>
+            </v-row>
             <div class="llm-section-head compact mt-4"><div><h3>品种 / 周期专属覆盖</h3><p>专属参数优先于全局参数；未配置的字段继续使用全局值。</p></div></div>
             <div class="d-flex flex-wrap ga-2 align-center">
               <v-select v-model="structureProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:220px" />
@@ -1333,7 +1343,7 @@ export default {
     const pageTitle = computed(() => isStrategyPage.value ? '策略管理' : '用户配置')
     const settingsTab = ref('account')
     const llmWorkspaceTab = ref('providers')
-    const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_buffer_atr: 0.1, break_confirm_bars: 2, retest_bars: 2, displacement_atr: 0.8, range_touch_tolerance: 0.003, range_touch_atr: 0.45, range_min_touches: 2, range_min_inside_ratio: 0.65, range_min_bars: 24, range_max_atr: 8, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18, trend_min_direction_ratio: 0.62, trend_relaxed_direction_ratio: 0.55, trend_min_efficiency: 0.30, trend_min_net_change_atr: 1.5 })
+    const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_buffer_atr: 0.1, break_confirm_bars: 2, retest_bars: 2, displacement_atr: 0.8, range_touch_tolerance: 0.003, range_touch_atr: 0.45, range_min_touches: 2, range_min_inside_ratio: 0.65, range_min_bars: 24, range_max_atr: 8, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18, trend_min_direction_ratio: 0.62, trend_relaxed_direction_ratio: 0.55, trend_min_efficiency: 0.30, trend_min_net_change_atr: 1.5, entry_zone_atr: 0.35, stop_buffer_atr: 0.25, min_real_risk_reward: 1.2, breakout_target_atr: 3, breakout_retest_valid_bars: 6, enable_triangle_prebreakout: true, require_location_reclaim: true })
     const structureEngineSaving = ref(false)
     const structureProfiles = ref([])
     const structureProfileDraft = ref({ symbol: '', period: 'M5' })

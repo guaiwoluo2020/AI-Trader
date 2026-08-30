@@ -11,9 +11,47 @@ from ...models import SignalSource, TradingSignal
 from ...store import KlineStore
 from ...store.structure_plan_store import StructureTradePlanRepository
 from ..market_structure_engine_v2 import analyze
+from sqlite_storage import RuntimeStateRepository
 
 
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
+
+# Public, market-layer defaults.  These parameters describe how a structure
+# becomes a trade plan; they intentionally do not belong to a deployment.
+STRUCTURE_PLAN_DEFAULT_CONFIG = {
+    "enable_structure_location": True, "enable_range_boundary": True,
+    "enable_range_breakout": True, "enable_triangle_prebreakout": True,
+    "enable_choch": True, "enable_liquidity_sweep": True, "enable_trend": True,
+    "entry_zone_atr": 0.35, "location_proximity_atr": 0.6,
+    "stop_buffer_atr": 0.25, "target_buffer_atr": 0.1,
+    "min_real_risk_reward": 1.2, "min_structure_confidence": 60,
+    "breakout_stop_inside_atr": 0.3, "breakout_stop_buffer_atr": 0.8,
+    "breakout_target_atr": 3.0, "breakout_retest_valid_bars": 6,
+    "range_plan_valid_bars": 12, "location_plan_valid_bars": 6,
+    "require_range_boundary_reclaim": False, "require_location_reclaim": True,
+    "min_breakout_displacement_atr": 0.2, "min_choch_displacement_atr": 0.2,
+    "min_trendline_touches": 2,
+}
+
+
+def resolve_structure_plan_config(symbol: str, period: str) -> Dict:
+    """Resolve the canonical market-layer plan config for one symbol/period."""
+    config = dict(STRUCTURE_PLAN_DEFAULT_CONFIG)
+    try:
+        stored_items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
+        stored = stored_items[-1] if stored_items else {}
+        allowed = set(STRUCTURE_PLAN_DEFAULT_CONFIG)
+        config.update({key: value for key, value in stored.items() if key in allowed})
+        for profile in stored.get("profiles", []) if isinstance(stored, dict) else []:
+            if (str(profile.get("symbol") or "").upper() == str(symbol).upper()
+                    and str(profile.get("period") or "").upper() == str(period).upper()):
+                config.update({key: value for key, value in profile.items() if key in allowed})
+                break
+    except Exception as exc:
+        # Plan generation must continue with safe defaults if the optional
+        # runtime configuration store is temporarily unavailable.
+        print(f"[StructurePlan] 公共计划配置读取失败，使用默认值: {exc}")
+    return config
 
 
 def _number(value, default=0.0) -> float:
@@ -571,7 +609,8 @@ class StructurePlanBuilder:
             # deliberately limited to the convergence end and requires the
             # price to be near the projected lower trendline; otherwise only
             # the breakout watcher is exposed.
-            if pattern in {"ascending_triangle", "ascending", "descending_triangle", "descending"}:
+            if (pattern in {"ascending_triangle", "ascending", "descending_triangle", "descending"}
+                    and self._param("enable_triangle_prebreakout", True)):
                 close = _number(rows[-1].get("close") or rows[-1].get("close_price"))
                 low_slope = _number(box.get("low_slope"))
                 low_intercept = _number(box.get("low_intercept"))
@@ -887,7 +926,12 @@ class StructurePlanSignalGenerator:
                 all_plans.extend(self._cache.get(key, []))
                 continue
             result = structure or analyze(symbol, period, rows[-600:])
-            plans = StructurePlanBuilder(config.get("params") or {}).build(
+            # Structure plans are generated from the canonical market-layer
+            # config, not duplicated strategy parameters.  Strategy config is
+            # only used later for execution filtering and risk management.
+            plans = StructurePlanBuilder(
+                resolve_structure_plan_config(symbol, period)
+            ).build(
                 source_id, symbol, period, rows[-600:], result,
             )
             self.repository.replace_scope(

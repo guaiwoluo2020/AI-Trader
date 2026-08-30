@@ -61,7 +61,7 @@ from market.services.market_structure_service import analyze as analyze_market_s
 from market.services.market_structure_engine_v2 import analyze_incremental as analyze_market_structure_v2, restore_snapshot as restore_market_structure_snapshot, DEFAULT_CONFIG as MARKET_STRUCTURE_DEFAULT_CONFIG
 from market.services.market_structure_snapshot_store import current_path as market_structure_snapshot_path, load_current as load_market_structure_snapshot, save_checkpoint as save_market_structure_checkpoint
 from market.store.structure_plan_store import StructureTradePlanRepository
-from market.services.signal.structure_plan_signal import StructurePlanBuilder
+from market.services.signal.structure_plan_signal import StructurePlanBuilder, STRUCTURE_PLAN_DEFAULT_CONFIG, resolve_structure_plan_config
 from market_data_source_policy import MarketDataSourcePolicy
 
 
@@ -1043,7 +1043,9 @@ def create_market_routes(
                 structure = analyze_market_structure_v2(
                     symbol, period.upper(), rows[-600:], MARKET_STRUCTURE_DEFAULT_CONFIG
                 )
-                items = StructurePlanBuilder().build(
+                items = StructurePlanBuilder(
+                    resolve_structure_plan_config(symbol, period.upper())
+                ).build(
                     "market-structure", symbol, period.upper(), rows[-600:], structure,
                 )
                 bar_time = int(
@@ -1065,11 +1067,13 @@ def create_market_routes(
     async def get_market_structure_config(user: AuthUser = Depends(require_admin)):
         items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
         stored = items[-1] if items else {}
-        return {"status": "ok", "config": {**MARKET_STRUCTURE_DEFAULT_CONFIG, **{k:v for k,v in stored.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG}}, "profiles": stored.get("profiles", [])}
+        defaults = {**MARKET_STRUCTURE_DEFAULT_CONFIG, **STRUCTURE_PLAN_DEFAULT_CONFIG}
+        return {"status": "ok", "config": {**defaults, **{k:v for k,v in stored.items() if k in defaults}}, "profiles": stored.get("profiles", [])}
 
     @protected_router.put("/admin/market-structure/config")
     async def put_market_structure_config(payload: Dict, user: AuthUser = Depends(require_admin)):
-        cfg = dict(MARKET_STRUCTURE_DEFAULT_CONFIG)
+        allowed = {**MARKET_STRUCTURE_DEFAULT_CONFIG, **STRUCTURE_PLAN_DEFAULT_CONFIG}
+        cfg = dict(allowed)
         integer_keys = {
             "pivot_legs", "medium_pivot_legs", "large_pivot_legs",
             "break_confirm_bars", "retest_bars", "range_min_touches",
@@ -1087,7 +1091,7 @@ def create_market_routes(
         for profile in profiles if isinstance(profiles, list) else []:
             if not profile.get("symbol") or not profile.get("period"): continue
             item = {"symbol": str(profile["symbol"]).strip(), "period": str(profile["period"]).upper()}
-            for key in MARKET_STRUCTURE_DEFAULT_CONFIG:
+            for key in allowed:
                 if key in profile:
                     try:
                         value = float(profile[key])
@@ -1096,7 +1100,7 @@ def create_market_routes(
             normalized_profiles.append(item)
         cfg["profiles"] = normalized_profiles
         RuntimeStateRepository(0, 0).upsert_entity("market_structure_config", "default", cfg, status="active")
-        return {"status": "ok", "config": {k:v for k,v in cfg.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG}, "profiles": normalized_profiles}
+        return {"status": "ok", "config": {k:v for k,v in cfg.items() if k in allowed}, "profiles": normalized_profiles}
 
     @protected_router.get("/market/pivots/{symbol}")
     async def get_pivots(
