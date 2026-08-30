@@ -37,6 +37,11 @@ class PositionManager:
     ) -> Tuple[float, float, List[Dict]]:
         settings = config.get("multi_level_exit") or {}
         stops, targets = [], []
+        supplied_targets = list(target_candidates or [])
+        price_discovery = bool(supplied_targets) and all(
+            str(item.get("source_type") or "") == "risk_reward_projection"
+            for item in supplied_targets
+        )
         for kind, candidates, percentages in (
             ("stop_loss", stop_candidates, settings.get("stop_close_percent") or {}),
             ("take_profit", target_candidates, settings.get("take_profit_close_percent") or {}),
@@ -71,18 +76,57 @@ class PositionManager:
                     "status": "waiting",
                 })
                 (stops if kind == "stop_loss" else targets).append(item)
-        if not stops or not targets:
-            raise ValueError("多层结构持仓管理需要有效的结构止损和止盈候选点")
+        if not stops:
+            raise ValueError("多层结构持仓管理需要至少一个有效的结构止损候选点")
 
         stops.sort(
             key=lambda item: abs(float(item["price"]) - entry_price)
         )
-        targets.sort(
-            key=lambda item: abs(float(item["price"]) - entry_price)
-        )
+        targets.sort(key=lambda item: abs(float(item["price"]) - entry_price))
         # The furthest available structure level always closes the remainder.
         stops[-1]["close_remaining"] = True
-        targets[-1]["close_remaining"] = True
+        if price_discovery or not targets:
+            targets = []
+            reference_risk = abs(entry_price - float(stops[0]["price"]))
+            sign = 1 if direction == "buy" else -1
+            for index, level in enumerate(
+                settings.get("price_discovery_take_profit_levels") or [], start=1
+            ):
+                risk_reward = max(0.0, float(level.get("risk_reward") or 0))
+                close_percent = min(100.0, max(
+                    0.0, float(level.get("close_percent") or 0)
+                ))
+                if not risk_reward or not close_percent:
+                    continue
+                targets.append({
+                    "type": "take_profit",
+                    "level_id": str(
+                        level.get("level_id") or f"price_discovery_tp{index}"
+                    ),
+                    "structure_layer": "projection",
+                    "source_type": "risk_reward_projection",
+                    "risk_reward": risk_reward,
+                    "price": entry_price + sign * reference_risk * risk_reward,
+                    "close_percent": close_percent,
+                    "status": "waiting",
+                    "reason": f"价格发现阶段 {risk_reward:g}R 分批止盈",
+                })
+            if not targets:
+                raise ValueError("价格发现模式至少需要一个有效的R倍数止盈层级")
+            targets.append({
+                "type": "runner",
+                "level_id": "price_discovery_runner",
+                "structure_layer": "dynamic",
+                "source_type": "trailing_stop",
+                "price": 0.0,
+                "close_percent": 0.0,
+                "close_remaining": True,
+                "reference_risk": reference_risk,
+                "status": "waiting",
+                "reason": "剩余仓位由最有利价格的移动止损管理",
+            })
+        else:
+            targets[-1]["close_remaining"] = True
         furthest_stop = float(stops[-1]["price"])
         disaster_buffer = max(0.0, float(atr or 0)) * max(
             0.0, float(settings.get("disaster_stop_buffer_atr", 0.50) or 0)
@@ -91,7 +135,9 @@ class PositionManager:
             furthest_stop - disaster_buffer
             if direction == "buy" else furthest_stop + disaster_buffer
         )
-        reference_target = float(targets[0]["price"])
+        reference_target = float(next(
+            item["price"] for item in targets if item.get("type") == "take_profit"
+        ))
         return disaster_stop, reference_target, stops + targets
 
     @staticmethod
@@ -421,6 +467,52 @@ class PositionManager:
                     level_id=level_ids[-1], level_ids=level_ids,
                     reason=kind, events=events,
                 )
+
+            runner = next((
+                item for item in exit_levels
+                if item.get("type") == "runner"
+                and str(item.get("level_id") or "") not in triggered_partials
+            ), None)
+            multi_settings = policy_config.get("multi_level_exit") or {}
+            if runner and multi_settings.get("runner_trailing_enabled", True):
+                runner_risk = max(
+                    0.0, float(runner.get("reference_risk") or risk)
+                )
+                activation_r = max(0.0, float(
+                    multi_settings.get("runner_trailing_activation_r", 1.0) or 0
+                ))
+                distance_r = max(0.0, float(
+                    multi_settings.get("runner_trailing_distance_r", 0.8) or 0
+                ))
+                runner_profit_r = profit / runner_risk if runner_risk > 0 else 0.0
+                if runner_risk > 0 and runner_profit_r >= activation_r:
+                    trailing_price = (
+                        favorable - runner_risk * distance_r
+                        if direction == "buy" else favorable + runner_risk * distance_r
+                    )
+                    hit = (
+                        price <= trailing_price if direction == "buy"
+                        else price >= trailing_price
+                    )
+                    if hit:
+                        runner_id = str(
+                            runner.get("level_id") or "price_discovery_runner"
+                        )
+                        add_event(
+                            "multi_level_runner_trailing", "triggered",
+                            f"价格从最有利位置回撤至移动止损 {trailing_price:.2f}，平掉剩余仓位",
+                            level_id=runner_id, level_ids=[runner_id],
+                            close_volume=volume, trailing_stop=trailing_price,
+                            trailing_activation_r=activation_r,
+                            trailing_distance_r=distance_r,
+                            runner_profit_r=round(runner_profit_r, 4),
+                            execution_key=runner_id,
+                        )
+                        return PositionAction(
+                            "close", close_volume=volume, close_percent=100.0,
+                            level_id=runner_id, level_ids=[runner_id],
+                            reason="multi_level_runner_trailing", events=events,
+                        )
 
         # An AI take-profit is a staged exit: close the configured portion at
         # the signal price, then let the remaining volume be managed by the

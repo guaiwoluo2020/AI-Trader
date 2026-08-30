@@ -41,6 +41,18 @@ def default_position_management_config() -> Dict:
             "take_profit_close_percent": {
                 "internal": 30, "swing": 30, "external": 100,
             },
+            # When price is discovering a new high/low there may be no valid
+            # structure target ahead. Realize part of the position at fixed R
+            # milestones and manage the remainder with a virtual trailing stop.
+            "price_discovery_take_profit_levels": [
+                {"level_id": "price_discovery_tp1", "risk_reward": 1.0,
+                 "close_percent": 30},
+                {"level_id": "price_discovery_tp2", "risk_reward": 2.0,
+                 "close_percent": 30},
+            ],
+            "runner_trailing_enabled": True,
+            "runner_trailing_activation_r": 1.0,
+            "runner_trailing_distance_r": 0.8,
         },
         "initial_stop_rules": [
             {"type": "pivot", "period": "M5", "selection": "nearest",
@@ -110,6 +122,43 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
                 0.0, float(values.get(layer, default) or 0)
             ))
         multi[key] = values
+    fallback_levels = []
+    for index, level in enumerate(
+        multi.get("price_discovery_take_profit_levels") or [
+            {"risk_reward": 1.0, "close_percent": 30},
+            {"risk_reward": 2.0, "close_percent": 30},
+        ],
+        start=1,
+    ):
+        risk_reward = _positive(
+            level.get("risk_reward", index), "价格发现止盈R"
+        )
+        close_percent = _positive(
+            level.get("close_percent", 30), "价格发现止盈比例"
+        )
+        if close_percent > 100:
+            raise ValueError("价格发现止盈比例不能超过100%")
+        fallback_levels.append({
+            "level_id": str(
+                level.get("level_id") or f"price_discovery_tp{index}"
+            ),
+            "risk_reward": risk_reward,
+            "close_percent": close_percent,
+        })
+    multi["price_discovery_take_profit_levels"] = sorted(
+        fallback_levels, key=lambda item: item["risk_reward"]
+    )
+    multi["runner_trailing_enabled"] = bool(
+        multi.get("runner_trailing_enabled", True)
+    )
+    multi["runner_trailing_activation_r"] = _positive(
+        multi.get("runner_trailing_activation_r", 1.0),
+        "价格发现移动止损启动R",
+    )
+    multi["runner_trailing_distance_r"] = _positive(
+        multi.get("runner_trailing_distance_r", 0.8),
+        "价格发现移动止损距离R",
+    )
     normalized["multi_level_exit"] = multi
     stop_rules = list(normalized.get("initial_stop_rules") or [])
     take_rules = list(normalized.get("initial_take_profit_rules") or [])

@@ -1909,6 +1909,15 @@ class PaperTradingService:
                         max(favorable, mark) if position["direction"] == "buy"
                         else min(favorable, mark)
                     )
+                    # Position-manager trailing exits depend on the historical
+                    # high/low watermark. Persist it even when this Tick does
+                    # not emit an action, otherwise the next Tick would reload
+                    # the stale value and a later pullback could not trigger.
+                    conn.execute(
+                        "UPDATE paper_positions SET favorable_price = ? "
+                        "WHERE position_id = ?",
+                        (favorable, position["position_id"]),
+                    )
                     position_state = dict(position)
                     position_state["favorable_price"] = favorable
                     position_state["remaining_volume"] = float(

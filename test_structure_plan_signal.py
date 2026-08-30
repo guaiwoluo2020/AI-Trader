@@ -359,6 +359,22 @@ class StructurePlanTests(unittest.TestCase):
         self.assertLess(plans[0]["risk_reward_ratio"], 1.2)
         self.assertEqual(plans[0]["minimum_risk_reward"], 0.5)
 
+    def test_uptrend_without_higher_target_enters_price_discovery_mode(self):
+        structure = _trend_structure("up")
+        for layer in structure["structure_hierarchy"].values():
+            layer.pop("weak_high", None)
+            layer.pop("protected_high", None)
+        self.store.rows[-1]["close"] = 110.2
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "structure_location_pullback")
+        self.assertTrue(plans[0]["price_discovery"])
+        self.assertEqual(
+            plans[0]["target_candidates"][0]["source_type"],
+            "risk_reward_projection",
+        )
+
     def test_uptrend_pullback_still_rejects_below_half_risk_reward(self):
         structure = _trend_structure("up")
         for layer in structure["structure_hierarchy"].values():

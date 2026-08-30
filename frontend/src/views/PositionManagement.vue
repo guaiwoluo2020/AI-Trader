@@ -154,6 +154,22 @@
               </template>
             </div>
             <v-alert type="info" variant="tonal" density="compact" class="mt-3">最外层有效点位始终平掉全部剩余仓位；前两层比例按初始仓位计算，行情跳价跨越多个层级时会合并执行。</v-alert>
+            <div class="section-title mt-5">价格发现阶段</div>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+              当上涨行情没有更高结构目标、或下跌行情没有更低结构目标时，先按 R 倍数分批止盈；剩余尾仓按最有利价格持续移动止损。
+            </v-alert>
+            <v-row
+              v-for="(level, index) in form.config.multi_level_exit.price_discovery_take_profit_levels"
+              :key="level.level_id"
+            >
+              <v-col cols="12" md="3"><v-text-field v-model.number="level.risk_reward" :label="`第 ${index + 1} 层止盈`" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
+              <v-col cols="12" md="3"><v-text-field v-model.number="level.close_percent" label="平仓比例" suffix="%" type="number" min="1" max="100" /></v-col>
+            </v-row>
+            <v-row>
+              <v-col cols="12" md="4"><v-switch v-model="form.config.multi_level_exit.runner_trailing_enabled" color="success" label="尾仓启用移动止损" /></v-col>
+              <v-col cols="6" md="3"><v-text-field v-model.number="form.config.multi_level_exit.runner_trailing_activation_r" label="移动止损启动" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
+              <v-col cols="6" md="3"><v-text-field v-model.number="form.config.multi_level_exit.runner_trailing_distance_r" label="距最有利价格" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
+            </v-row>
           </template>
           <RuleChain v-model="form.config.initial_stop_rules" title="初始止损规则链" kind="stop" />
           <RuleChain v-model="form.config.initial_take_profit_rules" title="初始止盈规则链" kind="take" />
@@ -311,6 +327,13 @@ const defaultConfig = () => ({
     disaster_stop_buffer_atr: 0.5,
     stop_close_percent: { internal: 30, swing: 40, external: 100 },
     take_profit_close_percent: { internal: 30, swing: 30, external: 100 },
+    price_discovery_take_profit_levels: [
+      { level_id: 'price_discovery_tp1', risk_reward: 1, close_percent: 30 },
+      { level_id: 'price_discovery_tp2', risk_reward: 2, close_percent: 30 },
+    ],
+    runner_trailing_enabled: true,
+    runner_trailing_activation_r: 1,
+    runner_trailing_distance_r: 0.8,
   },
   initial_stop_rules: [{ type: 'pivot', period: 'M5', selection: 'nearest', max_age_bars: 100, buffer: { type: 'fixed_points', value: 0 } }, { type: 'fixed_percent', value: 0.003 }],
   initial_take_profit_rules: [{ type: 'risk_reward', value: 2 }],

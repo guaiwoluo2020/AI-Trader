@@ -98,6 +98,91 @@ class PositionManagerTests(unittest.TestCase):
         self.assertAlmostEqual(action.close_volume, 0.7)
         self.assertEqual(action.reason, "multi_level_take_profit")
 
+    def test_price_discovery_builds_r_targets_and_trailing_runner(self):
+        plan = PositionManager().create_plan(
+            policy({
+                "management_mode": "multi_level_exit",
+                "multi_level_exit": {
+                    "disaster_stop_buffer_atr": 0.5,
+                    "price_discovery_take_profit_levels": [
+                        {"risk_reward": 1, "close_percent": 30},
+                        {"risk_reward": 2, "close_percent": 30},
+                    ],
+                    "runner_trailing_enabled": True,
+                    "runner_trailing_activation_r": 1,
+                    "runner_trailing_distance_r": 0.8,
+                },
+                "initial_stop_rules": [{"type": "signal"}],
+                "initial_take_profit_rules": [{"type": "signal"}],
+                "management_rules": [], "min_risk_reward": 0.5,
+                "min_stop_percent": 0, "max_stop_percent": 0,
+            }),
+            "buy", 100, signal_stop_loss=98, signal_take_profit=102,
+            atr=2, setup_context={"signal_source": "structure_plan"},
+            signal_stop_candidates=[{
+                "level_id": "sl-i", "structure_layer": "internal", "price": 98,
+            }],
+            signal_target_candidates=[{
+                "level_id": "projection", "structure_layer": "internal",
+                "price": 102, "source_type": "risk_reward_projection",
+            }],
+        )
+        targets = [item for item in plan.exit_levels if item["type"] == "take_profit"]
+        runner = [item for item in plan.exit_levels if item["type"] == "runner"]
+        self.assertEqual([item["price"] for item in targets], [102, 104])
+        self.assertEqual([item["close_percent"] for item in targets], [30, 30])
+        self.assertEqual(len(runner), 1)
+        self.assertFalse(any(item.get("close_remaining") for item in targets))
+
+    def test_price_discovery_runner_uses_favorable_price_trailing_stop(self):
+        levels = [{
+            "type": "runner", "level_id": "price_discovery_runner",
+            "price": 0, "close_remaining": True,
+        }]
+        position = {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5, "volume": 0.4, "remaining_volume": 0.4,
+            "exit_levels": levels, "partial_levels_done": [],
+        }
+        config = {
+            "management_mode": "multi_level_exit", "management_rules": [],
+            "multi_level_exit": {
+                "runner_trailing_enabled": True,
+                "runner_trailing_activation_r": 1,
+                "runner_trailing_distance_r": 0.8,
+            },
+        }
+        before_activation = PositionManager().evaluate(
+            config, {**position, "favorable_price": 104}, {"price": 100}
+        )
+        self.assertEqual(before_activation.action, "none")
+        trailing_hit = PositionManager().evaluate(
+            config, {**position, "favorable_price": 110}, {"price": 105.5}
+        )
+        self.assertEqual(trailing_hit.action, "close")
+        self.assertEqual(trailing_hit.reason, "multi_level_runner_trailing")
+        self.assertEqual(trailing_hit.events[0]["trailing_stop"], 106)
+
+    def test_price_discovery_runner_trailing_is_symmetric_for_sell(self):
+        action = PositionManager().evaluate({
+            "management_mode": "multi_level_exit", "management_rules": [],
+            "multi_level_exit": {
+                "runner_trailing_enabled": True,
+                "runner_trailing_activation_r": 1,
+                "runner_trailing_distance_r": 0.8,
+            },
+        }, {
+            "direction": "sell", "entry_price": 100, "stop_loss": 105,
+            "initial_risk": 5, "favorable_price": 90,
+            "volume": 0.4, "remaining_volume": 0.4,
+            "partial_levels_done": [], "exit_levels": [{
+                "type": "runner", "level_id": "price_discovery_runner",
+                "price": 0, "reference_risk": 5,
+            }],
+        }, {"price": 94.5})
+        self.assertEqual(action.action, "close")
+        self.assertEqual(action.events[0]["trailing_stop"], 94)
+
     def test_structure_trend_pullback_uses_signal_half_rr_threshold(self):
         config = {
             "initial_stop_rules": [{"type": "signal"}],

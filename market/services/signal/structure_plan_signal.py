@@ -225,6 +225,7 @@ class StructurePlanBuilder:
         expires_at: int = 0, invalidation_price: float = 0,
         minimum_risk_reward: float = 0,
         structure_snapshot: Optional[Dict] = None,
+        price_discovery: bool = False,
     ) -> Dict:
         group = _hash(source_id, symbol, period, anchor, "group")
         plan_id = _hash(source_id, symbol, period, anchor, setup_type, direction)
@@ -247,6 +248,7 @@ class StructurePlanBuilder:
             "generated_at": generated_at,
             "structure_anchor_time": int(anchor),
             "structure_snapshot": structure_snapshot or {},
+            "price_discovery": bool(price_discovery),
         }
         if direction in {"buy", "sell"} and entry > 0:
             stop_candidates, target_candidates = self._exit_candidates(
@@ -268,7 +270,14 @@ class StructurePlanBuilder:
                     "price": round(take_profit, 8),
                     "reference_price": round(take_profit, 8),
                     "rank": 1,
-                    "reason": "当前交易形态目标点",
+                    "reason": (
+                        "前方无结构目标，按风险倍数生成临时参考点"
+                        if price_discovery else "当前交易形态目标点"
+                    ),
+                    "source_type": (
+                        "risk_reward_projection" if price_discovery
+                        else "structure"
+                    ),
                 }]
             payload["stop_candidates"] = stop_candidates
             payload["target_candidates"] = target_candidates
@@ -539,10 +548,16 @@ class StructurePlanBuilder:
         else:
             sl = max(entry, protected) + stop_buffer if protected else entry + stop_buffer
         target = self._next_target(hierarchy, direction, entry)
-        if not target:
-            self._reject("结构位附近具备入场位置，但前方没有有效的结构止盈目标")
-            return []
-        target = target - target_buffer if direction == "buy" else target + target_buffer
+        price_discovery = not bool(target)
+        if price_discovery:
+            # A trending market at a new high/low has no historical resistance
+            # or support ahead. Keep the plan tradable with a 1R reference;
+            # multi-level management replaces it with configurable R exits and
+            # a trailing-stop runner.
+            risk = abs(entry - sl)
+            target = entry + risk if direction == "buy" else entry - risk
+        else:
+            target = target - target_buffer if direction == "buy" else target + target_buffer
         entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
         valid_bars = max(1, int(self._param("location_plan_valid_bars", 6)))
         entry_mode = (
@@ -568,6 +583,7 @@ class StructurePlanBuilder:
             ),
             valid_from=bar_time, expires_at=bar_time + seconds * valid_bars,
             invalidation_price=sl, structure_snapshot=snapshot,
+            price_discovery=price_discovery,
         )
         return [plan] if plan else []
 
@@ -888,7 +904,8 @@ class StructurePlanBuilder:
             )
             target = self._next_target(hierarchy, direction, entry)
             risk = abs(entry - sl)
-            if not target:
+            price_discovery = not bool(target)
+            if price_discovery:
                 target = entry + risk * 2 if direction == "buy" else entry - risk * 2
             elif direction == "buy":
                 target -= target_buffer
@@ -908,6 +925,7 @@ class StructurePlanBuilder:
                 ),
                 valid_from=bar_time, expires_at=expires,
                 invalidation_price=sl, structure_snapshot=snapshot,
+                price_discovery=price_discovery,
             )
             return [plan] if plan else []
 
@@ -937,7 +955,8 @@ class StructurePlanBuilder:
                 entry + stop_buffer if direction == "sell" else entry - stop_buffer
             )
             target = self._next_target(hierarchy, direction, entry)
-            if not target:
+            price_discovery = not bool(target)
+            if price_discovery:
                 target = entry - abs(entry-sl)*2 if direction == "sell" else entry + abs(entry-sl)*2
             if direction == "sell": target += target_buffer
             else: target -= target_buffer
@@ -953,6 +972,7 @@ class StructurePlanBuilder:
                 ),
                 valid_from=bar_time, expires_at=expires,
                 invalidation_price=sl, structure_snapshot=snapshot,
+                price_discovery=price_discovery,
             )
             return [plan] if plan else []
 
@@ -974,7 +994,8 @@ class StructurePlanBuilder:
         sl = protected-stop_buffer if direction == "buy" else protected+stop_buffer
         target = self._next_target(hierarchy, direction, entry)
         risk = abs(entry-sl)
-        if not target:
+        price_discovery = not bool(target)
+        if price_discovery:
             target = entry+risk*2 if direction == "buy" else entry-risk*2
         elif direction == "buy":
             target -= target_buffer
@@ -992,6 +1013,7 @@ class StructurePlanBuilder:
             reason=f"{period} {setup} BOS 已收盘确认，等待回踩突破位",
             valid_from=bar_time, expires_at=expires,
             invalidation_price=sl, structure_snapshot=snapshot,
+            price_discovery=price_discovery,
         )
         return [plan] if plan else []
 
