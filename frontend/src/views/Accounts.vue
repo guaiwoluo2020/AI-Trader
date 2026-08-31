@@ -653,6 +653,7 @@ const paperDetail = ref(null)
 const liveDialog = ref(false)
 const liveDetail = ref(null)
 const paperContext = reactive({ strategies: [] })
+const paperContextLoaded = ref(false)
 const selectedStrategyId = ref('')
 const deploying = ref(false)
 const deploymentLoadingId = ref('')
@@ -874,14 +875,19 @@ function runtimeEventLabel(type) {
   return { heartbeat: '运行心跳', execution: '撮合事件' }[type] || type
 }
 
-async function loadAccounts() {
+async function loadPaperContext(force = false) {
+  if (paperContextLoaded.value && !force) return
+  const contextData = await accountAPI.getPaperContext()
+  paperContext.strategies = contextData.strategies || []
+  paperContextLoaded.value = true
+}
+
+async function loadAccounts(includeContext = false) {
   loading.value = true
   try {
-    const [data, contextData] = await Promise.all([
-      accountAPI.list(), accountAPI.getPaperContext(),
-    ])
+    const data = await accountAPI.list()
     accounts.value = data.accounts || []
-    paperContext.strategies = contextData.strategies || []
+    if (includeContext) await loadPaperContext()
   } catch (error) {
     messageType.value = 'error'
     message.value = error.response?.data?.detail || '加载交易账户失败'
@@ -1019,6 +1025,7 @@ function openStrategyManager(account) {
   selectedAccount.value = account
   accountStrategyId.value = ''
   strategyDialog.value = true
+  loadPaperContext()
 }
 
 async function bindAccountStrategy() {
@@ -1074,7 +1081,10 @@ async function refreshSelectedAccount() {
 async function openPaperRuntime(account) {
   runtimeLoadingId.value = account.account_id
   try {
-    const data = await accountAPI.getPaperDetail(account.account_id)
+    const [data] = await Promise.all([
+      accountAPI.getPaperDetail(account.account_id),
+      loadPaperContext(),
+    ])
     paperDetail.value = data.detail
     expandedPaperPositions.value = new Set()
     selectedStrategyId.value = ''
@@ -1115,7 +1125,6 @@ async function refreshLiveDetail() {
     liveDetail.value = data.detail
     await nextTick()
     renderLiveEquityChart()
-    await loadAccounts()
   } catch (error) {
     messageType.value = 'error'
     message.value = error.response?.data?.detail || '刷新实盘运行数据失败'
