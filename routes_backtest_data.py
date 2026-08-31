@@ -115,6 +115,7 @@ def create_backtest_data_routes(
                     warmup_days=int(payload.get("warmup_days", 1)),
                     visibility=str(payload.get("visibility", "shared")),
                 )
+                quota_service.usage_repository.rebuild_user(user.user_id)
             return {
                 "status": "ok",
                 "message": "历史数据集已创建，等待 MT5 EA 领取任务",
@@ -167,6 +168,7 @@ def create_backtest_data_routes(
         with quota_service.guarded():
             quota_service.assert_can_create(user.user_id, user.role, "datasets")
             dataset = repository.copy(user.user_id, dataset_id)
+            quota_service.usage_repository.rebuild_user(user.user_id)
         if dataset is None:
             raise HTTPException(status_code=404, detail="历史数据集不存在或未共享")
         return {
@@ -195,6 +197,7 @@ def create_backtest_data_routes(
         try:
             if not service.delete_dataset(user.user_id, dataset_id):
                 raise HTTPException(status_code=404, detail="历史数据集不存在")
+            quota_service.usage_repository.rebuild_user(user.user_id)
             return {"status": "ok", "message": "历史数据集已删除"}
         except DatasetReferencedError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

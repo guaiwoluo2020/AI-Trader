@@ -1733,6 +1733,7 @@ def create_market_routes(
             shared_ai_runtime_repo.sync_strategy_visibility(
                 user.user_id, strategy.to_dict()
             )
+            quota_service.usage_repository.rebuild_user(user.user_id)
             engine_manager.refresh_user_strategies(user.user_id)
             add_audit_event(
                 user, "strategy_created", "创建策略",
@@ -2040,6 +2041,7 @@ def create_market_routes(
             shared_ai_runtime_repo.sync_strategy_visibility(
                 user.user_id, strategy.to_dict()
             )
+            quota_service.usage_repository.rebuild_user(user.user_id)
             engine_manager.refresh_user_strategies(user.user_id)
             add_audit_event(
                 user, "strategy_quick_created", "一键创建 AI 策略",
@@ -3230,6 +3232,7 @@ def create_market_routes(
             shared_ai_runtime_repo.sync_strategy_visibility(
                 target_user.user_id, saved.to_dict()
             )
+            quota_service.usage_repository.rebuild_user(target_user.user_id)
             engine_manager.refresh_user_strategies(target_user.user_id)
             if saved.visibility == "shared":
                 notify_strategy_references(
@@ -3400,6 +3403,7 @@ def create_market_routes(
                         user.user_id, strategy_id
                     )
         if success:
+            quota_service.usage_repository.rebuild_user(user.user_id)
             engine_manager.refresh_user_strategies(user.user_id)
             add_audit_event(
                 user, "strategy_deleted", "删除策略",
@@ -4045,6 +4049,7 @@ def create_market_routes(
                     user.user_id, user.role, "signal_sources"
                 )
                 source = ai_signal_source_repo.create(user.user_id, data)
+                quota_service.usage_repository.rebuild_user(user.user_id)
             return {"status": "ok", "source": ai_signal_source_payload(source)}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -4074,6 +4079,7 @@ def create_market_routes(
             source = ai_signal_source_repo.update(
                 user.user_id, signal_source_id, data, allow_hot_reload=True,
             )
+            quota_service.usage_repository.rebuild_user(user.user_id)
             engine_manager.refresh_user_strategies(user.user_id)
             return {"status": "ok", "source": ai_signal_source_payload(source)}
         except ValueError as exc:
@@ -4083,6 +4089,7 @@ def create_market_routes(
     async def copy_ai_signal_source(signal_source_id: str, user: AuthUser = Depends(require_auth)) -> Dict:
         try:
             source = ai_signal_source_repo.copy(user.user_id, signal_source_id)
+            quota_service.usage_repository.rebuild_user(user.user_id)
             return {"status": "ok", "source": ai_signal_source_payload(source)}
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
@@ -4161,6 +4168,7 @@ def create_market_routes(
     async def delete_ai_signal_source(signal_source_id: str, user: AuthUser = Depends(require_auth)) -> Dict:
         try:
             ai_signal_source_repo.delete(user.user_id, signal_source_id)
+            quota_service.usage_repository.rebuild_user(user.user_id)
             return {"status": "ok"}
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
