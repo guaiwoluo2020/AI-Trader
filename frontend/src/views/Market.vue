@@ -20,13 +20,14 @@
           <h2>{{ focusedStrategyName }}</h2>
         </div>
         <div class="d-flex align-center ga-2">
-          <v-chip size="small" color="primary" variant="tonal">{{ focusedDeployments.length }} 个部署</v-chip>
+          <v-chip size="small" color="primary" variant="tonal">{{ loadingFocusedExecution ? '加载中…' : `${focusedDeployments.length} 个部署` }}</v-chip>
           <v-btn size="small" variant="tonal" prepend-icon="mdi-refresh" :loading="loadingFocusedExecution" @click="loadFocusedExecution">刷新</v-btn>
           <v-btn icon="mdi-close" variant="text" size="small" title="关闭策略详情" @click="clearFocus" />
         </div>
       </div>
-      <v-alert v-if="loadingFocusedExecution" type="info" variant="tonal" density="compact">正在加载该策略的运行记录。</v-alert>
-      <v-alert v-else-if="!focusedDeployments.length" type="info" variant="tonal" density="compact">该策略尚未部署到模拟盘或实盘账户。</v-alert>
+          <v-alert v-if="loadingFocusedExecution" type="info" variant="tonal" density="compact">正在加载该策略的运行记录。</v-alert>
+          <v-alert v-else-if="focusedExecutionError" type="error" variant="tonal" density="compact">{{ focusedExecutionError }}</v-alert>
+          <v-alert v-else-if="!focusedDeployments.length" type="info" variant="tonal" density="compact">该策略尚未部署到模拟盘或实盘账户。</v-alert>
       <v-row v-else class="deployment-grid">
         <v-col v-for="deployment in focusedDeployments" :key="deployment.deployment_id" cols="12" lg="6">
           <article class="deployment-panel">
@@ -134,6 +135,7 @@ export default {
 
     const loadingDecisions = ref(false)
     const loadingFocusedExecution = ref(false)
+    const focusedExecutionError = ref('')
     const focusedExecution = ref(null)
     const focusedExecutionSection = ref(null)
     let focusedRefreshTimer = null
@@ -225,9 +227,11 @@ export default {
       const strategyId = decisionFilters.strategy_id
       if (!strategyId) {
         focusedExecution.value = null
+        focusedExecutionError.value = ''
         return
       }
       loadingFocusedExecution.value = true
+      focusedExecutionError.value = ''
       try {
       // 详情页需要展示策略的完整部署关系，即使账户暂时离线、被暂停或
       // 风控开关关闭。运行资格由 deployment.runtime_active/status 单独标记，
@@ -273,6 +277,7 @@ export default {
         focusedExecution.value = { ...data, deployments }
       } catch (err) {
         focusedExecution.value = null
+        focusedExecutionError.value = err?.response?.data?.detail || '加载策略运行记录失败，请稍后重试'
         console.error('加载策略部署运行记录失败:', err)
       } finally {
         loadingFocusedExecution.value = false
@@ -471,6 +476,7 @@ export default {
       focusedStrategyName,
       focusedExecutionSection,
       loadingFocusedExecution,
+      focusedExecutionError,
       strategyFilterOptions,
       decisionFilters,
       decisionStatusOptions,

@@ -2209,17 +2209,16 @@ class PaperTradingService:
         if not decision_id:
             return
         runtime = RuntimeStateRepository(user_id, account_id, self.storage)
-        for payload in runtime.list_entities("strategy_decision"):
-            if str(payload.get("decision_id") or "") != decision_id:
-                continue
-            payload["status"] = status
-            payload["auto_executed"] = bool(auto_executed)
-            payload["order_id"] = order_id
-            runtime.upsert_entity(
-                "strategy_decision", decision_id, payload,
-                symbol=str(payload.get("symbol") or ""), status=status,
-            )
+        payload = runtime.get_entity("strategy_decision", decision_id)
+        if payload is None:
             return
+        payload["status"] = status
+        payload["auto_executed"] = bool(auto_executed)
+        payload["order_id"] = order_id
+        runtime.upsert_entity(
+            "strategy_decision", decision_id, payload,
+            symbol=str(payload.get("symbol") or ""), status=status,
+        )
 
     def run_maintenance(self) -> Dict:
         """使用最近一次有效报价维护 Paper 持仓，页面关闭后仍持续运行。"""

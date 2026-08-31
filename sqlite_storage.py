@@ -5814,6 +5814,25 @@ class RuntimeStateRepository:
             for row in self.storage.fetchall(sql, tuple(params))
         ]
 
+    def get_entity(self, entity_type: str, entity_id: str) -> Optional[Dict]:
+        """读取单条运行态，避免为一次状态回算扫描整个账户历史。"""
+        row = self.storage.fetchone(
+            """
+            SELECT payload_json
+            FROM runtime_entities
+            WHERE user_id = ? AND account_id = ?
+              AND entity_type = ? AND entity_id = ?
+            LIMIT 1
+            """,
+            (self.user_id, self.account_id, entity_type, str(entity_id)),
+        )
+        if not row:
+            return None
+        try:
+            return json.loads(row["payload_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+
     def delete_entity(self, entity_type: str, entity_id: str) -> None:
         self.storage.execute(
             """
