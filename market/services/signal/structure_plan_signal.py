@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 from ...models import SignalSource, TradingSignal
 from ...store import KlineStore
 from ...store.structure_plan_store import StructureTradePlanRepository
-from ..market_structure_engine_v2 import analyze
+from ..market_structure_engine_v2 import analyze_incremental as analyze
 from sqlite_storage import RuntimeStateRepository
 
 

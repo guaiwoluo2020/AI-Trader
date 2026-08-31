@@ -1031,7 +1031,13 @@ class TradingServer:
         cached = self._structure_context_cache.get(key)
         if cached and cached[0] == latest_time:
             return cached[1]
-        from market.services.market_structure_engine_v2 import analyze as analyze_structure
+        # Runtime plans must advance the persisted/in-memory structure state
+        # machine.  Calling the stateless analyzer here refits a triangle or
+        # box on every closed bar and can erase a breakout candidate before
+        # its confirmation bar arrives.
+        from market.services.market_structure_engine_v2 import (
+            analyze_incremental as analyze_structure,
+        )
         result = analyze_structure(symbol, period, rows[-600:])
         self._structure_context_cache[key] = (latest_time, result)
         return result

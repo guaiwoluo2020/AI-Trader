@@ -21,6 +21,15 @@ class StructureTradePlanRepository:
     ) -> List[Dict]:
         now = int(time.time())
         keep = {str(plan["plan_id"]) for plan in plans}
+        new_actionable = {
+            str(plan["plan_id"])
+            for plan in plans
+            if (
+                str(plan.get("status") or "") == "active"
+                and str(plan.get("direction") or "") in {"buy", "sell"}
+                and float(plan.get("entry_price") or 0) > 0
+            )
+        }
         # A rolling structure window can move its anchor forward by one bar even
         # though the actionable opportunity has not changed.  Capture the
         # currently active semantic plan before invalidating the old bar so the
@@ -28,7 +37,8 @@ class StructureTradePlanRepository:
         # a new timestamp when its setup, direction or entry mode actually
         # changes (or after the prior opportunity has already disappeared).
         previous_active = self.storage.fetchall(
-            "SELECT setup_type,direction,entry_mode,payload_json,created_at "
+            "SELECT plan_id,setup_type,direction,entry_mode,status,expires_at,"
+            "payload_json,created_at "
             "FROM structure_trade_plans WHERE user_id=? AND account_id=? "
             "AND strategy_id=? AND signal_source_id=? AND symbol=? AND period=? "
             "AND status IN ('active','watching') ORDER BY updated_at DESC",
@@ -49,29 +59,42 @@ class StructureTradePlanRepository:
                 key,
                 int(previous_payload.get("generated_at") or row["created_at"] or now),
             )
-        # Invalidate every plan anchored to an older closed bar before
-        # upserting the new snapshot. This is deliberately scope-local, so a
-        # new plan for one strategy/symbol cannot affect another deployment.
+        # Expiry is authoritative.  An actionable retest/reclaim plan may be
+        # valid for several bars and must not disappear merely because the
+        # next closed bar produces an observation/no_trade snapshot.
         self.storage.execute(
             "UPDATE structure_trade_plans SET status='invalidated', updated_at=? "
             "WHERE user_id=? AND account_id=? AND strategy_id=? "
             "AND signal_source_id=? AND symbol=? AND period=? "
-            "AND structure_bar_time < ? AND status IN ('active','watching')",
+            "AND expires_at>0 AND expires_at<=? "
+            "AND status IN ('active','watching')",
             (now, user_id, account_id, strategy_id, signal_source_id,
-             symbol, period, int(structure_bar_time)),
+             symbol, period, now),
         )
         current = self.storage.fetchall(
-            "SELECT plan_id FROM structure_trade_plans WHERE user_id=? AND account_id=? "
+            "SELECT plan_id,status,direction,payload_json FROM structure_trade_plans "
+            "WHERE user_id=? AND account_id=? "
             "AND strategy_id=? AND signal_source_id=? AND symbol=? AND period=? "
             "AND status IN ('active','watching')",
             (user_id, account_id, strategy_id, signal_source_id, symbol, period),
         )
         for row in current:
             plan_id = str(row["plan_id"])
-            # A newly generated snapshot supersedes older active plans. Plans
-            # in the current snapshot remain active; stale plans are no longer
-            # eligible for Tick evaluation.
             if plan_id not in keep:
+                try:
+                    old_payload = json.loads(row["payload_json"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    old_payload = {}
+                old_actionable = (
+                    str(row["status"] or "") == "active"
+                    and str(row["direction"] or "") in {"buy", "sell"}
+                    and float(old_payload.get("entry_price") or 0) > 0
+                )
+                # A new actionable opportunity supersedes the previous one.
+                # A watching/no_trade result only replaces older observations;
+                # it cannot shorten an existing plan's configured validity.
+                if old_actionable and not new_actionable:
+                    continue
                 self.storage.execute(
                     "UPDATE structure_trade_plans SET status='invalidated', updated_at=? "
                     "WHERE plan_id=?",
@@ -80,7 +103,8 @@ class StructureTradePlanRepository:
         for plan in plans:
             payload = dict(plan)
             existing = self.storage.fetchone(
-                "SELECT payload_json,created_at FROM structure_trade_plans "
+                "SELECT payload_json,created_at,status,expires_at "
+                "FROM structure_trade_plans "
                 "WHERE plan_id=? LIMIT 1",
                 (plan["plan_id"],),
             )
@@ -92,6 +116,17 @@ class StructureTradePlanRepository:
                 payload["generated_at"] = int(
                     previous.get("generated_at") or existing["created_at"] or now
                 )
+                same_live_opportunity = (
+                    str(plan.get("status") or "") == "active"
+                    and str(plan.get("direction") or "") in {"buy", "sell"}
+                    and str(existing["status"] or "") == "active"
+                    and int(existing["expires_at"] or 0) > now
+                )
+                if same_live_opportunity:
+                    # Keep the original boundary, validity window and payload.
+                    # A repeated closed-bar calculation is the same opportunity,
+                    # not permission to move the entry or extend its lifetime.
+                    continue
             else:
                 semantic_key = (
                     str(plan.get("setup_type") or ""),
@@ -132,7 +167,13 @@ class StructureTradePlanRepository:
                     json.dumps(payload, ensure_ascii=False), now, now,
                 ),
             )
-        return plans
+        # The generator cache must include retained actionable plans as well as
+        # the latest observation rows; returning only ``plans`` would keep the
+        # database correct but make Tick evaluation forget the retained plan.
+        return self.list_current(
+            user_id, account_id, strategy_id,
+            signal_source_id, symbol, period,
+        )
 
     def list_current(
         self, user_id: int, account_id: int, strategy_id: str,
