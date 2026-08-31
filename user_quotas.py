@@ -23,6 +23,67 @@ DEFAULT_LIMITS = {
 }
 
 
+class ResourceUsageRepository:
+    """持久化用户资源计数；首次访问或校准时从业务表重建。"""
+
+    RESOURCE_TYPES = ("datasets", "strategies", "signal_sources")
+
+    def __init__(self, storage=None):
+        self.storage = storage or get_storage()
+
+    def get_usage(self, user_id: int) -> Optional[Dict[str, int]]:
+        rows = self.storage.fetchall(
+            "SELECT resource_type, used_count FROM user_resource_usage WHERE user_id = ?",
+            (int(user_id),),
+        )
+        if not rows:
+            return None
+        values = {key: 0 for key in self.RESOURCE_TYPES}
+        for row in rows:
+            if row["resource_type"] in values:
+                values[row["resource_type"]] = int(row["used_count"] or 0)
+        return values
+
+    def rebuild_user(self, user_id: int) -> Dict[str, int]:
+        user_id = int(user_id)
+        datasets = self.storage.fetchone(
+            "SELECT COUNT(*) AS total FROM backtest_datasets WHERE user_id = ?", (user_id,)
+        )
+        strategies = self.storage.fetchall(
+            "SELECT config_json FROM user_strategy_configs WHERE user_id = ?", (user_id,)
+        )
+        inline_sources = 0
+        for row in strategies:
+            try:
+                config = json.loads(row.get("config_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                config = {}
+            for source in config.get("signal_sources") or []:
+                if isinstance(source, dict) and (
+                    source.get("source") != "ai_entry"
+                    or not str((source.get("params") or {}).get("ai_signal_source_id") or "")
+                ):
+                    inline_sources += 1
+        independent = self.storage.fetchone(
+            "SELECT COUNT(*) AS total FROM ai_signal_sources WHERE user_id = ?", (user_id,)
+        )
+        values = {
+            "datasets": int(datasets["total"] if datasets else 0),
+            "strategies": len(strategies),
+            "signal_sources": inline_sources + int(independent["total"] if independent else 0),
+        }
+        now = int(time.time())
+        for resource_type, used_count in values.items():
+            self.storage.execute(
+                """INSERT INTO user_resource_usage(user_id, resource_type, used_count, updated_at)
+                   VALUES(?, ?, ?, ?)
+                   ON CONFLICT(user_id, resource_type) DO UPDATE SET
+                     used_count = excluded.used_count, updated_at = excluded.updated_at""",
+                (user_id, resource_type, used_count, now),
+            )
+        return values
+
+
 class QuotaExceededError(ValueError):
     """用户试图创建超过其允许数量的资源。"""
 
@@ -92,6 +153,7 @@ class UserQuotaService:
     def __init__(self, storage=None):
         self.storage = storage or get_storage()
         self.repository = UserQuotaRepository(self.storage)
+        self.usage_repository = ResourceUsageRepository(self.storage)
         self.memberships = MembershipService(self.storage)
 
     @contextmanager
@@ -101,43 +163,8 @@ class UserQuotaService:
             yield
 
     def get_usage(self, user_id: int) -> Dict[str, int]:
-        datasets = self.storage.fetchone(
-            "SELECT COUNT(*) AS total FROM backtest_datasets WHERE user_id = ?",
-            (int(user_id),),
-        )
-        strategy_rows = self.storage.fetchall(
-            "SELECT config_json FROM user_strategy_configs WHERE user_id = ?",
-            (int(user_id),),
-        )
-        # Avoid JSON_TABLE here: some production MySQL-compatible servers do
-        # not implement it consistently, and a malformed/large strategy JSON
-        # could make the whole admin quota page time out.  The row count is
-        # small and parsing the already-loaded JSON is deterministic.
-        strategy_count = len(strategy_rows)
-        inline_sources = 0
-        for row in strategy_rows:
-            try:
-                config = json.loads(row.get("config_json") or "{}")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                config = {}
-            for source in config.get("signal_sources") or []:
-                if not isinstance(source, dict):
-                    continue
-                if source.get("source") != "ai_entry" or not str(
-                    (source.get("params") or {}).get("ai_signal_source_id") or ""
-                ):
-                    inline_sources += 1
-        ai_signal_sources = self.storage.fetchone(
-            "SELECT COUNT(*) AS total FROM ai_signal_sources WHERE user_id = ?",
-            (int(user_id),),
-        )
-        return {
-            "datasets": int(datasets["total"] if datasets else 0),
-            "strategies": strategy_count,
-            "signal_sources": inline_sources + int(
-                ai_signal_sources["total"] if ai_signal_sources else 0
-            ),
-        }
+        usage = self.usage_repository.get_usage(user_id)
+        return usage if usage is not None else self.usage_repository.rebuild_user(user_id)
 
     def get_summary(self, user_id: int, role: str = "user") -> Dict:
         usage = self.get_usage(user_id)

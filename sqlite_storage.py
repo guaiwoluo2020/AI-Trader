@@ -369,6 +369,18 @@ class SQLiteStorage:
                         FOREIGN KEY(updated_by) REFERENCES users(id) ON DELETE SET NULL
                     );
 
+                    CREATE TABLE IF NOT EXISTS user_resource_usage (
+                        user_id INTEGER NOT NULL,
+                        resource_type TEXT NOT NULL,
+                        used_count INTEGER NOT NULL DEFAULT 0,
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY(user_id, resource_type),
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_user_resource_usage_type
+                    ON user_resource_usage(resource_type, updated_at);
+
                     CREATE TABLE IF NOT EXISTS system_email_config (
                         id INTEGER PRIMARY KEY CHECK (id = 1),
                         smtp_host TEXT NOT NULL DEFAULT 'smtp.qiye.aliyun.com',
