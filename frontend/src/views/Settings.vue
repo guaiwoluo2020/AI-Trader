@@ -516,7 +516,9 @@
             <v-alert type="info" variant="tonal" density="compact" class="mb-4">
               等级决定默认资源额度；留空表示跟随会员等级。实盘必须同时满足黄金/钻石等级和管理员授权，管理员账号不受限制。
             </v-alert>
-            <v-table density="comfortable" class="quota-table">
+            <v-alert v-if="quotaLoading" type="info" variant="tonal" density="compact" class="mb-3">正在加载用户与会员数据…</v-alert>
+            <v-alert v-else-if="!quotaUsers.length" type="warning" variant="tonal" density="compact" class="mb-3">暂无用户数据。请点击右上角“刷新运营数据”重试。</v-alert>
+            <v-table v-else density="comfortable" class="quota-table">
               <thead><tr><th>用户</th><th>会员等级</th><th>实盘授权</th><th>当前用量</th><th>数据集上限</th><th>策略上限</th><th>信号源上限</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="item in quotaUsers" :key="item.user_id">
@@ -1307,7 +1309,7 @@
 </template>
 
 <script>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { marketAPI } from '@/api/market'
 import { accountAPI, authAPI } from '@/api/trading'
 import { authState, saveAdminSessionForView, setAuthSession } from '@/auth'
@@ -1418,6 +1420,7 @@ export default {
 
     // 管理员用户配额白名单
     const quotaUsers = ref([])
+    const quotaLoading = ref(false)
     const quotaSaving = ref(null)
     const adminStrategies = ref([])
     const adminStrategiesLoading = ref(false)
@@ -1512,6 +1515,7 @@ export default {
 
     const loadUserQuotas = async () => {
       if (!isAdmin.value) return
+      quotaLoading.value = true
       try {
         const data = await authAPI.getUserQuotas()
         quotaUsers.value = (data.users || []).map(item => ({
@@ -1529,6 +1533,8 @@ export default {
       } catch (err) {
         errorMessage.value = err.response?.data?.detail || '加载用户配额失败'
         showError.value = true
+      } finally {
+        quotaLoading.value = false
       }
     }
 
@@ -3423,6 +3429,14 @@ export default {
       }
     })
 
+    // 管理员工作区的批量初始化是异步的；如果用户立即点击“用户与会员”，
+    // 直接补发该页请求，避免因其它运营接口较慢而看到空白表格。
+    watch(settingsTab, tab => {
+      if (tab === 'quota' && isAdmin.value && !quotaUsers.value.length && !quotaLoading.value) {
+        loadUserQuotas()
+      }
+    })
+
     return {
       isStrategyPage,
       pageTitle,
@@ -3473,6 +3487,7 @@ export default {
       saveInstrumentMapping,
       deleteInstrumentMapping,
       quotaUsers,
+      quotaLoading,
       quotaSaving,
       saveUserQuota,
       viewAsUser,
