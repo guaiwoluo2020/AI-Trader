@@ -1125,8 +1125,7 @@
             <v-row dense class="mt-3">
               <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">每根已收盘 K 线按“背景方向 + 当前形态 + 所处位置 + 确认证据”生成或更新一个最相关计划，Tick 只判断触及与回收。覆盖趋势结构位回踩、箱体边界、突破回踩、假突破和流动性扫单；没有可靠机会时会显示具体拦截原因。</v-alert></v-col>
               <v-col cols="12" sm="6"><v-select v-model="newSignalSource.params.allowed_directions" :items="[{title:'买入和卖出',value:['buy','sell']},{title:'仅买入',value:['buy']},{title:'仅卖出',value:['sell']}]" label="允许方向" multiple chips></v-select></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model.number="newSignalSource.params.max_plan_age_bars" label="计划最大时效" type="number" min="0" max="20" suffix="根K线" hint="仅限制策略读取计划的时效，结构计划参数在市场结构配置中统一维护" persistent-hint></v-text-field></v-col>
-              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">结构计划的识别、入场、止损、止盈和三角形/箱体参数已统一移至“系统结构识别 → 结构交易计划参数”，并支持按品种和周期覆盖。此处仅保留策略执行筛选。</v-alert></v-col>
+              <v-col cols="12"><v-alert type="info" variant="tonal" density="compact">结构计划的识别、入场、止损、止盈和有效期已统一移至“系统结构识别 → 结构交易计划参数”，并支持按品种和周期覆盖。策略只筛选允许方向，并严格采用公共计划的有效期。</v-alert></v-col>
             </v-row>
           </template>
 
@@ -2483,7 +2482,7 @@ export default {
                 cooldown_seconds: 180
             }
             : source === 'structure_plan'
-              ? { enable_trend: true, enable_structure_location: true, enable_range: true, enable_range_boundary: true, require_range_boundary_reclaim: false, enable_range_breakout: true, enable_false_breakout: true, enable_liquidity_sweep: true, enable_choch: true, require_location_reclaim: true, min_structure_confidence: 60, min_real_risk_reward: 1.2, max_event_age_bars: 2, min_breakout_displacement_atr: 0.2, min_choch_displacement_atr: 0.2, entry_zone_atr: 0.35, location_proximity_atr: 0.6, min_trendline_touches: 2, stop_buffer_atr: 0.25, target_buffer_atr: 0.1, breakout_stop_inside_atr: 0.3, breakout_stop_buffer_atr: 0.8, breakout_stop_width_ratio: 0.15, breakout_target_atr: 3, range_plan_valid_bars: 12, event_plan_valid_bars: 6, location_plan_valid_bars: 6, breakout_retest_valid_bars: 6 }
+              ? { allowed_directions: ['buy', 'sell'], require_signal_consistency: false }
             : source === 'alpha_factor'
               ? {
                   alpha_id: '', alpha_version: 1, alpha_name: '',

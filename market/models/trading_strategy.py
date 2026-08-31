@@ -172,7 +172,6 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
     elif source == "structure_plan":
         params = {
             "allowed_directions": ["buy", "sell"],
-            "max_plan_age_bars": 2,
             "require_signal_consistency": False,
         }
     return {
@@ -372,7 +371,7 @@ def normalize_signal_sources(
                 "breakout_stop_buffer_atr", "breakout_stop_width_ratio",
                 "breakout_target_atr", "range_plan_valid_bars",
                 "event_plan_valid_bars", "location_plan_valid_bars",
-                "breakout_retest_valid_bars",
+                "breakout_retest_valid_bars", "max_plan_age_bars",
             ):
                 params.pop(obsolete, None)
             directions = params.get("allowed_directions", ["buy", "sell"])
@@ -381,9 +380,6 @@ def normalize_signal_sources(
             params["allowed_directions"] = [
                 value for value in directions if str(value) in {"buy", "sell"}
             ] or ["buy", "sell"]
-            params["max_plan_age_bars"] = max(
-                0, min(20, int(params.get("max_plan_age_bars", 2)))
-            )
             params["require_signal_consistency"] = bool(
                 params.get("require_signal_consistency", False)
             )

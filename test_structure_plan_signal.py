@@ -2,6 +2,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from market.models.trading_strategy import normalize_signal_sources
 from market.services.signal.structure_plan_signal import (
     StructurePlanBuilder,
     StructurePlanSignalGenerator,
@@ -114,6 +115,14 @@ def _trend_structure(direction="down", close=110.0):
 
 
 class StructurePlanTests(unittest.TestCase):
+    def test_structure_strategy_drops_private_plan_age_limit(self):
+        source = normalize_signal_sources([{
+            "signal_source_id": "structure-1",
+            "source": "structure_plan", "period": "M5",
+            "params": {"max_plan_age_bars": 2},
+        }])[0]
+        self.assertNotIn("max_plan_age_bars", source["params"])
+
     def setUp(self):
         self.store = _KlineStore()
 
@@ -241,6 +250,39 @@ class StructurePlanTests(unittest.TestCase):
 
         self.assertEqual(len(repository.replace_calls), 1)
         self.assertEqual(repository.replace_calls[0][3], "market-structure")
+
+    @patch(
+        "market.services.signal.structure_plan_signal.time.time",
+        return_value=10_000,
+    )
+    def test_strategy_uses_public_plan_expiry_without_private_age_cutoff(
+        self, _mock_time,
+    ):
+        repository = _Repository()
+        repository.plans = [{
+            "plan_id": "plan-1", "plan_group_id": "group-1",
+            "status": "active", "direction": "buy",
+            "setup_type": "range_lower_reversal", "setup_family": "range",
+            "entry_mode": "touch_or_near", "entry_price": 100,
+            "entry_zone": {"lower": 99, "upper": 101},
+            "stop_loss": 98, "take_profit": 104,
+            "risk_reward_ratio": 2, "minimum_risk_reward": 1.2,
+            "confidence": 80, "valid_from": 1_000, "expires_at": 11_000,
+        }]
+        generator = StructurePlanSignalGenerator(
+            self.store, repository, 1, 2,
+        )
+        strategy = _Strategy({
+            "allowed_directions": ["buy", "sell"],
+            # Legacy strategy data must no longer shorten the public expiry.
+            "max_plan_age_bars": 1,
+        })
+
+        signal = generator.generate_signals_for_strategy(
+            "BTCUSD", 100, strategy,
+        )[0]
+        self.assertEqual(signal.action, "buy")
+        self.assertTrue(signal.state_ready)
 
     def test_stale_bos_does_not_create_trend_order_plan(self):
         structure = {
