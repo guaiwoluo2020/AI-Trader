@@ -517,7 +517,8 @@
               等级决定默认资源额度；留空表示跟随会员等级。实盘必须同时满足黄金/钻石等级和管理员授权，管理员账号不受限制。
             </v-alert>
             <v-alert v-if="quotaLoading" type="info" variant="tonal" density="compact" class="mb-3">正在加载用户与会员数据…</v-alert>
-            <v-alert v-else-if="!quotaUsers.length" type="warning" variant="tonal" density="compact" class="mb-3">暂无用户数据。请点击右上角“刷新运营数据”重试。</v-alert>
+            <v-alert v-else-if="quotaError" type="error" variant="tonal" density="compact" class="mb-3">{{ quotaError }}</v-alert>
+            <v-alert v-else-if="!quotaUsers.length" type="warning" variant="tonal" density="compact" class="mb-3">暂无用户数据。</v-alert>
             <v-table v-else density="comfortable" class="quota-table">
               <thead><tr><th>用户</th><th>会员等级</th><th>实盘授权</th><th>当前用量</th><th>数据集上限</th><th>策略上限</th><th>信号源上限</th><th></th></tr></thead>
               <tbody>
@@ -1421,6 +1422,7 @@ export default {
     // 管理员用户配额白名单
     const quotaUsers = ref([])
     const quotaLoading = ref(false)
+    const quotaError = ref('')
     const quotaSaving = ref(null)
     const adminStrategies = ref([])
     const adminStrategiesLoading = ref(false)
@@ -1516,6 +1518,7 @@ export default {
     const loadUserQuotas = async () => {
       if (!isAdmin.value) return
       quotaLoading.value = true
+      quotaError.value = ''
       try {
         const data = await authAPI.getUserQuotas()
         quotaUsers.value = (data.users || []).map(item => ({
@@ -1531,8 +1534,7 @@ export default {
           }
         }))
       } catch (err) {
-        errorMessage.value = err.response?.data?.detail || '加载用户配额失败'
-        showError.value = true
+        quotaError.value = err.response?.data?.detail || '加载用户配额失败，请稍后重试'
       } finally {
         quotaLoading.value = false
       }
@@ -1605,7 +1607,7 @@ export default {
       quotaSaving.value = 'loading'
       try {
         await Promise.all([
-          loadUserQuotas(), loadInvitations(), loadEmailConfig(),
+          loadInvitations(), loadEmailConfig(),
           loadLLMConfig(), loadLLMAccessRequests(), loadAdminStrategies(),
           loadInstrumentMappings(), loadInstrumentObservations(), loadInstrumentPriceObservations(),
           loadTradeConfig(), loadSymbols()
@@ -1613,6 +1615,7 @@ export default {
         const engineData = await marketAPI.getMarketStructureConfig()
         structureEngineConfig.value = { ...structureEngineConfig.value, ...(engineData.config || {}) }
         structureProfiles.value = Array.isArray(engineData.profiles) ? engineData.profiles : []
+        if (settingsTab.value === 'quota') await loadUserQuotas()
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
       } finally {
@@ -3488,6 +3491,7 @@ export default {
       deleteInstrumentMapping,
       quotaUsers,
       quotaLoading,
+      quotaError,
       quotaSaving,
       saveUserQuota,
       viewAsUser,
