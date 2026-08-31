@@ -62,7 +62,12 @@ class InstrumentPriceStore:
 
     def list(self) -> list:
         now = time.time()
-        mapping_rows = self.mappings.list(enabled_only=True)
+        try:
+            mapping_rows = self.mappings.list(enabled_only=True)
+        except Exception:
+            # Quote inspection is auxiliary; a transient DB pool/query issue
+            # must not turn the admin settings page into a failed request.
+            mapping_rows = []
         mapping_by_key = {
             (
                 self._normalize(item.get("effective_broker_name") or item.get("broker_name")),

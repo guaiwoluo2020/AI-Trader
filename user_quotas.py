@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import time
 from typing import Dict, Optional
 
@@ -104,38 +105,37 @@ class UserQuotaService:
             "SELECT COUNT(*) AS total FROM backtest_datasets WHERE user_id = ?",
             (int(user_id),),
         )
-        strategies = self.storage.fetchone(
-            "SELECT COUNT(*) AS total FROM user_strategy_configs WHERE user_id = ?",
+        strategy_rows = self.storage.fetchall(
+            "SELECT config_json FROM user_strategy_configs WHERE user_id = ?",
             (int(user_id),),
         )
-        signal_sources = self.storage.fetchone(
-            """
-            SELECT COUNT(*) AS total
-            FROM user_strategy_configs AS strategy
-            JOIN JSON_TABLE(strategy.config_json, '$.signal_sources[*]'
-                COLUMNS(
-                    source_type VARCHAR(64) PATH '$.source',
-                    ai_signal_source_id VARCHAR(128) PATH '$.params.ai_signal_source_id'
-                )
-            ) AS source
-            WHERE strategy.user_id = ? AND JSON_VALID(strategy.config_json)
-              AND (
-                source.source_type != 'ai_entry'
-                OR COALESCE(source.ai_signal_source_id, '') = ''
-              )
-            """,
-            (int(user_id),),
-        )
+        # Avoid JSON_TABLE here: some production MySQL-compatible servers do
+        # not implement it consistently, and a malformed/large strategy JSON
+        # could make the whole admin quota page time out.  The row count is
+        # small and parsing the already-loaded JSON is deterministic.
+        strategy_count = len(strategy_rows)
+        inline_sources = 0
+        for row in strategy_rows:
+            try:
+                config = json.loads(row.get("config_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                config = {}
+            for source in config.get("signal_sources") or []:
+                if not isinstance(source, dict):
+                    continue
+                if source.get("source") != "ai_entry" or not str(
+                    (source.get("params") or {}).get("ai_signal_source_id") or ""
+                ):
+                    inline_sources += 1
         ai_signal_sources = self.storage.fetchone(
             "SELECT COUNT(*) AS total FROM ai_signal_sources WHERE user_id = ?",
             (int(user_id),),
         )
         return {
             "datasets": int(datasets["total"] if datasets else 0),
-            "strategies": int(strategies["total"] if strategies else 0),
-            "signal_sources": (
-                int(signal_sources["total"] if signal_sources else 0)
-                + int(ai_signal_sources["total"] if ai_signal_sources else 0)
+            "strategies": strategy_count,
+            "signal_sources": inline_sources + int(
+                ai_signal_sources["total"] if ai_signal_sources else 0
             ),
         }
 
