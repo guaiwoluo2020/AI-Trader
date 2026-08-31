@@ -229,7 +229,12 @@ export default {
       }
       loadingFocusedExecution.value = true
       try {
-        const data = await marketAPI.getStrategyExecutionOverview(strategyId)
+      // 详情页需要展示策略的完整部署关系，即使账户暂时离线、被暂停或
+      // 风控开关关闭。运行资格由 deployment.runtime_active/status 单独标记，
+      // 不应因为运行态检查失败而把真实存在的部署误显示为“0 个部署”。
+      const data = await marketAPI.getStrategyExecutionOverview(strategyId, {
+        include_inactive: true,
+      })
         const deployments = await Promise.all(
           (Array.isArray(data.deployments) ? data.deployments : [])
             .filter(Boolean)
