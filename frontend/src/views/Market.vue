@@ -20,16 +20,18 @@
           <h2>{{ focusedStrategyName }}</h2>
         </div>
         <div class="d-flex align-center ga-2">
-          <v-chip size="small" color="primary" variant="tonal">{{ loadingFocusedExecution ? '加载中…' : `${focusedDeployments.length} 个部署` }}</v-chip>
+          <v-chip size="small" color="primary" variant="tonal">{{ loadingFocusedExecution ? '加载中…' : `${visibleFocusedDeployments.length} 个运行部署` }}</v-chip>
+          <v-btn v-if="!loadingFocusedExecution && inactiveFocusedDeployments.length" size="small" variant="text" :prepend-icon="showInactiveDeployments ? 'mdi-chevron-up' : 'mdi-chevron-down'" @click="showInactiveDeployments = !showInactiveDeployments">{{ showInactiveDeployments ? '收起' : `展开 ${inactiveFocusedDeployments.length} 个非运行部署` }}</v-btn>
           <v-btn size="small" variant="tonal" prepend-icon="mdi-refresh" :loading="loadingFocusedExecution" @click="loadFocusedExecution">刷新</v-btn>
           <v-btn icon="mdi-close" variant="text" size="small" title="关闭策略详情" @click="clearFocus" />
         </div>
       </div>
           <v-alert v-if="loadingFocusedExecution" type="info" variant="tonal" density="compact">正在加载该策略的运行记录。</v-alert>
           <v-alert v-else-if="focusedExecutionError" type="error" variant="tonal" density="compact">{{ focusedExecutionError }}</v-alert>
-          <v-alert v-else-if="!focusedDeployments.length" type="info" variant="tonal" density="compact">该策略尚未部署到模拟盘或实盘账户。</v-alert>
+          <v-alert v-else-if="!visibleFocusedDeployments.length && !inactiveFocusedDeployments.length" type="info" variant="tonal" density="compact">该策略尚未部署到模拟盘或实盘账户。</v-alert>
+          <v-alert v-else-if="!visibleFocusedDeployments.length" type="info" variant="tonal" density="compact">当前没有运行中的部署，非运行部署已折叠。</v-alert>
       <v-row v-else class="deployment-grid">
-        <v-col v-for="deployment in focusedDeployments" :key="deployment.deployment_id" cols="12" lg="6">
+        <v-col v-for="deployment in visibleFocusedDeployments" :key="deployment.deployment_id" cols="12" lg="6">
           <article class="deployment-panel">
             <div class="deployment-heading">
               <div><strong>{{ deployment.account_name }}</strong><span>{{ deployment.symbol }}</span></div>
@@ -137,6 +139,7 @@ export default {
     const loadingFocusedExecution = ref(false)
     const focusedExecutionError = ref('')
     const focusedExecution = ref(null)
+    const showInactiveDeployments = ref(false)
     const focusedExecutionSection = ref(null)
     let focusedRefreshTimer = null
     const decisionFilters = reactive({
@@ -194,6 +197,11 @@ export default {
       ))
     })
     const focusedDeployments = computed(() => Array.isArray(focusedExecution.value?.deployments) ? focusedExecution.value.deployments : [])
+    const activeFocusedDeployments = computed(() => focusedDeployments.value.filter(item => item?.status === 'active'))
+    const inactiveFocusedDeployments = computed(() => focusedDeployments.value.filter(item => item?.status !== 'active'))
+    const visibleFocusedDeployments = computed(() => showInactiveDeployments.value
+      ? focusedDeployments.value
+      : activeFocusedDeployments.value)
     const runningDeploymentCount = computed(() => (
       decisionFilters.strategy_id
         ? focusedDeployments.value.filter(item => item?.status === 'active').length
@@ -275,6 +283,7 @@ export default {
             }),
         )
         focusedExecution.value = { ...data, deployments }
+        showInactiveDeployments.value = false
       } catch (err) {
         focusedExecution.value = null
         focusedExecutionError.value = err?.response?.data?.detail || '加载策略运行记录失败，请稍后重试'
@@ -473,6 +482,9 @@ export default {
       activeStrategyGroups,
       runningDeploymentCount,
       focusedDeployments,
+      visibleFocusedDeployments,
+      inactiveFocusedDeployments,
+      showInactiveDeployments,
       focusedStrategyName,
       focusedExecutionSection,
       loadingFocusedExecution,
