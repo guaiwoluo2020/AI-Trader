@@ -882,7 +882,10 @@ class PaperTradingService:
         decision_reasons = {}
         try:
             runtime = RuntimeStateRepository(user_id, account_id, self.storage)
-            for payload in runtime.list_entities("strategy_decision"):
+            # 运行态只用于补充最近订单的开仓原因；无界读取历史决策会让账户
+            # 详情在长期运行账户上越来越慢。订单页本身只展示最近 30 条，
+            # 因此读取最近 1000 条快照已足够覆盖关联，并避免首屏卡死。
+            for payload in runtime.list_entities("strategy_decision", limit=1000):
                 decision_id = str(payload.get("decision_id") or "")
                 if decision_id:
                     decision_reasons[decision_id] = str(

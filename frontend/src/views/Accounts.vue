@@ -124,10 +124,10 @@
               <v-btn v-if="account.account_type === 'mt5'" color="primary" variant="tonal" prepend-icon="mdi-link-variant" @click="openStrategyManager(account)">
                 管理绑定策略
               </v-btn>
-              <v-btn v-if="account.account_type === 'mt5'" color="success" variant="tonal" prepend-icon="mdi-chart-timeline-variant" @click="openLiveRuntime(account)">
+              <v-btn v-if="account.account_type === 'mt5'" color="success" variant="tonal" prepend-icon="mdi-chart-timeline-variant" :loading="runtimeLoadingId === account.account_id" @click="openLiveRuntime(account)">
                 打开实盘运行台
               </v-btn>
-              <v-btn v-if="account.account_type === 'paper'" color="primary" variant="tonal" prepend-icon="mdi-monitor-dashboard" @click="openPaperRuntime(account)">
+              <v-btn v-if="account.account_type === 'paper'" color="primary" variant="tonal" prepend-icon="mdi-monitor-dashboard" :loading="runtimeLoadingId === account.account_id" @click="openPaperRuntime(account)">
                 打开模拟运行台
               </v-btn>
             </div>
@@ -656,6 +656,7 @@ const paperContext = reactive({ strategies: [] })
 const selectedStrategyId = ref('')
 const deploying = ref(false)
 const deploymentLoadingId = ref('')
+const runtimeLoadingId = ref(null)
 const reportLoading = ref(false)
 const paperReport = ref(null)
 const reportStrategyId = ref('')
@@ -1071,6 +1072,7 @@ async function refreshSelectedAccount() {
 }
 
 async function openPaperRuntime(account) {
+  runtimeLoadingId.value = account.account_id
   try {
     const data = await accountAPI.getPaperDetail(account.account_id)
     paperDetail.value = data.detail
@@ -1083,10 +1085,13 @@ async function openPaperRuntime(account) {
   } catch (error) {
     messageType.value = 'error'
     message.value = error.response?.data?.detail || '加载模拟账户失败'
+  } finally {
+    runtimeLoadingId.value = null
   }
 }
 
 async function openLiveRuntime(account) {
+  runtimeLoadingId.value = account.account_id
   try {
     const data = await accountAPI.getLiveMonitoring(account.account_id)
     liveDetail.value = data.detail
@@ -1098,6 +1103,8 @@ async function openLiveRuntime(account) {
   } catch (error) {
     messageType.value = 'error'
     message.value = error.response?.data?.detail || '加载实盘运行台失败'
+  } finally {
+    runtimeLoadingId.value = null
   }
 }
 
