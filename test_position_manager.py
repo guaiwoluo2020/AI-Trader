@@ -1,6 +1,7 @@
 import unittest
 
 from market.models import PositionManagementPolicy
+from market.models.position_management import normalize_position_management_config
 from market.services.position_manager import PositionManager
 
 
@@ -9,6 +10,44 @@ def policy(config):
 
 
 class PositionManagerTests(unittest.TestCase):
+    def test_multi_level_config_does_not_require_legacy_rule_chains(self):
+        config = normalize_position_management_config({
+            "management_mode": "multi_level_exit",
+            "initial_stop_rules": [],
+            "initial_take_profit_rules": [],
+            "management_rules": [
+                {"type": "break_even", "activation_r": 1},
+                {"type": "reverse_signal"},
+                {"type": "max_holding_bars", "period": "M5", "bars": 12},
+            ],
+        })
+        self.assertEqual(config["initial_stop_rules"], [])
+        self.assertEqual(config["initial_take_profit_rules"], [])
+        self.assertEqual(
+            [rule["type"] for rule in config["management_rules"]],
+            ["reverse_signal", "max_holding_bars"],
+        )
+
+    def test_standard_config_still_requires_legacy_rule_chains(self):
+        with self.assertRaisesRegex(ValueError, "初始止损"):
+            normalize_position_management_config({
+                "management_mode": "standard",
+                "initial_stop_rules": [],
+                "initial_take_profit_rules": [{"type": "risk_reward", "value": 2}],
+            })
+
+    def test_multi_level_policy_rejects_non_structure_signal(self):
+        with self.assertRaisesRegex(ValueError, "仅支持结构交易信号"):
+            PositionManager().create_plan(
+                policy({
+                    "management_mode": "multi_level_exit",
+                    "initial_stop_rules": [],
+                    "initial_take_profit_rules": [],
+                }),
+                "buy", 100,
+                setup_context={"signal_source": "pivot"},
+            )
+
     def test_multi_level_structure_plan_uses_virtual_exits_and_disaster_stop(self):
         plan = PositionManager().create_plan(
             policy({
@@ -22,8 +61,8 @@ class PositionManagerTests(unittest.TestCase):
                         "internal": 30, "swing": 30, "external": 100,
                     },
                 },
-                "initial_stop_rules": [{"type": "signal"}],
-                "initial_take_profit_rules": [{"type": "signal"}],
+                "initial_stop_rules": [],
+                "initial_take_profit_rules": [],
                 "management_rules": [], "min_risk_reward": 0.5,
                 "min_stop_percent": 0, "max_stop_percent": 0,
             }),

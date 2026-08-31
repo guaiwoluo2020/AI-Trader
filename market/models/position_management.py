@@ -163,10 +163,24 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
     stop_rules = list(normalized.get("initial_stop_rules") or [])
     take_rules = list(normalized.get("initial_take_profit_rules") or [])
     management_rules = list(normalized.get("management_rules") or [])
-    if not stop_rules:
-        raise ValueError("至少需要一条初始止损规则")
-    if not take_rules:
-        raise ValueError("至少需要一条初始止盈规则")
+    multi_level_mode = normalized["management_mode"] == "multi_level_exit"
+    if multi_level_mode:
+        # Structure candidates are the source of truth in this mode. Keeping
+        # the legacy chains would suggest they participate in execution even
+        # though the multi-level engine deliberately ignores them.
+        stop_rules = []
+        take_rules = []
+        management_rules = [
+            rule for rule in management_rules
+            if str(rule.get("type") or "") in {
+                "reverse_signal", "max_holding_bars",
+            }
+        ]
+    else:
+        if not stop_rules:
+            raise ValueError("至少需要一条初始止损规则")
+        if not take_rules:
+            raise ValueError("至少需要一条初始止盈规则")
 
     for group, rules in (("初始止损", stop_rules), ("初始止盈", take_rules)):
         for rule in rules:
@@ -276,7 +290,10 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
         key: copy.deepcopy(value)
         for key, value in normalized.items() if key != "setup_profiles"
     }
-    for index, raw in enumerate((config or {}).get("setup_profiles") or []):
+    raw_profiles = [] if multi_level_mode else (
+        (config or {}).get("setup_profiles") or []
+    )
+    for index, raw in enumerate(raw_profiles):
         if not isinstance(raw, dict):
             continue
         match = raw.get("match") or {}

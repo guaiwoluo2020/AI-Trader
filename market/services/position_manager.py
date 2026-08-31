@@ -252,20 +252,13 @@ class PositionManager:
         config, applied_profile = resolve_position_management_config(
             policy.config, setup_context
         )
-        stop, stop_rule = self._resolve_rule(
-            config["initial_stop_rules"], direction, entry_price,
-            float(signal_stop_loss or 0), 0, pivots, atr, True, current_time,
-        )
-        if stop is None:
-            raise ValueError("没有止损规则能够生成有效价格")
-        multi_level = (
-            config.get("management_mode") == "multi_level_exit"
-            and str((setup_context or {}).get("signal_source") or "")
-            == "structure_plan"
-        )
+        multi_level = config.get("management_mode") == "multi_level_exit"
+        if multi_level and str(
+            (setup_context or {}).get("signal_source") or ""
+        ) != "structure_plan":
+            raise ValueError("多层级持仓管理仅支持结构交易信号")
         exit_levels: List[Dict] = []
         reference_take_profit = 0.0
-        reference_stop = stop
         if multi_level:
             stop, reference_take_profit, exit_levels = self._multi_level_exit_plan(
                 direction, entry_price, config,
@@ -286,6 +279,14 @@ class PositionManager:
                     ) or 0
                 ),
             }
+        else:
+            stop, stop_rule = self._resolve_rule(
+                config["initial_stop_rules"], direction, entry_price,
+                float(signal_stop_loss or 0), 0, pivots, atr, True, current_time,
+            )
+            if stop is None:
+                raise ValueError("没有止损规则能够生成有效价格")
+            reference_stop = stop
         risk = abs(entry_price - stop)
         minimum = entry_price * float(config.get("min_stop_percent", 0.1) or 0) / 100.0
         maximum = entry_price * float(config.get("max_stop_percent", 0.7) or 0) / 100.0
@@ -320,12 +321,6 @@ class PositionManager:
                 f"止损距离 {risk:.2f} 超过持仓管理方案最大比例 "
                 f"{float(config.get('max_stop_percent', 0) or 0):.2f}%"
             )
-        take_profit, take_rule = self._resolve_rule(
-            config["initial_take_profit_rules"], direction, entry_price,
-            float(signal_take_profit or 0), risk, pivots, atr, False, current_time,
-        )
-        if take_profit is None:
-            raise ValueError("没有止盈规则能够生成有效价格")
         if multi_level:
             take_profit = reference_take_profit
             take_rule = {"type": "multi_level_structure_targets"}
@@ -333,6 +328,13 @@ class PositionManager:
             reward = abs(take_profit - entry_price)
             rr = reward / reference_risk if reference_risk else 0
         else:
+            take_profit, take_rule = self._resolve_rule(
+                config["initial_take_profit_rules"], direction, entry_price,
+                float(signal_take_profit or 0), risk, pivots, atr, False,
+                current_time,
+            )
+            if take_profit is None:
+                raise ValueError("没有止盈规则能够生成有效价格")
             reward = abs(take_profit - entry_price) if take_profit else 0
             rr = reward / risk if risk and take_profit else 0
         minimum_rr = float(config.get("min_risk_reward", 0) or 0)

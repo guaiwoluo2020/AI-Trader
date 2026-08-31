@@ -171,10 +171,11 @@
               <v-col cols="6" md="3"><v-text-field v-model.number="form.config.multi_level_exit.runner_trailing_distance_r" label="距最有利价格" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
             </v-row>
           </template>
-          <RuleChain v-model="form.config.initial_stop_rules" title="初始止损规则链" kind="stop" />
-          <RuleChain v-model="form.config.initial_take_profit_rules" title="初始止盈规则链" kind="take" />
-          <div class="section-title mt-6">持仓后管理</div>
-          <v-row>
+          <template v-if="form.config.management_mode !== 'multi_level_exit'">
+            <RuleChain v-model="form.config.initial_stop_rules" title="初始止损规则链" kind="stop" />
+            <RuleChain v-model="form.config.initial_take_profit_rules" title="初始止盈规则链" kind="take" />
+            <div class="section-title mt-6">持仓后管理</div>
+            <v-row>
             <v-col cols="12" md="4"><v-switch v-model="management.breakEven" color="success" label="盈利后移动至保本" /></v-col>
             <v-col cols="6" md="2"><v-text-field v-model.number="management.breakEvenR" label="启动盈利" suffix="R" type="number" min="0.1" step="0.1" /></v-col>
             <v-col cols="12" md="4"><v-switch v-model="management.trailing" color="success" label="启用移动止损" /></v-col>
@@ -189,19 +190,32 @@
             <v-col cols="12" md="3"><v-switch v-model="management.timeout" color="success" label="最大持仓时间" /></v-col>
             <v-col cols="6" md="2"><v-text-field v-model.number="management.timeoutBars" label="K线数量" type="number" min="1" /></v-col>
             <v-col cols="6" md="2"><v-select v-model="management.timeoutPeriod" :items="periods" label="计时周期" /></v-col>
-          </v-row>
-          <div class="section-title mt-6">分批止盈</div>
-          <v-switch v-model="management.partialTakeProfit" color="success" label="启用分批止盈" />
-          <div v-if="management.partialTakeProfit" class="partial-levels">
-            <div v-for="(level, index) in management.partialLevels" :key="level.level_id" class="partial-row">
-              <span class="rule-index">{{ index + 1 }}</span>
-              <v-text-field v-model.number="level.trigger_r" label="触发盈利" suffix="R" type="number" min="0.1" step="0.1" density="compact" />
-              <v-text-field v-model.number="level.close_percent" label="平仓比例" suffix="%" type="number" min="1" max="100" density="compact" />
-              <v-select v-model="level.move_sl" :items="partialMoveOptions" label="触发后止损" density="compact" />
-              <v-btn icon="mdi-delete-outline" color="error" variant="text" :disabled="management.partialLevels.length === 1" @click="removePartialLevel(index)" />
+            </v-row>
+            <div class="section-title mt-6">分批止盈</div>
+            <v-switch v-model="management.partialTakeProfit" color="success" label="启用分批止盈" />
+            <div v-if="management.partialTakeProfit" class="partial-levels">
+              <div v-for="(level, index) in management.partialLevels" :key="level.level_id" class="partial-row">
+                <span class="rule-index">{{ index + 1 }}</span>
+                <v-text-field v-model.number="level.trigger_r" label="触发盈利" suffix="R" type="number" min="0.1" step="0.1" density="compact" />
+                <v-text-field v-model.number="level.close_percent" label="平仓比例" suffix="%" type="number" min="1" max="100" density="compact" />
+                <v-select v-model="level.move_sl" :items="partialMoveOptions" label="触发后止损" density="compact" />
+                <v-btn icon="mdi-delete-outline" color="error" variant="text" :disabled="management.partialLevels.length === 1" @click="removePartialLevel(index)" />
+              </div>
+              <v-btn variant="tonal" color="primary" prepend-icon="mdi-plus" @click="addPartialLevel">增加止盈层级</v-btn>
             </div>
-            <v-btn variant="tonal" color="primary" prepend-icon="mdi-plus" @click="addPartialLevel">增加止盈层级</v-btn>
-          </div>
+          </template>
+          <template v-else>
+            <div class="section-title mt-6">兜底退出</div>
+            <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+              结构层级负责分批止损、分批止盈和尾仓移动止损。这里仅保留与结构点位无关的强制退出条件。
+            </v-alert>
+            <v-row>
+              <v-col cols="12" md="4"><v-switch v-model="management.reverse" color="success" label="反向信号退出" /></v-col>
+              <v-col cols="12" md="4"><v-switch v-model="management.timeout" color="success" label="最大持仓时间" /></v-col>
+              <v-col cols="6" md="2"><v-text-field v-model.number="management.timeoutBars" label="K线数量" type="number" min="1" :disabled="!management.timeout" /></v-col>
+              <v-col cols="6" md="2"><v-select v-model="management.timeoutPeriod" :items="periods" label="计时周期" :disabled="!management.timeout" /></v-col>
+            </v-row>
+          </template>
           <v-row>
             <v-col cols="6" md="3"><v-text-field v-model.number="form.config.min_risk_reward" label="最小盈亏比" type="number" min="0" step="0.1" /></v-col>
             <v-col cols="6" md="3"><v-text-field v-model.number="form.config.min_stop_percent" label="最小止损比例" suffix="%" hint="默认 0.1%，按入场价计算" persistent-hint type="number" min="0" step="0.01" /></v-col>
@@ -215,6 +229,7 @@
             <v-col cols="6" md="4"><v-text-field v-model.number="form.config.loss_streak_limit" label="连续亏损次数" type="number" min="1" max="20" :disabled="!form.config.loss_streak_circuit_breaker_enabled" /></v-col>
             <v-col cols="6" md="4"><v-text-field v-model.number="form.config.loss_streak_pause_minutes" label="暂停时长" suffix="分钟" type="number" min="1" max="1440" :disabled="!form.config.loss_streak_circuit_breaker_enabled" /></v-col>
           </v-row>
+          <template v-if="form.config.management_mode !== 'multi_level_exit'">
           <v-divider class="my-6" />
           <div class="d-flex align-center ga-3"><div><div class="section-title">场景规则</div><div class="text-caption text-medium-emphasis">按具体Setup、通用场景族或信号来源覆盖默认规则；未命中时继续使用上面的默认方案。</div></div><v-spacer/><v-btn color="primary" variant="tonal" prepend-icon="mdi-plus" @click="addSetupProfile">新增场景规则</v-btn></div>
           <v-alert v-if="!form.config.setup_profiles?.length" type="info" variant="tonal" density="compact" class="mt-4">当前没有场景覆盖，所有信号使用默认持仓管理规则。</v-alert>
@@ -236,6 +251,7 @@
             </div>
             <div class="effective-preview">匹配顺序：具体 Setup ＞ 通用场景族 ＞ 信号来源；未命中时使用默认持仓管理方案。</div>
           </div>
+          </template>
         </v-card-text>
         <v-card-actions class="pa-5"><v-spacer /><v-btn variant="text" @click="dialog = false">取消</v-btn><v-btn color="primary" :loading="saving" @click="save">保存方案</v-btn></v-card-actions>
       </v-card>
@@ -533,6 +549,11 @@ function addSetupProfile() {
 function removeSetupProfile(index) { form.config.setup_profiles.splice(index, 1) }
 function buildManagementRules() {
   const rules = []
+  if (form.config.management_mode === 'multi_level_exit') {
+    if (management.reverse) rules.push({ type: 'reverse_signal' })
+    if (management.timeout) rules.push({ type: 'max_holding_bars', period: management.timeoutPeriod, bars: management.timeoutBars })
+    return rules
+  }
   if (management.breakEven) rules.push({ type: 'break_even', activation_r: management.breakEvenR, offset_r: 0 })
   rules.push({ type: 'pivot_trailing', enabled: management.pivotTrailing, period: management.pivotPeriod, buffer: { type: 'fixed_points', value: 0 } })
   rules.push({ type: 'structure_trailing', enabled: management.structureTrailing, structure_layer: 'swing', buffer_type: 'atr', buffer_value: Number(management.structureBuffer) || 0.15, min_improvement_atr: Number(management.structureImprove) || 0.10, confirm_bars: 1, cooldown_seconds: 30 })
@@ -545,6 +566,11 @@ function buildManagementRules() {
 function serializeConfig() {
   const config = deepClone(form.config)
   config.management_rules = buildManagementRules()
+  if (config.management_mode === 'multi_level_exit') {
+    config.initial_stop_rules = []
+    config.initial_take_profit_rules = []
+    config.setup_profiles = []
+  }
   config.setup_profiles = (config.setup_profiles || []).map(profile => {
     const clean = {
       profile_id: profile.profile_id,
@@ -589,6 +615,9 @@ function openCreateMulti() {
   openCreate()
   form.name = '多层结构持仓管理'
   form.config.management_mode = 'multi_level_exit'
+  form.config.initial_stop_rules = []
+  form.config.initial_take_profit_rules = []
+  form.config.setup_profiles = []
   // Structure levels own partial exits; generic R-based partial exits would
   // otherwise compete for the same remaining volume.
   syncManagement([])
