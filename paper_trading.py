@@ -875,7 +875,6 @@ class PaperTradingService:
 
     def get_account_detail(self, user_id: int, account_id: int) -> Dict:
         account = self._paper_account(user_id, account_id)
-        self._expire_deployments(user_id, account_id)
         settings = self._settings(account_id)
         # 决策快照保存在运行态仓储中；订单/成交通过 decision_id 读取开仓原因，
         # 不把会变化的策略配置反向当作历史原因。

@@ -2134,13 +2134,6 @@ def create_market_routes(
             if not runtime_active and not include_inactive:
                 continue
             engine = engine_manager.get_engine(user.user_id, account_id)
-            if str(deployment.get("execution_mode") or "") == "paper":
-                # Keep the execution-centre audit aligned with the terminal
-                # paper-order state, including creation-time rejects and
-                # one-minute pending-order expiry.
-                engine_manager.paper_trading.reconcile_decision_statuses(
-                    user.user_id, account_id,
-                )
             # 执行中心首屏只展示最近 10 条决策；历史回放按时间范围另行加载，
             # 避免把账户全部运行态、上千根 K 线和成交事件一次性拼进响应。
             decisions = engine.get_decision_history(
