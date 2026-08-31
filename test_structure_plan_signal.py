@@ -162,6 +162,15 @@ class StructurePlanTests(unittest.TestCase):
         self.assertEqual(first["fingerprint"], second["fingerprint"])
         self.assertNotIn("计划产生于", first["reason"])
 
+    def test_plan_validity_prefers_utc_kline_timestamp(self):
+        self.store.rows[-1]["timestamp"] = 10_800
+        self.store.rows[-1]["timestamp_utc"] = 3_600
+        plan = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows,
+            _range_structure("breakout_confirmed", "down"),
+        )[0]
+        self.assertEqual(plan["valid_from"], 3_600)
+
     def test_sideways_triangle_keeps_box_boundary_plans(self):
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows,

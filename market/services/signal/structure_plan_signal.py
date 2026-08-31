@@ -64,7 +64,12 @@ def _number(value, default=0.0) -> float:
 
 
 def _bar_time(row: Dict) -> int:
-    value = int(_number(row.get("timestamp") or row.get("time") or 0))
+    # Trading-plan validity is an absolute instant. The legacy ``timestamp``
+    # is MT5 broker wall time and may be UTC+2/+3; EA 2.07+ supplies the
+    # canonical UTC value explicitly.
+    value = int(_number(
+        row.get("timestamp_utc") or row.get("timestamp") or row.get("time") or 0
+    ))
     # EA 可能上报毫秒时间戳；计划有效期统一使用 Unix 秒。
     return value // 1000 if value > 10_000_000_000 else value
 

@@ -4,6 +4,7 @@ from market.services.market_structure_engine_v2 import (
     ENGINE_VERSION,
     _atr_series,
     _anchor_confirmed_segments,
+    _advance_locked_range_breakout,
     _event_stream,
     _range,
     _segments,
@@ -18,6 +19,90 @@ def bars(closes):
 
 
 class MarketStructureEngineTests(unittest.TestCase):
+    def test_locked_triangle_boundary_confirms_without_refitting(self):
+        cached = {
+            "last_bar_time": 300,
+            "range": {
+                "active": True, "status": "breakout_candidate",
+                "pattern": "descending_triangle", "breakout_direction": "down",
+                "top": 110, "bottom": 100,
+                "locked_top": 110, "locked_bottom": 100,
+                "breakout_level": 100, "breakout_confirm_count": 1,
+                "breakout_candidate_age_bars": 0,
+                "breakout_detected_time": 300,
+            },
+        }
+        # A fresh regression has already lost the old triangle. Confirmation
+        # must still use the boundary observed by the first breakout candle.
+        result = {
+            "atr": 1, "range": None, "trendlines": [], "evidence": {},
+        }
+        rows = [{
+            "timestamp_utc": 600, "open": 99.5, "high": 100,
+            "low": 98.5, "close": 99,
+        }]
+        advanced = _advance_locked_range_breakout(
+            cached, result, rows, {
+                "break_buffer_atr": 0.1, "break_confirm_bars": 2,
+                "range_breakout_candidate_timeout_bars": 3,
+            },
+        )
+        self.assertEqual(advanced["range"]["status"], "breakout_confirmed")
+        self.assertEqual(advanced["range"]["breakout_level"], 100)
+        self.assertTrue(
+            advanced["range"]["lifecycle_event"]["boundary_locked"]
+        )
+
+    def test_locked_triangle_boundary_marks_return_inside_as_failed(self):
+        cached = {
+            "last_bar_time": 300,
+            "range": {
+                "active": True, "status": "breakout_candidate",
+                "pattern": "triangle", "breakout_direction": "down",
+                "top": 110, "bottom": 100,
+                "locked_top": 110, "locked_bottom": 100,
+                "breakout_level": 100, "breakout_confirm_count": 1,
+            },
+        }
+        rows = [{
+            "timestamp_utc": 600, "open": 99, "high": 102,
+            "low": 98, "close": 101,
+        }]
+        advanced = _advance_locked_range_breakout(
+            cached, {"atr": 1, "range": None, "trendlines": []}, rows,
+            {"break_buffer_atr": 0.1, "break_confirm_bars": 2,
+             "range_breakout_candidate_timeout_bars": 3},
+        )
+        self.assertEqual(advanced["range"]["status"], "failed_breakout")
+
+    def test_locked_triangle_candidate_expires_after_short_ttl(self):
+        cached = {
+            "last_bar_time": 300,
+            "range": {
+                "active": True, "status": "breakout_candidate",
+                "pattern": "triangle", "breakout_direction": "down",
+                "top": 110, "bottom": 100,
+                "locked_top": 110, "locked_bottom": 100,
+                "breakout_level": 100, "breakout_confirm_count": 1,
+                "breakout_candidate_age_bars": 2,
+                "breakout_detected_time": 0,
+            },
+        }
+        fresh = {"atr": 1, "range": None, "trendlines": []}
+        rows = [{
+            "timestamp_utc": 600, "open": 100, "high": 101,
+            "low": 99, "close": 99.95,
+        }]
+        advanced = _advance_locked_range_breakout(
+            cached, fresh, rows,
+            {"break_buffer_atr": 0.1, "break_confirm_bars": 2,
+             "range_breakout_candidate_timeout_bars": 3},
+        )
+        self.assertIsNone(advanced["range"])
+        self.assertEqual(
+            advanced["expired_range_breakout_candidate"]["level"], 100
+        )
+
     def test_breakout_is_close_confirmed(self):
         rows = bars([100 + i * .2 for i in range(40)] + [108, 109, 110, 111, 112, 113])
         result = analyze("TEST", "M5", rows, {"break_confirm_bars": 2})

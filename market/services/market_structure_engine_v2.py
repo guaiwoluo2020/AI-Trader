@@ -1,12 +1,13 @@
 """Hierarchical, close-confirmed market-structure engine."""
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 import json
 from typing import Dict, List, Optional, Tuple
 
 _CACHE: Dict[str, Dict] = {}
-ENGINE_VERSION = "hierarchical-structure-v8"
+ENGINE_VERSION = "hierarchical-structure-v9"
 DEFAULT_CONFIG = {
     "pivot_legs": 3, "medium_pivot_legs": 8, "large_pivot_legs": 25,
     "min_reversal_atr": 0.5, "break_buffer_atr": 0.10,
@@ -23,6 +24,7 @@ DEFAULT_CONFIG = {
     "trend_min_slope_consistency": 0.60,
     "trend_max_retrace_atr": 4.0,
     "candidate_timeout_bars": 12,
+    "range_breakout_candidate_timeout_bars": 3,
     "trend_max_anchor_bars": 48,
 }
 
@@ -268,17 +270,42 @@ def _range(rows: List[Dict], pivots: List[Dict], atr: float, config: Dict) -> Op
     if samples and len(samples) >= count and all(item["up"] for item in samples[-count:]):
         confirmed_at = samples[-count]["index"]
         best.update({"active": False, "status": "breakout_confirmed", "breakout_direction": "up",
+                     "breakout_level": top, "locked_top": top, "locked_bottom": bottom,
+                     "breakout_confirm_count": count,
                      "lifecycle_event": {"type": "range_breakout_confirmed", "direction": "up",
-                                         "index": confirmed_at, "confirmed_at": confirmed_at}})
+                                         "index": confirmed_at, "confirmed_at": confirmed_at,
+                                         "level": top, "confirm_count": count,
+                                         "boundary_locked": True}})
     elif samples and len(samples) >= count and all(item["down"] for item in samples[-count:]):
         confirmed_at = samples[-count]["index"]
         best.update({"active": False, "status": "breakout_confirmed", "breakout_direction": "down",
+                     "breakout_level": bottom, "locked_top": top, "locked_bottom": bottom,
+                     "breakout_confirm_count": count,
                      "lifecycle_event": {"type": "range_breakout_confirmed", "direction": "down",
-                                         "index": confirmed_at, "confirmed_at": confirmed_at}})
+                                         "index": confirmed_at, "confirmed_at": confirmed_at,
+                                         "level": bottom, "confirm_count": count,
+                                         "boundary_locked": True}})
     elif samples and (samples[-1]["up"] or samples[-1]["down"]):
         direction = "up" if samples[-1]["up"] else "down"
+        consecutive = 0
+        for sample in reversed(samples):
+            if not sample[direction]:
+                break
+            consecutive += 1
+        breakout_level = top if direction == "up" else bottom
         best.update({"status": "breakout_candidate", "breakout_direction": direction,
-                     "lifecycle_event": {"type": "range_breakout_candidate", "direction": direction, "index": len(rows) - 1}})
+                     # Freeze the boundary used by the first breakout close.
+                     # Subsequent bars must confirm against this snapshot,
+                     # rather than against a newly refitted triangle/box.
+                     "breakout_level": breakout_level,
+                     "locked_top": top, "locked_bottom": bottom,
+                     "breakout_confirm_count": consecutive,
+                     "breakout_candidate_age_bars": 0,
+                     "breakout_detected_at": len(rows) - 1,
+                     "breakout_detected_time": _time(rows[-1]),
+                     "lifecycle_event": {"type": "range_breakout_candidate", "direction": direction,
+                                         "index": len(rows) - 1, "level": breakout_level,
+                                         "confirm_count": consecutive}})
     elif samples and samples[-1]["inside"]:
         prior_up = any(item["up"] for item in samples[:-1])
         prior_down = any(item["down"] for item in samples[:-1])
@@ -288,6 +315,107 @@ def _range(rows: List[Dict], pivots: List[Dict], atr: float, config: Dict) -> Op
                          "lifecycle_event": {"type": "range_failed_breakout", "direction": direction,
                                              "index": len(rows) - 1, "returned_inside": True}})
     return best
+
+
+def _advance_locked_range_breakout(
+    cached: Dict, result: Dict, rows: List[Dict], config: Dict,
+) -> Dict:
+    """Advance a range/triangle breakout against its frozen first-break level.
+
+    A fresh regression may move or remove the range after the first breakout
+    candle.  That recalculation remains useful for the next structure, but it
+    must not rewrite an already-observed event.  This state transition owns the
+    candidate until it confirms, returns inside, or expires.
+    """
+    previous = copy.deepcopy((cached or {}).get("range") or {})
+    if previous.get("status") != "breakout_candidate" or not rows:
+        return result
+    direction = str(previous.get("breakout_direction") or "")
+    if direction not in {"up", "down"}:
+        return result
+    previous_time = cached.get("last_bar_time")
+    latest_time = _time(rows[-1])
+    try:
+        if previous_time is not None and latest_time is not None and float(latest_time) <= float(previous_time):
+            return result
+    except (TypeError, ValueError):
+        if str(latest_time) == str(previous_time):
+            return result
+
+    level = float(previous.get("breakout_level") or (
+        previous.get("top") if direction == "up" else previous.get("bottom")
+    ) or 0)
+    top = float(previous.get("locked_top") or previous.get("top") or 0)
+    bottom = float(previous.get("locked_bottom") or previous.get("bottom") or 0)
+    if level <= 0 or top <= bottom:
+        return result
+    close = _v(rows[-1], "close")
+    atr = max(float(result.get("atr") or 0), 1e-9)
+    buffer = atr * float(config.get("break_buffer_atr", 0.10))
+    outside = close > level + buffer if direction == "up" else close < level - buffer
+    returned_inside = bottom <= close <= top
+    count = max(1, int(previous.get("breakout_confirm_count") or 1))
+    age = max(0, int(previous.get("breakout_candidate_age_bars") or 0)) + 1
+    required = max(1, int(config.get("break_confirm_bars", 2)))
+    timeout = max(1, int(config.get("range_breakout_candidate_timeout_bars", 3)))
+    locked = previous
+    locked.update({
+        "end_index": len(rows) - 1,
+        "breakout_level": level,
+        "breakout_candidate_age_bars": age,
+    })
+    if outside:
+        count += 1
+        locked["breakout_confirm_count"] = count
+        if count >= required:
+            locked.update({
+                "active": False,
+                "status": "breakout_confirmed",
+                "lifecycle_event": {
+                    "type": "range_breakout_confirmed",
+                    "direction": direction,
+                    "index": len(rows) - 1,
+                    "confirmed_at": len(rows) - 1,
+                    "level": level,
+                    "confirm_count": count,
+                    "boundary_locked": True,
+                },
+            })
+        else:
+            locked["status"] = "breakout_candidate"
+    elif returned_inside:
+        locked.update({
+            "active": True,
+            "status": "failed_breakout",
+            "lifecycle_event": {
+                "type": "range_failed_breakout",
+                "direction": direction,
+                "index": len(rows) - 1,
+                "level": level,
+                "returned_inside": True,
+                "boundary_locked": True,
+            },
+        })
+    elif age >= timeout:
+        # The locked candidate has neither confirmed nor returned inside. Let
+        # the newly calculated structure take ownership after the short TTL.
+        result["expired_range_breakout_candidate"] = {
+            "direction": direction, "level": level,
+            "detected_time": previous.get("breakout_detected_time"),
+            "expired_time": latest_time,
+        }
+        return result
+    else:
+        locked["status"] = "breakout_candidate"
+
+    result["range"] = locked
+    result["local_patterns"] = _local_patterns(
+        rows, locked, result.get("trendlines") or []
+    )
+    evidence = dict(result.get("evidence") or {})
+    evidence["range_active"] = bool(locked.get("active"))
+    result["evidence"] = evidence
+    return result
 
 
 def _trendlines(rows: List[Dict], levels: Dict[str, List[Dict]], atr: float, config: Dict) -> List[Dict]:
@@ -750,6 +878,7 @@ def analyze_incremental(symbol: str, period: str, rows: List[Dict], config: Dict
     result = analyze(symbol, period, rows, cfg)
     if (cached and cached.get("engine_version") == ENGINE_VERSION
             and cached.get("config_signature") == signature):
+        result = _advance_locked_range_breakout(cached, result, rows, cfg)
         result = _preserve_locked_segments(cached, result, rows)
     result.update({"config_signature": signature, "window_signature": window_signature,
                    "calculation_mode": "incremental" if cached else "initial",
