@@ -210,11 +210,13 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @router.get("/accounts/{account_id}/paper")
     async def get_paper_account(
         account_id: int,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(30, ge=1, le=100),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         try:
             detail = engine_manager.paper_trading.get_account_detail(
-                user.user_id, account_id
+                user.user_id, account_id, page=page, page_size=page_size
             )
             return {"status": "ok", "detail": detail}
         except ValueError as exc:
@@ -418,13 +420,19 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @router.get("/accounts/{account_id}/deployments")
     async def list_account_deployments(
         account_id: int,
+        page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         try:
-            deployments = engine_manager.paper_trading.list_deployments(
+            all_deployments = engine_manager.paper_trading.list_deployments(
                 user.user_id, account_id
             )
-            return {"status": "ok", "deployments": deployments}
+            start = (page - 1) * page_size
+            deployments = all_deployments[start:start + page_size]
+            return {"status": "ok", "deployments": deployments,
+                    "total": len(all_deployments), "page": page,
+                    "page_size": page_size,
+                    "has_more": len(all_deployments) > start + page_size}
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

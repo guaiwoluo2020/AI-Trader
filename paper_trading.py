@@ -83,9 +83,16 @@ class PaperTradingService:
             # A shared strategy reference stores only its source pointer.  Use
             # the repository to materialize the publisher's current signals
             # before determining whether it may enter paper trading directly.
-            strategy = strategy_repository.get_strategy_by_id(
-                user_id, row["strategy_id"]
-            )
+            # Most strategy rows contain the complete config.  Materialize
+            # directly from it to avoid one extra SELECT per row; shared
+            # references still go through the repository resolver.
+            raw_config = json.loads(row["config_json"] or "{}")
+            if raw_config.get("source_owner_user_id"):
+                strategy = strategy_repository.get_strategy_by_id(
+                    user_id, row["strategy_id"]
+                )
+            else:
+                strategy = TradingStrategy.from_dict(raw_config)
             if strategy is None:
                 continue
             config = strategy.to_dict()
@@ -425,6 +432,7 @@ class PaperTradingService:
         rows = self.storage.fetchall(
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name,
+                   s.config_json AS config_json,
                    s.created_at AS strategy_created_at,
                    json_extract(s.config_json, '$.lifecycle_status') AS lifecycle_status,
                    1 AS strategy_enabled
@@ -440,9 +448,13 @@ class PaperTradingService:
         deployments = []
         for row in rows:
             item = dict(row)
-            strategy = strategy_repository.get_strategy_by_id(
-                user_id, item["strategy_id"]
-            )
+            raw_config = json.loads(item.get("config_json") or "{}")
+            if raw_config.get("source_owner_user_id"):
+                strategy = strategy_repository.get_strategy_by_id(
+                    user_id, item["strategy_id"]
+                )
+            else:
+                strategy = TradingStrategy.from_dict(raw_config) if raw_config else None
             configured_lifecycle = item.get("lifecycle_status") or "draft"
             if strategy is not None:
                 item["strategy_name"] = strategy.strategy_name
@@ -502,23 +514,33 @@ class PaperTradingService:
     def enqueue_decisions(self, user_id: int, decisions: List[Dict]) -> int:
         created = 0
         now = int(time.time())
+        # Load eligible deployments once per request instead of querying the
+        # same table for every strategy decision in the batch.
+        eligible_rows = self.storage.fetchall(
+            """
+            SELECT d.* FROM strategy_deployments d
+            JOIN trading_accounts a ON a.id = d.account_id
+            WHERE d.user_id = ? AND d.status = 'active'
+              AND d.execution_mode = 'paper'
+              AND a.account_type = 'paper' AND a.status = 'active'
+              AND a.enabled = 1 AND a.trading_enabled = 1
+              AND a.auto_trading_enabled = 1
+            """,
+            (user_id,),
+        )
+        deployments_by_key = {}
+        for deployment in eligible_rows:
+            key = (str(deployment["strategy_id"]), str(deployment["symbol"]))
+            deployments_by_key.setdefault(key, []).append(deployment)
         for decision in decisions or []:
             if (
                 decision.get("action") not in {"buy", "sell"}
                 or decision.get("status") == "rejected"
             ):
                 continue
-            deployments = self.storage.fetchall(
-                """
-                SELECT d.* FROM strategy_deployments d
-                JOIN trading_accounts a ON a.id = d.account_id
-                WHERE d.user_id = ? AND d.strategy_id = ? AND d.symbol = ?
-                  AND d.status = 'active' AND d.execution_mode = 'paper'
-                  AND a.account_type = 'paper' AND a.status = 'active'
-                  AND a.enabled = 1 AND a.trading_enabled = 1
-                  AND a.auto_trading_enabled = 1
-                """,
-                (user_id, decision.get("strategy_id"), decision.get("symbol")),
+            deployments = deployments_by_key.get(
+                (str(decision.get("strategy_id") or ""), str(decision.get("symbol") or "")),
+                [],
             )
             for deployment in deployments:
                 if self._create_order(user_id, deployment, decision, now):
@@ -872,7 +894,8 @@ class PaperTradingService:
                 )
         return len(orders)
 
-    def get_account_detail(self, user_id: int, account_id: int) -> Dict:
+    def get_account_detail(self, user_id: int, account_id: int,
+                           page: int = 1, page_size: int = 30) -> Dict:
         account = self._paper_account(user_id, account_id)
         settings = self._settings(account_id)
         # 决策快照保存在运行态仓储中；订单/成交通过 decision_id 读取开仓原因，
@@ -922,6 +945,8 @@ class PaperTradingService:
             position["management_events"] = self.position_events.list_for_position(
                 user_id, account_id, position["position_id"]
             )
+        page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
+        offset = (page - 1) * page_size
         orders = [dict(row) for row in self.storage.fetchall(
             """
             SELECT o.*, p.position_id AS linked_position_id,
@@ -929,10 +954,12 @@ class PaperTradingService:
             FROM paper_orders o
             LEFT JOIN paper_positions p ON p.order_id = o.order_id
             WHERE o.account_id = ?
-            ORDER BY o.requested_at DESC, o.order_id DESC LIMIT 30
+            ORDER BY o.requested_at DESC, o.order_id DESC LIMIT ? OFFSET ?
             """,
-            (account_id,),
+            (account_id, page_size + 1, offset),
         )]
+        orders_has_more = len(orders) > page_size
+        orders = orders[:page_size]
         for order in orders:
             order["position_attribution"] = json.loads(
                 order.get("position_attribution_json") or "{}"
@@ -968,10 +995,12 @@ class PaperTradingService:
             FROM paper_trades t
             LEFT JOIN paper_orders o ON o.order_id = t.order_id
             WHERE t.account_id = ?
-            ORDER BY t.closed_at DESC, t.trade_id DESC LIMIT 20
+            ORDER BY t.closed_at DESC, t.trade_id DESC LIMIT ? OFFSET ?
             """,
-            (account_id,),
+            (account_id, page_size + 1, offset),
         )]
+        trades_has_more = len(trades) > page_size
+        trades = trades[:page_size]
         for trade in trades:
             trade["position_attribution"] = json.loads(
                 trade.get("position_attribution_json") or "{}"
@@ -1024,20 +1053,24 @@ class PaperTradingService:
                 for row in self.storage.fetchall(
                     """
                     SELECT * FROM paper_runtime_logs
-                    WHERE account_id = ? ORDER BY created_at DESC, id DESC LIMIT 100
+                    WHERE account_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
                     """,
-                    (account_id,),
-                )
+                    (account_id, page_size + 1, offset),
+                )[:page_size]
             ],
             "equity_curve": [dict(row) for row in self.storage.fetchall(
                 """
                 SELECT point_time AS time, balance, equity, free_margin, margin,
                        open_positions
                 FROM paper_equity_points WHERE account_id = ?
-                ORDER BY point_time DESC LIMIT 1440
+                ORDER BY point_time DESC LIMIT ? OFFSET ?
                 """,
-                (account_id,),
+                (account_id, min(page_size * 10, 500), offset),
             )][::-1],
+            "page": page,
+            "page_size": page_size,
+            "orders_has_more": orders_has_more,
+            "trades_has_more": trades_has_more,
         }
 
     def build_report(

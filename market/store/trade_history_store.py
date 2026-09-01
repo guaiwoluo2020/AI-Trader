@@ -138,9 +138,15 @@ class TradeHistoryStore:
 
             return deals
 
-    def get_dict(self, symbol: str = None, hours: int = None) -> List[Dict]:
-        """获取成交记录（字典格式）"""
-        return [d.to_dict() for d in self.get(symbol, hours)]
+    def get_dict(
+        self, symbol: str = None, hours: int = None,
+        offset: int = 0, limit: Optional[int] = None,
+    ) -> List[Dict]:
+        """获取成交记录（字典格式），支持服务端分页切片。"""
+        deals = self.get(symbol, hours)
+        start = max(0, int(offset or 0))
+        items = deals[start:] if limit is None else deals[start:start + max(1, int(limit))]
+        return [d.to_dict() for d in items]
 
     def get_statistics(self, symbol: str = None) -> Dict:
         """

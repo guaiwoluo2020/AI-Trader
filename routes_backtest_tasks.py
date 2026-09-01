@@ -3,7 +3,7 @@
 
 from typing import Dict
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from auth import AuthUser, require_auth
 from backtest_ai_analysis import BacktestAIAnalysisService
@@ -25,10 +25,11 @@ def create_backtest_task_routes() -> APIRouter:
 
     @router.get("/backtest/templates")
     async def list_templates(
+        page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        templates = service.list_templates(user.user_id)
-        return {"status": "ok", "count": len(templates), "templates": templates}
+        templates, total = service.list_templates_page(user.user_id, page, page_size)
+        return {"status": "ok", "count": len(templates), "total": total, "page": page, "page_size": page_size, "has_more": page * page_size < total, "templates": templates}
 
     @router.post("/backtest/templates")
     async def create_template(
@@ -83,10 +84,11 @@ def create_backtest_task_routes() -> APIRouter:
 
     @router.get("/backtest/batches")
     async def list_batches(
+        page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        batches = service.list_batches(user.user_id)
-        return {"status": "ok", "count": len(batches), "batches": batches}
+        batches, total = service.list_batches_page(user.user_id, page, page_size)
+        return {"status": "ok", "count": len(batches), "total": total, "page": page, "page_size": page_size, "has_more": page * page_size < total, "batches": batches}
 
     @router.get("/backtest/batches/{batch_id}")
     async def get_batch(

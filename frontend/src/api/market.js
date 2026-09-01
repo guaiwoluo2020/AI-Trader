@@ -72,8 +72,8 @@ export const marketAPI = {
     return response.data
   },
 
-  async getBacktestTemplates() {
-    const response = await api.get('/backtest/templates')
+  async getBacktestTemplates(page = 1, pageSize = 20) {
+    const response = await api.get('/backtest/templates', { params: { page, page_size: pageSize } })
     return response.data
   },
 
@@ -104,8 +104,8 @@ export const marketAPI = {
     return response.data
   },
 
-  async getBacktestBatches() {
-    const response = await api.get('/backtest/batches')
+  async getBacktestBatches(page = 1, pageSize = 20) {
+    const response = await api.get('/backtest/batches', { params: { page, page_size: pageSize } })
     return response.data
   },
 
@@ -205,8 +205,8 @@ export const marketAPI = {
     return response.data
   },
 
-  async getAlphaResearchRuns() {
-    const response = await api.get('/alpha-research/runs')
+  async getAlphaResearchRuns(page = 1, pageSize = 20) {
+    const response = await api.get('/alpha-research/runs', { params: { page, page_size: pageSize } })
     return response.data
   },
 
@@ -238,8 +238,8 @@ export const marketAPI = {
     return response.data
   },
 
-  async getAlphaLibrary() {
-    const response = await api.get('/alpha-library')
+  async getAlphaLibrary(page = 1, pageSize = 20) {
+    const response = await api.get('/alpha-library', { params: { page, page_size: pageSize } })
     return response.data
   },
 
@@ -376,9 +376,10 @@ export const marketAPI = {
   },
 
   // 获取待确认订单
-  async getPendingOrders(symbol = null, accountId = null) {
+  async getPendingOrders(symbol = null, accountId = null, page = 1, pageSize = 30) {
     const params = symbol ? { symbol } : {}
     if (accountId) params.account_id = accountId
+    params.page = page; params.page_size = pageSize
     const response = await api.get('/pending_orders', { params })
     return response.data
   },
@@ -696,10 +697,12 @@ export const marketAPI = {
     return response.data
   },
 
-  async getPositionManagementEvents(symbol, ticket, accountId = null) {
+  async getPositionManagementEvents(symbol, ticket, accountId = null, page = 1, pageSize = 30) {
+    const params = { page, page_size: pageSize }
+    if (accountId) params.account_id = accountId
     const response = await api.get(
       `/positions/${encodeURIComponent(symbol)}/${encodeURIComponent(ticket)}/management-events`,
-      { params: accountId ? { account_id: accountId } : {} }
+      { params }
     )
     return response.data
   },
@@ -707,9 +710,11 @@ export const marketAPI = {
   // ==================== 交易历史 ====================
 
   // 获取交易历史
-  async getTradeHistory(accountId = null) {
+  async getTradeHistory(accountId = null, page = 1, pageSize = 30) {
+    const params = { page, page_size: pageSize }
+    if (accountId) params.account_id = accountId
     const response = await api.get('/trade_history', {
-      params: accountId ? { account_id: accountId } : {},
+      params,
     })
     return response.data
   },
@@ -835,8 +840,12 @@ export const marketAPI = {
     return response.data
   },
 
-  async getAdminStrategies() {
-    const response = await api.get('/admin/strategies')
+  async getAdminStrategies(page = 1, pageSize = 20, filters = {}) {
+    const params = { page, page_size: pageSize }
+    if (filters.user_id) params.target_user_id = filters.user_id
+    if (filters.symbol) params.symbol = filters.symbol
+    if (filters.lifecycle_status) params.lifecycle_status = filters.lifecycle_status
+    const response = await api.get('/admin/strategies', { params })
     return response.data
   },
 
@@ -869,6 +878,8 @@ export const marketAPI = {
   // 获取决策历史
   async getDecisions(filters = {}, accountId = null) {
     const params = { count: filters.count || 50 }
+    if (filters.page) params.page = filters.page
+    if (filters.page_size) params.page_size = filters.page_size
     if (filters.symbol) params.symbol = filters.symbol
     if (filters.strategy_id) params.strategy_id = filters.strategy_id
     if (filters.status) params.status = filters.status

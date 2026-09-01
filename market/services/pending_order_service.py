@@ -80,9 +80,11 @@ class PendingOrderService:
         """获取订单列表"""
         return self.store.get_pending_orders(symbol)
 
-    def get_orders_dict(self, symbol: str = None) -> List[Dict]:
+    def get_orders_dict(self, symbol: str = None, offset: int = 0, limit: int = None) -> List[Dict]:
         """获取订单字典列表"""
-        return self.store.get_pending_orders_dict(symbol)
+        items = self.store.get_pending_orders_dict(symbol)
+        start = max(0, int(offset or 0))
+        return items[start:] if limit is None else items[start:start + max(1, int(limit))]
 
     # 兼容旧方法名
     def get_pending_orders_dict(self, symbol: str = None) -> List[Dict]:

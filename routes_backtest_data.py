@@ -30,12 +30,14 @@ def create_backtest_data_routes(
 
     @router.get("/backtest/datasets")
     async def list_datasets(
+        page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        datasets = repository.list_for_user(user.user_id)
+        datasets, total = repository.list_page(user.user_id, page, page_size)
         return {
             "status": "ok",
-            "count": len(datasets),
+            "count": len(datasets), "total": total, "page": page,
+            "page_size": page_size, "has_more": page * page_size < total,
             "datasets": datasets,
             "quota": quota_service.get_summary(user.user_id, user.role),
         }

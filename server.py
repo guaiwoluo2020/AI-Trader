@@ -1453,6 +1453,7 @@ class TradingServer:
         status: str = None,
         date_from: str = None,
         date_to: str = None,
+        offset: int = 0,
     ) -> List[Dict]:
         """获取当前账户的执行历史和聚合后的内存等待状态。"""
         decisions = list(self._decision_history)
@@ -1462,7 +1463,7 @@ class TradingServer:
             # those decisions without needing a restart.
             persisted = []
             # 执行中心只取最近决策，避免每个请求反序列化账户全部运行态。
-            recent_limit = max(100, min(500, int(count or 20) * 20))
+            recent_limit = max(100, min(5000, (int(offset or 0) + int(count or 20)) * 20))
             for item in self._runtime_repository.list_entities(
                 "strategy_decision", limit=recent_limit
             ):
@@ -1496,7 +1497,9 @@ class TradingServer:
             end = datetime.fromisoformat(date_to)
             decisions = [d for d in decisions if d.created_at and d.created_at <= end]
         decisions.sort(key=lambda item: item.created_at or datetime.min)
-        return [d.to_dict() for d in reversed(decisions[-max(1, min(count, 1000)):])]
+        page_offset = max(0, int(offset or 0))
+        page_count = max(1, min(int(count or 20), 1000))
+        return [d.to_dict() for d in reversed(decisions[-(page_offset + page_count):])][page_offset:page_offset + page_count]
 
     def get_dashboard_overview(self, account) -> Dict:
         """Build one account-scoped operational snapshot for the dashboard."""

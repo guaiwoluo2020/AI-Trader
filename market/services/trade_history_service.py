@@ -35,9 +35,10 @@ class TradeHistoryService:
         deals = [TradeDeal.from_ea_data(data) for data in deals_data]
         return self.store.add(deals)
 
-    def get_deals(self, symbol: str = None, hours: int = None) -> List[Dict]:
+    def get_deals(self, symbol: str = None, hours: int = None,
+                  offset: int = 0, limit: int = None) -> List[Dict]:
         """获取成交记录"""
-        return self.store.get_dict(symbol, hours)
+        return self.store.get_dict(symbol, hours, offset=offset, limit=limit)
 
     def get_statistics(self, symbol: str = None) -> Dict:
         """获取交易统计"""

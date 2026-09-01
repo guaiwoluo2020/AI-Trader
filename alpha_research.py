@@ -258,6 +258,16 @@ class AlphaResearchRepository:
         )
         return [self._row(row) for row in rows]
 
+    def list_page(self, user_id: int, page: int = 1, page_size: int = 20):
+        page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
+        total = self.storage.fetchone("SELECT COUNT(*) AS total FROM alpha_research_runs WHERE user_id=?", (user_id,))
+        rows = self.storage.fetchall(
+            "SELECT r.*, d.dataset_name, d.symbol FROM alpha_research_runs r LEFT JOIN backtest_datasets d ON d.dataset_id=r.dataset_id "
+            "WHERE r.user_id=? ORDER BY r.created_at DESC, r.run_id DESC LIMIT ? OFFSET ?",
+            (user_id, page_size, (page - 1) * page_size),
+        )
+        return [self._row(row) for row in rows], int(total['total'] if total else 0)
+
     def get(self, user_id: int, run_id: str) -> Optional[Dict]:
         row = self.storage.fetchone(
             """
@@ -503,6 +513,16 @@ class AlphaLibraryRepository:
             (user_id,),
         )
         return [self._row(row, user_id) for row in rows]
+
+    def list_visible_page(self, user_id: int, page: int = 1, page_size: int = 20):
+        page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
+        total = self.storage.fetchone("SELECT COUNT(*) AS total FROM alpha_library WHERE user_id=? OR visibility='shared'", (user_id,))
+        rows = self.storage.fetchall(
+            "SELECT a.*, u.username AS owner_username FROM alpha_library a JOIN users u ON u.id=a.user_id "
+            "WHERE a.user_id=? OR a.visibility='shared' ORDER BY a.updated_at DESC, a.alpha_id DESC LIMIT ? OFFSET ?",
+            (user_id, page_size, (page - 1) * page_size),
+        )
+        return [self._row(row, user_id) for row in rows], int(total['total'] if total else 0)
 
     def get_visible(self, user_id: int, alpha_id: str) -> Optional[Dict]:
         row = self.storage.fetchone(

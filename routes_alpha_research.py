@@ -3,7 +3,7 @@
 
 from typing import Dict
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from alpha_research import AlphaResearchService
 from auth import AuthUser, require_auth
@@ -21,9 +21,12 @@ def create_alpha_research_routes() -> APIRouter:
         return {"status": "ok", **service.context(user.user_id)}
 
     @router.get("/alpha-research/runs")
-    async def list_runs(user: AuthUser = Depends(require_auth)) -> Dict:
-        runs = service.repository.list_for_user(user.user_id)
-        return {"status": "ok", "count": len(runs), "runs": runs}
+    async def list_runs(
+        page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        runs, total = service.repository.list_page(user.user_id, page, page_size)
+        return {"status": "ok", "count": len(runs), "total": total, "page": page, "page_size": page_size, "has_more": page * page_size < total, "runs": runs}
 
     @router.post("/alpha-research/candidates")
     async def generate_candidates(
@@ -93,10 +96,11 @@ def create_alpha_research_routes() -> APIRouter:
 
     @router.get("/alpha-library")
     async def list_alpha_library(
+        page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
-        items = service.library.list_visible(user.user_id)
-        return {"status": "ok", "count": len(items), "items": items}
+        items, total = service.library.list_visible_page(user.user_id, page, page_size)
+        return {"status": "ok", "count": len(items), "total": total, "page": page, "page_size": page_size, "has_more": page * page_size < total, "items": items}
 
     @router.post("/alpha-library/{alpha_id}/retire")
     async def retire_alpha(

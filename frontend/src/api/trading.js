@@ -90,8 +90,10 @@ export const authAPI = {
     return response.data
   },
 
-  async getUserQuotas() {
-    const response = await api.get('/auth/admin/user-quotas')
+  async getUserQuotas(page = 1, pageSize = 20) {
+    const response = await api.get('/auth/admin/user-quotas', {
+      params: { page, page_size: pageSize },
+    })
     return response.data
   },
 
@@ -260,8 +262,10 @@ export const accountAPI = {
     return response.data
   },
 
-  async getPaperDetail(accountId) {
-    const response = await api.get(`/accounts/${encodeURIComponent(accountId)}/paper`)
+  async getPaperDetail(accountId, page = 1, pageSize = 30) {
+    const response = await api.get(`/accounts/${encodeURIComponent(accountId)}/paper`, {
+      params: { page, page_size: pageSize },
+    })
     return response.data
   },
 
@@ -282,6 +286,13 @@ export const accountAPI = {
     const response = await api.post(
       `/accounts/${encodeURIComponent(accountId)}/deployments`,
       { strategy_id: strategyId }
+    )
+    return response.data
+  },
+  async getAccountDeployments(accountId, page = 1, pageSize = 20) {
+    const response = await api.get(
+      `/accounts/${encodeURIComponent(accountId)}/deployments`,
+      { params: { page, page_size: pageSize } }
     )
     return response.data
   },

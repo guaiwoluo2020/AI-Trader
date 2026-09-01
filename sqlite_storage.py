@@ -2179,6 +2179,16 @@ class UserRepository:
         )
         return [user for row in rows if (user := self._row_to_user(row)) is not None]
 
+    def list_users_page(self, page: int = 1, page_size: int = 20):
+        page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
+        total = self.storage.fetchone("SELECT COUNT(*) AS total FROM users")
+        rows = self.storage.fetchall(
+            "SELECT id, username, email, password_hash, salt, role, membership_level, live_trading_enabled, token_version, created_at, updated_at "
+            "FROM users ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            (page_size, (page - 1) * page_size),
+        )
+        return [user for row in rows if (user := self._row_to_user(row)) is not None], int(total['total'] if total else 0)
+
     def ensure_runtime_user(self, password_hash_builder) -> UserRecord:
         username = get_runtime_username()
         user = self.get_by_username(username)
@@ -5176,15 +5186,15 @@ class PositionManagementEventRepository:
 
     def list_for_position(
         self, user_id: int, account_id: int, position_key: str,
-        limit: int = 100,
+        limit: int = 100, offset: int = 0,
     ) -> List[Dict]:
         rows = self.storage.fetchall(
             """
             SELECT * FROM position_management_events
             WHERE user_id = ? AND account_id = ? AND position_key = ?
-            ORDER BY event_time, created_at LIMIT ?
+            ORDER BY event_time, created_at LIMIT ? OFFSET ?
             """,
-            (int(user_id), int(account_id), str(position_key), int(limit)),
+            (int(user_id), int(account_id), str(position_key), int(limit), max(0, int(offset))),
         )
         return [self._row_to_dict(row) for row in rows]
 
@@ -5423,6 +5433,29 @@ class StrategyConfigRepository:
             })
             items.append(payload)
         return items
+
+    def list_admin_strategies_page(self, page: int = 1, page_size: int = 20,
+                                   user_id: Optional[int] = None,
+                                   symbol: str = "", lifecycle_status: str = ""):
+        from market.models.trading_strategy import TradingStrategy
+        page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
+        clauses = []; params = []
+        if user_id is not None: clauses.append("strategy.user_id = ?"); params.append(int(user_id))
+        if symbol: clauses.append("JSON_UNQUOTE(JSON_EXTRACT(strategy.config_json, '$.symbol')) = ?"); params.append(str(symbol))
+        if lifecycle_status: clauses.append("JSON_UNQUOTE(JSON_EXTRACT(strategy.config_json, '$.lifecycle_status')) = ?"); params.append(str(lifecycle_status))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        total = self.storage.fetchone("SELECT COUNT(*) AS total FROM user_strategy_configs AS strategy" + where, tuple(params))
+        rows = self.storage.fetchall(
+            "SELECT strategy.user_id, users.username, users.email, users.role, users.membership_level, users.live_trading_enabled, strategy.strategy_id, strategy.symbol, strategy.config_json, strategy.created_at, strategy.updated_at "
+            "FROM user_strategy_configs AS strategy JOIN users ON users.id=strategy.user_id" + where +
+            " ORDER BY strategy.updated_at DESC, strategy.created_at DESC, strategy.strategy_id DESC LIMIT ? OFFSET ?",
+            tuple(params + [page_size, (page - 1) * page_size]),
+        )
+        items = []
+        for row in rows:
+            strategy = self._materialize_shared_reference(TradingStrategy.from_dict(json.loads(row['config_json'])))
+            payload = strategy.to_dict(); payload.update({'user_id': int(row['user_id']), 'username': row['username'], 'email': row['email'], 'user_role': row['role'], 'membership_level': row['membership_level'], 'live_trading_enabled': bool(row['live_trading_enabled'])}); items.append(payload)
+        return items, int(total['total'] if total else 0)
 
     def get_strategy(self, user_id: int, symbol: str) -> Optional["TradingStrategy"]:
         """兼容旧调用，返回该品种创建最早的策略。"""

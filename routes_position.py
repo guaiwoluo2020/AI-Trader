@@ -144,13 +144,18 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
         symbol: str,
         ticket: int,
         account_id: Optional[int] = Query(None),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(30, ge=1, le=200),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         account, _ = resolve_web_engine(engine_manager, user, account_id)
         events = PositionManagementEventRepository().list_for_position(
-            user.user_id, account.account_id, str(ticket)
+            user.user_id, account.account_id, str(ticket),
+            limit=page_size + 1, offset=(page - 1) * page_size,
         )
-        return {"status": "ok", "events": events}
+        items = events[:page_size]
+        return {"status": "ok", "events": items, "page": page,
+                "page_size": page_size, "has_more": len(events) > page_size}
 
     # ==================== 交易历史接口 ====================
 
@@ -221,6 +226,8 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     async def get_trade_history(
         symbol: Optional[str] = None,
         account_id: Optional[int] = Query(None),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(30, ge=1, le=200),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """
@@ -230,12 +237,19 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
         - symbol: 可选，指定品种
         """
         _, trading_server = resolve_web_engine(engine_manager, user, account_id)
-        deals = trading_server.trade_history_service.get_deals(symbol)
+        # 读取一页加一条探测记录，避免把账户全部成交复制到响应内存。
+        all_deals = trading_server.trade_history_service.get_deals(
+            symbol, offset=(page - 1) * page_size, limit=page_size + 1,
+        )
+        start = (page - 1) * page_size
+        deals = all_deals[:page_size]
         statistics = trading_server.trade_history_service.get_statistics(symbol)
 
         return {
             "status": "ok",
             "deals": deals,
+            "page": page, "page_size": page_size,
+            "has_more": len(all_deals) > page_size,
             "statistics": statistics
         }
 

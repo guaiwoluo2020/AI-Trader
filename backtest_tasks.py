@@ -69,6 +69,16 @@ class BacktestTemplateService:
         )
         return [self._template_to_dict(row, user_id) for row in rows]
 
+    def list_templates_page(self, user_id: int, page: int = 1, page_size: int = 20):
+        page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
+        total = self.storage.fetchone("SELECT COUNT(*) AS total FROM backtest_templates WHERE user_id = ?", (user_id,))
+        rows = self.storage.fetchall(
+            "SELECT t.*, u.username AS creator_username FROM backtest_templates t JOIN users u ON u.id=t.user_id "
+            "WHERE t.user_id=? ORDER BY t.updated_at DESC, t.template_id DESC LIMIT ? OFFSET ?",
+            (user_id, page_size, (page - 1) * page_size),
+        )
+        return [self._template_to_dict(row, user_id) for row in rows], int(total['total'] if total else 0)
+
     def get_template(self, user_id: int, template_id: str) -> Optional[Dict]:
         row = self.storage.fetchone(
             """
@@ -323,6 +333,15 @@ class BacktestTemplateService:
             (user_id,),
         )
         return [self._batch_to_dict(row, include_tasks=False) for row in rows]
+
+    def list_batches_page(self, user_id: int, page: int = 1, page_size: int = 20):
+        page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
+        total = self.storage.fetchone("SELECT COUNT(*) AS total FROM backtest_batches WHERE user_id = ?", (user_id,))
+        rows = self.storage.fetchall(
+            "SELECT * FROM backtest_batches WHERE user_id=? ORDER BY created_at DESC, batch_id DESC LIMIT ? OFFSET ?",
+            (user_id, page_size, (page - 1) * page_size),
+        )
+        return [self._batch_to_dict(row, include_tasks=False) for row in rows], int(total['total'] if total else 0)
 
     def get_batch(self, user_id: int, batch_id: str) -> Optional[Dict]:
         row = self.storage.fetchone(

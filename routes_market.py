@@ -1428,15 +1428,22 @@ def create_market_routes(
     async def get_pending_orders(
         symbol: Optional[str] = None,
         account_id: Optional[int] = Query(None),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(30, ge=1, le=100),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取待确认订单列表"""
         _, engine = resolve_web_engine(engine_manager, user, account_id)
         pending_order_service = engine.pending_order_service
-        orders = pending_order_service.get_orders_dict(symbol)
+        orders = pending_order_service.get_orders_dict(
+            symbol, offset=(page - 1) * page_size, limit=page_size + 1,
+        )
+        has_more = len(orders) > page_size
+        orders = orders[:page_size]
         return {
             "status": "ok",
             "count": len(orders),
+            "page": page, "page_size": page_size, "has_more": has_more,
             "orders": orders
         }
 
@@ -2086,15 +2093,19 @@ def create_market_routes(
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         count: int = Query(50, ge=1, le=1000),
+        page: int = Query(1, ge=1),
+        page_size: Optional[int] = Query(None, ge=1, le=100),
         account_id: Optional[int] = Query(None),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         """获取当前账户的策略决策审计记录。"""
         _, engine = resolve_web_engine(engine_manager, user, account_id)
         try:
+            effective_count = int(page_size or count)
             decisions = engine.get_decision_history(
                 symbol=symbol,
-                count=count,
+                count=effective_count,
+                offset=(page - 1) * effective_count,
                 strategy_id=strategy_id,
                 status=status,
                 date_from=date_from,
@@ -2105,6 +2116,9 @@ def create_market_routes(
         return {
             "status": "ok",
             "count": len(decisions),
+            "page": page,
+            "page_size": effective_count,
+            "has_more": len(decisions) == effective_count,
             "decisions": decisions
         }
 
@@ -3168,13 +3182,20 @@ def create_market_routes(
 
     @protected_router.get("/admin/strategies")
     async def admin_list_strategies(
+        page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+        target_user_id: Optional[int] = Query(None),
+        symbol: Optional[str] = Query(None), lifecycle_status: Optional[str] = Query(None),
         user: AuthUser = Depends(require_admin),
     ) -> Dict:
         """管理员查看所有用户策略，便于人工推进验证状态。"""
-        items = strategy_repo.list_admin_strategies()
+        items, total = strategy_repo.list_admin_strategies_page(
+            page, page_size, target_user_id, symbol or "", lifecycle_status or ""
+        )
         return {
             "status": "ok",
             "count": len(items),
+            "total": total, "page": page, "page_size": page_size,
+            "has_more": page * page_size < total,
             "strategies": items,
             "lifecycle_options": [
                 {"value": value, "label": label}

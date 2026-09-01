@@ -101,6 +101,19 @@ class BacktestDatasetRepository:
         )
         return [self._row_to_dict(row, user_id) for row in rows]
 
+    def list_page(self, user_id: int, page: int = 1, page_size: int = 20):
+        page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
+        total_row = self.storage.fetchone(
+            "SELECT COUNT(*) AS total FROM backtest_datasets WHERE user_id = ? OR visibility = 'shared'",
+            (user_id,),
+        )
+        rows = self.storage.fetchall(
+            "SELECT dataset_id FROM backtest_datasets WHERE user_id = ? OR visibility = 'shared' "
+            "ORDER BY created_at DESC, dataset_id DESC LIMIT ? OFFSET ?",
+            (user_id, page_size, (page - 1) * page_size),
+        )
+        return [self.get_for_user(user_id, row['dataset_id']) for row in rows], int(total_row['total'] if total_row else 0)
+
     def get_for_user(self, user_id: int, dataset_id: str) -> Optional[Dict]:
         row = self.storage.fetchone(
             """

@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 
 from auth import (
@@ -246,9 +246,13 @@ def create_auth_routes(
         }
 
     @router.get("/admin/user-quotas")
-    async def list_user_quotas(user: AuthUser = Depends(require_admin)):
+    async def list_user_quotas(
+        page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+        user: AuthUser = Depends(require_admin),
+    ):
         users = []
-        for record in user_repository.list_users():
+        records, total = user_repository.list_users_page(page, page_size)
+        for record in records:
             summary = quota_service.get_summary(record.user_id, record.role)
             users.append({
                 "user_id": record.user_id,
@@ -259,7 +263,9 @@ def create_auth_routes(
                 "live_trading_enabled": record.live_trading_enabled,
                 **summary,
             })
-        return {"status": "ok", "users": users}
+        return {"status": "ok", "users": users, "total": total,
+                "page": page, "page_size": page_size,
+                "has_more": page * page_size < total}
 
     @router.post("/admin/users/{user_id}/view-token")
     async def create_user_view_token(
