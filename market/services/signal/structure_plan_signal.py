@@ -26,6 +26,8 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "entry_zone_atr": 0.35, "location_proximity_atr": 0.6,
     "stop_buffer_atr": 0.25, "target_buffer_atr": 0.1,
     "min_real_risk_reward": 1.2, "trend_min_real_risk_reward": 0.5,
+    # Hidden safety ceiling; normal lifecycle is governed by structure events.
+    "max_plan_lifetime_bars": 100,
     "min_structure_confidence": 60,
     "breakout_stop_inside_atr": 0.3, "breakout_stop_buffer_atr": 0.8,
     "breakout_target_atr": 3.0, "breakout_retest_valid_bars": 6,
@@ -42,8 +44,8 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
 }
 
 
-def resolve_structure_plan_config(symbol: str, period: str) -> Dict:
-    """Resolve the canonical market-layer plan config for one symbol/period."""
+def resolve_structure_plan_config(symbol: str, period: str, setup_type: str = "") -> Dict:
+    """Resolve config using public defaults, symbol/period, then setup override."""
     config = dict(STRUCTURE_PLAN_DEFAULT_CONFIG)
     try:
         stored_items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
@@ -55,6 +57,23 @@ def resolve_structure_plan_config(symbol: str, period: str) -> Dict:
                     and str(profile.get("period") or "").upper() == str(period).upper()):
                 config.update({key: value for key, value in profile.items() if key in allowed})
                 break
+        wanted_setup = str(setup_type or "").strip().lower()
+        matching_setup_profiles = []
+        for profile in stored.get("setup_profiles", []) if isinstance(stored, dict) else []:
+            if (str(profile.get("symbol") or "").upper() == str(symbol).upper()
+                    and str(profile.get("period") or "").upper() == str(period).upper()):
+                matching_setup_profiles.append(profile)
+        if wanted_setup:
+            for profile in stored.get("setup_profiles", []) if isinstance(stored, dict) else []:
+                if (
+                    str(profile.get("symbol") or "").upper() == str(symbol).upper()
+                    and str(profile.get("period") or "").upper() == str(period).upper()
+                    and str(profile.get("setup_type") or "").strip().lower() == wanted_setup
+                ):
+                    config.update({key: value for key, value in profile.items() if key in allowed})
+                    break
+        if str(setup_type or "") == "__builder__":
+            config["_setup_profiles"] = matching_setup_profiles
     except Exception as exc:
         # Plan generation must continue with safe defaults if the optional
         # runtime configuration store is temporarily unavailable.
@@ -88,12 +107,26 @@ def _hash(*parts, length=32) -> str:
 class StructurePlanBuilder:
     """Convert one closed-bar structure snapshot into lifecycle plans."""
 
-    def __init__(self, params: Optional[Dict] = None):
+    def __init__(self, params: Optional[Dict] = None, setup_profiles: Optional[List[Dict]] = None):
         self.params = params or {}
+        self.setup_profiles = setup_profiles or []
+        self._base_params = dict(self.params)
+        self._active_setup = ""
         self._rejections: List[str] = []
 
     def _param(self, name, default):
         return self.params.get(name, default)
+
+    def _activate_setup(self, setup_type: str) -> None:
+        """Apply the most specific setup override before deriving a plan."""
+        self._active_setup = str(setup_type or "").strip().lower()
+        self.params = dict(self._base_params)
+        if not self._active_setup:
+            return
+        for profile in self.setup_profiles:
+            if str(profile.get("setup_type") or "").strip().lower() == self._active_setup:
+                self.params.update({k: v for k, v in profile.items() if k in STRUCTURE_PLAN_DEFAULT_CONFIG})
+                break
 
     def _reject(self, reason: str) -> None:
         if reason and reason not in self._rejections:
@@ -278,6 +311,8 @@ class StructurePlanBuilder:
         risk = abs(entry - stop_loss) if entry and stop_loss else 0.0
         reward = abs(take_profit - entry) if entry and take_profit else 0.0
         generated_at = int(time.time())
+        safety_bars = max(1, int(_number(self._param("max_plan_lifetime_bars", 100))))
+        safety_expiry = int(valid_from or time.time()) + PERIOD_SECONDS.get(str(period).upper(), 300) * safety_bars
         payload = {
             "plan_id": plan_id, "plan_group_id": group,
             "setup_type": setup_type, "setup_family": self._setup_family(setup_type),
@@ -290,12 +325,47 @@ class StructurePlanBuilder:
             "minimum_risk_reward": round(float(minimum_risk_reward or 0), 3),
             "confidence": max(0, min(100, int(confidence))),
             "reason": reason,
-            "valid_from": int(valid_from), "expires_at": int(expires_at),
+            "valid_from": int(valid_from), "expires_at": safety_expiry,
             "generated_at": generated_at,
             "structure_anchor_time": int(anchor),
             "structure_snapshot": structure_snapshot or {},
             "price_discovery": bool(price_discovery),
         }
+        snapshot = structure_snapshot or {}
+        box = snapshot.get("range") or {}
+        pattern_type = box.get("pattern") or snapshot.get("current_pattern") or ""
+        segment_id = snapshot.get("structure_segment_id") or _hash(
+            symbol, period, anchor, snapshot.get("major_state"), pattern_type,
+        )
+        plan_phase = {
+            "close_breakout": "watching_breakout",
+            "breakout_retest": "waiting_retest",
+            "touch_and_reclaim": "waiting_reclaim",
+            "touch_or_near": "waiting_touch",
+        }.get(entry_mode, "active")
+        payload["structure_metadata"] = {
+            "segment_id": segment_id,
+            "revision": _hash(json.dumps(snapshot, sort_keys=True, default=str), length=16),
+            "anchor_time": int(anchor),
+            "major_state": snapshot.get("major_state") or "",
+            "current_state": snapshot.get("current_state") or "",
+            "pattern_type": pattern_type,
+            "range_top": _number(box.get("top")),
+            "range_bottom": _number(box.get("bottom")),
+            "upper_boundary": {"slope": _number(box.get("high_slope")), "intercept": _number(box.get("high_intercept"))},
+            "lower_boundary": {"slope": _number(box.get("low_slope")), "intercept": _number(box.get("low_intercept"))},
+        }
+        payload["structure_segment_id"] = segment_id
+        payload["plan_phase"] = plan_phase
+        payload["invalidation_rules"] = self._invalidation_rules(setup_type)
+        payload["tick_invalidation_rules"] = [
+            rule for rule in payload["invalidation_rules"]
+            if rule in {"protected_level_break", "range_returned_inside"}
+        ]
+        payload["close_invalidation_rules"] = [
+            rule for rule in payload["invalidation_rules"]
+            if rule in {"triangle_pattern_break", "range_structure_break", "same_structure_new_plan"}
+        ]
         if direction in {"buy", "sell"} and entry > 0:
             stop_candidates, target_candidates = self._exit_candidates(
                 structure_snapshot or {}, direction, entry,
@@ -349,6 +419,19 @@ class StructurePlanBuilder:
         if setup_type == "no_trade":
             return "observation"
         return "trend_follow"
+
+    @staticmethod
+    def _invalidation_rules(setup_type: str) -> List[str]:
+        rules = ["same_structure_new_plan"]
+        if setup_type in {"range_breakout", "triangle_breakout", "triangle_breakout_watch"}:
+            rules.append("close_return_to_invalid_boundary")
+        if "triangle" in setup_type:
+            rules.append("triangle_pattern_break")
+        if setup_type.startswith("range_"):
+            rules.append("range_structure_break")
+        if setup_type in {"structure_location_pullback", "trend_continuation", "structure_reversal"}:
+            rules.append("protected_level_break")
+        return rules
 
     def _tradable_plan(self, **kwargs) -> Optional[Dict]:
         minimum_override = kwargs.pop("min_risk_reward_override", None)
@@ -543,6 +626,7 @@ class StructurePlanBuilder:
     ) -> List[Dict]:
         if not self._param("enable_structure_location", True):
             return []
+        self._activate_setup("structure_location_pullback")
         major = str(structure.get("major_state") or structure.get("current_state") or "")
         if major not in {"up", "down"}:
             self._reject("当前不是已确认的上涨或下跌主结构")
@@ -665,6 +749,10 @@ class StructurePlanBuilder:
         plans = []
 
         if status == "failed_breakout" and self._param("enable_false_breakout", True):
+            self._activate_setup("range_false_breakout")
+            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
             failed = str(box.get("breakout_direction") or "")
             direction = "sell" if failed == "up" else "buy"
             entry = top if direction == "sell" else bottom
@@ -684,6 +772,10 @@ class StructurePlanBuilder:
 
         if status == "breakout_confirmed" and self._param("enable_range_breakout", True):
             direction = "buy" if box.get("breakout_direction") == "up" else "sell"
+            self._activate_setup("triangle_breakout" if "triangle" in pattern else "range_breakout")
+            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
             entry = top if direction == "buy" else bottom
             stop_inside = atr * max(0.1, _number(self._param("breakout_stop_inside_atr", 0.3)))
             sl = entry - stop_inside if direction == "buy" else entry + stop_inside
@@ -764,6 +856,7 @@ class StructurePlanBuilder:
         # remain observation-only by default because boundary risk expands.
         if pattern != "range":
             setup = "diverging_no_trade" if pattern == "broadening" else "triangle_breakout_watch"
+            self._activate_setup(setup)
             # A directional triangle carries a structural bias.  Do not expose
             # the opposite breakout as an equally likely trade: an ascending
             # triangle watches only the upper-boundary break, while a
@@ -804,6 +897,10 @@ class StructurePlanBuilder:
                 late_convergence = width_atr > 0 and width_atr <= 2.5
                 near_entry_level = level > 0 and close > 0 and abs(close - level) <= entry_buffer
                 if late_convergence and near_entry_level:
+                    self._activate_setup("triangle_prebreakout_pullback")
+                    entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+                    stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+                    target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
                     protected = self._protected_reference(
                         structure.get("structure_hierarchy") or {}, direction, level
                     )
@@ -866,6 +963,10 @@ class StructurePlanBuilder:
             return result
 
         if self._param("enable_range_boundary", True):
+            self._activate_setup("range_lower_reversal")
+            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
             lower = self._tradable_plan(
                 source_id=source_id, symbol=symbol, period=period, anchor=anchor,
                 setup_type="range_lower_reversal", direction="buy",
@@ -877,6 +978,10 @@ class StructurePlanBuilder:
                 valid_from=bar_time, expires_at=expires,
                 invalidation_price=bottom-stop_buffer, structure_snapshot=snapshot,
             )
+            self._activate_setup("range_upper_reversal")
+            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
             upper = self._tradable_plan(
                 source_id=source_id, symbol=symbol, period=period, anchor=anchor,
                 setup_type="range_upper_reversal", direction="sell",
@@ -898,6 +1003,7 @@ class StructurePlanBuilder:
                     )]
                 plans.extend(boundary_plans)
         if self._param("enable_range_breakout", True):
+            self._activate_setup("range_breakout_watch")
             for direction in ("buy", "sell"):
                 plans.append(self._plan(
                     source_id=source_id, symbol=symbol, period=period, anchor=anchor,
@@ -932,6 +1038,10 @@ class StructurePlanBuilder:
         expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
 
         if latest.get("type") == "choch" and self._param("enable_choch", True):
+            self._activate_setup("choch_reversal")
+            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
             direction_state = str(latest.get("direction") or "")
             if direction_state not in {"up", "down"}:
                 self._reject("CHOCH 事件没有明确的反转方向")
@@ -984,6 +1094,10 @@ class StructurePlanBuilder:
             return [plan] if plan else []
 
         if latest.get("type") == "liquidity_sweep" and self._param("enable_liquidity_sweep", True):
+            self._activate_setup("liquidity_sweep_reclaim")
+            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
             swept = str(latest.get("direction") or "")
             direction = "sell" if swept == "up" else "buy"
             major = str(
@@ -1066,6 +1180,10 @@ class StructurePlanBuilder:
             target += target_buffer
         swing_phase = str(swing.get("phase") or "")
         setup = "structure_reversal" if swing_phase == "reversal_confirmed" else "trend_continuation"
+        self._activate_setup(setup)
+        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
         plan = self._tradable_plan(
             source_id=source_id, symbol=symbol, period=period, anchor=anchor,
             setup_type=setup, direction=direction, entry_mode="breakout_retest",
@@ -1124,11 +1242,14 @@ class StructurePlanSignalGenerator:
             # Structure plans are generated from the canonical market-layer
             # config, not duplicated strategy parameters.  Strategy config is
             # only used later for execution filtering and risk management.
+            resolved_config = resolve_structure_plan_config(symbol, period, "__builder__")
+            setup_profiles = resolved_config.pop("_setup_profiles", []) if isinstance(resolved_config, dict) else []
             plans = StructurePlanBuilder(
-                resolve_structure_plan_config(symbol, period)
+                resolved_config, setup_profiles=setup_profiles
             ).build(
                 source_id, symbol, period, rows[-600:], result,
             )
+            plans = self._resolve_plan_conflicts(plans)
             self.repository.replace_scope(
                 self.user_id, 0, "",
                 source_id, symbol, period, plans, bar_time,
@@ -1172,6 +1293,47 @@ class StructurePlanSignalGenerator:
             or (direction == "sell" and price <= entry)
         ))
 
+    @staticmethod
+    def _resolve_plan_conflicts(plans: List[Dict]) -> List[Dict]:
+        """Keep one direction when simultaneous active plans conflict."""
+        actionable = [p for p in plans if str(p.get("direction") or "") in {"buy", "sell"}]
+        buys = [p for p in actionable if p.get("direction") == "buy"]
+        sells = [p for p in actionable if p.get("direction") == "sell"]
+        if not buys or not sells:
+            return plans
+        winner = max(actionable, key=lambda p: (
+            int(p.get("confidence") or 0),
+            _number(p.get("risk_reward_ratio")),
+            -abs(_number(p.get("entry_price")) - _number(p.get("trigger_price"))),
+        ))
+        return [p for p in plans if p not in actionable or p is winner]
+
+    def _event_invalidated(self, plan: Dict, price: float) -> str:
+        """Evaluate cheap Tick-time invalidations from the persisted snapshot."""
+        rules = set(plan.get("tick_invalidation_rules") or [])
+        metadata = plan.get("structure_metadata") or {}
+        top = _number(metadata.get("range_top"))
+        bottom = _number(metadata.get("range_bottom"))
+        setup = str(plan.get("setup_type") or "")
+        direction = str(plan.get("direction") or "")
+        # A confirmed breakout is no longer valid once price trades back into
+        # the originating range.  The close-based structure refresh provides
+        # the authoritative confirmation; this Tick guard prevents an order
+        # from being opened during the failed-breakout interval.
+        if "close_return_to_invalid_boundary" in rules and top > bottom > 0:
+            if bottom < price < top:
+                return "range_returned_inside"
+        if "protected_level_break" in rules:
+            invalid = _number(plan.get("invalidation_price"))
+            if invalid and ((direction == "buy" and price <= invalid) or (direction == "sell" and price >= invalid)):
+                return "protected_level_broken"
+        if "triangle_pattern_break" in rules and setup.startswith("triangle_") and top > bottom > 0:
+            if direction == "buy" and price < bottom:
+                return "triangle_pattern_broken"
+            if direction == "sell" and price > top:
+                return "triangle_pattern_broken"
+        return ""
+
     def generate_signals_for_strategy(
         self, symbol: str, current_price: float, strategy,
     ) -> List[TradingSignal]:
@@ -1200,11 +1362,9 @@ class StructurePlanSignalGenerator:
                     continue
                 if int(plan.get("expires_at") or 0) and now > int(plan["expires_at"]):
                     continue
-                invalid = _number(plan.get("invalidation_price"))
-                if invalid and (
-                    (direction == "buy" and current_price <= invalid)
-                    or (direction == "sell" and current_price >= invalid)
-                ):
+                invalid_reason = self._event_invalidated(plan, float(current_price))
+                if invalid_reason:
+                    self.repository.invalidate_plan(plan_id, invalid_reason)
                     continue
                 if self._triggered(plan, float(current_price)):
                     active.append((config, plan))

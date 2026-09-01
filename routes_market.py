@@ -1195,7 +1195,12 @@ def create_market_routes(
         items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
         stored = items[-1] if items else {}
         defaults = {**MARKET_STRUCTURE_DEFAULT_CONFIG, **STRUCTURE_PLAN_DEFAULT_CONFIG}
-        return {"status": "ok", "config": {**defaults, **{k:v for k,v in stored.items() if k in defaults}}, "profiles": stored.get("profiles", [])}
+        return {
+            "status": "ok",
+            "config": {**defaults, **{k: v for k, v in stored.items() if k in defaults}},
+            "profiles": stored.get("profiles", []) if isinstance(stored, dict) else [],
+            "setup_profiles": stored.get("setup_profiles", []) if isinstance(stored, dict) else [],
+        }
 
     @protected_router.put("/admin/market-structure/config")
     async def put_market_structure_config(payload: Dict, user: AuthUser = Depends(require_admin)):
@@ -1226,8 +1231,27 @@ def create_market_routes(
                     except (TypeError, ValueError): pass
             normalized_profiles.append(item)
         cfg["profiles"] = normalized_profiles
+        setup_profiles = payload.get("setup_profiles", [])
+        normalized_setup_profiles = []
+        for profile in setup_profiles if isinstance(setup_profiles, list) else []:
+            if not profile.get("symbol") or not profile.get("period") or not profile.get("setup_type"):
+                continue
+            item = {
+                "symbol": str(profile["symbol"]).strip(),
+                "period": str(profile["period"]).upper(),
+                "setup_type": str(profile["setup_type"]).strip().lower(),
+            }
+            for key in allowed:
+                if key in profile:
+                    try:
+                        value = float(profile[key])
+                        item[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
+                    except (TypeError, ValueError):
+                        pass
+            normalized_setup_profiles.append(item)
+        cfg["setup_profiles"] = normalized_setup_profiles
         RuntimeStateRepository(0, 0).upsert_entity("market_structure_config", "default", cfg, status="active")
-        return {"status": "ok", "config": {k:v for k,v in cfg.items() if k in allowed}, "profiles": normalized_profiles}
+        return {"status": "ok", "config": {k:v for k,v in cfg.items() if k in allowed}, "profiles": normalized_profiles, "setup_profiles": normalized_setup_profiles}
 
     @protected_router.get("/market/pivots/{symbol}")
     async def get_pivots(

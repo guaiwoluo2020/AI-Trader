@@ -91,10 +91,6 @@ class StructureTradePlanRepository:
                     and float(old_payload.get("entry_price") or 0) > 0
                 )
                 # A new actionable opportunity supersedes the previous one.
-                # A watching/no_trade result only replaces older observations;
-                # it cannot shorten an existing plan's configured validity.
-                if old_actionable and not new_actionable:
-                    continue
                 self.storage.execute(
                     "UPDATE structure_trade_plans SET status='invalidated', updated_at=? "
                     "WHERE plan_id=?",
@@ -192,6 +188,26 @@ class StructureTradePlanRepository:
             payload["status"] = row["status"]
             result.append(payload)
         return result
+
+    def invalidate_plan(self, plan_id: str, reason: str) -> None:
+        """Persist an event-driven invalidation for a public structure plan."""
+        now = int(time.time())
+        row = self.storage.fetchone(
+            "SELECT payload_json,status FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
+            (str(plan_id),),
+        )
+        if not row or str(row["status"] or "") not in {"active", "watching"}:
+            return
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        payload["status"] = "invalidated"
+        payload["invalidated_reason"] = str(reason or "structure_event")
+        self.storage.execute(
+            "UPDATE structure_trade_plans SET status='invalidated', payload_json=?, updated_at=? WHERE plan_id=?",
+            (json.dumps(payload, ensure_ascii=False), now, str(plan_id)),
+        )
 
     def is_consumed(
         self, user_id: int, account_id: int, deployment_id: str, plan_id: str,

@@ -95,6 +95,7 @@
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.stop_buffer_atr" type="number" min="0" max="5" step="0.05" label="止损缓冲（ATR）" density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.min_real_risk_reward" type="number" min="1" max="10" step="0.1" label="最低真实盈亏比" density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_min_real_risk_reward" type="number" min="0.1" max="10" step="0.1" label="趋势回踩最低盈亏比" hint="用于上涨回踩买入和下跌反弹卖出，默认 0.5" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.max_plan_lifetime_bars" type="number" min="10" max="1000" label="计划安全兜底（K线）" hint="结构事件未发生时的最长保留上限，默认 100 根" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.breakout_target_atr" type="number" min="1" max="10" step="0.5" label="突破目标（ATR）" density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.breakout_retest_valid_bars" type="number" min="1" max="50" label="突破回踩有效K线数" density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.enable_triangle_prebreakout" color="primary" inset hide-details label="启用三角形提前入场" /></v-col>
@@ -107,6 +108,18 @@
               <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureProfile">保存当前参数为专属配置</v-btn>
             </div>
             <v-chip v-for="item in structureProfiles" :key="`${item.symbol}-${item.period}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureProfile(item)">{{ item.symbol }} · {{ item.period }}</v-chip>
+            <div class="llm-section-head compact mt-4"><div><h3>Setup 专属覆盖</h3><p>匹配品种、周期和 Setup 类型时覆盖上面的专属/公共参数；未填写字段继续向上继承。</p></div></div>
+            <div class="d-flex flex-wrap ga-2 align-center">
+              <v-select v-model="structureSetupProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:200px" />
+              <v-select v-model="structureSetupProfileDraft.period" :items="['M1','M5','M15','H1','H4']" label="周期" density="compact" variant="outlined" hide-details style="max-width:130px" />
+              <v-select v-model="structureSetupProfileDraft.setup_type" :items="structureSetupTypes" label="Setup" density="compact" variant="outlined" hide-details style="max-width:250px" />
+              <v-text-field v-model.number="structureSetupProfileDraft.min_real_risk_reward" type="number" min="0" step="0.1" label="最低盈亏比" density="compact" variant="outlined" hide-details style="max-width:130px" />
+              <v-text-field v-model.number="structureSetupProfileDraft.entry_zone_atr" type="number" min="0" step="0.05" label="入场 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
+              <v-text-field v-model.number="structureSetupProfileDraft.stop_buffer_atr" type="number" min="0" step="0.05" label="止损 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
+              <v-text-field v-model.number="structureSetupProfileDraft.target_buffer_atr" type="number" min="0" step="0.05" label="止盈 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
+              <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureSetupProfile">保存当前参数为 Setup 专属配置</v-btn>
+            </div>
+            <v-chip v-for="item in structureSetupProfiles" :key="`${item.symbol}-${item.period}-${item.setup_type}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureSetupProfile(item)">{{ item.symbol }} · {{ item.period }} · {{ item.setup_type }}</v-chip>
           </v-card-text>
         </v-card>
       </v-col>
@@ -1341,6 +1354,9 @@ export default {
     const structureEngineSaving = ref(false)
     const structureProfiles = ref([])
     const structureProfileDraft = ref({ symbol: '', period: 'M5' })
+    const structureSetupProfiles = ref([])
+    const structureSetupProfileDraft = ref({ symbol: '', period: 'M5', setup_type: 'structure_location_pullback', min_real_risk_reward: null, entry_zone_atr: null, stop_buffer_atr: null, target_buffer_atr: null })
+    const structureSetupTypes = ['structure_location_pullback', 'range_lower_reversal', 'range_upper_reversal', 'range_breakout', 'range_false_breakout', 'triangle_breakout', 'triangle_breakout_watch', 'triangle_prebreakout_pullback', 'choch_reversal', 'liquidity_sweep_reclaim', 'trend_continuation', 'structure_reversal']
 
     // 交易配置
     const tradeConfig = ref({
@@ -1624,6 +1640,7 @@ export default {
         const engineData = await marketAPI.getMarketStructureConfig()
         structureEngineConfig.value = { ...structureEngineConfig.value, ...(engineData.config || {}) }
         structureProfiles.value = Array.isArray(engineData.profiles) ? engineData.profiles : []
+        structureSetupProfiles.value = Array.isArray(engineData.setup_profiles) ? engineData.setup_profiles : []
         if (settingsTab.value === 'quota') await loadUserQuotas()
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
@@ -1635,7 +1652,7 @@ export default {
     const saveStructureEngineConfig = async () => {
       structureEngineSaving.value = true
       try {
-        const data = await marketAPI.saveMarketStructureConfig({ ...structureEngineConfig.value, profiles: structureProfiles.value })
+        const data = await marketAPI.saveMarketStructureConfig({ ...structureEngineConfig.value, profiles: structureProfiles.value, setup_profiles: structureSetupProfiles.value })
         structureEngineConfig.value = { ...structureEngineConfig.value, ...(data.config || {}) }
         successMessage.value = '系统结构识别参数已保存'
         showSuccess.value = true
@@ -1652,6 +1669,18 @@ export default {
       await saveStructureEngineConfig()
     }
     const removeStructureProfile = async item => { structureProfiles.value = structureProfiles.value.filter(x => !(x.symbol === item.symbol && x.period === item.period)); await saveStructureEngineConfig() }
+    const saveStructureSetupProfile = async () => {
+      const draft = structureSetupProfileDraft.value
+      if (!draft.symbol || !draft.period || !draft.setup_type) return
+      const item = { symbol: draft.symbol, period: draft.period, setup_type: draft.setup_type }
+      for (const key of ['min_real_risk_reward', 'entry_zone_atr', 'stop_buffer_atr', 'target_buffer_atr']) {
+        if (draft[key] !== null && draft[key] !== '' && Number.isFinite(Number(draft[key]))) item[key] = Number(draft[key])
+      }
+      const index = structureSetupProfiles.value.findIndex(x => x.symbol === item.symbol && x.period === item.period && x.setup_type === item.setup_type)
+      if (index >= 0) structureSetupProfiles.value.splice(index, 1, item); else structureSetupProfiles.value.push(item)
+      await saveStructureEngineConfig()
+    }
+    const removeStructureSetupProfile = async item => { structureSetupProfiles.value = structureSetupProfiles.value.filter(x => !(x.symbol === item.symbol && x.period === item.period && x.setup_type === item.setup_type)); await saveStructureEngineConfig() }
     const loadInstrumentMappings = async () => {
       if (!isAdmin.value) return
       try {
@@ -3471,8 +3500,13 @@ export default {
       saveStructureEngineConfig,
       structureProfiles,
       structureProfileDraft,
+      structureSetupProfiles,
+      structureSetupProfileDraft,
+      structureSetupTypes,
       saveStructureProfile,
       removeStructureProfile,
+      saveStructureSetupProfile,
+      removeStructureSetupProfile,
       tradeConfig,
       newSymbol,
       newVolume,

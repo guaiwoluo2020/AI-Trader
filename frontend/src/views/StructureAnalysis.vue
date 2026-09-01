@@ -12,14 +12,14 @@
       <v-card-text>
         <div v-if="tradePlans.length" class="plan-grid">
           <article v-for="plan in tradePlans" :key="plan.plan_id">
-            <div class="card-head"><v-chip size="small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><span>{{ plan.status==='active'?'等待价格':'等待确认' }}</span></div>
+            <div class="card-head"><v-chip size="small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><span>{{ ({ watching_breakout:'等待突破', waiting_retest:'等待回踩', waiting_reclaim:'等待回收', waiting_touch:'等待触碰', active:'等待价格' }[plan.plan_phase] || (plan.status==='active'?'等待价格':'等待确认')) }}</span></div>
             <div class="plan-values"><span>入场 {{ Number(plan.entry_price||0).toFixed(2) }}</span><span>止损 {{ Number(plan.stop_loss||0).toFixed(2) }}</span><span>止盈 {{ Number(plan.take_profit||0).toFixed(2) }}</span><span v-if="plan.direction==='buy'||plan.direction==='sell'">盈亏比 {{ Number(plan.risk_reward_ratio||0).toFixed(2) }} / 最低 {{ Number(plan.minimum_risk_reward||0).toFixed(2) }}</span></div>
             <div v-if="plan.stop_candidates?.length || plan.target_candidates?.length" class="plan-levels">
               <div><small>止损候选</small><v-chip v-for="item in plan.stop_candidates" :key="item.level_id" size="x-small" color="error" variant="tonal">{{ item.structure_layer }} {{ Number(item.price).toFixed(2) }}</v-chip></div>
               <div><small>止盈候选</small><v-chip v-for="item in plan.target_candidates" :key="item.level_id" size="x-small" color="success" variant="tonal">{{ item.structure_layer }} {{ Number(item.price).toFixed(2) }}</v-chip></div>
             </div>
             <p>{{ plan.reason || '结构条件尚未满足' }}</p>
-            <small>产生于 {{ formatPlanTime(plan.generated_at) }} · 有效至 {{ formatPlanTime(plan.expires_at) }}</small>
+            <small>产生于 {{ formatPlanTime(plan.generated_at) }} · 由结构失效事件管理</small>
             <div class="subscription-summary">
               <v-chip size="x-small" variant="tonal">订阅策略 {{ plan.subscription_summary?.strategy_count || 0 }}</v-chip>
               <v-chip size="x-small" color="primary" variant="tonal">运行部署 {{ plan.subscription_summary?.deployment_count || 0 }}</v-chip>
