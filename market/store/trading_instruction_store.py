@@ -10,7 +10,7 @@ import threading
 from collections import defaultdict
 
 from ..models import TradingInstruction
-from mysql_repositories import RuntimeStateRepository
+from repositories.runtime import RuntimeStateRepository
 
 
 class TradingInstructionStore:

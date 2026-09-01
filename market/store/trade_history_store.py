@@ -10,7 +10,7 @@ from typing import List, Dict, Optional
 import threading
 
 from ..models.trade_history import TradeDeal
-from mysql_repositories import RuntimeStateRepository
+from repositories.runtime import RuntimeStateRepository
 
 
 class TradeHistoryStore:

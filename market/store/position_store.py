@@ -10,7 +10,7 @@ from typing import List, Dict, Optional
 import threading
 
 from ..models.position import PositionData
-from mysql_repositories import RuntimeStateRepository
+from repositories.runtime import RuntimeStateRepository
 
 
 class PositionStore:

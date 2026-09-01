@@ -10,7 +10,7 @@ import threading
 from collections import defaultdict
 
 from ..models import PendingOrder
-from mysql_repositories import RuntimeStateRepository
+from repositories.runtime import RuntimeStateRepository
 
 
 class PendingOrderStore:

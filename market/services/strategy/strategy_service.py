@@ -16,7 +16,7 @@ from ...models import (
 from ...models import ConsistencyRequirement, ConflictResolution
 from ...store import StrategyStore
 from ..position_attribution import build_position_attribution
-from mysql_repositories import PositionManagementPolicyRepository
+from repositories.runtime import PositionManagementPolicyRepository
 from ..signal import SignalService
 from ..signal.signal_rules import constrain_pivot_levels_to_hundred_band, valid_exits
 from ..position_manager import PositionManager
