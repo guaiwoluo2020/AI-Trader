@@ -13,7 +13,7 @@ from mysql_repositories import (
     TradingAccountRecord,
 )
 from repositories.accounts import TradingAccountRepository
-from repositories.strategy import StrategyConfigRepository
+from repositories.strategy_config import StrategyConfigRepository
 from repositories.trade_config import TradeConfigRepository
 from repositories.trading import (
     LiveTradeDealRepository, PositionManagementEventRepository, TradeExecutionRepository,

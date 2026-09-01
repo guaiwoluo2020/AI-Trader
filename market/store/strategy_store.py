@@ -9,7 +9,7 @@ from datetime import datetime
 import threading
 
 from ..models import StrategyLifecycle, TradingStrategy
-from repositories.strategy import StrategyConfigRepository
+from repositories.strategy_config import StrategyConfigRepository
 from mysql_repositories import bootstrap_runtime_storage
 
 

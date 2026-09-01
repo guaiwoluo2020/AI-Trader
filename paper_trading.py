@@ -28,7 +28,7 @@ from mysql_repositories import (
     RuntimeStateRepository, TradingAccountRepository, get_storage,
 )
 from repositories.platform import PlatformInstrumentMappingRepository
-from repositories.strategy import StrategyConfigRepository
+from repositories.strategy_config import StrategyConfigRepository
 from repositories.trading import PositionManagementEventRepository
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 

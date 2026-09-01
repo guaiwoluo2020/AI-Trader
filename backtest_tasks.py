@@ -14,7 +14,7 @@ from mysql_repositories import (
     PositionManagementPolicyRepository, MySQLStorage,
     get_storage,
 )
-from repositories.strategy import StrategyConfigRepository
+from repositories.strategy_config import StrategyConfigRepository
 
 
 class BacktestTaskStatus:

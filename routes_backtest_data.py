@@ -13,7 +13,7 @@ from backtest_data import (
     DatasetReferencedError,
 )
 from ea_auth import EAIdentity, require_ea_auth
-from repositories.strategy import StrategyConfigRepository
+from repositories.strategy_config import StrategyConfigRepository
 from repositories.accounts import TradingAccountRepository
 from trading_engine_manager import TradingEngineManager
 from user_quotas import UserQuotaService
