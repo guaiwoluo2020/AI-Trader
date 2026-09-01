@@ -11,7 +11,7 @@ from auth import AuthUser, require_auth
 from ea_auth import EAIdentity, require_ea_auth
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
-from mysql_repositories import PositionManagementEventRepository
+from repositories.trading import PositionManagementEventRepository
 
 
 def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:

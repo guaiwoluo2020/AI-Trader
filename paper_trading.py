@@ -24,12 +24,12 @@ from market.services.strategy.transient_decision_store import transient_decision
 from market.store.structure_plan_store import StructureTradePlanRepository
 from membership import MembershipService
 from mysql_repositories import (
-    PositionManagementEventRepository,
     PositionManagementPolicyRepository, MySQLStorage,
     PlatformInstrumentMappingRepository,
     RuntimeStateRepository, TradingAccountRepository, get_storage,
 )
 from repositories.strategy import StrategyConfigRepository
+from repositories.trading import PositionManagementEventRepository
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 
 

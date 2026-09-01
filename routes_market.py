@@ -43,12 +43,11 @@ from mysql_repositories import (
     StrategyConfigRepository,
     StrategyDeploymentRepository,
     TradeConfigRepository,
-    TradeExecutionRepository,
-    PositionManagementEventRepository,
     RuntimeStateRepository,
     TradingAccountRepository,
     UserRepository,
 )
+from repositories.trading import TradeExecutionRepository, PositionManagementEventRepository
 from market.models.trading_strategy import StrategyLifecycle
 from trading_engine_manager import TradingEngineManager
 from strategy_admission import StrategyAdmissionService

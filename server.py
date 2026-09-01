@@ -38,15 +38,14 @@ from market.system_log import SystemLog
 from membership import MembershipService
 from mysql_repositories import (
     AISignalSourceRepository,
-    PositionManagementEventRepository,
     PositionManagementPolicyRepository,
     PlatformInstrumentMappingRepository,
     RuntimeStateRepository,
     SharedAIRuntimeRepository,
-    TradeExecutionRepository,
     TradingAccountRepository,
 )
 from repositories.strategy import StrategyDeploymentRepository
+from repositories.trading import PositionManagementEventRepository, TradeExecutionRepository
 
 
 class TradingServer:
