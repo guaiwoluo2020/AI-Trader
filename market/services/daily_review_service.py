@@ -9,9 +9,8 @@ import time
 from typing import Callable, Dict, List, Optional
 
 from llm_governance import AI_SIGNAL_ANALYSIS
-from mysql_repositories import (
-    RuntimeStateRepository, StrategyConfigRepository, get_storage,
-)
+from mysql_repositories import RuntimeStateRepository, get_storage
+from repositories.strategy import StrategyConfigRepository
 from market.services.signal.structure_plan_signal import (
     resolve_structure_plan_config,
 )

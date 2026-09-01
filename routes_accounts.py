@@ -12,12 +12,12 @@ from market.services.account_strategy_performance import build_live_performance
 from mysql_repositories import (
     LiveTradeDealRepository,
     PositionManagementEventRepository,
-    StrategyConfigRepository,
     TradeConfigRepository,
     TradeExecutionRepository,
     TradingAccountRecord,
 )
 from repositories.accounts import TradingAccountRepository
+from repositories.strategy import StrategyConfigRepository
 from trading_engine_manager import TradingEngineManager
 from market_data_source_policy import MarketDataSourcePolicy
 

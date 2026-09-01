@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from alpha_research import AlphaResearchService
 from auth import AuthUser, require_auth
 from llm_governance import LLMQuotaExceeded
-from mysql_repositories import StrategyConfigRepository
+from repositories.strategy import StrategyConfigRepository
 
 
 def create_alpha_research_routes() -> APIRouter:

@@ -12,8 +12,9 @@ from typing import Dict, List, Optional
 from backtest_data import BacktestDatasetRepository, DatasetStatus
 from mysql_repositories import (
     PositionManagementPolicyRepository, MySQLStorage,
-    StrategyConfigRepository, get_storage,
+    get_storage,
 )
+from repositories.strategy import StrategyConfigRepository
 
 
 class BacktestTaskStatus:

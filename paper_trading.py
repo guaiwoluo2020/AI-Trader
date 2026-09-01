@@ -26,9 +26,10 @@ from membership import MembershipService
 from mysql_repositories import (
     PositionManagementEventRepository,
     PositionManagementPolicyRepository, MySQLStorage,
-    PlatformInstrumentMappingRepository, StrategyConfigRepository,
+    PlatformInstrumentMappingRepository,
     RuntimeStateRepository, TradingAccountRepository, get_storage,
 )
+from repositories.strategy import StrategyConfigRepository
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 
 

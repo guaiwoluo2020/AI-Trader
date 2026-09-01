@@ -43,10 +43,10 @@ from mysql_repositories import (
     PlatformInstrumentMappingRepository,
     RuntimeStateRepository,
     SharedAIRuntimeRepository,
-    StrategyDeploymentRepository,
     TradeExecutionRepository,
     TradingAccountRepository,
 )
+from repositories.strategy import StrategyDeploymentRepository
 
 
 class TradingServer:
