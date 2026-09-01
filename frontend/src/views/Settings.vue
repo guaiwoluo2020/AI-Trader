@@ -137,7 +137,7 @@
           <v-window v-model="strategyWorkspaceTab">
             <v-window-item value="mine">
               <div class="strategy-metrics">
-                <article><span>全部策略</span><strong>{{ strategies.length }} / {{ strategyQuota.limits.strategies ?? '∞' }}</strong><v-icon>mdi-layers-triple-outline</v-icon></article>
+                <article><span>全部策略</span><strong>{{ strategyTotal }} / {{ strategyQuota.limits.strategies ?? '∞' }}</strong><v-icon>mdi-layers-triple-outline</v-icon></article>
                 <article><span>实盘可用</span><strong>{{ strategyMetrics.production }}</strong><v-icon>mdi-rocket-launch-outline</v-icon></article>
                 <article><span>已部署运行</span><strong>{{ strategyMetrics.deployed }}</strong><v-icon>mdi-pulse</v-icon></article>
                 <article><span>信号源用量</span><strong>{{ strategyQuota.usage.signal_sources }} / {{ strategyQuota.limits.signal_sources ?? '∞' }}</strong><v-icon>mdi-access-point</v-icon></article>
@@ -173,8 +173,15 @@
                 </div>
 
                 <div v-if="!filteredStrategies.length" class="strategy-empty">
-                  <v-icon size="52">mdi-radar</v-icon><h3>{{ strategies.length ? '没有符合筛选条件的策略' : '还没有策略' }}</h3><p>{{ strategies.length ? '调整筛选条件后再试试。' : '创建第一条策略，开始配置交易信号。' }}</p>
+                  <v-progress-circular v-if="strategiesLoading" indeterminate color="primary" />
+                  <v-icon v-else size="52">{{ strategiesError ? 'mdi-alert-circle-outline' : 'mdi-radar' }}</v-icon>
+                  <h3>{{ strategiesLoading ? '正在加载策略' : (strategiesError ? '策略加载失败' : (strategies.length ? '没有符合筛选条件的策略' : '还没有策略')) }}</h3>
+                  <p>{{ strategiesLoading ? '正在读取你的策略配置，请稍候。' : (strategiesError || (strategies.length ? '调整筛选条件后再试试。' : '创建第一条策略，开始配置交易信号。')) }}</p>
+                  <v-btn v-if="strategiesError" color="primary" variant="tonal" @click="loadStrategies">重试</v-btn>
                   <v-btn v-if="!strategies.length" color="primary" variant="tonal" @click="openNewStrategyDialog">新建策略</v-btn>
+                </div>
+                <div v-if="strategyTotal > strategyPageSize" class="d-flex justify-center py-4">
+                  <v-pagination v-model="strategyPage" :length="strategyPageCount" :total-visible="7" :disabled="strategiesLoading" @update:model-value="loadStrategies" />
                 </div>
               </v-card>
             </v-window-item>
@@ -988,7 +995,9 @@
         <v-card-text>
           <v-select v-model="newStrategySymbol" :items="strategySymbolOptions" :loading="strategySymbolsLoading" label="交易品种" prepend-inner-icon="mdi-currency-usd" class="mt-4"></v-select>
           <v-text-field v-model="newStrategyName" label="策略名称" placeholder="例如：GOLD M5 趋势策略" prepend-inner-icon="mdi-tag-outline"></v-text-field>
-          <v-select v-model="newStrategyPolicyId" :items="positionPolicyOptions" label="持仓管理方案" prepend-inner-icon="mdi-shield-check-outline"></v-select>
+          <v-select v-model="newStrategyPolicyId" :items="positionPolicyOptions" :loading="positionPoliciesLoading" :disabled="positionPoliciesLoading || !!positionPoliciesError" label="持仓管理方案" prepend-inner-icon="mdi-shield-check-outline" no-data-text="暂无可用持仓管理方案"></v-select>
+          <v-alert v-if="positionPoliciesError" type="error" variant="tonal" density="compact" class="mb-2">{{ positionPoliciesError }} <v-btn size="small" variant="text" @click="loadPositionPolicies">重试</v-btn></v-alert>
+          <v-alert v-else-if="!positionPoliciesLoading && !positionPolicyOptions.length" type="warning" variant="tonal" density="compact" class="mb-2">暂无启用的持仓管理方案，请先在持仓管理页面创建方案。</v-alert>
           <v-alert type="info" variant="tonal" density="compact">新策略默认为私有草稿，不会立即参与交易。持仓管理方案只需在这里选择一次，创建后在风控选项卡中只展示当前绑定。</v-alert>
         </v-card-text>
         <v-card-actions>
@@ -2196,11 +2205,17 @@ export default {
     const strategies = ref([])
     const strategyQuota = ref({ usage: { signal_sources: 0 }, limits: { strategies: 5, signal_sources: 10 } })
     const strategiesLoading = ref(false)
+    const strategiesError = ref('')
+    const strategyPage = ref(1)
+    const strategyPageSize = 10
+    const strategyTotal = ref(0)
     const strategySaving = ref(null)
     const strategySymbolsLoading = ref(false)
     const strategyLifecycleSaving = ref(null)
     const strategyAdmissions = ref({})
     const positionPolicies = ref([])
+    const positionPoliciesLoading = ref(false)
+    const positionPoliciesError = ref('')
     const strategyWorkspaceTab = ref('mine')
     const strategyDetailTab = ref('overview')
     const selectedStrategy = ref(null)
@@ -2591,10 +2606,21 @@ export default {
     ]
 
     const loadPositionPolicies = async () => {
-      const data = await marketAPI.getPositionManagementPolicies()
-      positionPolicies.value = data.policies || []
-      if (!newStrategyPolicyId.value) {
-        newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
+      positionPoliciesLoading.value = true
+      positionPoliciesError.value = ''
+      try {
+        const data = await marketAPI.getPositionManagementPolicies()
+        if (data.status !== 'ok') throw new Error(data.message || '持仓管理方案加载失败')
+        positionPolicies.value = data.policies || []
+        if (!newStrategyPolicyId.value) {
+          newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
+        }
+      } catch (err) {
+        positionPolicies.value = []
+        positionPoliciesError.value = err.response?.data?.detail || err.message || '持仓管理方案加载失败，请重试'
+        throw err
+      } finally {
+        positionPoliciesLoading.value = false
       }
     }
 
@@ -2832,44 +2858,36 @@ export default {
     }
 
     // 加载策略列表
-    const loadStrategies = async () => {
+    const strategyPageCount = computed(() => Math.max(1, Math.ceil(strategyTotal.value / strategyPageSize)))
+    const loadStrategies = async (requestedPage = strategyPage.value) => {
+      strategyPage.value = Math.min(Math.max(1, Number(requestedPage) || 1), strategyPageCount.value || 1)
       strategiesLoading.value = true
+      strategiesError.value = ''
       try {
-        // 先渲染策略列表。准入证据和持仓方案只在详情/生命周期操作时需要，
-        // 不应阻塞策略配置页首屏。
-        const data = await marketAPI.getStrategies()
-        if (data.status === 'ok') {
-          strategies.value = data.strategies || []
-          strategyQuota.value = data.quota || strategyQuota.value
-          strategies.value.forEach(strategy => {
-            normalizeStrategyVisibility(strategy)
-            ensureSignalSources(strategy)
-          })
+        const [strategyResult] = await Promise.allSettled([
+          marketAPI.getStrategies(strategyPage.value, strategyPageSize),
+          loadPositionPolicies(),
+        ])
+        if (strategyResult.status !== 'fulfilled') throw strategyResult.reason
+        const data = strategyResult.value
+        if (data.status !== 'ok') throw new Error(data.message || '策略列表加载失败')
+        strategies.value = data.strategies || []
+        strategyTotal.value = Number(data.total ?? data.count ?? strategies.value.length)
+        if (strategyPage.value > strategyPageCount.value) {
+          strategyPage.value = strategyPageCount.value
+          return await loadStrategies(strategyPage.value)
         }
-        // 空闲时再加载补充信息；失败不影响策略列表可用性。
-        window.setTimeout(() => {
-          Promise.allSettled([
-            marketAPI.getStrategyAdmission(),
-            marketAPI.getPositionManagementPolicies(),
-          ]).then(([admissionResult, policyResult]) => {
-            const admissionData = admissionResult.status === 'fulfilled'
-              ? admissionResult.value : null
-            const policyData = policyResult.status === 'fulfilled'
-              ? policyResult.value : null
-            if (admissionData?.status === 'ok') {
-              strategyAdmissions.value = Object.fromEntries(
-                (admissionData.items || []).map(item => [item.strategy_id, item])
-              )
-            }
-            if (policyData?.status === 'ok') {
-              positionPolicies.value = policyData.policies || []
-              if (!newStrategyPolicyId.value) {
-                newStrategyPolicyId.value = positionPolicyOptions.value[0]?.value || ''
-              }
-            }
-          })
-        }, 0)
+        strategyQuota.value = data.quota || strategyQuota.value
+        strategies.value.forEach(strategy => {
+          normalizeStrategyVisibility(strategy)
+          ensureSignalSources(strategy)
+        })
+        // 准入信息仅用于详情和生命周期操作，继续后台加载但不阻塞首屏。
+        loadStrategyAdmissions().catch(err => console.warn('加载策略准入信息失败:', err))
       } catch (err) {
+        strategies.value = []
+        strategyTotal.value = 0
+        strategiesError.value = err.response?.data?.detail || err.message || '策略列表加载失败，请重试'
         console.error('加载策略配置失败:', err)
       } finally {
         strategiesLoading.value = false
@@ -3366,15 +3384,18 @@ export default {
 
     const openNewStrategyDialog = async () => {
       newStrategyDialog.value = true
-      strategySymbolsLoading.value = true
-      try {
-        await loadSymbols()
-      } catch (err) {
-        errorMessage.value = err.response?.data?.detail || err.message || '加载交易品种失败'
-        showError.value = true
-      } finally {
-        strategySymbolsLoading.value = false
+      const tasks = []
+      if (!strategySymbolOptions.value.length) tasks.push((async () => {
+        strategySymbolsLoading.value = true
+        try { await loadSymbols() } catch (err) {
+          errorMessage.value = err.response?.data?.detail || err.message || '加载交易品种失败'
+          showError.value = true
+        } finally { strategySymbolsLoading.value = false }
+      })())
+      if (!positionPolicies.value.length && !positionPoliciesLoading.value) {
+        tasks.push(loadPositionPolicies().catch(() => {}))
       }
+      await Promise.all(tasks)
     }
 
     const addStrategy = async () => {
@@ -3550,6 +3571,11 @@ export default {
       strategies,
       strategyQuota,
       strategiesLoading,
+      strategiesError,
+      strategyPage,
+      strategyPageSize,
+      strategyTotal,
+      strategyPageCount,
       strategySaving,
       strategyLifecycleSaving,
       strategyAdmissions,
@@ -3592,6 +3618,8 @@ export default {
       newStrategyName,
       consistencyOptions,
       positionPolicies,
+      positionPoliciesLoading,
+      positionPoliciesError,
       positionPolicyOptions,
       newStrategyPolicyId,
       strategySymbolOptions,

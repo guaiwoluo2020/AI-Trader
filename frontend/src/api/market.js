@@ -780,8 +780,8 @@ export const marketAPI = {
   },
 
   // 获取所有策略配置
-  async getStrategies() {
-    const response = await api.get('/strategy')
+  async getStrategies(page = 1, pageSize = 10) {
+    const response = await api.get('/strategy', { params: { page, page_size: pageSize } })
     return response.data
   },
 

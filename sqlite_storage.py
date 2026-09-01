@@ -5360,6 +5360,39 @@ class StrategyConfigRepository:
 
         return []
 
+    def get_strategies_page(self, user_id: int, page: int = 1, page_size: int = 10):
+        """按创建时间分页读取策略，分页在数据库执行。"""
+        page = max(1, int(page or 1))
+        page_size = min(100, max(1, int(page_size or 10)))
+        offset = (page - 1) * page_size
+        from market.models.trading_strategy import TradingStrategy
+        total_row = self.storage.fetchone(
+            "SELECT COUNT(*) AS total FROM user_strategy_configs WHERE user_id = ?",
+            (int(user_id),),
+        )
+        rows = self.storage.fetchall(
+            """
+            SELECT strategy_id, symbol, config_json
+            FROM user_strategy_configs
+            WHERE user_id = ?
+            ORDER BY created_at DESC, strategy_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (int(user_id), page_size, offset),
+        )
+        if not rows and int(total_row["total"] if total_row else 0) == 0:
+            # Preserve the existing one-time legacy migration behavior.
+            migrated = self.get_all_strategies(user_id)
+            if migrated:
+                return migrated[:page_size], len(migrated)
+        strategies = [
+            self._materialize_shared_reference(
+                TradingStrategy.from_dict(json.loads(row["config_json"]))
+            )
+            for row in rows
+        ]
+        return strategies, int(total_row["total"] if total_row else 0)
+
     def list_admin_strategies(self) -> List[Dict]:
         from market.models.trading_strategy import TradingStrategy
 

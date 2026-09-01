@@ -31,6 +31,7 @@ from routes_alpha_research import create_alpha_research_routes
 from alpha_research import AlphaResearchWorker
 from backtest_engine import BacktestWorker
 from trading_engine_manager import TradingEngineManager
+from live_market_disconnect_monitor import LiveMarketDisconnectMonitor
 
 
 def background_worker_enabled(name: str) -> bool:
@@ -46,6 +47,7 @@ def create_app():
     engine_manager = TradingEngineManager()
     backtest_worker = BacktestWorker()
     alpha_research_worker = AlphaResearchWorker()
+    market_disconnect_monitor = LiveMarketDisconnectMonitor()
 
     # 创建 FastAPI 应用
     app = FastAPI(
@@ -116,6 +118,12 @@ def create_app():
 
         app.state.backtest_worker = backtest_worker
         app.state.alpha_research_worker = alpha_research_worker
+        app.state.market_disconnect_monitor = market_disconnect_monitor
+        if background_worker_enabled("AI_TRADER_ENABLE_MARKET_DISCONNECT_MONITOR"):
+            market_disconnect_monitor.start()
+            print("[Startup] 实盘品种行情掉线监控已启动（阈值 10 分钟）")
+        else:
+            print("[Startup] 实盘品种行情掉线监控已停用")
         if background_worker_enabled("AI_TRADER_ENABLE_BACKTEST_WORKER"):
             backtest_worker.start()
             print("[Startup] 回测任务 Worker 已启动")
@@ -133,6 +141,7 @@ def create_app():
     async def shutdown_event():
         backtest_worker.stop()
         alpha_research_worker.stop()
+        market_disconnect_monitor.stop()
         engine_manager.close_all()
 
         from market.system_log import get_system_log

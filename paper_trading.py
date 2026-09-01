@@ -425,6 +425,7 @@ class PaperTradingService:
         rows = self.storage.fetchall(
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name,
+                   s.created_at AS strategy_created_at,
                    json_extract(s.config_json, '$.lifecycle_status') AS lifecycle_status,
                    1 AS strategy_enabled
             FROM strategy_deployments d
@@ -448,12 +449,10 @@ class PaperTradingService:
                 configured_lifecycle = strategy.lifecycle_status
                 item["strategy_offline"] = False
             else:
-                # Keep historical deployment rows for audit, but make it
-                # explicit that a deleted strategy can no longer be started.
-                item["strategy_name"] = "策略已下线"
-                item["strategy_offline"] = True
-                item["configured_lifecycle_status"] = "offline"
-                configured_lifecycle = "offline"
+                # A deployment whose source strategy was deleted is retained
+                # in storage for audit, but must not appear in the runtime
+                # consoles or be presented as an executable deployment.
+                continue
             item["configured_lifecycle_status"] = configured_lifecycle
 
             # The account page describes a deployment, not merely its source
@@ -899,7 +898,7 @@ class PaperTradingService:
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name
             FROM strategy_deployments d
-            LEFT JOIN user_strategy_configs s
+            JOIN user_strategy_configs s
               ON s.user_id = d.user_id AND s.strategy_id = d.strategy_id
             WHERE d.user_id = ? AND d.account_id = ?
             ORDER BY d.created_at DESC

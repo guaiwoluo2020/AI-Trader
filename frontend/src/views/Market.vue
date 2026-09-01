@@ -187,13 +187,21 @@ export default {
             strategy_id: strategyId,
             strategy_name: deployment.strategy_name || strategyId,
             symbol: deployment.symbol,
+            strategy_created_at: deployment.strategy_created_at || 0,
             deployments: [],
           })
         }
-        groups.get(strategyId).deployments.push(deployment)
+        // A strategy can be deployed to multiple accounts; keep the
+        // configuration creation time from the joined strategy row.
+        const group = groups.get(strategyId)
+        if (!group.strategy_created_at && deployment.strategy_created_at) {
+          group.strategy_created_at = deployment.strategy_created_at
+        }
+        group.deployments.push(deployment)
       }
       return [...groups.values()].sort((left, right) => (
-        left.strategy_name.localeCompare(right.strategy_name, 'zh-CN')
+        Number(right.strategy_created_at || 0) - Number(left.strategy_created_at || 0)
+        || left.strategy_name.localeCompare(right.strategy_name, 'zh-CN')
       ))
     })
     const focusedDeployments = computed(() => Array.isArray(focusedExecution.value?.deployments) ? focusedExecution.value.deployments : [])

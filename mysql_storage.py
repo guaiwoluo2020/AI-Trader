@@ -382,6 +382,25 @@ class MySQLStorage:
                   COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                # Persistent resource counters are read by the strategy list
+                # endpoint for quota display.  Keep this table in the MySQL
+                # bootstrap path because production does not initialize the
+                # SQLite schema.
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS user_resource_usage (
+                    user_id BIGINT NOT NULL,
+                    resource_type VARCHAR(32) NOT NULL,
+                    used_count BIGINT NOT NULL DEFAULT 0,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (user_id, resource_type),
+                    KEY idx_user_resource_usage_type (resource_type, updated_at),
+                    CONSTRAINT fk_user_resource_usage_user
+                        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
                 try:
                     conn.execute(
                         "ALTER TABLE ai_signal_sources ADD COLUMN "

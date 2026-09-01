@@ -1695,12 +1695,20 @@ def create_market_routes(
             raise HTTPException(status_code=409, detail=str(exc))
 
     @protected_router.get("/strategy")
-    async def get_all_strategies(user: AuthUser = Depends(require_auth)) -> Dict:
-        """获取所有策略配置"""
-        strategies = strategy_repo.get_all_strategies(user.user_id)
+    async def get_all_strategies(
+        page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """按创建时间分页获取策略配置。"""
+        strategies, total = strategy_repo.get_strategies_page(
+            user.user_id, page, page_size
+        )
         return {
             "status": "ok",
-            "count": len(strategies),
+            "count": total,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
             "strategies": [strategy_payload(s, user.user_id) for s in strategies],
             "quota": quota_service.get_summary(user.user_id, user.role),
         }
