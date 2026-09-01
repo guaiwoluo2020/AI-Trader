@@ -18,7 +18,8 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
     创建交易员相关路由
     """
     router = APIRouter()
-    account_repository = TradingAccountRepository()
+    repositories = engine_manager.repositories
+    account_repository = repositories.accounts
 
     @router.get("/dashboard/overview")
     async def get_dashboard_overview(
@@ -143,7 +144,7 @@ def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         account, _ = resolve_web_engine(engine_manager, user, account_id)
-        reports = TradeExecutionRepository().list_for_account(
+        reports = repositories.trade_execution.list_for_account(
             user.user_id, account.account_id, count
         )
         return {"status": "ok", "count": len(reports), "reports": reports}

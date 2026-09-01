@@ -23,6 +23,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     """
     router = APIRouter()
     protected_router = APIRouter()
+    repositories = engine_manager.repositories
 
     @router.post("/ea/positions")
     async def receive_positions(
@@ -149,7 +150,7 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         account, _ = resolve_web_engine(engine_manager, user, account_id)
-        events = PositionManagementEventRepository().list_for_position(
+        events = repositories.position_events.list_for_position(
             user.user_id, account.account_id, str(ticket),
             limit=page_size + 1, offset=(page - 1) * page_size,
         )

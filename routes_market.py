@@ -341,21 +341,22 @@ def create_market_routes(
     router = APIRouter()
     protected_router = APIRouter(dependencies=[Depends(require_auth)])
 
-    trade_config_repo = TradeConfigRepository()
-    strategy_repo = StrategyConfigRepository()
-    strategy_deployment_repo = StrategyDeploymentRepository()
-    account_repo = TradingAccountRepository()
-    position_policy_repo = PositionManagementPolicyRepository()
-    llm_config_repo = LLMConfigRepository()
-    llm_access_repo = LLMAccessRepository()
-    shared_ai_runtime_repo = SharedAIRuntimeRepository()
-    instrument_mapping_repo = PlatformInstrumentMappingRepository()
-    ai_signal_source_repo = AISignalSourceRepository()
+    repositories = engine_manager.repositories
+    trade_config_repo = repositories.trade_config
+    strategy_repo = repositories.strategies
+    strategy_deployment_repo = repositories.deployments
+    account_repo = repositories.accounts
+    position_policy_repo = repositories.position_policies
+    llm_config_repo = repositories.ai_config
+    llm_access_repo = repositories.ai_access
+    shared_ai_runtime_repo = repositories.ai_runtime
+    instrument_mapping_repo = repositories.platform_mappings
+    ai_signal_source_repo = repositories.ai_sources
     quota_service = UserQuotaService()
     admission_service = StrategyAdmissionService(engine_manager.paper_trading)
     alpha_library = AlphaLibraryRepository()
     llm_governance = LLMGovernanceService()
-    event_logs = SystemEventLogRepository()
+    event_logs = SystemEventLogRepository(repositories.storage)
     memberships = MembershipService()
     shared_notifications = SharedReferenceNotificationService()
     impact_service = ConfigurationImpactService()

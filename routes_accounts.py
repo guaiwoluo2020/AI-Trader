@@ -24,9 +24,10 @@ from market_data_source_policy import MarketDataSourcePolicy
 
 def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     router = APIRouter()
-    repository = TradingAccountRepository()
-    strategy_repository = StrategyConfigRepository()
-    trade_config_repository = TradeConfigRepository()
+    repositories = engine_manager.repositories
+    repository = repositories.accounts
+    strategy_repository = repositories.strategies
+    trade_config_repository = repositories.trade_config
     memberships = MembershipService()
     market_source_policy = MarketDataSourcePolicy()
 
@@ -238,15 +239,15 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
 
         engine = engine_manager.get_engine(user.user_id, account_id)
         positions = engine.position_service.get_positions()
-        events = PositionManagementEventRepository()
+        events = repositories.position_events
         for position in positions:
             position["management_events"] = events.list_for_position(
                 user.user_id, account_id, str(position.get("ticket", "")),
             )
-        execution_reports = TradeExecutionRepository().list_for_account(
+        execution_reports = repositories.trade_execution.list_for_account(
             user.user_id, account_id, 100,
         )
-        trades = LiveTradeDealRepository().list_for_account(
+        trades = LiveTradeDealRepository(repositories.storage).list_for_account(
             user.user_id, account_id, 20,
         )
         # 成交回报通过 MT5 deal/order/position 与策略指令关联。老 EA 没有
