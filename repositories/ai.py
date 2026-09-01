@@ -4,9 +4,9 @@ from mysql_repositories import (
     AISignalSourceRepository,
     AITradeSuggestionRepository,
     LLMAccessRepository,
-    LLMConfigRepository,
     SharedAIRuntimeRepository,
 )
+from .llm_config import LLMConfigRepository
 
 __all__ = [
     "AISignalSourceRepository", "AITradeSuggestionRepository",

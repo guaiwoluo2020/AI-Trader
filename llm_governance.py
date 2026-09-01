@@ -12,7 +12,8 @@ from typing import Dict, List, Optional
 import requests
 
 from mysql_repositories import MySQLStorage, get_storage
-from repositories.ai import LLMAccessRepository, LLMConfigRepository
+from repositories.ai import LLMAccessRepository
+from repositories.llm_config import LLMConfigRepository
 from membership import MEMBERSHIP_LIMITS
 from system_event_log import SystemEventLogRepository
 

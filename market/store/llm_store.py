@@ -10,10 +10,10 @@ import threading
 
 from ..models import LLMConfig, LLMAnalysisResult
 from mysql_repositories import (
-    LLMConfigRepository,
     RuntimeStateRepository,
     bootstrap_runtime_storage,
 )
+from repositories.llm_config import LLMConfigRepository
 
 
 class LLMStore:
