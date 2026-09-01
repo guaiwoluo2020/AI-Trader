@@ -22,6 +22,34 @@
 - 支持普通持仓管理与 `multi_level_exit` 多层止盈止损。
 - 支持模拟盘、MT5 实盘、策略运行中心、完整审计链、AI 复盘和收益归因。
 
+## 产品界面
+
+### AI 行情分析与交易建议
+
+系统按周期展示 AI 行情判断、趋势依据、关键价位以及入场、止损、止盈建议。
+
+![AI 多周期趋势分析](docs/images/ai-trend-analysis.jpg)
+
+![AI 交易建议](docs/images/ai-trade-suggestions.jpg)
+
+### 策略配置与账户执行
+
+策略页面集中配置信号源、允许方向、风险约束和持仓管理；交易账户页面展示部署状态、账户资金和运行状态。
+
+![策略配置](docs/images/strategy-configuration.jpg)
+
+![MT5 EA 接入引导](docs/images/mt5-ea-setup.jpg)
+
+### 订单、持仓与交易统计
+
+平台提供待执行订单、当前持仓、历史成交和策略收益统计，支持从策略决策追溯到 EA 执行回执。
+
+![待确认订单](docs/images/pending-order-review.jpg)
+
+![当前持仓](docs/images/positions-overview.jpg)
+
+![历史成交统计](docs/images/trade-statistics.jpg)
+
 ## 系统链路
 
 ```mermaid
