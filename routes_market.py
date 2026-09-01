@@ -43,10 +43,11 @@ from mysql_repositories import (
 from repositories.trade_config import TradeConfigRepository
 from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.ai import (
-    LLMAccessRepository, AISignalSourceRepository,
+    AISignalSourceRepository,
     AITradeSuggestionRepository, SharedAIRuntimeRepository,
 )
 from repositories.llm_config import LLMConfigRepository
+from repositories.llm_access import LLMAccessRepository
 from repositories.trading import TradeExecutionRepository, PositionManagementEventRepository
 from market.models.trading_strategy import StrategyLifecycle
 from trading_engine_manager import TradingEngineManager
