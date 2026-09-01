@@ -47,6 +47,8 @@ from repositories.strategy import StrategyDeploymentRepository
 from repositories.trading import PositionManagementEventRepository, TradeExecutionRepository
 from repositories.container import RepositoryContainer
 from market.services.execution_adapter import adapter_for_mode
+from market.services.strategy_execution_coordinator import StrategyExecutionCoordinator
+from market.services.position_action_applier import apply_action
 
 
 class TradingServer:
@@ -215,6 +217,15 @@ class TradingServer:
         # 服务层
         self.pending_order_service = PendingOrderService(self.pending_order_store)
         self.trading_instruction_service = TradingInstructionService(self.trading_instruction_store)
+        self.strategy_execution_coordinator = StrategyExecutionCoordinator(
+            risk_manager=self._risk_manager,
+            account_repository=self.account_repository,
+            instruction_service=self.trading_instruction_service,
+            live_entries_allowed=self._live_entries_allowed,
+            broadcast_pending_order=self._broadcast_pending_order,
+            user_id=user_id,
+            account_id=account_id,
+        )
 
         # 设置订单确认回调
         self.pending_order_service.set_confirm_callback(self._on_order_confirmed)
@@ -969,57 +980,19 @@ class TradingServer:
                 self,
                 symbol, ticket, state, action.events
             )
-            if action.action == "close":
+            applied = apply_action(action, state, position, ticket)
+            if applied["close"]:
                 self.add_close_position_instruction(symbol, position.ticket)
                 self._managed_position_state.pop(ticket, None)
-            elif action.action == "modify_sl" and action.stop_loss:
-                state["stop_loss"] = float(action.stop_loss)
-                state["pending_stop_loss"] = float(action.stop_loss)
+            elif applied["stop_update"]:
                 self._position_update_instructions[symbol][ticket] = {
-                    "ticket": ticket, "sl": round(float(action.stop_loss), 8),
-                    "tp": round(float(position.tp or 0), 8),
-                    "reason": action.reason,
+                    **applied["stop_update"],
                 }
-            elif action.action == "partial_close" and action.close_volume > 0:
-                done = set(state.get("partial_levels_done") or [])
-                level_ids = action.level_ids or [action.level_id]
-                if not all(level_id in done for level_id in level_ids):
-                    close_volume = round(float(action.close_volume), 2)
-                    if close_volume <= 0:
-                        continue
-                    done.update(level_ids)
-                    state["partial_levels_done"] = sorted(done)
-                    if action.stop_loss or action.level_id == "signal_take_profit":
-                        if action.stop_loss:
-                            state["stop_loss"] = float(action.stop_loss)
-                            state["pending_stop_loss"] = float(action.stop_loss)
-                        if action.level_id == "signal_take_profit":
-                            state["take_profit"] = 0.0
-                        self._position_update_instructions[symbol][ticket] = {
-                            "ticket": ticket,
-                            "sl": round(float(state["stop_loss"]), 8),
-                            # The remaining volume must no longer be closed in
-                            # full by MT5 at the original AI target.
-                            "tp": 0 if action.level_id == "signal_take_profit"
-                            else round(float(position.tp or 0), 8),
-                            "reason": (
-                                f"{action.reason}:clear_tp"
-                                if action.level_id == "signal_take_profit"
-                                else f"{action.reason}:move_sl"
-                            ),
-                        }
-                    self._position_partial_instructions[symbol][
-                        f"{ticket}:{'|'.join(level_ids)}"
-                    ] = {
-                        "ticket": ticket,
-                        "volume": close_volume,
-                        "level_id": action.level_id,
-                        "level_ids": level_ids,
-                        "instruction_id": (
-                            f"exit-{ticket}-{'-'.join(level_ids)}"
-                        ),
-                        "reason": action.reason,
-                    }
+            if applied["partial"]:
+                partial = applied["partial"]
+                self._position_partial_instructions[symbol][
+                    f"{ticket}:{'|'.join(partial['level_ids'])}"
+                ] = partial
 
     def get_structure_context(self, symbol: str, period: str) -> Dict:
         """Return one cached structure result per closed K-line."""
@@ -1095,37 +1068,7 @@ class TradingServer:
 
     def _on_order_confirmed(self, order: PendingOrder):
         """订单确认回调"""
-        print(f"[TradingServer] 订单确认: {order.order_id}")
-
-        if not self._live_entries_allowed():
-            print(f"[TradingServer] 实盘权限已关闭，忽略开仓订单: {order.order_id}")
-            return
-
-        # 广播订单确认
-        self._broadcast_pending_order(order)
-
-        try:
-            self._risk_manager.record_confirmed_order(
-                order.order_id,
-                order.symbol,
-                order.mount,
-                abs(order.price - order.sl),
-            )
-            account = (
-                self.account_repository.get_by_id(self.user_id, self.account_id)
-                if self.user_id is not None and self.account_id else None
-            )
-            execution_mode = "live" if account and account.account_type == "mt5" else "paper"
-            result = adapter_for_mode(execution_mode).submit(
-                order, self.trading_instruction_service
-            )
-            if not result.accepted:
-                raise RuntimeError(result.reason or "执行适配器拒绝订单")
-            print(f"[TradingServer] {result.transport} 交易指令已创建: {result.instruction_id}")
-        except Exception as e:
-            print(f"[TradingServer] 创建交易指令失败: {e}")
-            import traceback
-            traceback.print_exc()
+        return self.strategy_execution_coordinator.on_order_confirmed(order)
 
     # ==================== EA 接口 ====================
 

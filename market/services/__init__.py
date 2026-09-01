@@ -12,6 +12,8 @@ from .tech_service import TechService
 from .pending_order_service import PendingOrderService
 from .trading_instruction_service import TradingInstructionService
 from .execution_result import ExecutionResult, EXECUTION_STATUSES, normalize_execution_status
+from .strategy_execution_coordinator import StrategyExecutionCoordinator
+from .position_action_applier import apply_action
 
 # 信号服务
 from .signal import (
@@ -34,6 +36,8 @@ __all__ = [
     'KlineService', 'PivotService', 'LLMService', 'TechService',
     'PendingOrderService', 'TradingInstructionService', 'ExecutionResult',
     'EXECUTION_STATUSES', 'normalize_execution_status',
+    'StrategyExecutionCoordinator',
+    'apply_action',
     'SignalService', 'KeyLevelSignalGenerator',
     'AIEntrySignalGenerator', 'MovingAverageSignalGenerator',
     'AlphaFactorSignalGenerator', 'AlphaRuntimeExecutor',

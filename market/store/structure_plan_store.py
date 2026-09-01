@@ -81,21 +81,8 @@ class StructureTradePlanRepository:
         for row in current:
             plan_id = str(row["plan_id"])
             if plan_id not in keep:
-                try:
-                    old_payload = json.loads(row["payload_json"] or "{}")
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    old_payload = {}
-                old_actionable = (
-                    str(row["status"] or "") == "active"
-                    and str(row["direction"] or "") in {"buy", "sell"}
-                    and float(old_payload.get("entry_price") or 0) > 0
-                )
                 # A new actionable opportunity supersedes the previous one.
-                self.storage.execute(
-                    "UPDATE structure_trade_plans SET status='invalidated', updated_at=? "
-                    "WHERE plan_id=?",
-                    (now, plan_id),
-                )
+                self.supersede_plan(plan_id, "superseded_by_new_plan")
         for plan in plans:
             payload = dict(plan)
             existing = self.storage.fetchone(
@@ -206,6 +193,26 @@ class StructureTradePlanRepository:
         payload["invalidated_reason"] = str(reason or "structure_event")
         self.storage.execute(
             "UPDATE structure_trade_plans SET status='invalidated', payload_json=?, updated_at=? WHERE plan_id=?",
+            (json.dumps(payload, ensure_ascii=False), now, str(plan_id)),
+        )
+
+    def supersede_plan(self, plan_id: str, reason: str = "superseded_by_new_plan") -> None:
+        """Mark a live plan as replaced while preserving an explicit audit reason."""
+        now = int(time.time())
+        row = self.storage.fetchone(
+            "SELECT payload_json,status FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
+            (str(plan_id),),
+        )
+        if not row or str(row["status"] or "") not in {"active", "watching"}:
+            return
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        payload["status"] = "superseded"
+        payload["invalidated_reason"] = str(reason or "superseded_by_new_plan")
+        self.storage.execute(
+            "UPDATE structure_trade_plans SET status='superseded', payload_json=?, updated_at=? WHERE plan_id=?",
             (json.dumps(payload, ensure_ascii=False), now, str(plan_id)),
         )
 

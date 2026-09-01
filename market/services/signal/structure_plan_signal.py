@@ -12,6 +12,12 @@ from ...store import KlineStore
 from ...store.structure_plan_store import StructureTradePlanRepository
 from ..market_structure_engine_v2 import analyze_incremental as analyze
 from mysql_repositories import RuntimeStateRepository
+from .structure_plan.price_calculator import (
+    calculate_next_target, protected_reference, exit_candidates,
+    location_reclaim_confirmed,
+)
+from .structure_plan.lifecycle import invalidate_reason, resolve_conflicts, stage_for
+from .structure_plan.config_resolver import resolve as resolve_plan_config
 
 
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
@@ -46,39 +52,10 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
 
 def resolve_structure_plan_config(symbol: str, period: str, setup_type: str = "") -> Dict:
     """Resolve config using public defaults, symbol/period, then setup override."""
-    config = dict(STRUCTURE_PLAN_DEFAULT_CONFIG)
-    try:
-        stored_items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
-        stored = stored_items[-1] if stored_items else {}
-        allowed = set(STRUCTURE_PLAN_DEFAULT_CONFIG)
-        config.update({key: value for key, value in stored.items() if key in allowed})
-        for profile in stored.get("profiles", []) if isinstance(stored, dict) else []:
-            if (str(profile.get("symbol") or "").upper() == str(symbol).upper()
-                    and str(profile.get("period") or "").upper() == str(period).upper()):
-                config.update({key: value for key, value in profile.items() if key in allowed})
-                break
-        wanted_setup = str(setup_type or "").strip().lower()
-        matching_setup_profiles = []
-        for profile in stored.get("setup_profiles", []) if isinstance(stored, dict) else []:
-            if (str(profile.get("symbol") or "").upper() == str(symbol).upper()
-                    and str(profile.get("period") or "").upper() == str(period).upper()):
-                matching_setup_profiles.append(profile)
-        if wanted_setup:
-            for profile in stored.get("setup_profiles", []) if isinstance(stored, dict) else []:
-                if (
-                    str(profile.get("symbol") or "").upper() == str(symbol).upper()
-                    and str(profile.get("period") or "").upper() == str(period).upper()
-                    and str(profile.get("setup_type") or "").strip().lower() == wanted_setup
-                ):
-                    config.update({key: value for key, value in profile.items() if key in allowed})
-                    break
-        if str(setup_type or "") == "__builder__":
-            config["_setup_profiles"] = matching_setup_profiles
-    except Exception as exc:
-        # Plan generation must continue with safe defaults if the optional
-        # runtime configuration store is temporarily unavailable.
-        print(f"[StructurePlan] 公共计划配置读取失败，使用默认值: {exc}")
-    return config
+    return resolve_plan_config(
+        symbol, period, setup_type, STRUCTURE_PLAN_DEFAULT_CONFIG,
+        lambda: RuntimeStateRepository(0, 0),
+    )
 
 
 def _number(value, default=0.0) -> float:
@@ -144,20 +121,7 @@ class StructurePlanBuilder:
         return _number(((hierarchy.get(layer) or {}).get(name) or {}).get("price"))
 
     def _next_target(self, hierarchy: Dict, direction: str, price: float) -> float:
-        names = ("weak_high", "protected_high") if direction == "buy" else (
-            "weak_low", "protected_low"
-        )
-        values = []
-        for layer in ("swing", "external"):
-            for name in names:
-                value = self._layer_price(hierarchy, layer, name)
-                if (direction == "buy" and value > price) or (
-                    direction == "sell" and 0 < value < price
-                ):
-                    values.append(value)
-        return min(values) if direction == "buy" and values else (
-            max(values) if values else 0.0
-        )
+        return calculate_next_target(hierarchy, direction, price)
 
     def _protected_reference(self, hierarchy: Dict, direction: str, entry: float) -> float:
         """Return the nearest valid protected point from the current structure.
@@ -167,17 +131,7 @@ class StructurePlanBuilder:
         on the wrong side of the entry is ignored so a stale/invalid hierarchy
         cannot create an inverted stop.
         """
-        name = "protected_low" if direction == "buy" else "protected_high"
-        candidates = []
-        for layer in ("internal", "swing", "external"):
-            value = self._layer_price(hierarchy, layer, name)
-            if (direction == "buy" and 0 < value < entry) or (
-                direction == "sell" and value > entry
-            ):
-                candidates.append(value)
-        if not candidates:
-            return 0.0
-        return max(candidates) if direction == "buy" else min(candidates)
+        return protected_reference(hierarchy, direction, entry)
 
     def _trend_retest_confirmed(self, rows: List[Dict], event: Dict, atr: float) -> bool:
         """Require a post-break bar to touch the broken level and reclaim it."""
@@ -203,16 +157,7 @@ class StructurePlanBuilder:
     def _location_reclaim_confirmed(rows: List[Dict], entry: float, direction: str,
                                     atr: float) -> bool:
         """Require the latest closed bar to touch and reclaim the HL/LH level."""
-        if not rows or entry <= 0:
-            return False
-        row = rows[-1]
-        high = _number(row.get("high") or row.get("high_price"))
-        low = _number(row.get("low") or row.get("low_price"))
-        close = _number(row.get("close") or row.get("close_price"))
-        tolerance = max(0.0, float(atr or 0)) * 0.10
-        if direction == "buy":
-            return low <= entry + tolerance and close >= entry
-        return high >= entry - tolerance and close <= entry
+        return location_reclaim_confirmed(rows, entry, direction, atr)
 
     @staticmethod
     def _hierarchy_snapshot(hierarchy: Dict) -> Dict:
@@ -230,70 +175,7 @@ class StructurePlanBuilder:
         self, structure_snapshot: Dict, direction: str, entry: float,
     ) -> tuple[List[Dict], List[Dict]]:
         """Build ordered structural stop/target candidates for position control."""
-        levels = structure_snapshot.get("structure_levels") or {}
-        atr = max(0.0, _number(structure_snapshot.get("atr")))
-        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-        stop_name = "protected_low" if direction == "buy" else "protected_high"
-        target_names = (
-            ("weak_high", "protected_high")
-            if direction == "buy" else ("weak_low", "protected_low")
-        )
-        stops, targets = [], []
-        for rank, layer in enumerate(("internal", "swing", "external"), start=1):
-            item = levels.get(layer) or {}
-            reference = _number(item.get(stop_name))
-            stop = (
-                reference - stop_buffer if direction == "buy"
-                else reference + stop_buffer
-            )
-            if reference > 0 and (
-                (direction == "buy" and stop < entry)
-                or (direction == "sell" and stop > entry)
-            ):
-                stops.append({
-                    "level_id": f"structure_sl_{layer}",
-                    "structure_layer": layer,
-                    "price": round(stop, 8),
-                    "reference_price": round(reference, 8),
-                    "rank": rank,
-                    "reason": f"{layer} {stop_name}",
-                })
-            for target_name in target_names:
-                reference = _number(item.get(target_name))
-                target = (
-                    reference - target_buffer if direction == "buy"
-                    else reference + target_buffer
-                )
-                if reference > 0 and (
-                    (direction == "buy" and target > entry)
-                    or (direction == "sell" and target < entry)
-                ):
-                    targets.append({
-                        "level_id": f"structure_tp_{layer}",
-                        "structure_layer": layer,
-                        "price": round(target, 8),
-                        "reference_price": round(reference, 8),
-                        "rank": rank,
-                        "reason": f"{layer} {target_name}",
-                    })
-                    break
-
-        def unique(items: List[Dict], reverse: bool) -> List[Dict]:
-            result = {}
-            for item in items:
-                result.setdefault(round(_number(item["price"]), 8), item)
-            return sorted(
-                result.values(), key=lambda item: _number(item["price"]),
-                reverse=reverse,
-            )
-
-        # Stops are ordered from the closest protection to the furthest one;
-        # targets are ordered from the nearest realization point outwards.
-        return (
-            unique(stops, direction == "buy"),
-            unique(targets, direction == "sell"),
-        )
+        return exit_candidates(structure_snapshot, direction, entry, self._param)
 
     def _plan(
         self, *, source_id: str, symbol: str, period: str, anchor: int,
@@ -343,11 +225,7 @@ class StructurePlanBuilder:
             "touch_and_reclaim": "waiting_reclaim",
             "touch_or_near": "waiting_touch",
         }.get(entry_mode, "active")
-        plan_stage = (
-            "candidate" if status == "watching" else
-            "confirmed" if entry_mode in {"breakout_retest", "touch_and_reclaim"} else
-            "active"
-        )
+        plan_stage = stage_for(status, entry_mode)
         payload["structure_metadata"] = {
             "segment_id": segment_id,
             "revision": _hash(json.dumps(snapshot, sort_keys=True, default=str), length=16),
@@ -1346,43 +1224,11 @@ class StructurePlanSignalGenerator:
     @staticmethod
     def _resolve_plan_conflicts(plans: List[Dict]) -> List[Dict]:
         """Keep one direction when simultaneous active plans conflict."""
-        actionable = [p for p in plans if str(p.get("direction") or "") in {"buy", "sell"}]
-        buys = [p for p in actionable if p.get("direction") == "buy"]
-        sells = [p for p in actionable if p.get("direction") == "sell"]
-        if not buys or not sells:
-            return plans
-        winner = max(actionable, key=lambda p: (
-            int(p.get("confidence") or 0),
-            _number(p.get("risk_reward_ratio")),
-            -abs(_number(p.get("entry_price")) - _number(p.get("trigger_price"))),
-        ))
-        return [p for p in plans if p not in actionable or p is winner]
+        return resolve_conflicts(plans)
 
     def _event_invalidated(self, plan: Dict, price: float) -> str:
         """Evaluate cheap Tick-time invalidations from the persisted snapshot."""
-        rules = set(plan.get("tick_invalidation_rules") or [])
-        metadata = plan.get("structure_metadata") or {}
-        top = _number(metadata.get("range_top"))
-        bottom = _number(metadata.get("range_bottom"))
-        setup = str(plan.get("setup_type") or "")
-        direction = str(plan.get("direction") or "")
-        # A confirmed breakout is no longer valid once price trades back into
-        # the originating range.  The close-based structure refresh provides
-        # the authoritative confirmation; this Tick guard prevents an order
-        # from being opened during the failed-breakout interval.
-        if "close_return_to_invalid_boundary" in rules and top > bottom > 0:
-            if bottom < price < top:
-                return "range_returned_inside"
-        if "protected_level_break" in rules:
-            invalid = _number(plan.get("invalidation_price"))
-            if invalid and ((direction == "buy" and price <= invalid) or (direction == "sell" and price >= invalid)):
-                return "protected_level_broken"
-        if "triangle_pattern_break" in rules and setup.startswith("triangle_") and top > bottom > 0:
-            if direction == "buy" and price < bottom:
-                return "triangle_pattern_broken"
-            if direction == "sell" and price > top:
-                return "triangle_pattern_broken"
-        return ""
+        return invalidate_reason(plan, price)
 
     def generate_signals_for_strategy(
         self, symbol: str, current_price: float, strategy,
