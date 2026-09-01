@@ -16,8 +16,8 @@ from mysql_repositories import (
     TradeConfigRepository,
     TradeExecutionRepository,
     TradingAccountRecord,
-    TradingAccountRepository,
 )
+from repositories.accounts import TradingAccountRepository
 from trading_engine_manager import TradingEngineManager
 from market_data_source_policy import MarketDataSourcePolicy
 

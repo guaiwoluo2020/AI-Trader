@@ -13,12 +13,11 @@ from ea_auth import EAIdentity, ensure_supported_ea_version, require_ea_auth
 from models import TradeInstruction
 from market_data_source_policy import MarketDataSourcePolicy
 from mysql_repositories import (
-    EAActivationRepository,
     LiveTradeDealRepository,
     TradeExecutionRepository,
-    TradingAccountRepository,
     UserRepository,
 )
+from repositories.accounts import EAActivationRepository, TradingAccountRepository
 from instrument_price_store import get_instrument_price_store
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
