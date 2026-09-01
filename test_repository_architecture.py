@@ -11,9 +11,13 @@ class RepositoryArchitectureTest(unittest.TestCase):
             "ai_runtime", "trade_execution", "position_events",
             "position_policies", "platform_mappings",
         )
-        container = RepositoryContainer.__new__(RepositoryContainer)
+        class FakeStorage:
+            pass
+
+        container = RepositoryContainer(FakeStorage())
         for name in expected:
-            self.assertTrue(name)
+            self.assertTrue(hasattr(container, name), name)
+            self.assertIs(getattr(container, name).storage, container.storage, name)
 
 
 if __name__ == "__main__":
