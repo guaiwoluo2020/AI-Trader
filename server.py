@@ -46,6 +46,7 @@ from repositories.ai import AISignalSourceRepository, SharedAIRuntimeRepository
 from repositories.strategy import StrategyDeploymentRepository
 from repositories.trading import PositionManagementEventRepository, TradeExecutionRepository
 from repositories.container import RepositoryContainer
+from market.services.execution_adapter import adapter_for_mode
 
 
 class TradingServer:
@@ -1110,9 +1111,17 @@ class TradingServer:
                 order.mount,
                 abs(order.price - order.sl),
             )
-            # 创建交易指令
-            instruction_id = self.trading_instruction_service.create_from_pending_order(order)
-            print(f"[TradingServer] 交易指令已创建: {instruction_id}")
+            account = (
+                self.account_repository.get_by_id(self.user_id, self.account_id)
+                if self.user_id is not None and self.account_id else None
+            )
+            execution_mode = "live" if account and account.account_type == "mt5" else "paper"
+            result = adapter_for_mode(execution_mode).submit(
+                order, self.trading_instruction_service
+            )
+            if not result.accepted:
+                raise RuntimeError(result.reason or "执行适配器拒绝订单")
+            print(f"[TradingServer] {result.transport} 交易指令已创建: {result.instruction_id}")
         except Exception as e:
             print(f"[TradingServer] 创建交易指令失败: {e}")
             import traceback
