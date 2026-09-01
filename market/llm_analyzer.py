@@ -9,7 +9,7 @@ import threading
 import asyncio
 import json
 from datetime import datetime
-from typing import Dict, Set, Optional
+from typing import Dict, Set, Optional, Callable
 
 from .services import LLMService
 class LLMAnalyzer:
@@ -28,6 +28,7 @@ class LLMAnalyzer:
         # 主事件循环引用
         self._main_loop = None
         self._analysis_lock = threading.Lock()
+        self._task_scheduler = None
 
         if self.llm_service.is_enabled():
             print("[LLMAnalyzer] 大模型分析器已初始化（已启用）")
@@ -43,6 +44,10 @@ class LLMAnalyzer:
         """清理 WebSocket 客户端。"""
         with self._ws_lock:
             self._ws_clients.clear()
+
+    def set_task_scheduler(self, scheduler) -> None:
+        """将手动分析也纳入进程级后台任务队列。"""
+        self._task_scheduler = scheduler
 
     def _run_analysis(self, due_only: bool = False):
         """执行分析"""
@@ -103,11 +108,19 @@ class LLMAnalyzer:
             finally:
                 self._analysis_lock.release()
 
-        threading.Thread(
-            target=run_in_background,
-            name="llm-manual-analysis",
-            daemon=True,
-        ).start()
+        if self._task_scheduler is not None:
+            accepted = self._task_scheduler.submit(
+                ("llm", id(self.llm_service)), run_in_background, max_retries=1,
+            )
+            if not accepted:
+                self._analysis_lock.release()
+                return {"status": "busy", "message": "大模型分析正在进行中"}
+        else:
+            threading.Thread(
+                target=run_in_background,
+                name="llm-manual-analysis",
+                daemon=True,
+            ).start()
         return {"status": "accepted", "message": "分析任务已提交"}
 
     # ==================== 配置 ====================

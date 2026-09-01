@@ -5,7 +5,7 @@
 包括K线数据接收、查询、WebSocket推送等
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
@@ -58,11 +58,8 @@ from user_quotas import UserQuotaService
 from configuration_impact import ConfigurationImpactService
 from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
-from market.services.market_structure_service import analyze as analyze_market_structure
-from market.services.market_structure_engine_v2 import analyze_incremental as analyze_market_structure_v2, restore_snapshot as restore_market_structure_snapshot, DEFAULT_CONFIG as MARKET_STRUCTURE_DEFAULT_CONFIG
-from market.services.market_structure_snapshot_store import current_path as market_structure_snapshot_path, load_current as load_market_structure_snapshot, save_checkpoint as save_market_structure_checkpoint
-from market.store.structure_plan_store import StructureTradePlanRepository
-from market.services.signal.structure_plan_signal import StructurePlanBuilder, STRUCTURE_PLAN_DEFAULT_CONFIG, MARKET_STRUCTURE_PLAN_SOURCE_ID, resolve_structure_plan_config
+from market.services.market_structure_engine_v2 import DEFAULT_CONFIG as MARKET_STRUCTURE_DEFAULT_CONFIG
+from market.services.signal.structure_plan_signal import STRUCTURE_PLAN_DEFAULT_CONFIG
 from market_data_source_policy import MarketDataSourcePolicy
 from routes_market_ea import create_ea_cursor_routes
 from routes_market_websocket import create_market_websocket_routes
@@ -229,7 +226,6 @@ def _restore_kline_memory(identity, symbol, period, kline_service) -> int:
     } for row in reversed(rows)]
     kline_service.process_kline_data(symbol, period, bars, True)
     return len(bars)
-from market.system_log import get_system_log_broadcaster
 from shared_notifications import SharedReferenceNotificationService
 from instrument_price_store import get_instrument_price_store
 
@@ -727,6 +723,9 @@ def create_market_routes(
                 lambda item_symbol, item_period, items, offset: _persist_historical_klines(
                     identity, item_symbol, item_period, items, offset,
                 ),
+                event_bus=engine.event_bus,
+                user_id=identity.user_id,
+                account_id=identity.account_id,
             )
             result = coordinator.process_batch(
                 symbol, {period: klines}, is_full,
@@ -796,6 +795,9 @@ def create_market_routes(
                 lambda item_symbol, period, klines, offset: _persist_historical_klines(
                     identity, item_symbol, period, klines, offset,
                 ),
+                event_bus=engine.event_bus,
+                user_id=identity.user_id,
+                account_id=identity.account_id,
             )
             results = coordinator.process_batch(
                 symbol, kline_data, is_full,
@@ -898,357 +900,6 @@ def create_market_routes(
             "count": len(klines),
             "data": klines
         }
-
-    async def get_market_structure(symbol: str, period: str = Query("M5"), count: int = Query(600), user: AuthUser = Depends(require_auth)):
-        engine = engine_manager.get_market_engine(user.user_id)
-        rows = engine.kline_service.get_klines(symbol, period.upper(), min(1000, max(50, count)))
-        if not rows:
-            # 结构分析必须严格匹配品种名称；GOLD、GOLD_、GOLDm 不互相替代。
-            store = getattr(engine.kline_service, "store", None)
-            stored = getattr(store, "_klines", {})
-            for actual_symbol in stored.keys():
-                if str(actual_symbol) == str(symbol):
-                    rows = engine.kline_service.get_klines(actual_symbol, period.upper(), min(1000, max(50, count)))
-                    if rows:
-                        break
-        if not rows:
-            historical = get_storage().fetchall(
-                """
-                SELECT timestamp, timestamp_utc, broker_utc_offset_seconds,
-                       open_price AS open, high_price AS high,
-                       low_price AS low, close_price AS close, volume
-                FROM historical_klines
-                WHERE user_id = ? AND account_id = 0 AND symbol = ? AND period = ?
-                  AND (timestamp_utc >= ? OR (timestamp_utc = 0 AND timestamp >= ?))
-                ORDER BY COALESCE(NULLIF(timestamp_utc, 0), timestamp) DESC
-                LIMIT ?
-                """,
-                (user.user_id, symbol, period.upper(), int(time.time()) - 7 * 86400,
-                 int(time.time()) - 7 * 86400, min(1000, max(50, count))),
-            )
-            if historical:
-                rows = [dict(row) for row in reversed(historical)]
-
-        if not rows:
-            for account in account_repo.list_for_user(user.user_id):
-                # 行情是否可用取决于该账户最近是否上报，而不是账户管理页的
-                # active 标记。模拟账户可能被标记为 inactive，但仍有 EA 行情流。
-                if account.account_type != "mt5":
-                    continue
-                try:
-                    candidate_engine = engine_manager.get_engine(user.user_id, account.account_id)
-                    rows = candidate_engine.kline_service.get_klines(symbol, period.upper(), min(1000, max(50, count)))
-                    if rows:
-                        engine = candidate_engine
-                        break
-                except Exception:
-                    continue
-        print(f"[MarketAPI] 结构查询 symbol={symbol} period={period.upper()} count={len(rows)}")
-        cfg_entity = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
-        cfg = dict(MARKET_STRUCTURE_DEFAULT_CONFIG)
-        stored = cfg_entity[-1] if cfg_entity else {}
-        cfg.update({k: v for k, v in stored.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG})
-        for profile in stored.get("profiles", []) if isinstance(stored, dict) else []:
-            if str(profile.get("symbol", "")).upper() == str(symbol).upper() and str(profile.get("period", "")).upper() == period.upper():
-                cfg.update({k: v for k, v in profile.items() if k in MARKET_STRUCTURE_DEFAULT_CONFIG})
-                break
-        account_id = int(getattr(engine, "account_id", 0) or 0)
-        previous = load_market_structure_snapshot(user.user_id, account_id, symbol, period.upper())
-        # Older compact snapshots did not contain chart overlays. Restoring
-        # those snapshots makes the next refresh render candles without Pivot,
-        # BOS/CHoCH, sweep, or trendline markers; force a full recalculation.
-        if previous and all(key in previous for key in ("swings", "events", "trendlines", "local_patterns")):
-            restore_market_structure_snapshot(previous)
-        result = analyze_market_structure_v2(symbol, period.upper(), rows, cfg)
-        try:
-            save_market_structure_checkpoint(result, user.user_id, account_id)
-        except Exception as snapshot_error:
-            print(f"[MarketAPI] 本地结构快照保存失败（不影响接口返回）: {snapshot_error}")
-        RuntimeStateRepository(user.user_id, account_id).upsert_entity(
-            "market_structure", f"{symbol}::{period.upper()}", {
-                "symbol": symbol, "period": period.upper(),
-                "engine_version": result.get("engine_version"),
-                "snapshot_path": str(market_structure_snapshot_path(user.user_id, account_id, symbol, period.upper())),
-                "last_bar_time": result.get("last_bar_time"),
-                "config_signature": result.get("config_signature"),
-                "updated_at": result.get("analyzed_at"),
-            }, symbol=symbol, status=result.get("current_state", "undetermined"),
-        )
-        return {"status":"ok", "data": result}
-
-    async def get_structure_trade_plans(
-        symbol: str,
-        period: str = Query("M5"),
-        user: AuthUser = Depends(require_auth),
-    ) -> Dict:
-        """行情层结构计划；不绑定页面当前查看账户。"""
-        repo = StructureTradePlanRepository(get_storage())
-        items = repo.list_current(
-            user.user_id, 0, "", MARKET_STRUCTURE_PLAN_SOURCE_ID,
-            symbol, period.upper(),
-        )
-        # 结构分析页是行情层视图，即使当前没有绑定策略，也要展示
-        # 基础结构计划；策略执行中心只在自己的部署作用域内筛选这些计划。
-        if not items:
-            # 行情层统一取该用户主实盘引擎；非实盘账户不再维护副本。
-            engine = engine_manager.get_market_engine(user.user_id)
-            rows = engine.kline_store.get_all_klines(symbol, period.upper())
-            if rows:
-                structure = analyze_market_structure_v2(
-                    symbol, period.upper(), rows[-600:], MARKET_STRUCTURE_DEFAULT_CONFIG
-                )
-                items = StructurePlanBuilder(
-                    resolve_structure_plan_config(symbol, period.upper())
-                ).build(
-                    MARKET_STRUCTURE_PLAN_SOURCE_ID, symbol, period.upper(), rows[-600:], structure,
-                )
-                bar_time = int(
-                    float(rows[-1].get("timestamp") or rows[-1].get("time") or 0)
-                )
-                if bar_time > 10_000_000_000:
-                    bar_time //= 1000
-                repo.replace_scope(
-                    user.user_id, 0, "", MARKET_STRUCTURE_PLAN_SOURCE_ID,
-                    symbol, period.upper(), items, bar_time,
-                )
-                items = repo.list_current(
-                    user.user_id, 0, "", MARKET_STRUCTURE_PLAN_SOURCE_ID,
-                    symbol, period.upper(),
-                )
-        # A public market plan is shared by every matching strategy, but its
-        # consumption boundary is one deployment.  Return both sides of that
-        # relationship so the structure page can explain who subscribes and
-        # whether each deployment has claimed/ordered/filled the plan.
-        normalized_symbol = str(symbol).upper()
-        normalized_period = str(period).upper()
-        subscribed_strategies = []
-        strategy_by_id = {}
-        for strategy in StrategyConfigRepository(get_storage()).get_all_strategies(
-            user.user_id
-        ):
-            if str(strategy.symbol).upper() != normalized_symbol:
-                continue
-            sources = [
-                source for source in strategy.get_signal_sources(
-                    "structure_plan", enabled_only=True
-                )
-                if str(source.get("period") or "M5").upper()
-                == normalized_period
-            ]
-            if not sources:
-                continue
-            item = {
-                "strategy_id": strategy.strategy_id,
-                "strategy_name": strategy.strategy_name,
-                "period": normalized_period,
-                "deployment_count": 0,
-                "active_deployment_count": 0,
-                "deployments": [],
-            }
-            subscribed_strategies.append(item)
-            strategy_by_id[strategy.strategy_id] = item
-
-        deployments = get_storage().fetchall(
-            "SELECT d.deployment_id,d.strategy_id,d.account_id,d.execution_mode,"
-            "d.status,d.symbol,a.account_name,a.account_type,a.enabled,"
-            "a.trading_enabled,a.auto_trading_enabled "
-            "FROM strategy_deployments d "
-            "JOIN trading_accounts a ON a.id=d.account_id "
-            "WHERE d.user_id=?",
-            (user.user_id,),
-        )
-        deployment_by_id = {}
-        for row in deployments:
-            strategy_item = strategy_by_id.get(str(row["strategy_id"]))
-            if not strategy_item or str(row["symbol"]).upper() != normalized_symbol:
-                continue
-            active = bool(
-                row["status"] == "active" and row["enabled"]
-                and row["trading_enabled"] and row["auto_trading_enabled"]
-            )
-            deployment_item = {
-                "deployment_id": str(row["deployment_id"]),
-                "strategy_id": str(row["strategy_id"]),
-                "strategy_name": strategy_item["strategy_name"],
-                "account_id": int(row["account_id"]),
-                "account_name": str(row["account_name"] or ""),
-                "account_type": str(row["account_type"] or ""),
-                "execution_mode": str(row["execution_mode"] or ""),
-                "deployment_status": str(row["status"] or ""),
-                "active": active,
-            }
-            strategy_item["deployments"].append(deployment_item)
-            strategy_item["deployment_count"] += 1
-            if active:
-                strategy_item["active_deployment_count"] += 1
-            deployment_by_id[deployment_item["deployment_id"]] = deployment_item
-
-        executions = repo.list_executions(
-            user.user_id, [str(item.get("plan_id") or "") for item in items]
-        )
-        executions_by_plan = {}
-        for execution in executions:
-            executions_by_plan.setdefault(str(execution["plan_id"]), {})[
-                str(execution["deployment_id"])
-            ] = execution
-        active_deployments = [
-            deployment for strategy in subscribed_strategies
-            for deployment in strategy["deployments"] if deployment["active"]
-        ]
-        consumed_statuses = {
-            "claimed", "triggered", "ordered", "filled", "rejected",
-            "expired", "canceled",
-        }
-        for plan in items:
-            plan_executions = executions_by_plan.get(
-                str(plan.get("plan_id") or ""), {}
-            )
-            subscription_rows = []
-            status_counts = {}
-            for deployment in active_deployments:
-                execution = plan_executions.get(deployment["deployment_id"])
-                execution_status = (
-                    str(execution.get("status") or "")
-                    if execution else "unconsumed"
-                )
-                status_counts[execution_status] = (
-                    status_counts.get(execution_status, 0) + 1
-                )
-                subscription_rows.append({
-                    **deployment,
-                    "execution_status": execution_status,
-                    "order_id": str(execution.get("order_id") or "")
-                    if execution else "",
-                    "execution_reason": str(execution.get("reason") or "")
-                    if execution else "",
-                    "consumed_at": int(execution.get("updated_at") or 0)
-                    if execution else 0,
-                })
-            consumed_count = sum(
-                count for status, count in status_counts.items()
-                if status in consumed_statuses
-            )
-            plan["subscription_summary"] = {
-                "strategy_count": len(subscribed_strategies),
-                "deployment_count": len(active_deployments),
-                "consumed_count": consumed_count,
-                "unconsumed_count": max(
-                    0, len(active_deployments) - consumed_count
-                ),
-                "status_counts": status_counts,
-            }
-            plan["subscriptions"] = subscription_rows
-            plan["subscribed_strategies"] = subscribed_strategies
-        return {"status": "ok", "symbol": symbol, "period": period.upper(), "plans": items}
-
-    async def get_structure_signal_reviews(
-        symbol: str,
-        period: str = Query("M5"),
-        limit: int = Query(30, ge=1, le=90),
-        user: AuthUser = Depends(require_auth),
-    ) -> Dict:
-        """Return persisted daily structure-signal reviews for one scope."""
-        items = engine_manager.daily_reviews.list_structure_reviews(
-            user.user_id, symbol, period.upper(), limit,
-        )
-        return {
-            "status": "ok", "symbol": symbol, "period": period.upper(),
-            "reviews": items,
-        }
-
-    async def get_market_structure_config(user: AuthUser = Depends(require_admin)):
-        items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
-        stored = items[-1] if items else {}
-        defaults = {**MARKET_STRUCTURE_DEFAULT_CONFIG, **STRUCTURE_PLAN_DEFAULT_CONFIG}
-        return {
-            "status": "ok",
-            "config": {**defaults, **{k: v for k, v in stored.items() if k in defaults}},
-            "profiles": stored.get("profiles", []) if isinstance(stored, dict) else [],
-            "setup_profiles": stored.get("setup_profiles", []) if isinstance(stored, dict) else [],
-        }
-
-    async def put_market_structure_config(payload: Dict, user: AuthUser = Depends(require_admin)):
-        allowed = {**MARKET_STRUCTURE_DEFAULT_CONFIG, **STRUCTURE_PLAN_DEFAULT_CONFIG}
-        cfg = dict(allowed)
-        integer_keys = {
-            "pivot_legs", "medium_pivot_legs", "large_pivot_legs",
-            "break_confirm_bars", "retest_bars", "range_min_touches",
-            "range_min_bars", "min_segment_bars", "trendline_min_touches",
-            "trendline_min_bars",
-        }
-        for key in cfg:
-            if key in payload:
-                try:
-                    value = float(payload[key])
-                    cfg[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
-                except (TypeError, ValueError): pass
-        profiles = payload.get("profiles", [])
-        normalized_profiles = []
-        for profile in profiles if isinstance(profiles, list) else []:
-            if not profile.get("symbol") or not profile.get("period"): continue
-            item = {"symbol": str(profile["symbol"]).strip(), "period": str(profile["period"]).upper()}
-            for key in allowed:
-                if key in profile:
-                    try:
-                        value = float(profile[key])
-                        item[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
-                    except (TypeError, ValueError): pass
-            normalized_profiles.append(item)
-        cfg["profiles"] = normalized_profiles
-        setup_profiles = payload.get("setup_profiles", [])
-        normalized_setup_profiles = []
-        for profile in setup_profiles if isinstance(setup_profiles, list) else []:
-            if not profile.get("symbol") or not profile.get("period") or not profile.get("setup_type"):
-                continue
-            item = {
-                "symbol": str(profile["symbol"]).strip(),
-                "period": str(profile["period"]).upper(),
-                "setup_type": str(profile["setup_type"]).strip().lower(),
-            }
-            for key in allowed:
-                if key in profile:
-                    try:
-                        value = float(profile[key])
-                        item[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
-                    except (TypeError, ValueError):
-                        pass
-            normalized_setup_profiles.append(item)
-        cfg["setup_profiles"] = normalized_setup_profiles
-        RuntimeStateRepository(0, 0).upsert_entity("market_structure_config", "default", cfg, status="active")
-        return {"status": "ok", "config": {k:v for k,v in cfg.items() if k in allowed}, "profiles": normalized_profiles, "setup_profiles": normalized_setup_profiles}
-
-    async def get_pivots(
-        symbol: str,
-        period: str = Query(None, description="周期，不指定则返回全部"),
-        direction: str = Query(None, description="方向: high/low"),
-        count: int = Query(10, ge=1, le=10, description="返回条数（最多10条）"),
-        user: AuthUser = Depends(require_auth),
-    ) -> Dict:
-        """获取转折点数据"""
-        engine = engine_manager.get_engine_for_user(user.user_id)
-        pivot_service = engine.pivot_service
-        if period:
-            period = period.upper()
-            pivots = pivot_service.get_pivots(symbol, period, direction, count)
-            return {
-                "status": "ok",
-                "symbol": symbol,
-                "period": period,
-                "count": len(pivots),
-                "data": pivots
-            }
-        else:
-            result = {}
-            for p in ['H4', 'H1', 'M15', 'M5', 'M1']:
-                pivots = pivot_service.get_pivots(symbol, p, direction, count)
-                if pivots:
-                    result[p] = pivots
-
-            return {
-                "status": "ok",
-                "symbol": symbol,
-                "data": result
-            }
 
     @protected_router.get("/market/symbols")
     async def get_symbols(
@@ -3519,101 +3170,6 @@ def create_market_routes(
         }
 
     # ==================== WebSocket接口 ====================
-
-    async def websocket_market(websocket: WebSocket):
-        """登录后绑定到当前用户的账户级 WebSocket。"""
-        await websocket.accept()
-        engine = None
-
-        try:
-            auth_text = await asyncio.wait_for(
-                websocket.receive_text(),
-                timeout=10,
-            )
-            auth_message = json.loads(auth_text)
-            if auth_message.get("type") != "auth" or not auth_message.get("token"):
-                await websocket.close(code=1008, reason="请先登录")
-                return
-
-            user = get_auth_manager().verify_token(auth_message["token"])
-            _, engine = resolve_web_engine(
-                engine_manager, user, auth_message.get("account_id")
-            )
-            engine.add_ws_client(websocket)
-            engine.system_log.add_log(
-                "websocket_connect",
-                message="行情 WebSocket 已连接",
-            )
-
-            await websocket.send_text(json.dumps({
-                "type": "connected",
-                "message": "已连接到账户行情监控服务",
-                "user_id": user.user_id,
-                "account_id": engine.account_id,
-            }))
-
-            while True:
-                try:
-                    data = await websocket.receive_text()
-                    msg = json.loads(data)
-
-                    if msg.get('type') == 'ping':
-                        await websocket.send_text(json.dumps({"type": "pong"}))
-
-                except WebSocketDisconnect:
-                    break
-
-        except asyncio.TimeoutError:
-            await websocket.close(code=1008, reason="登录超时")
-        except (HTTPException, json.JSONDecodeError):
-            await websocket.close(code=1008, reason="登录凭证无效")
-        except Exception as e:
-            print(f"[WebSocket] 连接异常: {e}")
-
-        finally:
-            if engine is not None:
-                engine.system_log.add_log(
-                    "websocket_disconnect",
-                    message="行情 WebSocket 已断开",
-                )
-                engine.remove_ws_client(websocket)
-
-    async def websocket_system_logs(websocket: WebSocket):
-        """Authenticated live event stream with tenant filtering."""
-        await websocket.accept()
-        broadcaster = get_system_log_broadcaster()
-        subscribed = False
-        try:
-            auth_text = await asyncio.wait_for(websocket.receive_text(), timeout=10)
-            auth_message = json.loads(auth_text)
-            if auth_message.get("type") != "auth" or not auth_message.get("token"):
-                await websocket.close(code=1008, reason="请先登录")
-                return
-            user = get_auth_manager().verify_token(auth_message["token"])
-            account_id = auth_message.get("account_id")
-            if account_id is not None:
-                account_id = int(account_id)
-            if user.role != "admin" and account_id and TradingAccountRepository().get_by_id(
-                user.user_id, account_id
-            ) is None:
-                await websocket.close(code=1008, reason="交易账户不存在")
-                return
-            broadcaster.add(
-                websocket, user.user_id, account_id, user.role == "admin"
-            )
-            subscribed = True
-            await websocket.send_text(json.dumps({
-                "type": "connected", "message": "日志实时流已连接",
-            }))
-            while True:
-                payload = json.loads(await websocket.receive_text())
-                if payload.get("type") == "ping":
-                    await websocket.send_text(json.dumps({"type": "pong"}))
-        except (asyncio.TimeoutError, WebSocketDisconnect, json.JSONDecodeError):
-            pass
-        finally:
-            if subscribed:
-                broadcaster.remove(websocket)
 
     # ==================== 大模型分析接口 ====================
 

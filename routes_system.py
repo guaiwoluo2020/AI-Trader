@@ -71,6 +71,34 @@ def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
             symbols=symbols,
             latest_statistics=latest_statistics,
         )
+
+    @protected_router.get("/system/tasks")
+    async def list_background_tasks(
+        limit: int = Query(50, ge=1, le=200),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """查看统一后台队列中的 AI、复盘和维护任务状态。"""
+        tasks = engine_manager.list_background_tasks(limit)
+        # 管理任务不携带用户数据；普通用户只看到自己账户相关任务，
+        # 以及全局系统任务的状态摘要。
+        if user.role != "admin":
+            tasks = [
+                task for task in tasks
+                if task.get("task_key", "").find(str(user.user_id)) >= 0
+                or "system" in task.get("task_key", "")
+                or "llm" in task.get("task_key", "")
+            ]
+        return {"status": "ok", "tasks": tasks, "count": len(tasks)}
+
+    @protected_router.get("/system/tasks/{task_id}")
+    async def get_background_task(
+        task_id: str,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        task = engine_manager.get_background_task(task_id)
+        if task is None:
+            return {"status": "not_found", "task": None}
+        return {"status": "ok", "task": task}
     
     router.include_router(protected_router)
     return router

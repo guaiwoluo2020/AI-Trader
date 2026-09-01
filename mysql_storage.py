@@ -456,6 +456,7 @@ class MySQLStorage:
                         ("lease_until", "BIGINT NULL"),
                     ),
                     "trade_execution_reports": (
+                        ("execution_status", "VARCHAR(32) NOT NULL DEFAULT 'pending'"),
                         ("mt5_position_id", "BIGINT NOT NULL DEFAULT 0"),
                         ("position_attribution_json", "JSON NULL"),
                     ),

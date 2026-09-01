@@ -95,6 +95,9 @@ class TradingEngineManager:
             runtime = self._engines.get(key)
             if runtime is None:
                 engine = self._engine_factory(key.user_id, key.account_id)
+                analyzer = getattr(engine, "llm_analyzer", None)
+                if analyzer is not None:
+                    analyzer.set_task_scheduler(self._scheduler)
                 if self._event_loop is not None:
                     engine.set_event_loop(self._event_loop)
                 runtime = EngineRuntime(
@@ -109,6 +112,13 @@ class TradingEngineManager:
             else:
                 runtime.last_active_at = now
             return runtime.engine
+
+    def list_background_tasks(self, limit: int = 50):
+        """统一暴露后台任务状态，供运维页轮询，不触发任务执行。"""
+        return self._scheduler.list_tasks(limit)
+
+    def get_background_task(self, task_id: str):
+        return self._scheduler.get_task(task_id)
 
     def get_engine_for_ea(self, identity: EAIdentity) -> TradingServer:
         return self.get_engine(identity.user_id, identity.account_id)

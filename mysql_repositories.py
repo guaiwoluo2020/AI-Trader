@@ -940,6 +940,7 @@ class TradeExecutionRepository:
             str(payload.get("order_id", "") or ""),
             str(payload.get("symbol", "") or ""), action,
             int(bool(payload.get("success", False))),
+            normalized.status,
             requested_price, executed_price,
             float(payload.get("requested_volume", 0) or 0),
             float(payload.get("executed_volume", 0) or 0),
@@ -962,13 +963,14 @@ class TradeExecutionRepository:
             """
             INSERT INTO trade_execution_reports(
                 user_id, account_id, instruction_id, order_id, symbol, action,
-                success, requested_price, executed_price, requested_volume,
+                success, execution_status, requested_price, executed_price, requested_volume,
                 executed_volume, slippage, mt5_order, mt5_deal, mt5_position_id, retcode,
                 error_message, reported_at, payload_json
                 , position_attribution_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_id, instruction_id) DO UPDATE SET
                 success = excluded.success,
+                execution_status = excluded.execution_status,
                 executed_price = excluded.executed_price,
                 executed_volume = excluded.executed_volume,
                 slippage = excluded.slippage,
@@ -1004,10 +1006,10 @@ class TradeExecutionRepository:
         item = dict(row)
         try:
             payload = json.loads(item.get("payload_json") or "{}")
-            item["status"] = payload.get("status") or ("filled" if item.get("success") else "failed")
+            item["status"] = item.get("execution_status") or payload.get("status") or ("filled" if item.get("success") else "failed")
             item["transport"] = payload.get("transport") or "mt5"
         except (TypeError, ValueError):
-            item["status"] = "filled" if item.get("success") else "failed"
+            item["status"] = item.get("execution_status") or ("filled" if item.get("success") else "failed")
             item["transport"] = "mt5"
         try:
             item["position_attribution"] = json.loads(

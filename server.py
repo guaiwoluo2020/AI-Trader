@@ -458,6 +458,7 @@ class TradingServer:
             getattr(signal, "setup_type", "") or "generic_entry"
         )
         setup_family = str(getattr(signal, "setup_family", "") or "generic")
+        signal_source = str(getattr(signal, "source", "") or "").lower()
         plan_id = str(
             getattr(signal, "trade_plan_id", "")
             or getattr(signal, "ai_plan_id", "") or ""
@@ -538,6 +539,10 @@ class TradingServer:
                 attribution = {}
             if str(attribution.get("strategy_id") or "") != strategy.strategy_id:
                 continue
+            if (plan_id or "structure" in signal_source) and str(
+                attribution.get("setup_type") or "generic_entry"
+            ) != setup_type:
+                continue
             position_id = str(row.get("mt5_position_id") or "")
             if not position_id:
                 continue
@@ -555,12 +560,24 @@ class TradingServer:
                 break
         if streak < limit:
             return {"allowed": True, "loss_streak": streak, "scope": "deployment"}
+        # Structure Plan 的熔断按 setup_type 隔离，固定暂停一小时；普通
+        # 信号继续使用原有部署级配置，避免改变既有风控行为。
+        is_structure_setup = bool(plan_id or "structure" in signal_source)
+        if is_structure_setup:
+            pause_seconds = 3600
         release_at = int(rows[0]["closed_at"] or 0) + pause_seconds
         if int(time.time()) < release_at:
             return {
-                "allowed": False, "loss_streak": streak, "scope": "deployment",
+                "allowed": False, "loss_streak": streak,
+                "scope": "setup_type" if is_structure_setup else "deployment",
+                "setup_type": setup_type if is_structure_setup else "",
                 "release_at": release_at,
-                "reason": f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}",
+                "reason": (
+                    f"SETUP {setup_type} 连续亏损 {streak} 次，已暂停该 SETUP 一小时，"
+                    f"恢复时间 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}"
+                    if is_structure_setup else
+                    f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}"
+                ),
             }
         return {
             "allowed": True, "loss_streak": streak, "scope": "deployment",
@@ -1096,6 +1113,11 @@ class TradingServer:
                 volume=state.get("remaining_volume") or state.get("volume", 0),
                 payload=event,
             )
+            self.event_bus.publish(ApplicationEvent(
+                "position_event_recorded",
+                {**event, "ticket": ticket, "symbol": symbol},
+                int(user_id), int(account_id), str(symbol or ""),
+            ))
 
     # ==================== 订单确认回调 ====================
 

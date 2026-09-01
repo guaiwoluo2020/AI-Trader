@@ -30,6 +30,7 @@ from mysql_repositories import (
 from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.strategy_config import StrategyConfigRepository
 from repositories.trading import PositionManagementEventRepository
+from repositories.trading import TradeExecutionRepository
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 
 
@@ -65,9 +66,37 @@ class PaperTradingService:
         self.position_manager = PositionManager()
         self.position_events = PositionManagementEventRepository(self.storage)
         self.structure_plans = StructureTradePlanRepository(self.storage)
+        self.execution_reports = TradeExecutionRepository(self.storage)
         self.memberships = MembershipService(self.storage)
         self._lock = threading.RLock()
         self._quotes: Dict[Tuple[int, str], Tuple[float, float]] = {}
+
+    def _record_execution_receipt(self, user_id: int, account_id: int,
+                                  order: Dict, status: str, reason: str = "",
+                                  *, executed_price: float = 0.0,
+                                  executed_volume: float = 0.0) -> None:
+        """将 Paper 撮合结果写入与 MT5 相同的执行回执表。"""
+        try:
+            self.execution_reports.record(int(user_id), int(account_id), {
+                "instruction_id": f"paper:{order.get('order_id')}",
+                "order_id": str(order.get("order_id") or ""),
+                "symbol": str(order.get("symbol") or ""),
+                "action": str(order.get("direction") or ""),
+                "status": status,
+                "success": status in {"filled", "partially_filled"},
+                "requested_price": float(order.get("requested_price") or 0),
+                "executed_price": float(executed_price or 0),
+                "requested_volume": float(order.get("requested_volume") or 0),
+                "executed_volume": float(executed_volume or 0),
+                "error_message": reason,
+                "reported_timestamp": int(time.time()),
+                "transport": "paper",
+                "strategy_id": str(order.get("strategy_id") or ""),
+                "position_attribution": json.loads(order.get("position_attribution_json") or "{}"),
+            })
+        except Exception as exc:
+            # 回执写入失败不应回滚已经完成的撮合；后续维护任务可重放。
+            print(f"[PaperTrading] 执行回执写入失败 order={order.get('order_id')}: {exc}")
 
     def list_context(self, user_id: int) -> Dict:
         strategies = self.storage.fetchall(
@@ -558,6 +587,7 @@ class PaperTradingService:
             getattr(signal, "setup_type", "") or "generic_entry"
         )
         setup_family = str(getattr(signal, "setup_family", "") or "generic")
+        signal_source = str(getattr(signal, "source", "") or "").lower()
         plan_id = str(
             getattr(signal, "trade_plan_id", "")
             or getattr(signal, "ai_plan_id", "") or ""
@@ -617,7 +647,7 @@ class PaperTradingService:
         # A paper trade is written once when the complete position closes;
         # partial take-profits are separate rows and must not affect the streak.
         rows = self.storage.fetchall(
-            "SELECT net_profit, closed_at FROM paper_trades WHERE user_id = ? "
+            "SELECT net_profit, closed_at, position_attribution_json FROM paper_trades WHERE user_id = ? "
             "AND account_id = ? AND deployment_id = ? "
             "AND exit_reason NOT IN ('partial_take_profit', 'signal_take_profit') "
             "ORDER BY closed_at DESC, created_at DESC LIMIT 100",
@@ -625,18 +655,35 @@ class PaperTradingService:
         )
         streak = 0
         for row in rows:
+            if (plan_id or "structure" in signal_source):
+                try:
+                    attribution = json.loads(row.get("position_attribution_json") or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    attribution = {}
+                if str(attribution.get("setup_type") or "generic_entry") != setup_type:
+                    continue
             if float(row.get("net_profit") or 0) < 0:
                 streak += 1
             else:
                 break
         if streak < limit:
             return {"allowed": True, "loss_streak": streak, "scope": "deployment"}
+        is_structure_setup = bool(plan_id or "structure" in signal_source)
+        if is_structure_setup:
+            pause_seconds = 3600
         release_at = int(rows[0].get("closed_at") or 0) + pause_seconds
         if int(time.time()) < release_at:
             return {
-                "allowed": False, "loss_streak": streak, "scope": "deployment",
+                "allowed": False, "loss_streak": streak,
+                "scope": "setup_type" if is_structure_setup else "deployment",
+                "setup_type": setup_type if is_structure_setup else "",
                 "release_at": release_at,
-                "reason": f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}",
+                "reason": (
+                    f"SETUP {setup_type} 连续亏损 {streak} 次，已暂停该 SETUP 一小时，"
+                    f"恢复时间 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}"
+                    if is_structure_setup else
+                    f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}"
+                ),
             }
         return {
             "allowed": True, "loss_streak": streak, "scope": "deployment",
@@ -877,6 +924,10 @@ class PaperTradingService:
             self._sync_paper_decision_status(
                 user_id, int(order["account_id"]), str(order["decision_id"]),
                 str(order["order_id"]), status="expired", auto_executed=False,
+            )
+            self._record_execution_receipt(
+                int(user_id), int(order["account_id"]),
+                {**dict(order), "symbol": symbol}, "timeout", reason,
             )
             try:
                 attribution = json.loads(
@@ -1686,6 +1737,15 @@ class PaperTradingService:
                     int(user_id), account_id, str(decision.get("decision_id") or ""),
                     order_id, status="rejected", auto_executed=False,
                 )
+            self._record_execution_receipt(
+                int(user_id), account_id,
+                {**decision, "order_id": order_id, "direction": decision.get("action"),
+                 "requested_price": entry, "requested_volume": requested_volume,
+                 "symbol": decision.get("symbol"),
+                 "position_attribution_json": json.dumps(attribution, ensure_ascii=False)},
+                status,
+                reason,
+            )
             return True
         except Exception as exc:
             if claimed_structure_plan:
@@ -2191,8 +2251,17 @@ class PaperTradingService:
                 "SELECT status,rejection_reason FROM paper_orders WHERE order_id=?",
                 (str(order["order_id"]),),
             )
-            if not outcome or outcome["status"] not in {"filled", "rejected"}:
+            if not outcome or outcome["status"] not in {"filled", "rejected", "canceled"}:
                 continue
+            self._record_execution_receipt(
+                int(user_id), int(account_id), dict(order),
+                "filled" if outcome["status"] == "filled" else (
+                    "canceled" if outcome["status"] == "canceled" else "rejected"
+                ),
+                str(outcome["rejection_reason"] or ""),
+                executed_price=float(order.get("filled_price") or 0),
+                executed_volume=float(order.get("filled_volume") or 0),
+            )
             self.structure_plans.record_execution(
                 int(user_id), int(account_id), str(order["deployment_id"]),
                 str(order["strategy_id"]), plan_id,

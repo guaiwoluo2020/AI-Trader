@@ -356,6 +356,11 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 int(identity.user_id or 0), int(identity.account_id or 0),
                 str(report.get("symbol") or ""),
             ))
+            server.event_bus.publish(ApplicationEvent(
+                "position_updated", {"report": report, "action": action},
+                int(identity.user_id or 0), int(identity.account_id or 0),
+                str(report.get("symbol") or ""),
+            ))
             return {"status": "ok", "report": report}
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
