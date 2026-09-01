@@ -15,7 +15,7 @@ from ...models import (
 )
 from ...models import ConsistencyRequirement, ConflictResolution
 from ...store import StrategyStore
-from ..position_attribution import build_position_attribution
+from ..execution_pipeline import ExecutionPipeline
 from repositories.runtime import PositionManagementPolicyRepository
 from ..signal import SignalService
 from ..signal.signal_rules import constrain_pivot_levels_to_hundred_band, valid_exits
@@ -43,6 +43,7 @@ class StrategyService:
 
         # 待确认订单服务引用（外部设置）
         self._pending_order_service = None
+        self.execution_pipeline = ExecutionPipeline()
 
         # 决策冷却
         self._decision_cooldowns: Dict[str, datetime] = {}
@@ -901,68 +902,14 @@ class StrategyService:
         Returns:
             订单ID 或 None
         """
-        if decision.action == "none" or decision.status == "rejected":
-            return None
-
         if not self._pending_order_service:
             print("[StrategyService] 待确认订单服务未设置")
             return None
-
-        order_action = "b" if decision.action == "buy" else "s"
-        source = str(decision.signal_summary.get("selected_signal_source", ""))
-        source_id = str(
-            decision.signal_summary.get("selected_signal_source_id", "")
+        order_id = self.execution_pipeline.execute(
+            decision, self._pending_order_service
         )
-        stored_strategy = (
-            self.strategy_store.get_strategy_by_id(decision.strategy_id)
-            if hasattr(self.strategy_store, "get_strategy_by_id") else None
-        )
-        description = f"AIT|{decision.strategy_id}|{source_id}"
-        position_attribution = build_position_attribution(
-            decision.signal_summary,
-            decision_id=decision.decision_id,
-            strategy_id=decision.strategy_id,
-            strategy_name=decision.strategy_name,
-            direction=decision.action,
-            entry_reason=decision.decision_reason,
-            initial_stop_loss=decision.sl,
-            initial_take_profit=decision.tp,
-            initial_volume=decision.volume,
-        )
-
-        # 创建订单
-        order_id = self._pending_order_service.create_order(
-            symbol=decision.symbol,
-            action=order_action,
-            price=decision.entry_price,
-            mount=decision.volume,
-            sl=decision.sl,
-            tp=decision.tp,
-            reason=decision.decision_reason,
-            description=description,
-            source="strategy_decision",
-            strategy_id=decision.strategy_id,
-            strategy_name=decision.strategy_name,
-            signal_source_id=source_id,
-            exit_mode="position_manager",
-            trailing_activation_r=1.0,
-            trailing_distance_r=1.0,
-            decision_id=decision.decision_id,
-            position_attribution=position_attribution,
-        )
-
-        decision.order_id = order_id
-        decision.status = "pending"
-
-        confirmed_order = self._pending_order_service.confirm_order(order_id)
-        if confirmed_order:
-            decision.auto_executed = True
-            decision.status = "confirmed"
+        if order_id:
             print(f"[StrategyService] 策略自动下单: {order_id}")
-        else:
-            print(f"[StrategyService] 策略自动下单失败: {order_id}")
-
-        print(f"[StrategyService] 决策已执行，订单ID: {order_id}")
         return order_id
 
     # ==================== 状态 ====================
