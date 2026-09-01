@@ -21,7 +21,7 @@ from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from pymysql.err import IntegrityError
-from sqlite_storage import MetaRepository, UserRepository, bootstrap_runtime_storage
+from mysql_repositories import MetaRepository, UserRepository, bootstrap_runtime_storage
 
 
 DEFAULT_TOKEN_TTL_SECONDS = 60 * 60 * 12

@@ -7,7 +7,7 @@ from typing import Optional
 
 from fastapi import Header, HTTPException, Query, Request, status
 
-from sqlite_storage import TradingAccountRepository
+from mysql_repositories import TradingAccountRepository
 
 
 MINIMUM_EA_VERSION = "2.0.7"

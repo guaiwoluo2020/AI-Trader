@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Dict, Optional
 
-from sqlite_storage import SQLiteStorage, get_storage
+from mysql_repositories import MySQLStorage, get_storage
 
 
 MEMBERSHIP_LEVELS = ("normal", "silver", "gold", "diamond")
@@ -40,7 +40,7 @@ class MembershipError(ValueError):
 
 
 class MembershipService:
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
 
     @staticmethod

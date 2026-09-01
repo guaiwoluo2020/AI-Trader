@@ -13,7 +13,7 @@ from ...models import SignalSource, TradingSignal
 from .signal_rules import (
     build_ai_entry_signal, direction_action, extract_ai_trend_state,
 )
-from sqlite_storage import AISignalSourceRepository
+from mysql_repositories import AISignalSourceRepository
 
 
 class AIEntrySignalGenerator:

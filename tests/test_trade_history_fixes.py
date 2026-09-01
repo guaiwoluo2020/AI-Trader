@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from market.services.adaptive_signal_tuner import AdaptiveSignalTuner
 from server import TradingServer
-from sqlite_storage import LiveTradeDealRepository
+from mysql_repositories import LiveTradeDealRepository
 
 
 ATTRIBUTION = json.dumps({

@@ -6,7 +6,7 @@
 
 from typing import Dict, List
 import threading
-from sqlite_storage import TradeConfigRepository, bootstrap_runtime_storage
+from mysql_repositories import TradeConfigRepository, bootstrap_runtime_storage
 
 
 class TradeConfig:
@@ -62,19 +62,19 @@ class TradeConfig:
         return salt, password_hash
 
     def _load_from_storage(self):
-        """从 SQLite 加载配置"""
+        """从 MySQL 加载配置"""
         try:
             data = self._repo.get_config(self._user_id)
             self.update(data)
-            print(f"[TradeConfig] 已从 SQLite 加载: mt5_timezone_offset={self.mt5_timezone_offset}")
+            print(f"[TradeConfig] 已从 MySQL 加载: mt5_timezone_offset={self.mt5_timezone_offset}")
         except Exception as e:
             print(f"[TradeConfig] 加载配置失败: {e}，使用默认配置")
 
     def save_to_file(self):
-        """保存配置到 SQLite"""
+        """保存配置到 MySQL"""
         try:
             self._repo.save_config(self._user_id, self.to_dict())
-            print("[TradeConfig] 配置已保存到 SQLite")
+            print("[TradeConfig] 配置已保存到 MySQL")
             return True
         except Exception as e:
             print(f"[TradeConfig] 保存配置失败: {e}")

@@ -30,7 +30,7 @@ from market.services.signal.key_level_signal import KeyLevelSignalGenerator
 from market.services.signal.pivot_repository import (
     calculate_pivot_score, pivot_config_fingerprint,
 )
-from sqlite_storage import SQLiteStorage, UserRepository
+from mysql_repositories import MySQLStorage, UserRepository
 
 
 class FakeLLMProvider:
@@ -769,7 +769,7 @@ class M1BacktestEngineTests(unittest.TestCase):
 class BacktestPersistenceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "test.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "test.db"))
         self.storage.initialize()
         self.user = UserRepository(self.storage).create_user(
             "engine-user", "hash", "salt"

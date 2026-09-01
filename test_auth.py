@@ -19,7 +19,7 @@ from auth import (
     reset_auth_manager,
 )
 from main import create_app
-from sqlite_storage import reset_storage
+from mysql_repositories import reset_storage
 
 
 class AuthRoutesTestCase(unittest.TestCase):

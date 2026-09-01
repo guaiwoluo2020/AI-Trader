@@ -9,7 +9,7 @@ from datetime import datetime
 import threading
 
 from ..models import StrategyLifecycle, TradingStrategy
-from sqlite_storage import StrategyConfigRepository, bootstrap_runtime_storage
+from mysql_repositories import StrategyConfigRepository, bootstrap_runtime_storage
 
 
 class StrategyStore:
@@ -27,7 +27,7 @@ class StrategyStore:
             runtime_user = bootstrap_runtime_storage(self._build_password_credentials)
             self._user_id = runtime_user.user_id
 
-        # 从 SQLite 加载
+        # 从 MySQL 加载
         self._load_from_file()
 
         print("[StrategyStore] 策略配置存储已初始化")
@@ -47,13 +47,13 @@ class StrategyStore:
         return salt, password_hash
 
     def _load_from_file(self) -> None:
-        """从 SQLite 加载配置"""
+        """从 MySQL 加载配置"""
         try:
             strategies = self._repo.get_all_strategies(self._user_id)
             self._strategies = {
                 strategy.strategy_id: strategy for strategy in strategies
             }
-            print(f"[StrategyStore] 从 SQLite 加载 {len(self._strategies)} 个策略配置")
+            print(f"[StrategyStore] 从 MySQL 加载 {len(self._strategies)} 个策略配置")
         except Exception as e:
             print(f"[StrategyStore] 加载配置失败: {e}")
 
@@ -63,10 +63,10 @@ class StrategyStore:
             self._load_from_file()
 
     def save_to_file(self) -> bool:
-        """保存配置到 SQLite"""
+        """保存配置到 MySQL"""
         try:
             self._repo.replace_all(self._user_id, list(self._strategies.values()))
-            print("[StrategyStore] 配置已保存到 SQLite")
+            print("[StrategyStore] 配置已保存到 MySQL")
             return True
         except Exception as e:
             print(f"[StrategyStore] 保存配置失败: {e}")

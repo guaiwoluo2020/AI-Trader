@@ -9,11 +9,11 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from sqlite_storage import SQLiteStorage, get_storage
+from mysql_repositories import MySQLStorage, get_storage
 
 
 class SystemEventLogRepository:
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
 
     def add(self, event: Dict) -> Dict:

@@ -36,7 +36,7 @@ from market.trade_config import TradeConfig
 from market.llm_analyzer import LLMAnalyzer
 from market.system_log import SystemLog
 from membership import MembershipService
-from sqlite_storage import (
+from mysql_repositories import (
     AISignalSourceRepository,
     PositionManagementEventRepository,
     PositionManagementPolicyRepository,

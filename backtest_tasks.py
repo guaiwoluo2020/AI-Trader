@@ -10,8 +10,8 @@ import uuid
 from typing import Dict, List, Optional
 
 from backtest_data import BacktestDatasetRepository, DatasetStatus
-from sqlite_storage import (
-    PositionManagementPolicyRepository, SQLiteStorage,
+from mysql_repositories import (
+    PositionManagementPolicyRepository, MySQLStorage,
     StrategyConfigRepository, get_storage,
 )
 
@@ -29,7 +29,7 @@ class BacktestTemplateService:
 
     POSITION_MODES = {"strategy", "fixed", "risk_percent"}
 
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
         self.strategies = StrategyConfigRepository(self.storage)
         self.position_policies = PositionManagementPolicyRepository(self.storage)

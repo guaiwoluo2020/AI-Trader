@@ -7,7 +7,7 @@ import uuid
 import re
 from typing import Dict, List, Optional
 
-from sqlite_storage import get_storage
+from mysql_repositories import get_storage
 
 
 class StructureTradePlanRepository:

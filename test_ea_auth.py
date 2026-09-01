@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from auth import AuthManager, reset_auth_manager
 from ea_auth import require_ea_auth
-from sqlite_storage import TradingAccountRepository, reset_storage
+from mysql_repositories import TradingAccountRepository, reset_storage
 
 
 class _RequestState:

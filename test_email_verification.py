@@ -13,7 +13,7 @@ from email_verification import (
     EmailVerificationService,
     SystemEmailConfigRepository,
 )
-from sqlite_storage import get_storage, reset_storage
+from mysql_repositories import get_storage, reset_storage
 
 
 class EmailVerificationTestCase(unittest.TestCase):

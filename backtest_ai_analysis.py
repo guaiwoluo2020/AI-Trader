@@ -12,7 +12,7 @@ from typing import Callable, Dict, List, Optional
 from market.services.llm_service import LLMRequestError, LLMService
 from market.models import TradingStrategy
 from market.store.llm_store import LLMStore
-from sqlite_storage import SQLiteStorage, get_storage
+from mysql_repositories import MySQLStorage, get_storage
 from llm_governance import BACKTEST_REPORT_ANALYSIS
 
 
@@ -22,7 +22,7 @@ class BacktestAIAnalysisService:
 
     def __init__(
         self,
-        storage: Optional[SQLiteStorage] = None,
+        storage: Optional[MySQLStorage] = None,
         llm_factory: Optional[Callable[[int], LLMService]] = None,
     ):
         self.storage = storage or get_storage()

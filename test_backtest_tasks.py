@@ -13,9 +13,9 @@ from backtest_data import (
 from backtest_tasks import BacktestTemplateService
 from market.models import PositionManagementPolicy
 from market.models.trading_strategy import TradingStrategy
-from sqlite_storage import (
+from mysql_repositories import (
     PositionManagementPolicyRepository,
-    SQLiteStorage,
+    MySQLStorage,
     StrategyConfigRepository,
     TradingAccountRepository,
     UserRepository,
@@ -25,7 +25,7 @@ from sqlite_storage import (
 class BacktestTemplateTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "test.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "test.db"))
         self.storage.initialize()
         self.users = UserRepository(self.storage)
         self.user = self.users.create_user("template-user", "hash", "salt")

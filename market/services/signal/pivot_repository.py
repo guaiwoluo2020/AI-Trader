@@ -66,7 +66,7 @@ def calculate_pivot_score(
 class ConfiguredPivotRepository:
     def __init__(self, storage=None):
         if storage is None:
-            from sqlite_storage import get_storage
+            from mysql_repositories import get_storage
             storage = get_storage()
         self.storage = storage
 

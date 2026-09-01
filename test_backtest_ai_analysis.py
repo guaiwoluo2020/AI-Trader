@@ -13,9 +13,9 @@ from backtest_data import BacktestDatasetRepository, BacktestDatasetService
 from backtest_tasks import BacktestTemplateService
 from market.models import PositionManagementPolicy
 from market.models.trading_strategy import TradingStrategy
-from sqlite_storage import (
+from mysql_repositories import (
     PositionManagementPolicyRepository,
-    SQLiteStorage,
+    MySQLStorage,
     StrategyConfigRepository,
     TradingAccountRepository,
     UserRepository,
@@ -48,7 +48,7 @@ class _FakeLLMService:
 class BacktestAIAnalysisTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "test.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "test.db"))
         self.storage.initialize()
         users = UserRepository(self.storage)
         self.user = users.create_user("ai-review-admin", "hash", "salt", role="admin")

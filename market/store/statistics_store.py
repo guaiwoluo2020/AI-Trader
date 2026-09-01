@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import threading
 from ..models.statistics import StatisticsData
-from sqlite_storage import RuntimeStateRepository
+from mysql_repositories import RuntimeStateRepository
 
 
 class StatisticsStore:

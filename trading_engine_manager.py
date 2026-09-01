@@ -16,7 +16,7 @@ from market.services.daily_review_service import DailyReviewCoordinator, CHINA_T
 from ea_auth import EAIdentity
 from paper_trading import PaperTradingService
 from server import TradingServer
-from sqlite_storage import TradingAccountRepository
+from mysql_repositories import TradingAccountRepository
 
 
 @dataclass(frozen=True)

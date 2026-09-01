@@ -43,7 +43,7 @@ from market.services.signal.alpha_factor_signal import AlphaRuntimeExecutor
 from market.services.signal.pivot_repository import calculate_pivot_score
 from market.services.strategy.strategy_service import StrategyService
 from market.store.llm_store import LLMStore
-from sqlite_storage import SQLiteStorage, get_storage
+from mysql_repositories import MySQLStorage, get_storage
 
 
 ENGINE_VERSION = "direction-consensus-2"
@@ -62,7 +62,7 @@ class BacktestCanceled(BacktestEngineError):
 class BacktestTaskRepository:
     """Atomically claims tasks and keeps task/batch status consistent."""
 
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
 
     def recover_stale(self, stale_seconds: int = 600) -> int:
@@ -587,7 +587,7 @@ class BacktestTaskRepository:
 
 
 class BacktestLLMCache:
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
 
     def get(self, cache_key: str) -> Optional[Dict]:
@@ -730,7 +730,7 @@ class ReplayPivotProvider:
 class CachedLLMProvider:
     """Calls the user's approved LLM config and caches immutable responses."""
 
-    def __init__(self, storage: Optional[SQLiteStorage] = None, retries: int = 2):
+    def __init__(self, storage: Optional[MySQLStorage] = None, retries: int = 2):
         self.storage = storage or get_storage()
         self.cache = BacktestLLMCache(self.storage)
         self.retries = max(1, int(retries))
@@ -2526,11 +2526,11 @@ def build_result(
 
 
 class BacktestWorker:
-    """Single-process worker; SQLite claiming keeps it safe to scale later."""
+    """Single-process worker; MySQL claiming keeps it safe to scale later."""
 
     def __init__(
         self,
-        storage: Optional[SQLiteStorage] = None,
+        storage: Optional[MySQLStorage] = None,
         engine_factory: Optional[Callable[..., M1BacktestEngine]] = None,
         poll_seconds: float = 1.0,
     ):

@@ -2,9 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sqlite_storage import (
+from mysql_repositories import (
     EAActivationRepository,
-    SQLiteStorage,
+    MySQLStorage,
     TradingAccountRepository,
     UserRepository,
 )
@@ -13,7 +13,7 @@ from sqlite_storage import (
 class EAActivationRepositoryTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(
+        self.storage = MySQLStorage(
             str(Path(self.temp_dir.name) / "activation-test.db")
         )
         self.user = UserRepository(self.storage).create_user(

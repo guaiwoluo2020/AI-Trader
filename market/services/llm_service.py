@@ -22,7 +22,7 @@ from ..models.llm_config import (
 )
 from ..store import LLMStore
 from .kline_service import KlineService
-from sqlite_storage import (
+from mysql_repositories import (
     AISignalSourceRepository, AITradeSuggestionRepository,
     SharedAIRuntimeRepository,
 )

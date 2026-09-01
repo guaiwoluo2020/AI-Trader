@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from market.models.trading_strategy import TradingStrategy
-from sqlite_storage import (
+from mysql_repositories import (
     StrategyConfigRepository,
     get_storage,
     reset_storage,

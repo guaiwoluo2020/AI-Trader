@@ -12,7 +12,7 @@ from auth import AuthUser, require_auth
 from ea_auth import EAIdentity, ensure_supported_ea_version, require_ea_auth
 from models import TradeInstruction
 from market_data_source_policy import MarketDataSourcePolicy
-from sqlite_storage import (
+from mysql_repositories import (
     EAActivationRepository,
     LiveTradeDealRepository,
     TradeExecutionRepository,

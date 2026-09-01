@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, Optional
 
-from sqlite_storage import SQLiteStorage, get_storage
+from mysql_repositories import MySQLStorage, get_storage
 
 
 class DataRetentionService:
@@ -17,7 +17,7 @@ class DataRetentionService:
     ALPHA_SIGNAL_DAYS = 7
     BATCH_SIZE = 5000
 
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
         self.storage.initialize()
 

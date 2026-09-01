@@ -18,7 +18,7 @@ import pandas as pd
 
 from backtest_data import BacktestDatasetRepository
 from backtest_engine import HistoricalBarReader, PERIOD_SECONDS
-from sqlite_storage import SQLiteStorage, get_storage
+from mysql_repositories import MySQLStorage, get_storage
 
 
 ALPHA_PERIOD_SECONDS = dict(PERIOD_SECONDS)
@@ -227,7 +227,7 @@ class FactorCatalog:
 
 
 class AlphaResearchRepository:
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
 
     def create(self, user_id: int, config: Dict) -> Dict:
@@ -498,7 +498,7 @@ class AlphaResearchRepository:
 class AlphaLibraryRepository:
     """Versioned, validated Alpha definitions available to strategy signals."""
 
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
 
     def list_visible(self, user_id: int) -> List[Dict]:
@@ -2250,7 +2250,7 @@ class AlphaResearchService:
         }
 
 class AlphaResearchWorker:
-    def __init__(self, storage: Optional[SQLiteStorage] = None, poll_seconds: float = 1.0):
+    def __init__(self, storage: Optional[MySQLStorage] = None, poll_seconds: float = 1.0):
         self.repository = AlphaResearchRepository(storage)
         self.poll_seconds = max(0.1, poll_seconds)
         self._stop = threading.Event()

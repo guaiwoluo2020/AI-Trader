@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 
 class MySQLConnection:
-    """Expose the small sqlite3 connection surface used by repositories."""
+    """Expose the small DB-API connection surface used by repositories."""
 
     def __init__(self, connection, release, discard):
         self._connection = connection
@@ -54,7 +54,7 @@ class MySQLConnection:
 
 
 class MySQLStorage:
-    """Thread-safe MySQL storage. SQLite is intentionally not a runtime option."""
+    """Thread-safe MySQL storage. MySQL is intentionally not a runtime option."""
 
     def __init__(self):
         self.host = os.getenv("AI_TRADER_MYSQL_HOST", "").strip()
@@ -385,7 +385,7 @@ class MySQLStorage:
                 # Persistent resource counters are read by the strategy list
                 # endpoint for quota display.  Keep this table in the MySQL
                 # bootstrap path because production does not initialize the
-                # SQLite schema.
+                # MySQL schema.
                 conn.execute(
                     """
                 CREATE TABLE IF NOT EXISTS user_resource_usage (
@@ -411,7 +411,7 @@ class MySQLStorage:
                     # column on every startup after the first successful run.
                     pass
                 # Execution attribution is deliberately migrated by the MySQL
-                # adapter itself. SQLiteStorage.initialize() is not part of the
+                # adapter itself. MySQLStorage.initialize() is not part of the
                 # production runtime, so adding compatibility columns there is
                 # insufficient for RDS deployments.
                 compatibility_columns = {
@@ -495,7 +495,7 @@ class MySQLStorage:
 
         Repository code uses this for persisted K-line batches. Exposing the
         same surface as the connection wrapper keeps MySQL as the only runtime
-        store without falling back to SQLite-specific write paths.
+        store without falling back to MySQL-specific write paths.
         """
         if not params:
             return
@@ -515,7 +515,7 @@ class MySQLStorage:
 
     @staticmethod
     def translate_sql(sql: str) -> str:
-        """Translate the repository's common SQLite syntax to MySQL 8 syntax."""
+        """Translate the repository's common MySQL syntax to MySQL 8 syntax."""
         text = str(sql)
         # `key` is reserved by MySQL, but only app_meta uses it as a column.
         # Keep DDL keywords such as PRIMARY KEY and UNIQUE KEY untouched.
@@ -533,7 +533,7 @@ class MySQLStorage:
         )
         text = re.sub(r"\bapp_meta\.key\b", "app_meta.`key`", text, flags=re.I)
         # Foreign-key enforcement is configured by the server. Existing callers
-        # issue this SQLite pragma before transactions, so make it a harmless no-op.
+        # issue this MySQL pragma before transactions, so make it a harmless no-op.
         if re.match(r"^\s*PRAGMA\s+foreign_keys\s*=\s*ON\s*;?\s*$", text, re.I):
             return "SELECT 1"
         text = re.sub(r"\bBEGIN\s+IMMEDIATE\b", "START TRANSACTION", text, flags=re.I)

@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Dict, Optional
 
-from sqlite_storage import SQLiteStorage, get_storage
+from mysql_repositories import MySQLStorage, get_storage
 
 
 def strategy_fingerprint(strategy: Dict) -> str:
@@ -27,7 +27,7 @@ class StrategyAdmissionService:
     MIN_PROFIT_FACTOR = 1.1
     MAX_DRAWDOWN_PCT = 20.0
 
-    def __init__(self, paper_trading, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, paper_trading, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
         self.paper_trading = paper_trading
 

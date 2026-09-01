@@ -23,9 +23,9 @@ from market.services.account_strategy_performance import build_paper_performance
 from market.services.strategy.transient_decision_store import transient_decision_store
 from market.store.structure_plan_store import StructureTradePlanRepository
 from membership import MembershipService
-from sqlite_storage import (
+from mysql_repositories import (
     PositionManagementEventRepository,
-    PositionManagementPolicyRepository, SQLiteStorage,
+    PositionManagementPolicyRepository, MySQLStorage,
     PlatformInstrumentMappingRepository, StrategyConfigRepository,
     RuntimeStateRepository, TradingAccountRepository, get_storage,
 )
@@ -56,7 +56,7 @@ class PaperTradingService:
     # 报价链路中断时必须释放风险额度，避免旧订单永久阻塞后续信号。
     PENDING_ORDER_TIMEOUT_SECONDS = 60
 
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
         self.accounts = TradingAccountRepository(self.storage)
         self.instrument_mappings = PlatformInstrumentMappingRepository(self.storage)

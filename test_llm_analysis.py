@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from market.llm_analyzer import LLMAnalyzer
 from market.models import LLMAnalysisResult, TradingStrategy
 from market.services.llm_service import LLMRequestError, LLMService
-from sqlite_storage import SQLiteStorage, TradingAccountRepository, UserRepository
+from mysql_repositories import MySQLStorage, TradingAccountRepository, UserRepository
 
 
 class _Config:
@@ -788,7 +788,7 @@ class LLMAnalysisTestCase(unittest.TestCase):
 
     def test_paper_deployment_is_included_in_ai_analysis_plan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            storage = SQLiteStorage(str(Path(temp_dir) / "paper-ai.db"))
+            storage = MySQLStorage(str(Path(temp_dir) / "paper-ai.db"))
             storage.initialize()
             user = UserRepository(storage).create_user("paper-ai", "hash", "salt")
             account = TradingAccountRepository(storage).create_paper_account(

@@ -11,7 +11,7 @@ import threading
 
 from ...models import TradingStrategy
 from ...risk_clock import risk_day_key, risk_day_start_timestamp
-from sqlite_storage import RuntimeStateRepository
+from mysql_repositories import RuntimeStateRepository
 
 
 class RiskManager:

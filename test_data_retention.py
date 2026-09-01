@@ -7,13 +7,13 @@ import unittest
 from pathlib import Path
 
 from data_retention import DataRetentionService
-from sqlite_storage import SQLiteStorage, UserRepository
+from mysql_repositories import MySQLStorage, UserRepository
 
 
 class DataRetentionServiceTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "retention.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "retention.db"))
         self.storage.initialize()
         self.user = UserRepository(self.storage).create_user(
             "retention-user", "hash", "salt"

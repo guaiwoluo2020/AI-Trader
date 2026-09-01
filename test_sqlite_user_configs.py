@@ -16,13 +16,13 @@ from market.models import (
 )
 from market.models.trading_strategy import signal_source_defaults
 from market.store.llm_store import LLMStore
-from sqlite_storage import (
+from mysql_repositories import (
     LLMAccessRepository,
     LLMConfigRepository,
     PositionManagementPolicyRepository,
     SharedAIRuntimeRepository,
     StrategyConfigRepository,
-    SQLiteStorage,
+    MySQLStorage,
     TradeConfigRepository,
     UserRepository,
     get_storage,
@@ -449,7 +449,7 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
                 """,
                 (self.user_a.user_id,),
             )
-            SQLiteStorage._remove_pivot_signal_strategies(conn)
+            MySQLStorage._remove_pivot_signal_strategies(conn)
 
             for table in (
                 "user_strategy_configs", "backtest_templates",
@@ -529,7 +529,7 @@ class SQLiteUserConfigIsolationTestCase(unittest.TestCase):
                 (1, "GOLD#", json.dumps(strategy.to_dict()), 1, 1),
             )
 
-        storage = SQLiteStorage(legacy_db)
+        storage = MySQLStorage(legacy_db)
         repository = StrategyConfigRepository(storage)
         migrated = repository.get_strategies(1, "GOLD#")
 

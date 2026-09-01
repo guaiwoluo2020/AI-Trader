@@ -173,7 +173,7 @@ python3 test_trading_service.py
 - [ ] 单元测试套件
 
 ### 中期 (v2.0)
-- [x] SQLite 账户级运行数据持久化
+- [x] MySQL 账户级运行数据持久化
 - [x] WebSocket 实时推送
 - [x] 多用户配置管理
 - [x] 账户引擎按需启动与空闲回收

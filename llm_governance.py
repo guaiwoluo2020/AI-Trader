@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 
 import requests
 
-from sqlite_storage import LLMAccessRepository, LLMConfigRepository, SQLiteStorage, get_storage
+from mysql_repositories import LLMAccessRepository, LLMConfigRepository, MySQLStorage, get_storage
 from membership import MEMBERSHIP_LIMITS
 from system_event_log import SystemEventLogRepository
 
@@ -236,7 +236,7 @@ class LLMQuotaExceeded(LLMGovernanceError):
 
 
 class LLMGovernanceService:
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
         self.configs = LLMConfigRepository(self.storage)
         self.access = LLMAccessRepository(self.storage)

@@ -8,10 +8,10 @@ import unittest
 from pathlib import Path
 
 from market.models import PositionManagementPolicy
-from sqlite_storage import (
+from mysql_repositories import (
     PositionManagementPolicyRepository,
     EAActivationRepository,
-    SQLiteStorage,
+    MySQLStorage,
     StrategyDeploymentRepository,
     TradeExecutionRepository,
     TradingAccountRepository,
@@ -24,7 +24,7 @@ from routes_accounts import _account_payload
 class TradingAccountRepositoryTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "accounts.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "accounts.db"))
         self.storage.initialize()
         self.user = UserRepository(self.storage).create_user(
             "account-user", "hash", "salt",
@@ -352,7 +352,7 @@ class LegacyAccountMigrationTests(unittest.TestCase):
                     (token_hash,),
                 )
 
-            storage = SQLiteStorage(str(db_path))
+            storage = MySQLStorage(str(db_path))
             storage.initialize()
             repository = TradingAccountRepository(storage)
             migrated = repository.authenticate(1, token)

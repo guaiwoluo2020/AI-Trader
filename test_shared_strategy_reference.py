@@ -5,7 +5,7 @@ import unittest
 
 from market.models import TradingStrategy
 from market.models.trading_strategy import signal_source_defaults
-from sqlite_storage import StrategyConfigRepository
+from mysql_repositories import StrategyConfigRepository
 
 
 class SharedStrategyReferenceTests(unittest.TestCase):

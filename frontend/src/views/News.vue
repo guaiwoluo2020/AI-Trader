@@ -37,7 +37,7 @@
       <article class="metric-card flash">
         <span>市场快讯</span>
         <strong>{{ status.flash_news_count || 0 }}</strong>
-        <small>SQLite 已保存</small>
+        <small>MySQL 已保存</small>
       </article>
     </section>
 

@@ -8,14 +8,14 @@ from types import SimpleNamespace
 
 from membership import MembershipError, MembershipService
 from server import TradingServer
-from sqlite_storage import SQLiteStorage, UserRepository
+from mysql_repositories import MySQLStorage, UserRepository
 from user_quotas import UserQuotaService
 
 
 class MembershipServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "membership.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "membership.db"))
         self.storage.initialize()
         self.users = UserRepository(self.storage)
         self.user = self.users.create_user("member", "hash", "salt")

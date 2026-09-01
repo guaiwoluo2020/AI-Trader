@@ -9,7 +9,7 @@ from typing import Optional, Dict
 from auth import AuthUser, require_auth
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
-from sqlite_storage import TradeExecutionRepository, TradingAccountRepository
+from mysql_repositories import TradeExecutionRepository, TradingAccountRepository
 
 
 def create_trader_routes(engine_manager: TradingEngineManager) -> APIRouter:

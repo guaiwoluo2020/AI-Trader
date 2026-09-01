@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from sqlite_storage import DATA_DIR, SQLiteStorage, get_storage
+from mysql_repositories import DATA_DIR, MySQLStorage, get_storage
 
 
 class DatasetStatus:
@@ -34,7 +34,7 @@ class DatasetReferencedError(ValueError):
 class BacktestDatasetRepository:
     """数据集和分片元数据仓库。"""
 
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
 
     def create(

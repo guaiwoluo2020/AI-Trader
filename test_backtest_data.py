@@ -10,8 +10,8 @@ from backtest_data import (
     BacktestDatasetService,
     DatasetStatus,
 )
-from sqlite_storage import (
-    SQLiteStorage,
+from mysql_repositories import (
+    MySQLStorage,
     TradingAccountRepository,
     UserRepository,
 )
@@ -20,7 +20,7 @@ from sqlite_storage import (
 class BacktestDatasetTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        storage = SQLiteStorage(str(Path(self.temp_dir.name) / "test.db"))
+        storage = MySQLStorage(str(Path(self.temp_dir.name) / "test.db"))
         storage.initialize()
         self.user = UserRepository(storage).create_user(
             "dataset-user", "hash", "salt"

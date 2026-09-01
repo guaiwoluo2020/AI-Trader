@@ -3,7 +3,7 @@
 import json
 from typing import Dict, List, Set, Tuple
 
-from sqlite_storage import get_storage
+from mysql_repositories import get_storage
 
 
 DEPLOYED_STATUSES = {"active", "paused", "pending"}

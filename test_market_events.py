@@ -12,7 +12,7 @@ from auth import AuthUser, reset_auth_manager
 from market_event_repository import MarketEventRepository
 import routes_news
 from routes_news import create_news_routes, get_market_event_hub
-from sqlite_storage import SQLiteStorage, reset_storage
+from mysql_repositories import MySQLStorage, reset_storage
 
 
 class _Request:
@@ -34,7 +34,7 @@ class _WebSocketClient:
 class MarketEventRepositoryTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "events.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "events.db"))
         self.storage.initialize()
         self.repository = MarketEventRepository(self.storage)
 

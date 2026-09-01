@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from market.models import StrategyLifecycle, TradingStrategy
-from sqlite_storage import SQLiteStorage, UserRepository
+from mysql_repositories import MySQLStorage, UserRepository
 from strategy_admission import StrategyAdmissionService
 
 
@@ -31,7 +31,7 @@ class PassingPaperTrading:
 class StrategyAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "admission.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "admission.db"))
         self.storage.initialize()
         self.user = UserRepository(self.storage).create_user("admission-user", "h", "s")
         self.strategy = TradingStrategy(

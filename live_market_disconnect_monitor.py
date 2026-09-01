@@ -7,7 +7,7 @@ import time
 from typing import Dict
 
 from shared_notifications import SharedReferenceNotificationService
-from sqlite_storage import get_storage
+from mysql_repositories import get_storage
 
 
 class LiveMarketDisconnectMonitor:

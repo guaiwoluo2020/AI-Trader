@@ -4,7 +4,7 @@ import time
 
 import requests
 
-from sqlite_storage import AISignalSourceRepository, LLMConfigRepository
+from mysql_repositories import AISignalSourceRepository, LLMConfigRepository
 
 
 repo = AISignalSourceRepository()

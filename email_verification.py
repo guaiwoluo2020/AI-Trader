@@ -17,7 +17,7 @@ from typing import Dict, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from sqlite_storage import MetaRepository, UserRepository, get_storage
+from mysql_repositories import MetaRepository, UserRepository, get_storage
 
 
 ROOT_DIR = Path(__file__).resolve().parent

@@ -18,7 +18,7 @@ from alpha_research import (
     AlphaResearchRepository,
     FactorCatalog,
 )
-from sqlite_storage import SQLiteStorage
+from mysql_repositories import MySQLStorage
 from market.services.signal.alpha_factor_signal import AlphaRuntimeExecutor
 
 
@@ -227,7 +227,7 @@ class AlphaIterationAuditTest(unittest.TestCase):
 
     def test_repository_persists_iteration_prompt_and_trial_round(self):
         with tempfile.TemporaryDirectory() as directory:
-            storage = SQLiteStorage(f"{directory}/alpha.db")
+            storage = MySQLStorage(f"{directory}/alpha.db")
             storage.initialize()
             now = int(time.time())
             storage.execute(
@@ -421,7 +421,7 @@ class AlphaLibraryAndRuntimeTest(unittest.TestCase):
 
     def test_validated_run_can_be_published_and_read_as_shared(self):
         with tempfile.TemporaryDirectory() as directory:
-            storage = SQLiteStorage(f"{directory}/alpha-library.db")
+            storage = MySQLStorage(f"{directory}/alpha-library.db")
             storage.initialize()
             now = int(time.time())
             for username in ("owner", "viewer"):

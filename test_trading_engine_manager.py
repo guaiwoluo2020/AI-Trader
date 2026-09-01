@@ -18,7 +18,7 @@ from market.models import (
     TradingInstruction as StoredTradingInstruction,
     TradingStrategy,
 )
-from sqlite_storage import (
+from mysql_repositories import (
     RuntimeStateRepository,
     TradingAccountRepository,
     UserRepository,

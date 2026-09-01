@@ -7,13 +7,13 @@ import json
 import time
 from typing import Dict, List, Optional
 
-from sqlite_storage import SQLiteStorage, get_storage
+from mysql_repositories import MySQLStorage, get_storage
 
 
 class MarketEventRepository:
     """Store shared calendar events, key events, and flash news."""
 
-    def __init__(self, storage: Optional[SQLiteStorage] = None):
+    def __init__(self, storage: Optional[MySQLStorage] = None):
         self.storage = storage or get_storage()
         self.storage.initialize()
 

@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 from fastapi import HTTPException, status
 
 from auth import AuthUser
-from sqlite_storage import TradingAccountRecord, TradingAccountRepository
+from mysql_repositories import TradingAccountRecord, TradingAccountRepository
 from trading_engine_manager import TradingEngineManager
 
 

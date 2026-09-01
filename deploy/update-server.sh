@@ -17,7 +17,7 @@ set -a
 source /etc/ai-trader.env
 set +a
 
-# Production storage is MySQL. Do not run the legacy SQLite initialization
+# Production storage is MySQL. Do not run local-file database initialization
 # during deploy; it can fail before the service restart on a MySQL-only host.
 "$APP_DIR/venv/bin/python" -c 'import pymysql'
 

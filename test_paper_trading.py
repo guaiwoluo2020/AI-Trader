@@ -11,9 +11,9 @@ from types import SimpleNamespace
 
 from paper_trading import PaperTradingService, market_spec
 from market.models import PositionManagementPolicy
-from sqlite_storage import (
+from mysql_repositories import (
     AISignalSourceRepository, PositionManagementPolicyRepository,
-    SQLiteStorage, StrategyConfigRepository, TradingAccountRepository,
+    MySQLStorage, StrategyConfigRepository, TradingAccountRepository,
     UserRepository,
 )
 
@@ -21,7 +21,7 @@ from sqlite_storage import (
 class PaperTradingServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "paper.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "paper.db"))
         self.storage.initialize()
         self.user = UserRepository(self.storage).create_user(
             "paper-user", "hash", "salt"

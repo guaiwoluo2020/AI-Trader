@@ -6,14 +6,14 @@ import time
 import unittest
 from pathlib import Path
 
-from sqlite_storage import SQLiteStorage, TradingAccountRepository, UserRepository
+from mysql_repositories import MySQLStorage, TradingAccountRepository, UserRepository
 from system_event_log import SystemEventLogRepository
 
 
 class SystemEventLogRepositoryTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "events.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "events.db"))
         self.storage.initialize()
         users = UserRepository(self.storage)
         self.user_a = users.create_user("event-a", "hash", "salt")

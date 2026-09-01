@@ -31,7 +31,7 @@ from llm_governance import (
 from market.services.llm_service import LLMRequestError
 from market.mt5_time import broker_wall_epoch_to_utc, normalize_epoch
 from membership import MembershipService
-from sqlite_storage import (
+from mysql_repositories import (
     get_storage,
     LLMAccessRepository,
     LLMConfigRepository,

@@ -7,7 +7,7 @@ import unittest
 
 from auth import AuthManager, reset_auth_manager
 from invitations import InvitationError, InvitationService
-from sqlite_storage import reset_storage
+from mysql_repositories import reset_storage
 
 
 class InvitationServiceTestCase(unittest.TestCase):

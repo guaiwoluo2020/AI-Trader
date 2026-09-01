@@ -8,7 +8,7 @@ import time
 from typing import Dict, Optional
 
 from membership import MEMBERSHIP_LIMITS, MembershipService
-from sqlite_storage import get_storage
+from mysql_repositories import get_storage
 
 
 RESOURCE_LABELS = {

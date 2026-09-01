@@ -9,7 +9,7 @@ from typing import Dict, Optional, List
 import threading
 
 from ..models import LLMConfig, LLMAnalysisResult
-from sqlite_storage import (
+from mysql_repositories import (
     LLMConfigRepository,
     RuntimeStateRepository,
     bootstrap_runtime_storage,
@@ -100,15 +100,15 @@ class LLMStore:
         return self._config
 
     def _load_config_from_file(self):
-        """从 SQLite 加载配置"""
+        """从 MySQL 加载配置"""
         try:
             self._config = self._repo.get_effective_config(self._user_id)
-            print("[LLMStore] 已从 SQLite 加载配置")
+            print("[LLMStore] 已从 MySQL 加载配置")
         except Exception as e:
             print(f"[LLMStore] 加载配置失败: {e}")
 
     def _save_config_to_file(self):
-        """保存配置到 SQLite"""
+        """保存配置到 MySQL"""
         try:
             self._config = self._repo.save_config(
                 self._user_id,
@@ -118,7 +118,7 @@ class LLMStore:
                 system_prompt=self._config.system_prompt,
                 analysis_prompt_template=self._config.analysis_prompt_template,
             )
-            print("[LLMStore] 配置已保存到 SQLite")
+            print("[LLMStore] 配置已保存到 MySQL")
         except Exception as e:
             print(f"[LLMStore] 保存配置失败: {e}")
 
@@ -187,7 +187,7 @@ class LLMStore:
         if not source_id:
             return None
         try:
-            from sqlite_storage import AISignalSourceRepository
+            from mysql_repositories import AISignalSourceRepository
 
             source = AISignalSourceRepository().get_visible(
                 int(self._user_id), source_id,

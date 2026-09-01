@@ -15,13 +15,13 @@ from llm_governance import (
     LLMGovernanceService,
     LLMQuotaExceeded,
 )
-from sqlite_storage import LLMConfigRepository, SQLiteStorage, UserRepository
+from mysql_repositories import LLMConfigRepository, MySQLStorage, UserRepository
 
 
 class LLMGovernanceTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.storage = SQLiteStorage(str(Path(self.temp_dir.name) / "test.db"))
+        self.storage = MySQLStorage(str(Path(self.temp_dir.name) / "test.db"))
         self.storage.initialize()
         users = UserRepository(self.storage)
         self.admin = users.create_user("llm-admin", "hash", "salt", role="admin")

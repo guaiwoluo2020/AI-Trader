@@ -41,7 +41,7 @@ from email_verification import (
     SystemEmailConfigRepository,
 )
 from membership import MembershipService
-from sqlite_storage import EAActivationRepository, TradingAccountRepository, UserRepository
+from mysql_repositories import EAActivationRepository, TradingAccountRepository, UserRepository
 from trading_engine_manager import TradingEngineManager
 from user_quotas import UserQuotaService
 
