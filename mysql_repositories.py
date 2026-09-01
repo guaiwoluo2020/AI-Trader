@@ -3925,3 +3925,6 @@ def _read_legacy_auth_users() -> List[Dict]:
 # Compatibility export: runtime state is implemented in the domain module.
 # Keep this name for older imports while guaranteeing one implementation.
 from repositories.runtime import RuntimeStateRepository as RuntimeStateRepository
+from repositories.platform import (
+    PlatformInstrumentMappingRepository as PlatformInstrumentMappingRepository,
+)

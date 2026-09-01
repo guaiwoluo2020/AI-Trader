@@ -13,10 +13,10 @@ import time
 from typing import Dict
 
 from mysql_repositories import (
-    PlatformInstrumentMappingRepository,
     TradingAccountRepository,
     get_storage,
 )
+from repositories.platform import PlatformInstrumentMappingRepository
 
 
 class MarketDataSourcePolicy:

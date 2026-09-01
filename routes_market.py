@@ -34,7 +34,6 @@ from membership import MembershipService
 from mysql_repositories import (
     get_storage,
     PositionManagementPolicyRepository,
-    PlatformInstrumentMappingRepository,
     StrategyConfigRepository,
     StrategyDeploymentRepository,
     TradeConfigRepository,
@@ -42,6 +41,7 @@ from mysql_repositories import (
     TradingAccountRepository,
     UserRepository,
 )
+from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.ai import (
     LLMAccessRepository, LLMConfigRepository, AISignalSourceRepository,
     AITradeSuggestionRepository, SharedAIRuntimeRepository,

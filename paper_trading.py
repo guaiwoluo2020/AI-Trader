@@ -25,9 +25,9 @@ from market.store.structure_plan_store import StructureTradePlanRepository
 from membership import MembershipService
 from mysql_repositories import (
     PositionManagementPolicyRepository, MySQLStorage,
-    PlatformInstrumentMappingRepository,
     RuntimeStateRepository, TradingAccountRepository, get_storage,
 )
+from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.strategy import StrategyConfigRepository
 from repositories.trading import PositionManagementEventRepository
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint

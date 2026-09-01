@@ -38,10 +38,10 @@ from market.system_log import SystemLog
 from membership import MembershipService
 from mysql_repositories import (
     PositionManagementPolicyRepository,
-    PlatformInstrumentMappingRepository,
     RuntimeStateRepository,
     TradingAccountRepository,
 )
+from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.ai import AISignalSourceRepository, SharedAIRuntimeRepository
 from repositories.strategy import StrategyDeploymentRepository
 from repositories.trading import PositionManagementEventRepository, TradeExecutionRepository

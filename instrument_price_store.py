@@ -7,7 +7,8 @@ import threading
 import time
 from typing import Deque, Dict, Optional, Tuple
 
-from mysql_repositories import PlatformInstrumentMappingRepository, TradingAccountRepository
+from mysql_repositories import TradingAccountRepository
+from repositories.platform import PlatformInstrumentMappingRepository
 
 
 class InstrumentPriceStore:
