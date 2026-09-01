@@ -45,6 +45,7 @@ from mysql_repositories import (
 from repositories.ai import AISignalSourceRepository, SharedAIRuntimeRepository
 from repositories.strategy import StrategyDeploymentRepository
 from repositories.trading import PositionManagementEventRepository, TradeExecutionRepository
+from repositories.container import RepositoryContainer
 
 
 class TradingServer:
@@ -62,10 +63,11 @@ class TradingServer:
     ):
         self.user_id = user_id
         self.account_id = account_id
-        self.strategy_deployments = StrategyDeploymentRepository()
-        self.account_repository = TradingAccountRepository()
+        self.repositories = RepositoryContainer()
+        self.strategy_deployments = self.repositories.deployments
+        self.account_repository = self.repositories.accounts
         self.instrument_mappings = PlatformInstrumentMappingRepository()
-        self._ai_signal_source_repository = AISignalSourceRepository()
+        self._ai_signal_source_repository = self.repositories.ai_sources
         self.memberships = MembershipService()
         self.structure_plans = StructureTradePlanRepository()
 
@@ -188,7 +190,7 @@ class TradingServer:
             account_id=account_id,
         )
         self._runtime_repository = (
-            RuntimeStateRepository(user_id, account_id)
+            self.repositories.runtime(user_id, account_id)
             if user_id is not None
             else None
         )
@@ -197,8 +199,8 @@ class TradingServer:
         self._position_partial_instructions = defaultdict(dict)
         self._managed_position_state = {}
         self._structure_context_cache = {}
-        self._position_event_repository = PositionManagementEventRepository()
-        self._position_policy_repository = PositionManagementPolicyRepository()
+        self._position_event_repository = self.repositories.position_events
+        self._position_policy_repository = self.repositories.position_policies
         self._ma_trailing_extremes = {}
         if self._runtime_repository:
             for item in self._runtime_repository.list_entities(
@@ -280,7 +282,7 @@ class TradingServer:
 
         # AI入场信号生成器
         ai_entry_generator = AIEntrySignalGenerator(
-            SharedAIRuntimeRepository(), self.user_id
+            self.repositories.ai_runtime, self.user_id
         )
         ai_entry_generator.set_llm_analyzer(self.llm_analyzer)
         self._ai_entry_generator = ai_entry_generator
@@ -1259,9 +1261,8 @@ class TradingServer:
             self._runtime_repository.migrate_scope(self.account_id)
             self._runtime_repository.set_scope(self.user_id, self.account_id)
         else:
-            self._runtime_repository = RuntimeStateRepository(
-                self.user_id,
-                self.account_id,
+            self._runtime_repository = self.repositories.runtime(
+                self.user_id, self.account_id
             )
         self.llm_store.set_scope(self.user_id, self.account_id)
         self.system_log.set_scope(self.user_id, self.account_id)
@@ -1385,8 +1386,8 @@ class TradingServer:
                         confidence_score=confidence,
                         status="skipped",
                     )
-                    runtime = RuntimeStateRepository(
-                        int(self.user_id or 0), int(deployment["account_id"]),
+                    runtime = self.repositories.runtime(
+                        int(self.user_id or 0), int(deployment["account_id"])
                     )
                     runtime.upsert_entity(
                         "strategy_decision", decision.decision_id, decision.to_dict(),
