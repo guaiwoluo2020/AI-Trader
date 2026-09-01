@@ -187,7 +187,7 @@ class LLMStore:
         if not source_id:
             return None
         try:
-            from mysql_repositories import AISignalSourceRepository
+            from repositories.ai import AISignalSourceRepository
 
             source = AISignalSourceRepository().get_visible(
                 int(self._user_id), source_id,

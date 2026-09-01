@@ -12,7 +12,8 @@ import json
 import time
 from typing import Callable, Dict, Iterable, List, Optional
 
-from mysql_repositories import AISignalSourceRepository, get_storage
+from mysql_repositories import get_storage
+from repositories.ai import AISignalSourceRepository
 
 
 DEFAULT_SAMPLE_SIZE = 7

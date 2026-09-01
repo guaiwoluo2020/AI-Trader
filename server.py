@@ -37,13 +37,12 @@ from market.llm_analyzer import LLMAnalyzer
 from market.system_log import SystemLog
 from membership import MembershipService
 from mysql_repositories import (
-    AISignalSourceRepository,
     PositionManagementPolicyRepository,
     PlatformInstrumentMappingRepository,
     RuntimeStateRepository,
-    SharedAIRuntimeRepository,
     TradingAccountRepository,
 )
+from repositories.ai import AISignalSourceRepository, SharedAIRuntimeRepository
 from repositories.strategy import StrategyDeploymentRepository
 from repositories.trading import PositionManagementEventRepository, TradeExecutionRepository
 

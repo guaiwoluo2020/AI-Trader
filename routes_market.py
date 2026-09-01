@@ -33,11 +33,6 @@ from market.mt5_time import broker_wall_epoch_to_utc, normalize_epoch
 from membership import MembershipService
 from mysql_repositories import (
     get_storage,
-    LLMAccessRepository,
-    LLMConfigRepository,
-    AISignalSourceRepository,
-    AITradeSuggestionRepository,
-    SharedAIRuntimeRepository,
     PositionManagementPolicyRepository,
     PlatformInstrumentMappingRepository,
     StrategyConfigRepository,
@@ -46,6 +41,10 @@ from mysql_repositories import (
     RuntimeStateRepository,
     TradingAccountRepository,
     UserRepository,
+)
+from repositories.ai import (
+    LLMAccessRepository, LLMConfigRepository, AISignalSourceRepository,
+    AITradeSuggestionRepository, SharedAIRuntimeRepository,
 )
 from repositories.trading import TradeExecutionRepository, PositionManagementEventRepository
 from market.models.trading_strategy import StrategyLifecycle
