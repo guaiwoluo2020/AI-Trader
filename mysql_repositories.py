@@ -913,6 +913,11 @@ class TradeExecutionRepository:
         self.storage = storage or get_storage()
 
     def record(self, user_id: int, account_id: int, payload: Dict) -> Dict:
+        from market.services.execution_result import ExecutionResult
+
+        normalized = ExecutionResult.from_payload(payload)
+        # 保留原始回报字段，同时补齐跨通道统一状态；旧字段仍按原逻辑落库。
+        payload = {**payload, "status": normalized.status, "transport": normalized.transport}
         instruction_id = str(payload.get("instruction_id", "")).strip()
         if not instruction_id:
             raise ValueError("执行回报缺少 instruction_id")
@@ -985,13 +990,25 @@ class TradeExecutionRepository:
             """,
             (account_id, instruction_id),
         )
-        return self._deserialize(row)
+        result = self._deserialize(row)
+        if result is not None:
+            result["status"] = normalized.status
+            result["transport"] = normalized.transport
+            result["accepted"] = normalized.accepted
+        return result
 
     @staticmethod
     def _deserialize(row) -> Optional[Dict]:
         if row is None:
             return None
         item = dict(row)
+        try:
+            payload = json.loads(item.get("payload_json") or "{}")
+            item["status"] = payload.get("status") or ("filled" if item.get("success") else "failed")
+            item["transport"] = payload.get("transport") or "mt5"
+        except (TypeError, ValueError):
+            item["status"] = "filled" if item.get("success") else "failed"
+            item["transport"] = "mt5"
         try:
             item["position_attribution"] = json.loads(
                 item.get("position_attribution_json") or "{}"

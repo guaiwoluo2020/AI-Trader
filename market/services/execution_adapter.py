@@ -7,16 +7,9 @@ acknowledgement and error handling later.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
-
-@dataclass(frozen=True)
-class ExecutionResult:
-    accepted: bool
-    instruction_id: str = ""
-    transport: str = ""
-    reason: str = ""
+from .execution_result import ExecutionResult
 
 
 class ExecutionAdapter:
@@ -31,12 +24,12 @@ class InstructionExecutionAdapter(ExecutionAdapter):
 
     def submit(self, order: Any, instruction_service) -> ExecutionResult:
         if instruction_service is None:
-            return ExecutionResult(False, transport=self.transport, reason="交易指令服务未设置")
+            return ExecutionResult(False, transport=self.transport, status="rejected", reason="交易指令服务未设置")
         try:
             instruction_id = instruction_service.create_from_pending_order(order)
-            return ExecutionResult(True, str(instruction_id), self.transport)
+            return ExecutionResult(True, str(instruction_id), self.transport, status="accepted")
         except Exception as exc:
-            return ExecutionResult(False, transport=self.transport, reason=str(exc))
+            return ExecutionResult(False, transport=self.transport, status="failed", reason=str(exc))
 
 
 class PaperExecutionAdapter(InstructionExecutionAdapter):

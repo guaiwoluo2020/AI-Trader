@@ -11,6 +11,7 @@ from .tech_indicators import calculate_ma, calculate_adx, calculate_rsi, calcula
 from .tech_service import TechService
 from .pending_order_service import PendingOrderService
 from .trading_instruction_service import TradingInstructionService
+from .execution_result import ExecutionResult, EXECUTION_STATUSES, normalize_execution_status
 
 # 信号服务
 from .signal import (
@@ -31,7 +32,8 @@ from .position_manager import PositionManager
 
 __all__ = [
     'KlineService', 'PivotService', 'LLMService', 'TechService',
-    'PendingOrderService', 'TradingInstructionService',
+    'PendingOrderService', 'TradingInstructionService', 'ExecutionResult',
+    'EXECUTION_STATUSES', 'normalize_execution_status',
     'SignalService', 'KeyLevelSignalGenerator',
     'AIEntrySignalGenerator', 'MovingAverageSignalGenerator',
     'AlphaFactorSignalGenerator', 'AlphaRuntimeExecutor',
