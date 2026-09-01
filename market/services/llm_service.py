@@ -23,8 +23,9 @@ from ..models.llm_config import (
 from ..store import LLMStore
 from .kline_service import KlineService
 from repositories.ai import (
-    AISignalSourceRepository, AITradeSuggestionRepository, SharedAIRuntimeRepository,
+    AISignalSourceRepository, SharedAIRuntimeRepository,
 )
+from repositories.ai_suggestions import AITradeSuggestionRepository
 from llm_governance import (
     AI_SIGNAL_ANALYSIS, LLMGovernanceService, LLMQuotaExceeded,
 )

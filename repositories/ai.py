@@ -2,11 +2,11 @@
 
 from mysql_repositories import (
     AISignalSourceRepository,
-    AITradeSuggestionRepository,
     SharedAIRuntimeRepository,
 )
 from .llm_config import LLMConfigRepository
 from .llm_access import LLMAccessRepository
+from .ai_suggestions import AITradeSuggestionRepository
 
 __all__ = [
     "AISignalSourceRepository", "AITradeSuggestionRepository",

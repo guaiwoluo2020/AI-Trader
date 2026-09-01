@@ -44,8 +44,9 @@ from repositories.trade_config import TradeConfigRepository
 from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.ai import (
     AISignalSourceRepository,
-    AITradeSuggestionRepository, SharedAIRuntimeRepository,
+    SharedAIRuntimeRepository,
 )
+from repositories.ai_suggestions import AITradeSuggestionRepository
 from repositories.llm_config import LLMConfigRepository
 from repositories.llm_access import LLMAccessRepository
 from repositories.trading import TradeExecutionRepository, PositionManagementEventRepository
