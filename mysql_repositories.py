@@ -3920,3 +3920,8 @@ def _read_legacy_auth_users() -> List[Dict]:
         if user.get("username") and user.get("password_hash") and user.get("salt"):
             valid_users.append(user)
     return valid_users
+
+
+# Compatibility export: runtime state is implemented in the domain module.
+# Keep this name for older imports while guaranteeing one implementation.
+from repositories.runtime import RuntimeStateRepository as RuntimeStateRepository
