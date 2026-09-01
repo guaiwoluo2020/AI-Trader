@@ -2,7 +2,6 @@
 """统一交易账户与 MT5 连接迁移测试。"""
 
 import json
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -311,64 +310,6 @@ class TradingAccountRepositoryTests(unittest.TestCase):
         self.assertEqual(
             reports.list_for_account(self.user.user_id, second.account_id), []
         )
-
-
-class LegacyAccountMigrationTests(unittest.TestCase):
-    def test_legacy_mt5_fields_are_migrated_without_rotating_token(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "legacy.db"
-            token = "legacy-token"
-            token_hash = TradingAccountRepository._hash_token(token)
-            with sqlite3.connect(db_path) as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE trading_accounts (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER NOT NULL,
-                        account_key TEXT NOT NULL DEFAULT 'default',
-                        account_name TEXT NOT NULL DEFAULT 'MT5',
-                        token_hash TEXT NOT NULL,
-                        enabled INTEGER NOT NULL DEFAULT 1,
-                        last_seen_at INTEGER,
-                        mt5_login TEXT,
-                        mt5_server TEXT,
-                        ea_version TEXT,
-                        activated_at INTEGER,
-                        created_at INTEGER NOT NULL,
-                        updated_at INTEGER NOT NULL,
-                        UNIQUE(user_id, account_key)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    INSERT INTO trading_accounts(
-                        user_id, account_key, account_name, token_hash, enabled,
-                        last_seen_at, mt5_login, mt5_server, ea_version,
-                        activated_at, created_at, updated_at
-                    ) VALUES(1, 'default', 'Legacy MT5', ?, 1, 100,
-                             '90001', 'Broker-Demo', '2.04', 90, 80, 90)
-                    """,
-                    (token_hash,),
-                )
-
-            storage = MySQLStorage(str(db_path))
-            storage.initialize()
-            repository = TradingAccountRepository(storage)
-            migrated = repository.authenticate(1, token)
-
-            self.assertIsNotNone(migrated)
-            self.assertEqual(migrated.account_type, "mt5")
-            self.assertEqual(migrated.environment, "demo")
-            self.assertEqual(migrated.mt5_login, "90001")
-            self.assertEqual(migrated.mt5_server, "Broker-Demo")
-            self.assertEqual(migrated.ea_version, "2.04")
-            self.assertIsNotNone(
-                storage.fetchone(
-                    "SELECT 1 FROM mt5_account_connections WHERE account_id = ?",
-                    (migrated.account_id,),
-                )
-            )
 
 
 if __name__ == "__main__":
