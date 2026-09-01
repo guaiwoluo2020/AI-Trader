@@ -10,11 +10,11 @@ from auth import AuthUser, require_auth
 from membership import MembershipService
 from market.services.account_strategy_performance import build_live_performance
 from mysql_repositories import (
-    TradeConfigRepository,
     TradingAccountRecord,
 )
 from repositories.accounts import TradingAccountRepository
 from repositories.strategy import StrategyConfigRepository
+from repositories.trade_config import TradeConfigRepository
 from repositories.trading import (
     LiveTradeDealRepository, PositionManagementEventRepository, TradeExecutionRepository,
 )

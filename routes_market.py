@@ -36,11 +36,11 @@ from mysql_repositories import (
     PositionManagementPolicyRepository,
     StrategyConfigRepository,
     StrategyDeploymentRepository,
-    TradeConfigRepository,
     RuntimeStateRepository,
     TradingAccountRepository,
     UserRepository,
 )
+from repositories.trade_config import TradeConfigRepository
 from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.ai import (
     LLMAccessRepository, LLMConfigRepository, AISignalSourceRepository,

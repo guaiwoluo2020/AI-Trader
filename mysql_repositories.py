@@ -3928,3 +3928,4 @@ from repositories.runtime import RuntimeStateRepository as RuntimeStateRepositor
 from repositories.platform import (
     PlatformInstrumentMappingRepository as PlatformInstrumentMappingRepository,
 )
+from repositories.trade_config import TradeConfigRepository as TradeConfigRepository

@@ -6,7 +6,8 @@
 
 from typing import Dict, List
 import threading
-from mysql_repositories import TradeConfigRepository, bootstrap_runtime_storage
+from repositories.trade_config import TradeConfigRepository
+from mysql_repositories import bootstrap_runtime_storage
 
 
 class TradeConfig:
