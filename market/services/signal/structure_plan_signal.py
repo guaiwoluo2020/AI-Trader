@@ -167,6 +167,21 @@ class StructurePlanBuilder:
         return False
 
     @staticmethod
+    def _location_reclaim_confirmed(rows: List[Dict], entry: float, direction: str,
+                                    atr: float) -> bool:
+        """Require the latest closed bar to touch and reclaim the HL/LH level."""
+        if not rows or entry <= 0:
+            return False
+        row = rows[-1]
+        high = _number(row.get("high") or row.get("high_price"))
+        low = _number(row.get("low") or row.get("low_price"))
+        close = _number(row.get("close") or row.get("close_price"))
+        tolerance = max(0.0, float(atr or 0)) * 0.10
+        if direction == "buy":
+            return low <= entry + tolerance and close >= entry
+        return high >= entry - tolerance and close <= entry
+
+    @staticmethod
     def _hierarchy_snapshot(hierarchy: Dict) -> Dict:
         result = {}
         for layer in ("internal", "swing", "external"):
@@ -571,6 +586,18 @@ class StructurePlanBuilder:
             key=lambda item: (abs(item["price"] - close), -int(item["confidence"])),
         )
         entry = _number(level["price"])
+        entry_mode = (
+            "touch_and_reclaim"
+            if self._param("require_location_reclaim", True) else "touch_or_near"
+        )
+        if entry_mode == "touch_and_reclaim" and not self._location_reclaim_confirmed(
+            rows, entry, direction, atr
+        ):
+            self._reject(
+                f"最近收盘K线尚未触碰并{'站回' if direction == 'buy' else '跌回'}"
+                f"{level['source']} {entry:.2f}，不提前生成趋势回撤计划"
+            )
+            return []
         stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
         target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
         protected = self._protected_reference(hierarchy, direction, entry)
@@ -591,10 +618,6 @@ class StructurePlanBuilder:
             target = target - target_buffer if direction == "buy" else target + target_buffer
         entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
         valid_bars = max(1, int(self._param("location_plan_valid_bars", 6)))
-        entry_mode = (
-            "touch_and_reclaim"
-            if self._param("require_location_reclaim", True) else "touch_or_near"
-        )
         plan = self._tradable_plan(
             source_id=source_id, symbol=symbol, period=period,
             anchor=_bar_time(rows[min(len(rows) - 1, max(0, level["anchor_index"]))]),
