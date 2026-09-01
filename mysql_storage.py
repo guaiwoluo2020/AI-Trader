@@ -169,6 +169,29 @@ class MySQLStorage:
                 return
             with self._connect() as conn:
                 conn.execute("SELECT 1")
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS outbox_events (
+                    event_id VARCHAR(64) NOT NULL,
+                    event_name VARCHAR(120) NOT NULL,
+                    aggregate_type VARCHAR(80) NOT NULL DEFAULT '',
+                    aggregate_id VARCHAR(255) NOT NULL DEFAULT '',
+                    user_id BIGINT NOT NULL DEFAULT 0,
+                    account_id BIGINT NOT NULL DEFAULT 0,
+                    symbol VARCHAR(64) NOT NULL DEFAULT '',
+                    payload_json JSON NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    retry_count INT NOT NULL DEFAULT 0,
+                    next_retry_at BIGINT NOT NULL,
+                    last_error VARCHAR(500) NOT NULL DEFAULT '',
+                    created_at BIGINT NOT NULL,
+                    published_at BIGINT NULL,
+                    claimed_at BIGINT NULL,
+                    lease_until BIGINT NULL,
+                    updated_at BIGINT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (event_id),
+                    KEY idx_outbox_pending (status, next_retry_at, created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """)
                 conn.execute(
                     """
                 CREATE TABLE IF NOT EXISTS platform_instrument_mappings (
@@ -428,6 +451,10 @@ class MySQLStorage:
                 # production runtime, so adding compatibility columns there is
                 # insufficient for RDS deployments.
                 compatibility_columns = {
+                    "outbox_events": (
+                        ("claimed_at", "BIGINT NULL"),
+                        ("lease_until", "BIGINT NULL"),
+                    ),
                     "trade_execution_reports": (
                         ("mt5_position_id", "BIGINT NOT NULL DEFAULT 0"),
                         ("position_attribution_json", "JSON NULL"),

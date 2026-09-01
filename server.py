@@ -48,7 +48,16 @@ from repositories.trading import PositionManagementEventRepository, TradeExecuti
 from repositories.container import RepositoryContainer
 from market.services.execution_adapter import adapter_for_mode
 from market.services.strategy_execution_coordinator import StrategyExecutionCoordinator
-from market.services.position_action_applier import apply_action
+from market.services.position_management_coordinator import PositionManagementCoordinator
+from market.services.event_bus import EventBus
+from market.services.events import (
+    ApplicationEvent, MARKET_TICK_RECEIVED, STRUCTURE_UPDATED,
+    STRUCTURE_PLAN_CREATED, STRATEGY_DECISION_CREATED, ORDER_COMMAND_CREATED,
+)
+from market.services.event_audit_bridge import EventAuditBridge
+from market.services.plan_execution_service import PlanExecutionService
+from market.services.outbox_dispatcher import OutboxDispatcher
+from market.services.plan_lifecycle_service import PlanLifecycleService
 
 
 class TradingServer:
@@ -72,7 +81,10 @@ class TradingServer:
         self.instrument_mappings = PlatformInstrumentMappingRepository()
         self._ai_signal_source_repository = self.repositories.ai_sources
         self.memberships = MembershipService()
+        self.event_bus = EventBus()
         self.structure_plans = StructureTradePlanRepository()
+        self.plan_execution_service = PlanExecutionService(self.structure_plans)
+        self.plan_lifecycle_service = PlanLifecycleService(self.structure_plans, self.event_bus)
 
         # 线程锁
         self.lock = threading.RLock()
@@ -82,6 +94,10 @@ class TradingServer:
         # second time and accidentally receive a different trading plan.
         self._tick_signal_snapshots: Dict[str, Dict] = {}
         self.system_log = SystemLog(user_id=user_id, account_id=account_id)
+        self.event_audit_bridge = EventAuditBridge(self.system_log)
+        self.event_audit_bridge.attach(self.event_bus, self.repositories.outbox)
+        self.outbox_dispatcher = OutboxDispatcher(self.repositories.outbox, self.event_bus)
+        self.outbox_dispatcher.start()
 
         # ==================== 行情模块（内部） ====================
         # 存储层
@@ -200,6 +216,7 @@ class TradingServer:
         self._close_position_instructions = defaultdict(list)
         self._position_update_instructions = defaultdict(dict)
         self._position_partial_instructions = defaultdict(dict)
+        self.position_management_coordinator = PositionManagementCoordinator()
         self._managed_position_state = {}
         self._structure_context_cache = {}
         self._position_event_repository = self.repositories.position_events
@@ -346,6 +363,7 @@ class TradingServer:
 
     def close(self):
         """停止账户引擎的后台任务并清理连接。"""
+        self.outbox_dispatcher.stop()
         self.llm_analyzer.stop()
         self.system_log.close()
         with self._ws_lock:
@@ -572,6 +590,11 @@ class TradingServer:
             "pending_order": None,
             "pending_orders": [],
         }
+        self.event_bus.publish(ApplicationEvent(
+            MARKET_TICK_RECEIVED,
+            {"price": float(current_price or 0)},
+            int(self.user_id or 0), int(self.account_id or 0), str(symbol or ""),
+        ))
 
         snapshot_key = str(symbol or "").upper()
         with self.lock:
@@ -662,6 +685,10 @@ class TradingServer:
                 # broker symbol (for example BTCUSDm).
                 decision.symbol = symbol
                 decisions.append(decision)
+                self.event_bus.publish(ApplicationEvent(
+                    STRATEGY_DECISION_CREATED, decision.to_dict(),
+                    int(self.user_id or 0), int(self.account_id or 0), str(symbol or ""),
+                ))
 
         for decision in decisions:
             # 3. 自动执行决策
@@ -686,13 +713,13 @@ class TradingServer:
                         ),
                     )
                     if deployment:
-                        claimed_structure_plan = self.structure_plans.claim_execution(
-                            int(self.user_id or 0), int(self.account_id or 0),
-                            str(deployment["deployment_id"]),
-                            str(decision.strategy_id), trade_plan_id,
-                            trade_plan_group_id,
+                        claimed_structure_plan = self.plan_execution_service.claim(
+                            user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
+                            deployment_id=str(deployment["deployment_id"]),
+                            strategy_id=str(decision.strategy_id),
+                            plan={**summary, "plan_id": trade_plan_id,
+                                  "plan_group_id": trade_plan_group_id},
                             reason=str(decision.decision_reason or ""),
-                            payload=summary,
                         )
                         if not claimed_structure_plan:
                             decision.status = "rejected"
@@ -705,13 +732,13 @@ class TradingServer:
                 )
                 if order_id:
                     if trade_plan_id and deployment:
-                        self.structure_plans.record_execution(
-                            int(self.user_id or 0), int(self.account_id or 0),
-                            str(deployment["deployment_id"]),
-                            str(decision.strategy_id), trade_plan_id,
-                            trade_plan_group_id, "ordered", order_id=order_id,
-                            reason=str(decision.decision_reason or ""),
-                            payload=summary,
+                        self.plan_execution_service.record_order(
+                            user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
+                            deployment_id=str(deployment["deployment_id"]),
+                            strategy_id=str(decision.strategy_id),
+                            plan={**summary, "plan_id": trade_plan_id,
+                                  "plan_group_id": trade_plan_group_id},
+                            order_id=order_id, reason=str(decision.decision_reason or ""),
                         )
                     pending_order = {
                         "order_id": order_id,
@@ -727,11 +754,15 @@ class TradingServer:
                         "tp": decision.tp
                     }
                     result["pending_orders"].append(pending_order)
+                    self.event_bus.publish(ApplicationEvent(
+                        ORDER_COMMAND_CREATED, pending_order,
+                        int(self.user_id or 0), int(self.account_id or 0), str(symbol or ""),
+                    ))
                 elif claimed_structure_plan and deployment:
-                    self.structure_plans.release_claim(
-                        int(self.user_id or 0), int(self.account_id or 0),
-                        str(deployment["deployment_id"]), trade_plan_id,
-                        reason="实盘待确认订单创建失败",
+                    self.plan_execution_service.release(
+                        user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
+                        deployment_id=str(deployment["deployment_id"]),
+                        plan={"plan_id": trade_plan_id}, reason="实盘待确认订单创建失败",
                     )
 
             self._record_decision(decision)
@@ -980,19 +1011,16 @@ class TradingServer:
                 self,
                 symbol, ticket, state, action.events
             )
-            applied = apply_action(action, state, position, ticket)
+            applied = self.position_management_coordinator.apply(
+                action=action, state=state, position=position, ticket=ticket,
+                symbol=symbol,
+                close_instructions=self._close_position_instructions,
+                stop_instructions=self._position_update_instructions,
+                partial_instructions=self._position_partial_instructions,
+                close_callback=self.add_close_position_instruction,
+            )
             if applied["close"]:
-                self.add_close_position_instruction(symbol, position.ticket)
                 self._managed_position_state.pop(ticket, None)
-            elif applied["stop_update"]:
-                self._position_update_instructions[symbol][ticket] = {
-                    **applied["stop_update"],
-                }
-            if applied["partial"]:
-                partial = applied["partial"]
-                self._position_partial_instructions[symbol][
-                    f"{ticket}:{'|'.join(partial['level_ids'])}"
-                ] = partial
 
     def get_structure_context(self, symbol: str, period: str) -> Dict:
         """Return one cached structure result per closed K-line."""
@@ -1028,6 +1056,11 @@ class TradingServer:
                     symbol, period, strategy, structure
                 )
                 refreshed += len(plans)
+                self.event_bus.publish(ApplicationEvent(
+                    STRUCTURE_PLAN_CREATED,
+                    {"period": period, "count": len(plans), "strategy_id": strategy.strategy_id},
+                    int(self.user_id or 0), 0, str(symbol or ""),
+                ))
             except Exception as exc:
                 print(
                     f"[TradingServer] 刷新结构交易计划失败: "

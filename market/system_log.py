@@ -27,6 +27,8 @@ EVENT_METADATA = {
     "pivot_alert": ("转折点提醒", "market", "warning"),
     "order_generated": ("交易指令生成", "trading", "info"),
     "strategy_decision_created": ("策略决策生成", "trading", "info"),
+    "structure_plan_created": ("结构交易计划生成", "market", "info"),
+    "structure_plan_invalidated": ("结构交易计划失效", "market", "warning"),
     "order_confirmed": ("交易指令确认", "trading", "info"),
     "order_rejected": ("交易指令拒绝", "trading", "warning"),
     "close_position": ("平仓指令", "trading", "warning"),

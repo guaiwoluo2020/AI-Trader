@@ -364,6 +364,35 @@ class StructureTradePlanRepository:
             ),
         )
 
+    def update_execution_status(
+        self, user_id: int, account_id: int, deployment_id: str,
+        plan_id: str, status: str, *, order_id: str = "", reason: str = "",
+        payload: Optional[Dict] = None,
+    ) -> bool:
+        allowed = {"claimed", "ordered", "accepted", "pending", "filled",
+                   "partially_filled", "rejected", "failed", "timeout", "released"}
+        status = str(status or "").lower()
+        if status not in allowed:
+            raise ValueError(f"不支持的计划执行状态: {status}")
+        now = int(time.time())
+        changes = ["status=?", "reason=?", "updated_at=?"]
+        params = [status, str(reason or ""), now]
+        if order_id:
+            changes.append("order_id=?"); params.append(str(order_id))
+        if payload is not None:
+            changes.append("payload_json=?"); params.append(json.dumps(payload, ensure_ascii=False))
+        params.extend([int(user_id), int(account_id), str(deployment_id), str(plan_id)])
+        self.storage.execute(
+            "UPDATE structure_plan_executions SET " + ",".join(changes) +
+            " WHERE user_id=? AND account_id=? AND deployment_id=? AND plan_id=?",
+            tuple(params),
+        )
+        return self.storage.fetchone(
+            "SELECT execution_id FROM structure_plan_executions WHERE user_id=? AND account_id=? "
+            "AND deployment_id=? AND plan_id=? LIMIT 1",
+            (int(user_id), int(account_id), str(deployment_id), str(plan_id)),
+        ) is not None
+
     def list_executions(self, user_id: int, plan_ids: List[str]) -> List[Dict]:
         ids = [str(item) for item in plan_ids if str(item)]
         if not ids:

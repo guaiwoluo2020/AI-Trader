@@ -64,6 +64,13 @@ from market.services.market_structure_snapshot_store import current_path as mark
 from market.store.structure_plan_store import StructureTradePlanRepository
 from market.services.signal.structure_plan_signal import StructurePlanBuilder, STRUCTURE_PLAN_DEFAULT_CONFIG, MARKET_STRUCTURE_PLAN_SOURCE_ID, resolve_structure_plan_config
 from market_data_source_policy import MarketDataSourcePolicy
+from routes_market_ea import create_ea_cursor_routes
+from routes_market_websocket import create_market_websocket_routes
+from routes_market_structure_config import create_market_structure_config_routes
+from routes_market_structure import create_market_structure_routes
+from routes_structure_plans import create_structure_plan_routes
+from routes_market_structure_read import create_structure_read_routes
+from market.services.kline_ingestion_coordinator import KlineIngestionCoordinator
 
 
 def _compact_market_structure_snapshot(result: Dict) -> Dict:
@@ -361,6 +368,20 @@ def create_market_routes(
     shared_notifications = SharedReferenceNotificationService()
     impact_service = ConfigurationImpactService()
     market_source_policy = MarketDataSourcePolicy()
+    router.include_router(create_ea_cursor_routes(
+        engine_manager, market_source_policy, _restore_kline_memory, get_storage,
+    ))
+    router.include_router(create_market_websocket_routes(engine_manager))
+    router.include_router(create_market_structure_config_routes(
+        MARKET_STRUCTURE_DEFAULT_CONFIG, STRUCTURE_PLAN_DEFAULT_CONFIG,
+    ), prefix="", dependencies=[Depends(require_auth)])
+    router.include_router(create_market_structure_routes(
+        engine_manager, account_repo, MARKET_STRUCTURE_DEFAULT_CONFIG,
+    ))
+    router.include_router(create_structure_plan_routes(
+        engine_manager, strategy_repo, MARKET_STRUCTURE_DEFAULT_CONFIG,
+    ))
+    router.include_router(create_structure_read_routes(engine_manager))
 
     def strategy_payload(strategy, user_id: int) -> Dict:
         payload = strategy.to_dict()
@@ -597,43 +618,6 @@ def create_market_routes(
 
     # ==================== EA端接口 ====================
 
-    @router.get("/ea/kline_cursor/{period}")
-    async def get_ea_kline_cursor(
-        period: str,
-        symbol: str = Query(...),
-        identity: EAIdentity = Depends(require_ea_auth),
-    ) -> Dict:
-        """返回服务端已持久化的最后一根K线时间，作为断线补传游标。"""
-        period = period.upper()
-        if period not in {"H4", "H1", "M15", "M5", "M1"}:
-            raise HTTPException(status_code=400, detail=f"不支持的周期: {period}")
-        market_policy = market_source_policy.resolve(
-            identity.user_id, identity.account_id, symbol,
-        )
-        if market_policy.get("mode") == "blocked":
-            raise HTTPException(status_code=409, detail=market_policy)
-        engine = engine_manager.get_engine_for_ea(identity)
-        restored_count = _restore_kline_memory(
-            identity, symbol, period, engine.kline_service,
-        )
-        row = get_storage().fetchone(
-            """
-            SELECT MAX(timestamp) AS last_bar_time, COUNT(*) AS bar_count
-            FROM historical_klines
-            WHERE user_id = ? AND account_id = ? AND symbol = ? AND period = ?
-            """,
-            (identity.user_id, 0, symbol, period),
-        )
-        return {
-            "status": "ok",
-            "symbol": symbol,
-            "period": period,
-            "server_last_bar_time": int(row["last_bar_time"]) if row and row["last_bar_time"] else 0,
-            "stored_bar_count": int(row["bar_count"] or 0) if row else 0,
-            "memory_restored_count": restored_count,
-            "market_source": market_policy,
-        }
-
     @router.post("/ea/kline/{period}")
     async def receive_kline(
         period: str,
@@ -737,12 +721,17 @@ def create_market_routes(
                         f"{continuity['gap_count']} 个理论周期，按EA游标数据接收"
                     )
 
-            # 保存K线数据
-            result = kline_service.process_kline_data(symbol, period, klines, is_full)
-            _persist_historical_klines(
-                identity, symbol, period, klines,
-                data.get("broker_utc_offset_seconds", 0),
+            # 统一交由 K 线接入协调器处理保存、Pivot 和结构计划刷新。
+            coordinator = KlineIngestionCoordinator(
+                kline_service, pivot_service, engine.refresh_structure_plans,
+                lambda item_symbol, item_period, items, offset: _persist_historical_klines(
+                    identity, item_symbol, item_period, items, offset,
+                ),
             )
+            result = coordinator.process_batch(
+                symbol, {period: klines}, is_full,
+                data.get("broker_utc_offset_seconds", 0),
+            ).get(period, {"status": "error", "message": "K线处理失败"})
             if staleness and staleness.get("is_stale"):
                 result.update({
                     "stale": True,
@@ -764,15 +753,6 @@ def create_market_routes(
                     {"period": period, "count": len(klines), "is_full": is_full},
                     symbol=symbol,
                     message=f"{'全量' if is_full else '增量'} {period} {len(klines)}条"
-                )
-
-            if result['status'] == 'ok':
-                # 更新转折点
-                all_klines = kline_service.get_all_kline_objects(symbol, period)
-                if all_klines:
-                    pivot_service.update_pivots(symbol, period, all_klines)
-                result["structure_plan_count"] = engine.refresh_structure_plans(
-                    symbol, period
                 )
 
             cursor_row = get_storage().fetchone(
@@ -804,43 +784,30 @@ def create_market_routes(
         """EA批量推送多个周期的K线数据"""
         try:
             engine = engine_manager.get_engine_for_ea(identity)
-            kline_service = engine.kline_service
-            pivot_service = engine.pivot_service
             data = await request.json()
             symbol = data.get('symbol', 'GOLD')
             is_full = data.get('is_full', False)
             kline_data = data.get('data', {})
 
-            results = {}
             system_log = engine.system_log
-
-            for period, klines in kline_data.items():
-                period = period.upper()
-                if period not in ['H4', 'H1', 'M15', 'M5', 'M1']:
-                    continue
-
-                result = kline_service.process_kline_data(symbol, period, klines, is_full)
-                _persist_historical_klines(
-                    identity, symbol, period, klines,
-                    data.get("broker_utc_offset_seconds", 0),
-                )
-                results[period] = result
-
-                if is_full:
-                    event_type = "ea_kline_full" if is_full else "ea_kline_incremental"
+            coordinator = KlineIngestionCoordinator(
+                engine.kline_service, engine.pivot_service,
+                engine.refresh_structure_plans,
+                lambda item_symbol, period, klines, offset: _persist_historical_klines(
+                    identity, item_symbol, period, klines, offset,
+                ),
+            )
+            results = coordinator.process_batch(
+                symbol, kline_data, is_full,
+                data.get("broker_utc_offset_seconds", 0),
+            )
+            if is_full:
+                for period, klines in kline_data.items():
                     system_log.add_log(
-                        event_type,
-                        {"period": period, "count": len(klines), "is_full": is_full},
+                        "ea_kline_full",
+                        {"period": str(period).upper(), "count": len(klines), "is_full": True},
                         symbol=symbol,
-                        message=f"{'全量' if is_full else '增量'} {period} {len(klines)}条"
-                    )
-
-                if result['status'] == 'ok':
-                    all_klines = kline_service.get_all_kline_objects(symbol, period)
-                    if all_klines:
-                        pivot_service.update_pivots(symbol, period, all_klines)
-                    result["structure_plan_count"] = engine.refresh_structure_plans(
-                        symbol, period
+                        message=f"全量 {str(period).upper()} {len(klines)}条",
                     )
 
             return {
@@ -932,7 +899,6 @@ def create_market_routes(
             "data": klines
         }
 
-    @protected_router.get("/market/structure/{symbol}")
     async def get_market_structure(symbol: str, period: str = Query("M5"), count: int = Query(600), user: AuthUser = Depends(require_auth)):
         engine = engine_manager.get_market_engine(user.user_id)
         rows = engine.kline_service.get_klines(symbol, period.upper(), min(1000, max(50, count)))
@@ -1010,7 +976,6 @@ def create_market_routes(
         )
         return {"status":"ok", "data": result}
 
-    @protected_router.get("/market/structure/{symbol}/trade-plans")
     async def get_structure_trade_plans(
         symbol: str,
         period: str = Query("M5"),
@@ -1176,7 +1141,6 @@ def create_market_routes(
             plan["subscribed_strategies"] = subscribed_strategies
         return {"status": "ok", "symbol": symbol, "period": period.upper(), "plans": items}
 
-    @protected_router.get("/market/structure/{symbol}/signal-reviews")
     async def get_structure_signal_reviews(
         symbol: str,
         period: str = Query("M5"),
@@ -1192,7 +1156,6 @@ def create_market_routes(
             "reviews": items,
         }
 
-    @protected_router.get("/admin/market-structure/config")
     async def get_market_structure_config(user: AuthUser = Depends(require_admin)):
         items = RuntimeStateRepository(0, 0).list_entities("market_structure_config")
         stored = items[-1] if items else {}
@@ -1204,7 +1167,6 @@ def create_market_routes(
             "setup_profiles": stored.get("setup_profiles", []) if isinstance(stored, dict) else [],
         }
 
-    @protected_router.put("/admin/market-structure/config")
     async def put_market_structure_config(payload: Dict, user: AuthUser = Depends(require_admin)):
         allowed = {**MARKET_STRUCTURE_DEFAULT_CONFIG, **STRUCTURE_PLAN_DEFAULT_CONFIG}
         cfg = dict(allowed)
@@ -1255,7 +1217,6 @@ def create_market_routes(
         RuntimeStateRepository(0, 0).upsert_entity("market_structure_config", "default", cfg, status="active")
         return {"status": "ok", "config": {k:v for k,v in cfg.items() if k in allowed}, "profiles": normalized_profiles, "setup_profiles": normalized_setup_profiles}
 
-    @protected_router.get("/market/pivots/{symbol}")
     async def get_pivots(
         symbol: str,
         period: str = Query(None, description="周期，不指定则返回全部"),
@@ -3559,7 +3520,6 @@ def create_market_routes(
 
     # ==================== WebSocket接口 ====================
 
-    @router.websocket("/ws/market")
     async def websocket_market(websocket: WebSocket):
         """登录后绑定到当前用户的账户级 WebSocket。"""
         await websocket.accept()
@@ -3618,7 +3578,6 @@ def create_market_routes(
                 )
                 engine.remove_ws_client(websocket)
 
-    @router.websocket("/ws/system-logs")
     async def websocket_system_logs(websocket: WebSocket):
         """Authenticated live event stream with tenant filtering."""
         await websocket.accept()

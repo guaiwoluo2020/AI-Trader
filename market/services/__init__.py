@@ -14,6 +14,14 @@ from .trading_instruction_service import TradingInstructionService
 from .execution_result import ExecutionResult, EXECUTION_STATUSES, normalize_execution_status
 from .strategy_execution_coordinator import StrategyExecutionCoordinator
 from .position_action_applier import apply_action
+from .position_management_coordinator import PositionManagementCoordinator
+from .event_bus import EventBus
+from .events import ApplicationEvent
+from .event_audit_bridge import EventAuditBridge
+from .plan_execution_service import PlanExecutionService
+from .outbox_dispatcher import OutboxDispatcher
+from .plan_lifecycle_service import PlanLifecycleService
+from .kline_ingestion_coordinator import KlineIngestionCoordinator
 
 # 信号服务
 from .signal import (
@@ -38,6 +46,13 @@ __all__ = [
     'EXECUTION_STATUSES', 'normalize_execution_status',
     'StrategyExecutionCoordinator',
     'apply_action',
+    'PositionManagementCoordinator',
+    'EventBus', 'ApplicationEvent',
+    'EventAuditBridge',
+    'PlanExecutionService',
+    'OutboxDispatcher',
+    'PlanLifecycleService',
+    'KlineIngestionCoordinator',
     'SignalService', 'KeyLevelSignalGenerator',
     'AIEntrySignalGenerator', 'MovingAverageSignalGenerator',
     'AlphaFactorSignalGenerator', 'AlphaRuntimeExecutor',
