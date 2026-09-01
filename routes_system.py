@@ -10,6 +10,7 @@ from auth import AuthUser, require_auth
 from status_payload import build_system_status_payload
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
+from infrastructure.storage_factory import healthcheck_storage
 
 
 def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -31,7 +32,12 @@ def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
         }
         ```
         """
-        return {"status": "ok", "ok": True}
+        mysql_ok = healthcheck_storage()
+        return {
+            "status": "ok" if mysql_ok else "degraded",
+            "ok": mysql_ok,
+            "components": {"mysql": "ok" if mysql_ok else "unavailable"},
+        }
     
     @protected_router.get("/status")
     async def get_status(

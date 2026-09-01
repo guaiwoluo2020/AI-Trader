@@ -140,6 +140,19 @@ class MySQLStorage:
             with self._pool_lock:
                 self._pool_created = max(0, self._pool_created - 1)
 
+    def close(self) -> None:
+        """Close every idle pooled connection and reset pool accounting."""
+        with self._pool_lock:
+            while True:
+                try:
+                    connection = self._pool.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    connection.close()
+                finally:
+                    self._pool_created = max(0, self._pool_created - 1)
+
     def _connect(self) -> MySQLConnection:
         connection = self._borrow_connection()
         return MySQLConnection(

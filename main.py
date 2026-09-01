@@ -146,6 +146,9 @@ def create_app():
 
         from market.system_log import get_system_log
         get_system_log().add_log("system_shutdown", message="服务已停止")
+
+        from infrastructure.storage_factory import close_storage
+        close_storage()
         print("[Shutdown] 后台任务与交易引擎已关闭")
 
     return app

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from mysql_storage import MySQLStorage
+from infrastructure.storage_factory import get_mysql_storage
 
 if TYPE_CHECKING:
     from market.models import LLMConfig, TradingStrategy
@@ -112,12 +113,15 @@ _STORAGE: Optional[MySQLStorage] = None
 def get_storage() -> MySQLStorage:
     global _STORAGE
     if _STORAGE is None:
-        _STORAGE = MySQLStorage()
+        _STORAGE = get_mysql_storage()
     return _STORAGE
 
 
 def reset_storage() -> None:
     global _STORAGE
+    from infrastructure.storage_factory import reset_storage as reset_mysql_storage
+
+    reset_mysql_storage()
     _STORAGE = None
 
 
