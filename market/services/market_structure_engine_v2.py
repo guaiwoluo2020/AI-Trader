@@ -12,6 +12,7 @@ DEFAULT_CONFIG = {
     "pivot_legs": 3, "medium_pivot_legs": 8, "large_pivot_legs": 25,
     "min_reversal_atr": 0.5, "break_buffer_atr": 0.10,
     "break_confirm_bars": 2, "retest_bars": 2, "displacement_atr": 0.8,
+    "trend_retest_required": True,
     "range_touch_tolerance": 0.003, "range_touch_atr": 0.45,
     "range_min_touches": 2, "range_min_inside_ratio": 0.65,
     "range_max_atr": 8.0, "range_min_bars": 24, "min_segment_bars": 12,
@@ -158,8 +159,9 @@ def _event_stream(rows: List[Dict], pivots: List[Dict], atrs: List[float], confi
             event_type = "choch" if state not in ("undetermined", direction) else "bos"
             if current["count"] < confirm_bars:
                 continue
-            needs_retest = (event_type == "choch" and scope == "major"
-                            and displacement < float(config.get("displacement_atr", 0.8))
+            needs_retest = (event_type in {"bos", "choch"}
+                            and bool(config.get("trend_retest_required", False))
+                            and scope in {"major", "swing"}
                             and int(config.get("retest_bars", 0)) > 0)
             if needs_retest:
                 current.update({"stage": "retest", "event_type": event_type,

@@ -2656,16 +2656,21 @@ class TradingAccountRepository:
 
     def list_live_equity_points(
         self, user_id: int, account_id: int, count: int = 1440,
+        from_time: Optional[int] = None, to_time: Optional[int] = None,
     ) -> List[Dict]:
-        rows = self.storage.fetchall(
-            """
+        sql = """
             SELECT point_time AS time, balance, equity, free_margin, margin
             FROM live_equity_points
             WHERE user_id = ? AND account_id = ?
-            ORDER BY point_time DESC LIMIT ?
-            """,
-            (user_id, account_id, max(1, min(int(count), 5000))),
-        )
+        """
+        params = [user_id, account_id]
+        if from_time is not None:
+            sql += " AND point_time >= ?"; params.append(int(from_time))
+        if to_time is not None:
+            sql += " AND point_time <= ?"; params.append(int(to_time))
+        sql += " ORDER BY point_time DESC LIMIT ?"
+        params.append(max(1, min(int(count), 5000)))
+        rows = self.storage.fetchall(sql, tuple(params))
         return [dict(row) for row in rows][::-1]
 
     @staticmethod

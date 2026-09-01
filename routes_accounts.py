@@ -212,11 +212,14 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         account_id: int,
         page: int = Query(1, ge=1),
         page_size: int = Query(30, ge=1, le=100),
+        equity_from: Optional[int] = Query(None, ge=0),
+        equity_to: Optional[int] = Query(None, ge=0),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         try:
             detail = engine_manager.paper_trading.get_account_detail(
-                user.user_id, account_id, page=page, page_size=page_size
+                user.user_id, account_id, page=page, page_size=page_size,
+                equity_from=equity_from, equity_to=equity_to,
             )
             return {"status": "ok", "detail": detail}
         except ValueError as exc:
@@ -225,6 +228,8 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     @router.get("/accounts/{account_id}/live-monitoring")
     async def get_live_monitoring(
         account_id: int,
+        equity_from: Optional[int] = Query(None, ge=0),
+        equity_to: Optional[int] = Query(None, ge=0),
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         account = repository.get_by_id(user.user_id, account_id)
@@ -311,7 +316,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     repository.storage, user.user_id, account_id, positions,
                 ),
                 "equity_curve": repository.list_live_equity_points(
-                    user.user_id, account_id,
+                    user.user_id, account_id, from_time=equity_from, to_time=equity_to,
                 ),
             },
         }

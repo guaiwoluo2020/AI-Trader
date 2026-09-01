@@ -31,7 +31,13 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "breakout_target_atr": 3.0, "breakout_retest_valid_bars": 6,
     "range_plan_valid_bars": 12, "location_plan_valid_bars": 6,
     "require_range_boundary_reclaim": False, "require_location_reclaim": True,
-    "min_breakout_displacement_atr": 0.2, "min_choch_displacement_atr": 0.2,
+    # Trend continuation is intentionally conservative: a close-confirmed
+    # break must also retest and hold the broken level before a plan is
+    # tradable.  Keep the threshold aligned with the structure engine.
+    "min_breakout_displacement_atr": 0.8,
+    "trend_retest_tolerance_atr": 0.25,
+    "trend_min_retest_bars": 1,
+    "min_choch_displacement_atr": 0.2,
     "min_trendline_touches": 2,
 }
 
@@ -139,6 +145,26 @@ class StructurePlanBuilder:
         if not candidates:
             return 0.0
         return max(candidates) if direction == "buy" else min(candidates)
+
+    def _trend_retest_confirmed(self, rows: List[Dict], event: Dict, atr: float) -> bool:
+        """Require a post-break bar to touch the broken level and reclaim it."""
+        index = int(event.get("confirmed_at", event.get("index", -1)) or -1)
+        level = _number(event.get("level"))
+        direction = str(event.get("direction") or "")
+        if index < 0 or level <= 0 or direction not in {"up", "down"}:
+            return False
+        tolerance = max(0.0, _number(self._param("trend_retest_tolerance_atr", 0.25))) * max(atr, 1e-9)
+        required = max(1, int(self._param("trend_min_retest_bars", 1)))
+        confirmed = 0
+        for row in rows[index + 1:]:
+            high, low, close = _number(row.get("high") or row.get("high_price")), _number(row.get("low") or row.get("low_price")), _number(row.get("close") or row.get("close_price"))
+            if direction == "up" and low <= level + tolerance and close >= level:
+                confirmed += 1
+            elif direction == "down" and high >= level - tolerance and close <= level:
+                confirmed += 1
+            if confirmed >= required:
+                return True
+        return False
 
     @staticmethod
     def _hierarchy_snapshot(hierarchy: Dict) -> Dict:
@@ -985,11 +1011,20 @@ class StructurePlanBuilder:
             return []
         direction_state = str(latest.get("direction") or "")
         major = str(structure.get("major_state") or "")
-        if direction_state != major or major not in {"up", "down"}:
+        current = str(structure.get("current_state") or structure.get("internal_state") or "")
+        if direction_state != major or current != major or major not in {"up", "down"}:
+            self._reject("趋势延续要求主结构、当前结构与突破方向一致")
             return []
         displacement = _number(latest.get("displacement_atr"))
-        minimum = max(0.0, _number(self._param("min_breakout_displacement_atr", 0.2)))
+        minimum = max(0.0, _number(self._param("min_breakout_displacement_atr", 0.8)))
         if displacement < minimum:
+            self._reject(f"趋势突破位移 {displacement:.2f} ATR 低于最低要求 {minimum:.2f} ATR")
+            return []
+        if latest.get("confirmation") and str(latest.get("confirmation")) not in {"close_confirmed", "retest_confirmed", "continuation_confirmed"}:
+            self._reject("趋势延续必须经过收盘突破确认")
+            return []
+        if latest.get("confirmation") and latest.get("retest_status") not in {"touched_and_held", "held_without_touch", "retest_confirmed", "continuation_confirmed"} and not self._trend_retest_confirmed(rows, latest, atr):
+            self._reject("趋势延续尚未完成突破后的回踩确认")
             return []
         direction = "buy" if major == "up" else "sell"
         entry = _number(latest.get("level"))

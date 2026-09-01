@@ -262,15 +262,21 @@ export const accountAPI = {
     return response.data
   },
 
-  async getPaperDetail(accountId, page = 1, pageSize = 30) {
+  async getPaperDetail(accountId, page = 1, pageSize = 30, equityFrom = null, equityTo = null) {
+    const params = { page, page_size: pageSize }
+    if (equityFrom != null) params.equity_from = equityFrom
+    if (equityTo != null) params.equity_to = equityTo
     const response = await api.get(`/accounts/${encodeURIComponent(accountId)}/paper`, {
-      params: { page, page_size: pageSize },
+      params,
     })
     return response.data
   },
 
-  async getLiveMonitoring(accountId) {
-    const response = await api.get(`/accounts/${encodeURIComponent(accountId)}/live-monitoring`)
+  async getLiveMonitoring(accountId, equityFrom = null, equityTo = null) {
+    const params = {}
+    if (equityFrom != null) params.equity_from = equityFrom
+    if (equityTo != null) params.equity_to = equityTo
+    const response = await api.get(`/accounts/${encodeURIComponent(accountId)}/live-monitoring`, { params })
     return response.data
   },
 

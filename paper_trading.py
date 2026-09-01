@@ -894,8 +894,23 @@ class PaperTradingService:
                 )
         return len(orders)
 
+    def _equity_curve(self, account_id: int, page_size: int, offset: int,
+                      equity_from: Optional[int] = None,
+                      equity_to: Optional[int] = None) -> List[Dict]:
+        sql = "SELECT point_time AS time, balance, equity, free_margin, margin, open_positions FROM paper_equity_points WHERE account_id = ?"
+        params: List = [account_id]
+        if equity_from is not None:
+            sql += " AND point_time >= ?"; params.append(int(equity_from))
+        if equity_to is not None:
+            sql += " AND point_time <= ?"; params.append(int(equity_to))
+        sql += " ORDER BY point_time DESC LIMIT ? OFFSET ?"
+        params.extend([min(page_size * 10, 500), offset])
+        return [dict(row) for row in self.storage.fetchall(sql, tuple(params))][::-1]
+
     def get_account_detail(self, user_id: int, account_id: int,
-                           page: int = 1, page_size: int = 30) -> Dict:
+                           page: int = 1, page_size: int = 30,
+                           equity_from: Optional[int] = None,
+                           equity_to: Optional[int] = None) -> Dict:
         account = self._paper_account(user_id, account_id)
         settings = self._settings(account_id)
         # 决策快照保存在运行态仓储中；订单/成交通过 decision_id 读取开仓原因，
@@ -917,6 +932,7 @@ class PaperTradingService:
         except Exception:
             # 历史运行态缺失不应影响模拟账户详情页面。
             decision_reasons = {}
+
         deployments = [dict(row) for row in self.storage.fetchall(
             """
             SELECT d.*, json_extract(s.config_json, '$.strategy_name') AS strategy_name
@@ -1058,15 +1074,7 @@ class PaperTradingService:
                     (account_id, page_size + 1, offset),
                 )[:page_size]
             ],
-            "equity_curve": [dict(row) for row in self.storage.fetchall(
-                """
-                SELECT point_time AS time, balance, equity, free_margin, margin,
-                       open_positions
-                FROM paper_equity_points WHERE account_id = ?
-                ORDER BY point_time DESC LIMIT ? OFFSET ?
-                """,
-                (account_id, min(page_size * 10, 500), offset),
-            )][::-1],
+            "equity_curve": self._equity_curve(account_id, page_size, offset, equity_from, equity_to),
             "page": page,
             "page_size": page_size,
             "orders_has_more": orders_has_more,

@@ -258,6 +258,7 @@
           <section class="runtime-chart-card">
             <div class="runtime-section-title">
               <h3>账户净值</h3>
+              <v-select v-model="paperEquityRange" :items="equityRangeOptions" density="compact" hide-details label="时间范围" style="max-width:150px" @update:model-value="refreshPaperDetail" />
               <v-btn size="small" variant="tonal" color="primary" :loading="reportLoading" @click="loadPaperReport">生成运行报告</v-btn>
             </div>
             <div v-if="paperDetail.equity_curve.length" ref="equityChart" class="equity-chart" />
@@ -459,7 +460,7 @@
           </section>
 
           <section class="runtime-chart-card">
-            <div class="runtime-section-title"><h3>实盘账户净值</h3><span>每 6 秒自动刷新</span></div>
+            <div class="runtime-section-title"><h3>实盘账户净值</h3><v-select v-model="liveEquityRange" :items="equityRangeOptions" density="compact" hide-details label="时间范围" style="max-width:150px" @update:model-value="refreshLiveDetail" /><span>每 6 秒自动刷新</span></div>
             <div v-if="liveDetail.equity_curve.length" ref="liveEquityChart" class="equity-chart" />
             <div v-else class="runtime-empty">等待 EA 上报第一条账户资金快照</div>
           </section>
@@ -663,6 +664,12 @@ const paperReport = ref(null)
 const reportStrategyId = ref('')
 const equityChart = ref(null)
 const liveEquityChart = ref(null)
+const equityRangeOptions = [
+  { title: '全部', value: 'all' }, { title: '最近6小时', value: '6h' },
+  { title: '最近24小时', value: '24h' }, { title: '最近7天', value: '7d' },
+]
+const paperEquityRange = ref('all')
+const liveEquityRange = ref('all')
 const expandedPaperPositions = ref(new Set())
 const expandedLivePositions = ref(new Set())
 let equityChartInstance = null
@@ -678,6 +685,12 @@ const paperForm = reactive({
 
 const mt5Accounts = computed(() => accounts.value.filter(item => item.account_type === 'mt5'))
 const paperAccounts = computed(() => accounts.value.filter(item => item.account_type === 'paper'))
+function equityRangeParams(range) {
+  if (range === 'all') return [null, null]
+  const to = Math.floor(Date.now() / 1000)
+  const seconds = { '6h': 6 * 3600, '24h': 24 * 3600, '7d': 7 * 86400 }[range]
+  return [to - (seconds || 0), to]
+}
 const connectedCount = computed(() => mt5Accounts.value.filter(item => item.connected).length)
 const strategyOptions = computed(() => paperContext.strategies.filter(
   strategy => strategy.paper_eligible
@@ -1082,7 +1095,7 @@ async function openPaperRuntime(account) {
   runtimeLoadingId.value = account.account_id
   try {
     const [data] = await Promise.all([
-      accountAPI.getPaperDetail(account.account_id),
+      accountAPI.getPaperDetail(account.account_id, 1, 30, ...equityRangeParams(paperEquityRange.value)),
       loadPaperContext(),
     ])
     paperDetail.value = data.detail
@@ -1103,7 +1116,7 @@ async function openPaperRuntime(account) {
 async function openLiveRuntime(account) {
   runtimeLoadingId.value = account.account_id
   try {
-    const data = await accountAPI.getLiveMonitoring(account.account_id)
+    const data = await accountAPI.getLiveMonitoring(account.account_id, ...equityRangeParams(liveEquityRange.value))
     liveDetail.value = data.detail
     expandedLivePositions.value = new Set()
     liveDialog.value = true
@@ -1121,7 +1134,7 @@ async function openLiveRuntime(account) {
 async function refreshLiveDetail() {
   if (!liveDetail.value) return
   try {
-    const data = await accountAPI.getLiveMonitoring(liveDetail.value.account.account_id)
+    const data = await accountAPI.getLiveMonitoring(liveDetail.value.account.account_id, ...equityRangeParams(liveEquityRange.value))
     liveDetail.value = data.detail
     await nextTick()
     renderLiveEquityChart()
@@ -1166,7 +1179,7 @@ function closePaperRuntime() {
 }
 
 async function refreshPaperDetail() {
-  const data = await accountAPI.getPaperDetail(paperDetail.value.account.account_id)
+  const data = await accountAPI.getPaperDetail(paperDetail.value.account.account_id, 1, 30, ...equityRangeParams(paperEquityRange.value))
   paperDetail.value = data.detail
   await nextTick()
   renderEquityChart()
