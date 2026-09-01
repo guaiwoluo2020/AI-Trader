@@ -13,7 +13,7 @@ import time
 from typing import Callable, Dict, Iterable, List, Optional
 
 from mysql_repositories import get_storage
-from repositories.ai import AISignalSourceRepository
+from repositories.ai_signal_sources import AISignalSourceRepository
 
 
 DEFAULT_SAMPLE_SIZE = 7
