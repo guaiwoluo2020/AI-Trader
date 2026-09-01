@@ -12,8 +12,13 @@
       <v-card-text>
         <div v-if="tradePlans.length" class="plan-grid">
           <article v-for="plan in tradePlans" :key="plan.plan_id">
-            <div class="card-head"><v-chip size="small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><span>{{ ({ watching_breakout:'等待突破', waiting_retest:'等待回踩', waiting_reclaim:'等待回收', waiting_touch:'等待触碰', active:'等待价格' }[plan.plan_phase] || (plan.status==='active'?'等待价格':'等待确认')) }}</span></div>
+            <div class="card-head"><v-chip size="small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><v-chip size="x-small" variant="tonal">{{ ({ candidate:'候选', confirmed:'已确认', active:'可交易' }[plan.plan_stage] || '候选') }}</v-chip><span>{{ ({ watching_breakout:'等待突破', waiting_retest:'等待回踩', waiting_reclaim:'等待回收', waiting_touch:'等待触碰', active:'等待价格' }[plan.plan_phase] || (plan.status==='active'?'等待价格':'等待确认')) }}</span></div>
             <div class="plan-values"><span>入场 {{ Number(plan.entry_price||0).toFixed(2) }}</span><span>止损 {{ Number(plan.stop_loss||0).toFixed(2) }}</span><span>止盈 {{ Number(plan.take_profit||0).toFixed(2) }}</span><span v-if="plan.direction==='buy'||plan.direction==='sell'">盈亏比 {{ Number(plan.risk_reward_ratio||0).toFixed(2) }} / 最低 {{ Number(plan.minimum_risk_reward||0).toFixed(2) }}</span></div>
+            <div v-if="plan.price_sources" class="plan-source-summary">
+              <span>入场来源：{{ plan.price_sources.entry?.source || '--' }}</span>
+              <span>止损来源：{{ plan.price_sources.stop_loss?.source || '--' }}</span>
+              <span>止盈来源：{{ plan.price_sources.take_profit?.source || '--' }}</span>
+            </div>
             <div v-if="plan.stop_candidates?.length || plan.target_candidates?.length" class="plan-levels">
               <div><small>止损候选</small><v-chip v-for="item in plan.stop_candidates" :key="item.level_id" size="x-small" color="error" variant="tonal">{{ item.structure_layer }} {{ Number(item.price).toFixed(2) }}</v-chip></div>
               <div><small>止盈候选</small><v-chip v-for="item in plan.target_candidates" :key="item.level_id" size="x-small" color="success" variant="tonal">{{ item.structure_layer }} {{ Number(item.price).toFixed(2) }}</v-chip></div>
@@ -182,6 +187,8 @@ watch(period,()=>{load();loadTradePlans();loadStructureReviews()});watch(symbol,
 .plan-grid p{margin:10px 0;color:#526860;font-size:.88rem}
 .plan-grid>article>small{color:#71837b}
 .plan-values{display:flex;gap:16px;flex-wrap:wrap;color:#304e44;font-size:.86rem;font-weight:600}
+.plan-source-summary{display:flex;gap:10px;flex-wrap:wrap;margin-top:7px;color:#6b8178;font-size:.72rem}
+.plan-source-summary span{padding:3px 7px;border:1px solid #dce9e3;border-radius:6px;background:#f7fbf9}
 .plan-levels{display:grid;gap:7px;margin-top:10px;padding:9px 10px;border-radius:10px;background:#f1f6f3}.plan-levels>div{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.plan-levels small{min-width:58px;color:#657970}
 .subscription-summary{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px dashed #d7e3dd}
 .subscription-panel{margin-top:10px}

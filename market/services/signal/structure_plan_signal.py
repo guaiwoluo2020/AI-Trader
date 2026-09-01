@@ -343,6 +343,11 @@ class StructurePlanBuilder:
             "touch_and_reclaim": "waiting_reclaim",
             "touch_or_near": "waiting_touch",
         }.get(entry_mode, "active")
+        plan_stage = (
+            "candidate" if status == "watching" else
+            "confirmed" if entry_mode in {"breakout_retest", "touch_and_reclaim"} else
+            "active"
+        )
         payload["structure_metadata"] = {
             "segment_id": segment_id,
             "revision": _hash(json.dumps(snapshot, sort_keys=True, default=str), length=16),
@@ -355,8 +360,16 @@ class StructurePlanBuilder:
             "upper_boundary": {"slope": _number(box.get("high_slope")), "intercept": _number(box.get("high_intercept"))},
             "lower_boundary": {"slope": _number(box.get("low_slope")), "intercept": _number(box.get("low_intercept"))},
         }
+        payload["price_sources"] = self._price_sources(
+            setup_type, direction, entry, stop_loss, take_profit, box,
+        )
+        if setup_type.startswith("range_"):
+            payload["boundary_cycle_id"] = _hash(
+                symbol, period, anchor, _number(box.get("top")), _number(box.get("bottom")),
+            )
         payload["structure_segment_id"] = segment_id
         payload["plan_phase"] = plan_phase
+        payload["plan_stage"] = plan_stage
         payload["invalidation_rules"] = self._invalidation_rules(setup_type)
         payload["tick_invalidation_rules"] = [
             rule for rule in payload["invalidation_rules"]
@@ -432,6 +445,24 @@ class StructurePlanBuilder:
         if setup_type in {"structure_location_pullback", "trend_continuation", "structure_reversal"}:
             rules.append("protected_level_break")
         return rules
+
+    @staticmethod
+    def _price_sources(setup_type, direction, entry, stop, target, box) -> Dict:
+        if setup_type in {"range_lower_reversal", "range_upper_reversal", "range_false_breakout"}:
+            entry_source = "range_lower_boundary" if direction == "buy" else "range_upper_boundary"
+            stop_source = "range_boundary_atr_buffer"
+            target_source = "opposite_range_boundary"
+        elif "triangle" in setup_type:
+            entry_source, stop_source, target_source = "triangle_boundary", "triangle_opposite_boundary_atr_buffer", "measured_move"
+        elif setup_type in {"structure_location_pullback", "trend_continuation", "structure_reversal"}:
+            entry_source, stop_source, target_source = "HL/LH_or_trendline", "protected_structure_level_atr_buffer", "next_structure_target"
+        else:
+            entry_source, stop_source, target_source = "confirmed_structure_event", "protected_structure_level_atr_buffer", "next_structure_target_or_R_projection"
+        return {
+            "entry": {"source": entry_source, "price": round(_number(entry), 8), "formula": "reference level / structure boundary"},
+            "stop_loss": {"source": stop_source, "price": round(_number(stop), 8), "formula": "reference level ± ATR buffer"},
+            "take_profit": {"source": target_source, "price": round(_number(target), 8), "formula": "structure target or measured move"},
+        }
 
     def _tradable_plan(self, **kwargs) -> Optional[Dict]:
         minimum_override = kwargs.pop("min_risk_reward_override", None)
