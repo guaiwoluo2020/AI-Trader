@@ -367,6 +367,7 @@ class StructurePlanBuilder:
             payload["boundary_cycle_id"] = _hash(
                 symbol, period, anchor, _number(box.get("top")), _number(box.get("bottom")),
             )
+            payload["boundary_state"] = "unvisited"
         payload["structure_segment_id"] = segment_id
         payload["plan_phase"] = plan_phase
         payload["plan_stage"] = plan_stage
@@ -1305,9 +1306,20 @@ class StructurePlanSignalGenerator:
         zone = plan.get("entry_zone") or {}
         lower, upper = _number(zone.get("lower")), _number(zone.get("upper"))
         if lower <= 0 or upper <= 0 or not lower <= price <= upper:
+            if str(plan.get("setup_type") or "").startswith("range_") and str(plan.get("boundary_state") or "") in {"touched", "reclaimed", "triggered"}:
+                # A boundary opportunity becomes eligible for a future cycle
+                # only after price has left its entry zone.
+                if price < lower or price > upper:
+                    plan["boundary_state"] = "left_boundary"
+                    self.repository.update_payload(plan.get("plan_id"), {"boundary_state": "left_boundary"})
             return False
         mode = str(plan.get("entry_mode") or "")
         if mode in {"breakout_retest", "touch_or_near"}:
+            if str(plan.get("setup_type") or "").startswith("range_") and str(plan.get("boundary_state") or "") == "triggered":
+                return False
+            if str(plan.get("setup_type") or "").startswith("range_"):
+                plan["boundary_state"] = "triggered"
+                self.repository.update_payload(plan.get("plan_id"), {"boundary_state": "triggered"})
             return True
         if mode != "touch_and_reclaim":
             return False
@@ -1317,12 +1329,19 @@ class StructurePlanSignalGenerator:
         direction = str(plan.get("direction") or "")
         if direction == "buy" and price <= entry:
             state["touched"] = True
+            if str(plan.get("setup_type") or "").startswith("range_"):
+                self.repository.update_payload(plan.get("plan_id"), {"boundary_state": "touched"})
         elif direction == "sell" and price >= entry:
             state["touched"] = True
-        return bool(state["touched"] and (
+            if str(plan.get("setup_type") or "").startswith("range_"):
+                self.repository.update_payload(plan.get("plan_id"), {"boundary_state": "touched"})
+        result = bool(state["touched"] and (
             (direction == "buy" and price >= entry)
             or (direction == "sell" and price <= entry)
         ))
+        if result and str(plan.get("setup_type") or "").startswith("range_"):
+            self.repository.update_payload(plan.get("plan_id"), {"boundary_state": "triggered"})
+        return result
 
     @staticmethod
     def _resolve_plan_conflicts(plans: List[Dict]) -> List[Dict]:

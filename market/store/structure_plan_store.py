@@ -209,6 +209,24 @@ class StructureTradePlanRepository:
             (json.dumps(payload, ensure_ascii=False), now, str(plan_id)),
         )
 
+    def update_payload(self, plan_id: str, changes: Dict) -> None:
+        """Persist small runtime state changes without replacing the plan."""
+        row = self.storage.fetchone(
+            "SELECT payload_json FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
+            (str(plan_id),),
+        )
+        if not row:
+            return
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        payload.update(changes or {})
+        self.storage.execute(
+            "UPDATE structure_trade_plans SET payload_json=?, updated_at=? WHERE plan_id=?",
+            (json.dumps(payload, ensure_ascii=False), int(time.time()), str(plan_id)),
+        )
+
     def is_consumed(
         self, user_id: int, account_id: int, deployment_id: str, plan_id: str,
     ) -> bool:
