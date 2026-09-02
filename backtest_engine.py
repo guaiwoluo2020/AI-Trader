@@ -683,6 +683,26 @@ class HistoricalBarReader:
         return [buckets[key] for key in sorted(buckets)]
 
 
+class HistoricalTickReader:
+    """Streaming reader used by the tick replay path.
+
+    Tick files are deliberately kept as an iterator so large replay windows do
+    not need to be loaded into memory.  The reader also applies the requested
+    time window before yielding records.
+    """
+
+    @staticmethod
+    def read(path: str, start: int = 0, end: int = 0) -> Iterator[Dict]:
+        for tick in iter_ticks(path):
+            timestamp = int(tick["event_time_ms"] // 1000)
+            if start and timestamp < int(start):
+                continue
+            if end and timestamp > int(end) + 60:
+                break
+            tick["time"] = timestamp
+            yield tick
+
+
 def aggregate_period(m1_bars: List[Dict], period: str, limit: int) -> List[Dict]:
     """Build bars from data already seen; the final bucket may be partial."""
     seconds = PERIOD_SECONDS[period]
@@ -1686,18 +1706,26 @@ class M1BacktestEngine:
         strategy = task["strategy_snapshot"]
         template = task["template_snapshot"]
         self._reject_unsupported_ai_reference_backtest(strategy)
+        start = int(dataset["requested_start"])
+        end = int(dataset["requested_end"])
         replay_mode = str(template.get("replay_mode") or "bars").lower()
+        ticks_by_minute: Dict[int, List[Dict]] = {}
         if replay_mode == "ticks":
             tick_path = str(template.get("tick_file_path") or "")
             if not tick_path:
                 raise BacktestEngineError("Tick 回测缺少 Tick 数据文件")
-            bars = HistoricalBarReader.read(tick_path, "ticks-bin-v1")
+            # Keep the existing bar stream for structure/Pivot calculations,
+            # while retaining the original sampled ticks for execution.
+            tick_rows = list(HistoricalTickReader.read(tick_path, start, end))
+            if not tick_rows:
+                raise BacktestEngineError("Tick 数据文件没有可回放记录")
+            for tick in tick_rows:
+                ticks_by_minute.setdefault(int(tick["time"]) - int(tick["time"]) % 60, []).append(tick)
+            bars = HistoricalBarReader._ticks_to_bars(tick_path)
         else:
             bars = HistoricalBarReader.read(
                 task["dataset_file_path"], dataset.get("data_format", "")
             )
-        start = int(dataset["requested_start"])
-        end = int(dataset["requested_end"])
         bars = [bar for bar in bars if int(bar["time"]) <= end]
         test_bars = [bar for bar in bars if int(bar["time"]) >= start]
         if len(test_bars) < 2:
@@ -1770,20 +1798,106 @@ class M1BacktestEngine:
             if timestamp >= start:
                 test_index += 1
                 replay_bars.append(bar)
-                for order in pending_orders:
-                    reason = position_limit_reason(
-                        order.direction, positions, strategy, template
-                    )
-                    if reason:
-                        order.reject(reason)
-                        continue
-                    position, balance = self._fill_order(
-                        order, bar, balance, template, point_size
-                    )
-                    if position:
-                        positions.append(position)
-                        all_positions.append(position)
-                pending_orders = []
+                if replay_mode == "ticks":
+                    # A pending order is eligible from the first subsequent
+                    # tick.  Bid/ask are preserved, so spread and direction
+                    # are handled consistently with live paper execution.
+                    for tick in ticks_by_minute.get(timestamp, []):
+                        tick_bar = {
+                            "time": int(tick["time"]),
+                            "open": float(tick.get("last_price") or tick.get("bid")),
+                            "high": float(tick.get("last_price") or tick.get("bid")),
+                            "low": float(tick.get("last_price") or tick.get("bid")),
+                            "close": float(tick.get("last_price") or tick.get("bid")),
+                            "spread": 0,
+                        }
+                        fill_bar = tick_bar
+                        still_pending = []
+                        for order in pending_orders:
+                            # The decision is made only after the previous
+                            # bar closes; it cannot fill on an earlier/same
+                            # quote.  A one-minute timeout matches the live
+                            # pending-order safety timeout.
+                            if int(tick["time"]) <= int(order.requested_at):
+                                still_pending.append(order)
+                                continue
+                            if int(tick["time"]) > int(order.requested_at) + 60:
+                                order.status = "canceled"
+                                order.canceled_at = int(tick["time"])
+                                order.rejection_reason = "下一 Tick 撮合超时"
+                                continue
+                            reason = position_limit_reason(order.direction, positions, strategy, template)
+                            if reason:
+                                order.reject(reason)
+                                continue
+                            side_price = float(tick.get("ask") if order.direction == "buy" else tick.get("bid"))
+                            fill_bar = {**tick_bar, "open": side_price}
+                            position, balance = self._fill_order(order, fill_bar, balance, template, point_size)
+                            if position:
+                                position.opened_at = int(tick["time"])
+                                positions.append(position)
+                                all_positions.append(position)
+                        pending_orders = still_pending
+                        for position in list(positions):
+                            price = float(tick.get("bid") if position.direction == "buy" else tick.get("ask"))
+                            position.favorable_price = (
+                                max(position.favorable_price, price)
+                                if position.direction == "buy"
+                                else min(position.favorable_price, price)
+                            )
+                            action = position_manager.evaluate(
+                                position.position_policy_snapshot["config"],
+                                position.__dict__,
+                                {"price": price, "time": int(tick["time"])},
+                                pivots=available_pivots,
+                            )
+                            if action.action == "close":
+                                trade, balance = self._close_at_price(
+                                    position, fill_bar, balance, template,
+                                    point_size, contract_size, price, action.reason,
+                                )
+                                trades.append(trade)
+                                positions.remove(position)
+                                continue
+                            if action.action == "partial_close" and action.close_volume:
+                                trade, balance = self._close_at_price(
+                                    position, fill_bar, balance, template,
+                                    point_size, contract_size, price,
+                                    "partial_take_profit", close_volume=action.close_volume,
+                                )
+                                trades.append(trade)
+                                position.partial_levels_done = position.partial_levels_done or []
+                                if action.level_id not in position.partial_levels_done:
+                                    position.partial_levels_done.append(action.level_id)
+                                if action.stop_loss:
+                                    position.stop_loss = float(action.stop_loss)
+                                if position.status != "open":
+                                    positions.remove(position)
+                                    continue
+                            if action.action == "modify_sl" and action.stop_loss:
+                                position.stop_loss = float(action.stop_loss)
+                            hit = (price <= position.stop_loss or (position.take_profit > 0 and price >= position.take_profit)) if position.direction == "buy" else (price >= position.stop_loss or (position.take_profit > 0 and price <= position.take_profit))
+                            if hit:
+                                reason = "stop_loss" if ((position.direction == "buy" and price <= position.stop_loss) or (position.direction == "sell" and price >= position.stop_loss)) else "take_profit"
+                                trade, balance = self._close_at_price(position, fill_bar, balance, template, point_size, contract_size, price, reason)
+                                trades.append(trade)
+                                if position in positions:
+                                    positions.remove(position)
+                else:
+                    for order in pending_orders:
+                        reason = position_limit_reason(
+                            order.direction, positions, strategy, template
+                        )
+                        if reason:
+                            order.reject(reason)
+                            continue
+                        position, balance = self._fill_order(
+                            order, bar, balance, template, point_size
+                        )
+                        if position:
+                            positions.append(position)
+                            all_positions.append(position)
+                    pending_orders = []
                 max_concurrent_positions = max(
                     max_concurrent_positions, len(positions)
                 )
@@ -1796,7 +1910,7 @@ class M1BacktestEngine:
                     signal_tp_percent = float(
                         policy_config.get("signal_take_profit_close_percent", 0) or 0
                     )
-                    tp_hit = (
+                    tp_hit = replay_mode != "ticks" and (
                         signal_tp_percent > 0
                         and position.take_profit > 0
                         and "signal_take_profit" not in (position.partial_levels_done or [])
@@ -1826,7 +1940,7 @@ class M1BacktestEngine:
                         if position.status == "open":
                             remaining_positions.append(position)
                         continue
-                    closed = self._maybe_close(
+                    closed = None if replay_mode == "ticks" else self._maybe_close(
                         position, bar, balance, template, point_size, contract_size
                     )
                     if closed is not None:
@@ -2094,6 +2208,8 @@ class M1BacktestEngine:
             "order_status_counts": order_status_counts,
             "max_concurrent_positions": max_concurrent_positions,
             "replay_mode": replay_mode,
+            "tick_execution": replay_mode == "ticks",
+            "replayed_tick_count": sum(len(items) for items in ticks_by_minute.values()),
         })
         result["_ledger"] = {
             "account": {
