@@ -14,7 +14,7 @@ from ..market_structure_engine_v2 import analyze_incremental as analyze
 from mysql_repositories import RuntimeStateRepository
 from .structure_plan.price_calculator import (
     calculate_next_target, protected_reference, exit_candidates,
-    location_reclaim_confirmed,
+    location_reclaim_confirmation,
 )
 from .structure_plan.lifecycle import invalidate_reason, resolve_conflicts, stage_for
 from .structure_plan.config_resolver import resolve as resolve_plan_config
@@ -30,6 +30,10 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "enable_range_breakout": True, "enable_triangle_prebreakout": True,
     "enable_choch": True, "enable_liquidity_sweep": True, "enable_trend": True,
     "entry_zone_atr": 0.35, "location_proximity_atr": 0.6,
+    "location_require_swing_external_alignment": True,
+    "location_require_internal_confirmation": True,
+    "location_reclaim_min_body_atr": 0.3,
+    "location_reclaim_min_close_extension_atr": 0.1,
     "stop_buffer_atr": 0.25, "target_buffer_atr": 0.1,
     "min_real_risk_reward": 1.2, "trend_min_real_risk_reward": 0.5,
     # Hidden safety ceiling; normal lifecycle is governed by structure events.
@@ -252,11 +256,19 @@ class StructurePlanBuilder:
                 return True
         return False
 
-    @staticmethod
-    def _location_reclaim_confirmed(rows: List[Dict], entry: float, direction: str,
-                                    atr: float) -> bool:
-        """Require the latest closed bar to touch and reclaim the HL/LH level."""
-        return location_reclaim_confirmed(rows, entry, direction, atr)
+    def _location_reclaim_confirmation(
+        self, rows: List[Dict], entry: float, direction: str, atr: float,
+    ) -> tuple[bool, Dict, str]:
+        """Require a directional, displaced close back beyond the HL/LH."""
+        return location_reclaim_confirmation(
+            rows, entry, direction, atr,
+            min_body_atr=max(0.0, _number(
+                self._param("location_reclaim_min_body_atr", 0.3)
+            )),
+            min_close_extension_atr=max(0.0, _number(
+                self._param("location_reclaim_min_close_extension_atr", 0.1)
+            )),
+        )
 
     @staticmethod
     def _hierarchy_snapshot(hierarchy: Dict) -> Dict:
@@ -603,27 +615,6 @@ class StructurePlanBuilder:
                 "confidence": 72 if pivot.get("layer") == "swing" else 66,
                 "anchor_index": int(pivot.get("index") or len(rows) - 1),
             })
-        protected_name = "protected_low" if direction == "buy" else "protected_high"
-        for layer, confidence in (("swing", 76), ("internal", 68)):
-            protected = (hierarchy.get(layer) or {}).get(protected_name) or {}
-            price = _number(protected.get("price"))
-            if price > 0:
-                result.append({
-                    "price": price, "source": f"{layer} {protected_name}",
-                    "confidence": confidence,
-                    "anchor_index": int(protected.get("index") or len(rows) - 1),
-                })
-        line = self._projected_trendline(
-            structure, direction, len(rows) - 1,
-            max(2, int(self._param("min_trendline_touches", 2))),
-        )
-        if line:
-            result.append({
-                "price": _number(line["projected_price"]),
-                "source": "上升支撑线" if direction == "buy" else "下降压力线",
-                "confidence": min(85, 62 + int(line.get("touches") or 0) * 4),
-                "anchor_index": int(line.get("anchor_index") or len(rows) - 1),
-            })
         unique = {}
         for item in result:
             key = round(_number(item["price"]), 8)
@@ -652,6 +643,33 @@ class StructurePlanBuilder:
         close = _number(latest.get("close") or latest.get("close_price"))
         atr = max(1e-9, _number(structure.get("atr")))
         hierarchy = structure.get("structure_hierarchy") or {}
+        expected_bias = "up" if direction == "buy" else "down"
+        swing_bias = self._direction_bias(
+            (hierarchy.get("swing") or {}).get("bias")
+        )
+        external_bias = self._direction_bias(
+            (hierarchy.get("external") or {}).get("bias")
+        )
+        internal_bias = self._direction_bias(
+            (hierarchy.get("internal") or {}).get("bias")
+            or structure.get("internal_state")
+        )
+        if self._param("location_require_swing_external_alignment", True) and (
+            swing_bias != expected_bias or external_bias != expected_bias
+        ):
+            self._reject(
+                f"趋势回撤要求 Swing/External 同向：计划={expected_bias}，"
+                f"Swing={swing_bias}，External={external_bias}"
+            )
+            return []
+        if self._param("location_require_internal_confirmation", True) and (
+            internal_bias != expected_bias
+        ):
+            self._reject(
+                f"Internal 当前为 {internal_bias}，等待向 {expected_bias} 的 "
+                "CHOCH/BOS 确认回撤结束"
+            )
+            return []
         protected_name = "protected_low" if direction == "buy" else "protected_high"
         swing_protected = self._layer_price(hierarchy, "swing", protected_name)
         if swing_protected and (
@@ -666,7 +684,7 @@ class StructurePlanBuilder:
         proximity = atr * max(0.05, _number(self._param("location_proximity_atr", 0.6)))
         candidates = self._location_candidates(rows, structure, direction)
         if not candidates:
-            self._reject("当前趋势没有可用的 HL/LH、保护点或有效趋势线")
+            self._reject("当前趋势没有可用的已确认 HL/LH，保护点仅用于止损和失效判断")
             return []
         nearby = [item for item in candidates if abs(item["price"] - close) <= proximity]
         if not nearby:
@@ -685,14 +703,24 @@ class StructurePlanBuilder:
             "touch_and_reclaim"
             if self._param("require_location_reclaim", True) else "touch_or_near"
         )
-        if entry_mode == "touch_and_reclaim" and not self._location_reclaim_confirmed(
-            rows, entry, direction, atr
-        ):
-            self._reject(
-                f"最近收盘K线尚未触碰并{'站回' if direction == 'buy' else '跌回'}"
-                f"{level['source']} {entry:.2f}，不提前生成趋势回撤计划"
+        validation_evidence = {
+            "expected_bias": expected_bias,
+            "swing_bias": swing_bias,
+            "external_bias": external_bias,
+            "internal_bias": internal_bias,
+            "entry_level_type": "HL" if direction == "buy" else "LH",
+            "entry_level_source": level["source"],
+        }
+        if entry_mode == "touch_and_reclaim":
+            accepted, reclaim_evidence, rejection = self._location_reclaim_confirmation(
+                rows, entry, direction, atr
             )
-            return []
+            validation_evidence["reclaim"] = reclaim_evidence
+            if not accepted:
+                self._reject(
+                    f"{level['source']} {entry:.2f} 回收确认不足：{rejection}"
+                )
+                return []
         stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
         target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
         protected = self._protected_reference(hierarchy, direction, entry)
@@ -725,14 +753,15 @@ class StructurePlanBuilder:
             ),
             confidence=int(level["confidence"]),
             reason=(
-                f"{period} {'上涨' if direction == 'buy' else '下跌'}主结构中，"
-                f"价格进入{level['source']} {entry:.2f} 附近，等待触及后"
-                f"{'回收' if entry_mode == 'touch_and_reclaim' else '确认'}顺势"
+                f"{period} {'上涨' if direction == 'buy' else '下跌'}结构中，"
+                f"Internal/Swing/External 同向；价格触及并有效回收 "
+                f"{level['source']} {entry:.2f}，顺势"
                 f"{'买入' if direction == 'buy' else '卖出'}"
             ),
             valid_from=bar_time, expires_at=bar_time + seconds * valid_bars,
             invalidation_price=sl, structure_snapshot=snapshot,
             price_discovery=price_discovery,
+            validation_evidence=validation_evidence,
         )
         return [plan] if plan else []
 

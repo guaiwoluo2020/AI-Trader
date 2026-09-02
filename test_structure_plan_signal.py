@@ -48,6 +48,16 @@ class _Repository:
     def list_current(self, *args):
         return list(self.plans)
 
+    def update_payload(self, plan_id, updates):
+        for plan in self.plans:
+            if plan.get("plan_id") == plan_id:
+                plan.update(updates)
+
+    def invalidate_plan(self, plan_id, reason):
+        for plan in self.plans:
+            if plan.get("plan_id") == plan_id:
+                plan.update({"status": "invalidated", "invalidated_reason": reason})
+
 
 def _range_structure(status="confirmed", direction=""):
     return {
@@ -125,6 +135,16 @@ class StructurePlanTests(unittest.TestCase):
 
     def setUp(self):
         self.store = _KlineStore()
+
+    def _valid_location_reclaim(self, direction):
+        if direction == "up":
+            self.store.rows[-1].update({
+                "open": 109.8, "high": 111.2, "low": 109.4, "close": 110.8,
+            })
+        else:
+            self.store.rows[-1].update({
+                "open": 110.6, "high": 111.0, "low": 108.8, "close": 109.2,
+            })
 
     def test_confirmed_range_builds_boundary_and_breakout_plans(self):
         plans = StructurePlanBuilder().build(
@@ -293,9 +313,8 @@ class StructurePlanTests(unittest.TestCase):
         self.assertFalse(generator.generate_signals_for_strategy(
             "BTCUSD", 110.0, strategy
         )[0].state_ready)
-        generator.generate_signals_for_strategy("BTCUSD", 99.8, strategy)
         signal = generator.generate_signals_for_strategy(
-            "BTCUSD", 100.1, strategy
+            "BTCUSD", 99.8, strategy
         )[0]
         self.assertTrue(signal.state_ready)
         self.assertEqual(signal.action, "buy")
@@ -394,7 +413,7 @@ class StructurePlanTests(unittest.TestCase):
 
     def test_downtrend_near_lh_builds_sell_location_plan(self):
         structure = _trend_structure("down")
-        self.store.rows[-1]["close"] = 109.7
+        self._valid_location_reclaim("down")
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
@@ -405,7 +424,7 @@ class StructurePlanTests(unittest.TestCase):
 
     def test_uptrend_near_hl_builds_buy_location_plan(self):
         structure = _trend_structure("up")
-        self.store.rows[-1]["close"] = 110.2
+        self._valid_location_reclaim("up")
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
@@ -443,13 +462,78 @@ class StructurePlanTests(unittest.TestCase):
         self.assertEqual(plans[0]["setup_type"], "no_trade")
         self.assertIn("没有可用", plans[0]["reason"])
 
+    def test_location_requires_swing_and_external_alignment(self):
+        structure = _trend_structure("up")
+        structure["structure_hierarchy"]["external"]["bias"] = "down"
+        self._valid_location_reclaim("up")
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("Swing/External 同向", plans[0]["reason"])
+
+    def test_location_waits_for_internal_to_return_to_trend(self):
+        structure = _trend_structure("down")
+        structure["internal_state"] = "up"
+        structure["structure_hierarchy"]["internal"]["bias"] = "up"
+        self._valid_location_reclaim("down")
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("CHOCH/BOS", plans[0]["reason"])
+
+    def test_location_does_not_use_protected_level_or_trendline_as_entry(self):
+        structure = _trend_structure("down")
+        for layer in structure["structure_hierarchy"].values():
+            layer["pivots"] = []
+        structure["trendlines"] = [{
+            "kind": "resistance", "anchor_price": 111.0,
+            "anchor_index": 30, "slope": -0.03, "touches": 4,
+            "broken_at": None, "score": 90,
+        }]
+        self._valid_location_reclaim("down")
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("保护点仅用于止损", plans[0]["reason"])
+
+    def test_location_reclaim_requires_directional_body_and_close_extension(self):
+        structure = _trend_structure("up")
+        self.store.rows[-1].update({
+            "open": 110.7, "high": 111.0, "low": 110.4, "close": 110.6,
+        })
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("实体方向", plans[0]["reason"])
+
+    def test_location_plan_saves_alignment_and_reclaim_evidence(self):
+        structure = _trend_structure("up")
+        self._valid_location_reclaim("up")
+        plan = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )[0]
+        self.assertEqual(plan["setup_type"], "structure_location_pullback")
+        self.assertEqual(plan["validation_evidence"]["swing_bias"], "up")
+        self.assertEqual(plan["validation_evidence"]["external_bias"], "up")
+        self.assertEqual(plan["validation_evidence"]["internal_bias"], "up")
+        self.assertGreaterEqual(
+            plan["validation_evidence"]["reclaim"]["body_atr"], 0.3
+        )
+        self.assertGreaterEqual(
+            plan["validation_evidence"]["reclaim"]["close_extension_atr"], 0.1
+        )
+
     def test_location_plan_reports_low_risk_reward_rejection(self):
         structure = _trend_structure("down")
         structure["structure_hierarchy"]["swing"]["weak_low"]["price"] = 106.0
         structure["structure_hierarchy"]["swing"]["protected_low"]["price"] = 106.0
         structure["structure_hierarchy"]["external"]["weak_low"]["price"] = 106.0
         structure["structure_hierarchy"]["external"]["protected_low"]["price"] = 106.0
-        self.store.rows[-1]["close"] = 109.8
+        self._valid_location_reclaim("down")
         plans = StructurePlanBuilder({"trend_min_real_risk_reward": 2.0}).build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
@@ -463,7 +547,7 @@ class StructurePlanTests(unittest.TestCase):
                 layer["weak_high"]["price"] = 112.2
             if layer.get("protected_high"):
                 layer["protected_high"]["price"] = 112.2
-        self.store.rows[-1]["close"] = 110.0
+        self._valid_location_reclaim("up")
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
@@ -478,7 +562,7 @@ class StructurePlanTests(unittest.TestCase):
         for layer in structure["structure_hierarchy"].values():
             layer.pop("weak_high", None)
             layer.pop("protected_high", None)
-        self.store.rows[-1]["close"] = 110.2
+        self._valid_location_reclaim("up")
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
@@ -496,7 +580,7 @@ class StructurePlanTests(unittest.TestCase):
                 layer["weak_high"]["price"] = 111.9
             if layer.get("protected_high"):
                 layer["protected_high"]["price"] = 111.9
-        self.store.rows[-1]["close"] = 110.0
+        self._valid_location_reclaim("up")
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
@@ -510,7 +594,7 @@ class StructurePlanTests(unittest.TestCase):
                 layer["weak_low"]["price"] = 107.7
             if layer.get("protected_low"):
                 layer["protected_low"]["price"] = 107.7
-        self.store.rows[-1]["close"] = 110.0
+        self._valid_location_reclaim("down")
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
