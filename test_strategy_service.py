@@ -427,8 +427,8 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertTrue(second[0].is_entry_trigger)
         self.assertEqual(second[0].action, "buy")
         self.assertEqual(second[0].source_period, "M1")
-        self.assertEqual(second[0].suggested_sl, 0)
-        self.assertEqual(second[0].suggested_tp, 0)
+        self.assertEqual(second[0].suggested_sl, 4099.0)
+        self.assertAlmostEqual(second[0].suggested_tp, 4101.0 * 1.0037, places=6)
 
     def test_signal_generation_assigns_each_signal_to_its_strategy(self):
         service = SignalService()
