@@ -46,12 +46,16 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "triangle_breakout_require_swing_external_alignment": True,
     "range_plan_valid_bars": 12, "location_plan_valid_bars": 6,
     "require_range_boundary_reclaim": False, "require_location_reclaim": True,
-    # Trend continuation is intentionally conservative: a close-confirmed
-    # break must also retest and hold the broken level before a plan is
-    # tradable.  Keep the threshold aligned with the structure engine.
-    "min_breakout_displacement_atr": 0.8,
+    # Trend continuation accepts either a held retest or two consecutive
+    # closes outside the broken level.  M1 gets a slightly longer observation
+    # window because five one-minute bars are still a short-lived event.
+    "max_event_age_bars": 2,
+    "trend_max_event_age_bars_m1": 5,
+    "trend_max_event_age_bars_other": 3,
+    "min_breakout_displacement_atr": 0.6,
     "trend_retest_tolerance_atr": 0.25,
     "trend_min_retest_bars": 1,
+    "trend_continuation_hold_bars": 2,
     "min_choch_displacement_atr": 0.2,
     "min_trendline_touches": 2,
 }
@@ -236,25 +240,93 @@ class StructurePlanBuilder:
         """
         return protected_reference(hierarchy, direction, entry)
 
-    def _trend_retest_confirmed(self, rows: List[Dict], event: Dict, atr: float) -> bool:
-        """Require a post-break bar to touch the broken level and reclaim it."""
-        index = int(event.get("confirmed_at", event.get("index", -1)) or -1)
+    def _trend_entry_confirmation(
+        self, rows: List[Dict], event: Dict, atr: float,
+    ) -> tuple[str, float, Dict]:
+        """Resolve a BOS entry as a retest or a sustained no-retest break."""
         level = _number(event.get("level"))
         direction = str(event.get("direction") or "")
-        if index < 0 or level <= 0 or direction not in {"up", "down"}:
-            return False
-        tolerance = max(0.0, _number(self._param("trend_retest_tolerance_atr", 0.25))) * max(atr, 1e-9)
-        required = max(1, int(self._param("trend_min_retest_bars", 1)))
-        confirmed = 0
-        for row in rows[index + 1:]:
-            high, low, close = _number(row.get("high") or row.get("high_price")), _number(row.get("low") or row.get("low_price")), _number(row.get("close") or row.get("close_price"))
-            if direction == "up" and low <= level + tolerance and close >= level:
-                confirmed += 1
-            elif direction == "down" and high >= level - tolerance and close <= level:
-                confirmed += 1
-            if confirmed >= required:
-                return True
-        return False
+        event_index = int(event.get("confirmed_at", event.get("index", -1)) or -1)
+        evidence = {
+            "confirmation_mode": "",
+            "breakout_level": round(level, 8),
+            "required_hold_bars": max(
+                2, int(self._param("trend_continuation_hold_bars", 2))
+            ),
+        }
+        if level <= 0 or direction not in {"up", "down"} or event_index < 0:
+            return "", 0.0, evidence
+
+        confirmation = str(event.get("confirmation") or "")
+        retest_status = str(event.get("retest_status") or "")
+        confirmation_index = int(
+            event.get("confirmation_index", event_index) or event_index
+        )
+        confirmation_index = min(len(rows) - 1, max(0, confirmation_index))
+        if confirmation in {"retest_confirmed"} or retest_status in {
+            "touched_and_held", "retest_confirmed",
+        }:
+            evidence.update({
+                "confirmation_mode": "retest",
+                "confirmation_bar_index": confirmation_index,
+            })
+            return "breakout_retest", level, evidence
+        if confirmation in {"continuation_confirmed"} or retest_status in {
+            "held_without_touch", "continuation_confirmed",
+        }:
+            entry = _number(rows[confirmation_index].get("close") or rows[confirmation_index].get("close_price"))
+            evidence.update({
+                "confirmation_mode": "continuation_hold",
+                "confirmation_bar_index": confirmation_index,
+                "confirmation_close": round(entry, 8),
+            })
+            return "touch_or_near", entry, evidence
+
+        tolerance = max(
+            0.0, _number(self._param("trend_retest_tolerance_atr", 0.25))
+        ) * max(atr, 1e-9)
+        required_hold = evidence["required_hold_bars"]
+        start_index = int(event.get("break_confirmed_at", event_index) or event_index)
+        start_index = min(len(rows) - 1, max(0, start_index))
+        breakout_close = _number(
+            rows[start_index].get("close") or rows[start_index].get("close_price")
+        )
+        held_count = int(
+            (direction == "up" and breakout_close >= level)
+            or (direction == "down" and breakout_close <= level)
+        )
+        for index, row in enumerate(rows[start_index + 1:], start=start_index + 1):
+            high = _number(row.get("high") or row.get("high_price"))
+            low = _number(row.get("low") or row.get("low_price"))
+            close = _number(row.get("close") or row.get("close_price"))
+            touched_and_held = (
+                direction == "up" and low <= level + tolerance and close >= level
+            ) or (
+                direction == "down" and high >= level - tolerance and close <= level
+            )
+            if touched_and_held:
+                evidence.update({
+                    "confirmation_mode": "retest",
+                    "confirmation_bar_index": index,
+                    "confirmation_close": round(close, 8),
+                })
+                return "breakout_retest", level, evidence
+            held = (
+                direction == "up" and close >= level
+            ) or (
+                direction == "down" and close <= level
+            )
+            held_count = held_count + 1 if held else 0
+            if held_count >= required_hold:
+                evidence.update({
+                    "confirmation_mode": "continuation_hold",
+                    "confirmation_bar_index": index,
+                    "confirmation_close": round(close, 8),
+                    "held_bars": held_count,
+                })
+                return "touch_or_near", close, evidence
+        evidence["held_bars"] = held_count
+        return "", 0.0, evidence
 
     def _location_reclaim_confirmation(
         self, rows: List[Dict], entry: float, direction: str, atr: float,
@@ -523,21 +595,21 @@ class StructurePlanBuilder:
         )
         if plans:
             return plans
-        # A fresh CHOCH is a reversal candidate and must be evaluated before
-        # ordinary trend-location plans, otherwise the old trend could mask it.
+        # Fresh structural events take precedence over ordinary location
+        # pullbacks.  If the event fails its own quality gates we still fall
+        # back to a valid HL/LH location plan below.
         latest_event = (structure.get("internal_events") or [])[-1:]
-        if latest_event and latest_event[0].get("type") == "choch":
+        if latest_event and latest_event[0].get("type") in {"choch", "bos"}:
             plans = self._event_plans(
                 source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
             )
             if plans:
                 return plans
-        else:
-            plans = self._location_plans(
-                source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
-            )
-            if plans:
-                return plans
+        plans = self._location_plans(
+            source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
+        )
+        if plans:
+            return plans
         plans = self._event_plans(
             source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
         )
@@ -1085,22 +1157,38 @@ class StructurePlanBuilder:
         hierarchy = structure.get("structure_hierarchy") or {}
         swing = hierarchy.get("swing") or {}
         latest = events[-1]
+        event_type = str(latest.get("type") or "")
         event_index = int(latest.get("confirmed_at", latest.get("index", -1)) or -1)
         age = len(rows)-1-event_index
-        max_age = max(0, int(self._param("max_event_age_bars", 2)))
+        if event_type == "bos":
+            swing_phase = str(swing.get("phase") or "")
+            setup = (
+                "structure_reversal"
+                if swing_phase == "reversal_confirmed"
+                else "trend_continuation"
+            )
+            self._activate_setup(setup)
+            max_age_key = (
+                "trend_max_event_age_bars_m1"
+                if str(period).upper() == "M1"
+                else "trend_max_event_age_bars_other"
+            )
+            max_age = max(1, int(self._param(
+                max_age_key, 5 if str(period).upper() == "M1" else 3,
+            )))
+        else:
+            setup = ""
+            max_age = max(0, int(self._param("max_event_age_bars", 2)))
         if event_index < 0 or age < 0 or age > max_age:
             return []
         anchor = _bar_time(rows[event_index]) if event_index < len(rows) else bar_time
-        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-        expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
 
-        if latest.get("type") == "choch" and self._param("enable_choch", True):
+        if event_type == "choch" and self._param("enable_choch", True):
             self._activate_setup("choch_reversal")
             entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
             stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
             target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
+            expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
             direction_state = str(latest.get("direction") or "")
             if direction_state not in {"up", "down"}:
                 self._reject("CHOCH 事件没有明确的反转方向")
@@ -1152,11 +1240,12 @@ class StructurePlanBuilder:
             )
             return [plan] if plan else []
 
-        if latest.get("type") == "liquidity_sweep" and self._param("enable_liquidity_sweep", True):
+        if event_type == "liquidity_sweep" and self._param("enable_liquidity_sweep", True):
             self._activate_setup("liquidity_sweep_reclaim")
             entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
             stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
             target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
+            expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
             swept = str(latest.get("direction") or "")
             direction = "sell" if swept == "up" else "buy"
             major = str(
@@ -1203,27 +1292,35 @@ class StructurePlanBuilder:
             )
             return [plan] if plan else []
 
-        if latest.get("type") != "bos" or not self._param("enable_trend", True):
+        if event_type != "bos" or not self._param("enable_trend", True):
             return []
         direction_state = str(latest.get("direction") or "")
         major = str(structure.get("major_state") or "")
-        current = str(structure.get("current_state") or structure.get("internal_state") or "")
-        if direction_state != major or current != major or major not in {"up", "down"}:
-            self._reject("趋势延续要求主结构、当前结构与突破方向一致")
+        swing_bias = self._direction_bias(swing.get("bias") or major)
+        if direction_state != major or swing_bias != major or major not in {"up", "down"}:
+            self._reject("趋势延续要求主结构、Swing 与突破方向一致")
             return []
         displacement = _number(latest.get("displacement_atr"))
-        minimum = max(0.0, _number(self._param("min_breakout_displacement_atr", 0.8)))
+        minimum = max(0.0, _number(self._param("min_breakout_displacement_atr", 0.6)))
         if displacement < minimum:
             self._reject(f"趋势突破位移 {displacement:.2f} ATR 低于最低要求 {minimum:.2f} ATR")
             return []
-        if latest.get("confirmation") and str(latest.get("confirmation")) not in {"close_confirmed", "retest_confirmed", "continuation_confirmed"}:
+        if str(latest.get("confirmation") or "") not in {
+            "close_confirmed", "retest_confirmed", "continuation_confirmed",
+        }:
             self._reject("趋势延续必须经过收盘突破确认")
             return []
-        if latest.get("confirmation") and latest.get("retest_status") not in {"touched_and_held", "held_without_touch", "retest_confirmed", "continuation_confirmed"} and not self._trend_retest_confirmed(rows, latest, atr):
-            self._reject("趋势延续尚未完成突破后的回踩确认")
+        entry_mode, entry, confirmation_evidence = self._trend_entry_confirmation(
+            rows, latest, atr,
+        )
+        if not entry_mode or entry <= 0:
+            self._reject("趋势延续尚未完成回踩确认或连续收盘站稳")
             return []
         direction = "buy" if major == "up" else "sell"
-        entry = _number(latest.get("level"))
+        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
+        expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
         protected = self._protected_reference(hierarchy, direction, entry)
         if not protected or not entry:
             return []
@@ -1237,23 +1334,23 @@ class StructurePlanBuilder:
             target -= target_buffer
         else:
             target += target_buffer
-        swing_phase = str(swing.get("phase") or "")
-        setup = "structure_reversal" if swing_phase == "reversal_confirmed" else "trend_continuation"
-        self._activate_setup(setup)
-        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
+        confirmation_text = (
+            "回踩突破位并守住"
+            if entry_mode == "breakout_retest"
+            else f"连续 {confirmation_evidence.get('held_bars') or confirmation_evidence.get('required_hold_bars')} 根K线收在突破位外"
+        )
         plan = self._tradable_plan(
             source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-            setup_type=setup, direction=direction, entry_mode="breakout_retest",
+            setup_type=setup, direction=direction, entry_mode=entry_mode,
             status="active", entry=entry,
             zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
             stop_loss=sl, take_profit=target,
             confidence=max(60, min(95, int(60+displacement*20))),
-            reason=f"{period} {setup} BOS 已收盘确认，等待回踩突破位",
+            reason=f"{period} {setup} BOS 已收盘确认，{confirmation_text}",
             valid_from=bar_time, expires_at=expires,
             invalidation_price=sl, structure_snapshot=snapshot,
             price_discovery=price_discovery,
+            validation_evidence=confirmation_evidence,
         )
         return [plan] if plan else []
 

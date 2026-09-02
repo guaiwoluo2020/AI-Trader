@@ -16,6 +16,9 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
         "pivot_legs", "medium_pivot_legs", "large_pivot_legs", "break_confirm_bars",
         "retest_bars", "range_min_touches", "range_min_bars", "min_segment_bars",
         "trendline_min_touches", "trendline_min_bars",
+        "max_event_age_bars", "trend_max_event_age_bars_m1",
+        "trend_max_event_age_bars_other", "trend_min_retest_bars",
+        "trend_continuation_hold_bars",
     }
 
     @router.get("/admin/market-structure/config", dependencies=[Depends(require_admin)])

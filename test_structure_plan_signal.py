@@ -376,7 +376,7 @@ class StructurePlanTests(unittest.TestCase):
             }],
             "structure_hierarchy": {},
         }
-        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+        plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
         self.assertEqual([item["setup_type"] for item in plans], ["no_trade"])
@@ -608,13 +608,146 @@ class StructurePlanTests(unittest.TestCase):
         structure = _trend_structure("down")
         structure["internal_events"] = [{
             "type": "bos", "direction": "down", "level": 109.0,
-            "confirmed_at": 39, "displacement_atr": 0.8,
+            "confirmed_at": 39, "displacement_atr": 0.6,
+            "confirmation": "continuation_confirmed",
+            "retest_status": "held_without_touch",
         }]
-        self.store.rows[-1]["close"] = 106.0
+        self.store.rows[-1]["close"] = 108.5
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "trend_continuation")
+
+    def test_trend_continuation_uses_major_swing_and_bos_not_internal_bias(self):
+        structure = _trend_structure("down")
+        structure["current_state"] = "up"
+        structure["internal_state"] = "up"
+        structure["structure_hierarchy"]["internal"]["bias"] = "up"
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "down", "level": 109.0,
+            "confirmed_at": 39, "displacement_atr": 0.6,
+            "confirmation": "retest_confirmed",
+            "retest_status": "touched_and_held",
+        }]
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
         self.assertEqual(plans[0]["setup_type"], "trend_continuation")
+        self.assertEqual(plans[0]["direction"], "sell")
+
+    def test_trend_continuation_rejects_swing_direction_mismatch(self):
+        structure = _trend_structure("down")
+        structure["structure_hierarchy"]["swing"]["bias"] = "up"
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "down", "level": 109.0,
+            "confirmed_at": 39, "displacement_atr": 0.8,
+            "confirmation": "retest_confirmed",
+            "retest_status": "touched_and_held",
+        }]
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("主结构、Swing", plans[0]["reason"])
+
+    def test_trend_continuation_default_displacement_is_point_six_atr(self):
+        structure = _trend_structure("down")
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "down", "level": 109.0,
+            "confirmed_at": 39, "displacement_atr": 0.59,
+            "confirmation": "retest_confirmed",
+            "retest_status": "touched_and_held",
+        }]
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("最低要求 0.60 ATR", plans[0]["reason"])
+
+    def test_m1_trend_event_remains_eligible_for_five_bars(self):
+        structure = _trend_structure("up")
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "up", "level": 109.0,
+            "confirmed_at": 34, "displacement_atr": 0.6,
+            "confirmation": "close_confirmed",
+        }]
+        for row in self.store.rows[34:]:
+            row.update({"open": 109.4, "high": 111.0, "low": 109.3, "close": 110.0})
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M1", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "trend_continuation")
+
+    def test_no_retest_two_closes_outside_bos_create_continuation_entry(self):
+        structure = _trend_structure("up")
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "up", "level": 109.0,
+            "confirmed_at": 38, "displacement_atr": 0.6,
+            "confirmation": "close_confirmed",
+        }]
+        self.store.rows[38].update({
+            "open": 109.0, "high": 110.5, "low": 109.2, "close": 110.0,
+        })
+        self.store.rows[39].update({
+            "open": 110.0, "high": 111.0, "low": 109.8, "close": 110.5,
+        })
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "trend_continuation")
+        self.assertEqual(plans[0]["entry_mode"], "touch_or_near")
+        self.assertEqual(plans[0]["entry_price"], 110.5)
+        self.assertEqual(
+            plans[0]["validation_evidence"]["confirmation_mode"],
+            "continuation_hold",
+        )
+
+    def test_no_retest_single_close_remains_observation_only(self):
+        structure = _trend_structure("up")
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "up", "level": 109.0,
+            "confirmed_at": 39, "displacement_atr": 0.6,
+            "confirmation": "close_confirmed",
+        }]
+        self.store.rows[39].update({
+            "open": 109.0, "high": 110.5, "low": 109.2, "close": 110.0,
+        })
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("连续收盘站稳", plans[0]["reason"])
+
+    def test_m5_trend_event_expires_after_three_bars(self):
+        structure = _trend_structure("up")
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "up", "level": 109.0,
+            "confirmed_at": 35, "displacement_atr": 0.8,
+            "confirmation": "close_confirmed",
+        }]
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+
+    def test_trend_setup_profile_applies_before_quality_and_stop_calculation(self):
+        structure = _trend_structure("down")
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "down", "level": 109.0,
+            "confirmed_at": 39, "displacement_atr": 0.7,
+            "confirmation": "retest_confirmed",
+            "retest_status": "touched_and_held",
+        }]
+        profiles = [{
+            "setup_type": "trend_continuation",
+            "min_breakout_displacement_atr": 0.7,
+            "stop_buffer_atr": 1.0,
+        }]
+        plans = StructurePlanBuilder(
+            {"enable_structure_location": False}, setup_profiles=profiles,
+        ).build("source-1", "BTCUSD", "M5", self.store.rows, structure)
+        self.assertEqual(plans[0]["setup_type"], "trend_continuation")
+        self.assertEqual(plans[0]["stop_loss"], 114.0)
 
     def test_confirmed_choch_builds_reversal_plan(self):
         structure = _trend_structure("down")
