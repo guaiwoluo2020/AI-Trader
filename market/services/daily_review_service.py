@@ -16,6 +16,7 @@ from market.services.signal.structure_plan_signal import (
     resolve_structure_plan_config,
 )
 from market.store.structure_plan_store import StructureTradePlanRepository
+from market.services.daily_review_file_store import load as load_review_file, save as save_review_file
 
 
 CHINA_TZ = timezone(timedelta(hours=8))
@@ -143,8 +144,21 @@ class DailyReviewCoordinator:
         return [dict(row) for row in rows]
 
     def _save_structure(self, user_id: int, entity_id: str, payload: Dict) -> None:
+        review_path = save_review_file(user_id, entity_id, payload)
+        # Keep a compact index in MySQL; the full evidence/review lives on disk.
+        index_payload = {
+            "review_id": entity_id,
+            "review_date": payload.get("review_date"),
+            "user_id": int(user_id),
+            "symbol": payload.get("symbol", ""),
+            "period": payload.get("period", ""),
+            "status": payload.get("status", ""),
+            "generated_at": payload.get("generated_at", 0),
+            "latest_market_at": payload.get("latest_market_at", 0),
+            "review_path": str(review_path),
+        }
         RuntimeStateRepository(user_id, 0, self.storage).upsert_entity(
-            self.STRUCTURE_ENTITY, entity_id, payload,
+            self.STRUCTURE_ENTITY, entity_id, index_payload,
             symbol=str(payload.get("symbol") or ""),
             status=str(payload.get("status") or ""),
         )
@@ -574,7 +588,11 @@ class DailyReviewCoordinator:
                 max(5, min(int(limit) * 5, 450)),
             ),
         )
-        items = [_json(row["payload_json"]) for row in rows]
+        items = []
+        for row in rows:
+            index = _json(row["payload_json"])
+            item = load_review_file(index.get("review_path", "")) if index.get("review_path") else None
+            items.append(item or index)
         return [
             item for item in items
             if str(item.get("period") or "").upper() == str(period).upper()
