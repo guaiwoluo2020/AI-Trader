@@ -20,6 +20,7 @@ from mysql_repositories import TradingAccountRepository
 from mysql_repositories import get_storage
 from repositories.outbox import OutboxEventRepository
 from market.services.outbox_dispatcher import OutboxDispatcher
+from repositories.container import RepositoryContainer
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,9 @@ class TradingEngineManager:
         self._engines: Dict[EngineKey, EngineRuntime] = {}
         self._lock = threading.RLock()
         self._event_loop = None
+        # Shared repository registry used by route factories and services.
+        # Keeping one container also guarantees one MySQL pool per process.
+        self.repositories = RepositoryContainer(get_storage())
         self._account_repo = TradingAccountRepository()
         self.paper_trading = PaperTradingService()
         self.data_retention = DataRetentionService()
