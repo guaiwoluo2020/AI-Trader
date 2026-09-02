@@ -31,6 +31,12 @@ from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.strategy_config import StrategyConfigRepository
 from repositories.trading import PositionManagementEventRepository
 from repositories.trading import TradeExecutionRepository
+from market.services.entry_guard_service import EntryGuardService
+from market.services.paper_execution_reporter import PaperExecutionReporter
+from market.services.paper_matching_engine import PaperMatchingEngine
+from market.services.paper_order_service import PaperOrderService
+from market.services.paper_position_service import PaperPositionService
+from market.services.paper_accounting_service import PaperAccountingService
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 
 
@@ -67,6 +73,11 @@ class PaperTradingService:
         self.position_events = PositionManagementEventRepository(self.storage)
         self.structure_plans = StructureTradePlanRepository(self.storage)
         self.execution_reports = TradeExecutionRepository(self.storage)
+        self.execution_reporter = PaperExecutionReporter(self.execution_reports)
+        self.matching_engine = PaperMatchingEngine(self)
+        self.order_service = PaperOrderService(self)
+        self.position_service = PaperPositionService(self)
+        self.accounting_service = PaperAccountingService(self)
         self.memberships = MembershipService(self.storage)
         self._lock = threading.RLock()
         self._quotes: Dict[Tuple[int, str], Tuple[float, float]] = {}
@@ -77,23 +88,10 @@ class PaperTradingService:
                                   executed_volume: float = 0.0) -> None:
         """将 Paper 撮合结果写入与 MT5 相同的执行回执表。"""
         try:
-            self.execution_reports.record(int(user_id), int(account_id), {
-                "instruction_id": f"paper:{order.get('order_id')}",
-                "order_id": str(order.get("order_id") or ""),
-                "symbol": str(order.get("symbol") or ""),
-                "action": str(order.get("direction") or ""),
-                "status": status,
-                "success": status in {"filled", "partially_filled"},
-                "requested_price": float(order.get("requested_price") or 0),
-                "executed_price": float(executed_price or 0),
-                "requested_volume": float(order.get("requested_volume") or 0),
-                "executed_volume": float(executed_volume or 0),
-                "error_message": reason,
-                "reported_timestamp": int(time.time()),
-                "transport": "paper",
-                "strategy_id": str(order.get("strategy_id") or ""),
-                "position_attribution": json.loads(order.get("position_attribution_json") or "{}"),
-            })
+            self.execution_reporter.record(
+                user_id, account_id, order, status, reason,
+                executed_price, executed_volume,
+            )
         except Exception as exc:
             # 回执写入失败不应回滚已经完成的撮合；后续维护任务可重放。
             print(f"[PaperTrading] 执行回执写入失败 order={order.get('order_id')}: {exc}")
@@ -573,7 +571,7 @@ class PaperTradingService:
                 [],
             )
             for deployment in deployments:
-                if self._create_order(user_id, deployment, decision, now):
+                if self.order_service.create(user_id, deployment, decision, now):
                     created += 1
         return created
 
@@ -670,7 +668,7 @@ class PaperTradingService:
             return {"allowed": True, "loss_streak": streak, "scope": "deployment"}
         is_structure_setup = bool(plan_id or "structure" in signal_source)
         if is_structure_setup:
-            pause_seconds = 3600
+            pause_seconds = 3 * 3600
         release_at = int(rows[0].get("closed_at") or 0) + pause_seconds
         if int(time.time()) < release_at:
             return {
@@ -679,7 +677,7 @@ class PaperTradingService:
                 "setup_type": setup_type if is_structure_setup else "",
                 "release_at": release_at,
                 "reason": (
-                    f"SETUP {setup_type} 连续亏损 {streak} 次，已暂停该 SETUP 一小时，"
+                    f"SETUP {setup_type} 连续亏损 {streak} 次，已暂停该 SETUP 三小时，"
                     f"恢复时间 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}"
                     if is_structure_setup else
                     f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}"
@@ -697,7 +695,9 @@ class PaperTradingService:
     ) -> int:
         """Use one signal snapshot per strategy, then apply account-level checks."""
         self._expire_deployments(user_id)
-        self._expire_stale_pending_orders(user_id, symbol, int(time.time()))
+        self.matching_engine.expire_stale_pending_orders(
+            user_id, symbol, int(time.time())
+        )
         deployments = self.storage.fetchall(
             """
             SELECT d.* FROM strategy_deployments d
@@ -791,7 +791,8 @@ class PaperTradingService:
                     self._paper_risk_check(aid, s, volume, px)
                 ),
                 entry_guard=lambda s, st, action, signal, aid=account_id, dep=deployment: (
-                    self._paper_loss_streak_guard(
+                    EntryGuardService.check_paper(
+                        self._paper_loss_streak_guard,
                         user_id, aid, dep, s, st, action, signal,
                         policy_snapshot.get("config") or {},
                     )
@@ -822,7 +823,7 @@ class PaperTradingService:
                         "strategy_decision", decision.decision_id, decision_payload,
                         symbol=decision.symbol, status=decision.status,
                     )
-            if decision and decision_payload.get("action") != "none" and self._create_order(
+            if decision and decision_payload.get("action") != "none" and self.order_service.create(
                 user_id, deployment, decision_payload, now
             ):
                 created += 1
@@ -868,7 +869,7 @@ class PaperTradingService:
         symbol = str(symbol)
         with self._lock:
             self._expire_deployments(user_id)
-            self._expire_stale_pending_orders(user_id, symbol, now)
+            self.matching_engine.expire_stale_pending_orders(user_id, symbol, now)
             self._quotes[(user_id, symbol)] = (bid, ask)
             account_rows = self.storage.fetchall(
                 """
@@ -887,64 +888,12 @@ class PaperTradingService:
             )
             summary = {"filled": 0, "closed": 0, "rejected": 0}
             for row in account_rows:
-                result = self._process_account_tick(
+                result = self.matching_engine.process_account_tick(
                     user_id, int(row["id"]), symbol, bid, ask, now, pivots or [], structures or {}
                 )
                 for key in summary:
                     summary[key] += result[key]
             return summary
-
-    def _expire_stale_pending_orders(
-        self, user_id: int, symbol: str, now: int,
-    ) -> int:
-        cutoff = int(now) - self.PENDING_ORDER_TIMEOUT_SECONDS
-        orders = self.storage.fetchall(
-            """
-            SELECT order_id, account_id, decision_id, deployment_id,
-                   strategy_id, position_attribution_json
-            FROM paper_orders
-            WHERE user_id = ? AND symbol = ? AND status = 'pending'
-              AND requested_at <= ?
-            """,
-            (user_id, symbol, cutoff),
-        )
-        if not orders:
-            return 0
-        reason = "等待下一次行情撮合超时，订单已自动取消"
-        for order in orders:
-            self.storage.execute(
-                """
-                UPDATE paper_orders
-                SET status = 'canceled', rejection_reason = ?,
-                    canceled_at = ?, updated_at = ?
-                WHERE order_id = ? AND status = 'pending'
-                """,
-                (reason, now, now, order["order_id"]),
-            )
-            self._sync_paper_decision_status(
-                user_id, int(order["account_id"]), str(order["decision_id"]),
-                str(order["order_id"]), status="expired", auto_executed=False,
-            )
-            self._record_execution_receipt(
-                int(user_id), int(order["account_id"]),
-                {**dict(order), "symbol": symbol}, "timeout", reason,
-            )
-            try:
-                attribution = json.loads(
-                    order["position_attribution_json"] or "{}"
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                attribution = {}
-            plan_id = str(attribution.get("trade_plan_id") or "")
-            if plan_id:
-                self.structure_plans.record_execution(
-                    int(user_id), int(order["account_id"]),
-                    str(order["deployment_id"]), str(order["strategy_id"]),
-                    plan_id, str(attribution.get("trade_plan_group_id") or ""),
-                    "expired", order_id=str(order["order_id"]), reason=reason,
-                    payload=attribution,
-                )
-        return len(orders)
 
     def _equity_curve(self, account_id: int, page_size: int, offset: int,
                       equity_from: Optional[int] = None,
@@ -1583,709 +1532,6 @@ class PaperTradingService:
                 warnings.append("模拟账户可用保证金不足")
         return {"allowed": not warnings, "warnings": warnings}
 
-    def _create_order(self, user_id: int, deployment, decision: Dict, now: int) -> bool:
-        account_id = int(deployment["account_id"])
-        if self.storage.fetchone(
-            "SELECT 1 FROM paper_orders WHERE account_id = ? AND decision_id = ?",
-            (account_id, decision["decision_id"]),
-        ):
-            return False
-        strategy = self._deployment_strategy(user_id, deployment)
-        account_open_count = int(self.storage.fetchone(
-            "SELECT COUNT(*) AS count FROM paper_positions WHERE account_id = ? AND status = 'open'",
-            (account_id,),
-        )["count"])
-        account_limits = self.storage.fetchone(
-            "SELECT max_total_positions, max_single_volume FROM trading_accounts WHERE id = ?",
-            (account_id,),
-        )
-        account_pending_count = int(self.storage.fetchone(
-            "SELECT COUNT(*) AS count FROM paper_orders WHERE account_id = ? AND status = 'pending'",
-            (account_id,),
-        )["count"])
-        reason = (
-            str(decision.get("decision_reason") or "模拟盘独立风控未通过")
-            if decision.get("status") == "rejected" else ""
-        )
-        if not reason and account_open_count + account_pending_count >= int(
-            account_limits["max_total_positions"]
-        ):
-            reason = "已达到账户最大持仓数"
-        deployment_id = str(deployment["deployment_id"])
-        strategy_count = int(self.storage.fetchone(
-            """
-            SELECT (
-                SELECT COUNT(*) FROM paper_positions
-                WHERE account_id = ? AND deployment_id = ? AND status = 'open'
-            ) + (
-                SELECT COUNT(*) FROM paper_orders
-                WHERE account_id = ? AND deployment_id = ? AND status = 'pending'
-            ) AS count
-            """,
-            (account_id, deployment_id, account_id, deployment_id),
-        )["count"])
-        if not reason and strategy_count >= max(
-            1, int(strategy.get("max_positions", 3))
-        ):
-            reason = "已达到策略最大持仓数"
-        same_direction = int(self.storage.fetchone(
-            """
-            SELECT (
-                SELECT COUNT(*) FROM paper_positions
-                WHERE account_id = ? AND deployment_id = ? AND symbol = ?
-                  AND status = 'open' AND direction = ?
-            ) + (
-                SELECT COUNT(*) FROM paper_orders
-                WHERE account_id = ? AND deployment_id = ? AND symbol = ?
-                  AND status = 'pending' AND direction = ?
-            ) AS count
-            """,
-            (
-                account_id, deployment_id, decision["symbol"], decision["action"],
-                account_id, deployment_id, decision["symbol"], decision["action"],
-            ),
-        )["count"])
-        if not reason and same_direction >= max(
-            1, int(strategy.get("max_same_direction", 2))
-        ):
-            reason = "已达到同方向最大持仓数"
-        entry = float(decision.get("entry_price", 0))
-        sl = float(decision.get("sl", 0))
-        tp = float(decision.get("tp", 0))
-        summary = decision.get("signal_summary") or {}
-        source_id = str(summary.get("selected_signal_source_id", ""))
-        source = str(summary.get("selected_signal_source", ""))
-        management = summary.get("position_management") or {}
-        policy_snapshot = management.get("policy_snapshot") or strategy.get(
-            "position_management_policy_snapshot", {}
-        )
-        attribution = build_position_attribution(
-            summary,
-            decision_id=str(decision.get("decision_id") or ""),
-            strategy_id=str(decision.get("strategy_id") or ""),
-            strategy_name=str(decision.get("strategy_name") or ""),
-            direction=str(decision.get("action") or ""),
-            entry_reason=str(decision.get("decision_reason") or ""),
-            initial_stop_loss=sl,
-            initial_take_profit=tp,
-            initial_volume=max(0.01, float(decision.get("volume", 0.01))),
-        )
-        requested_volume = max(0.01, float(decision.get("volume", 0.01)))
-        if requested_volume > float(account_limits["max_single_volume"]):
-            reason = "超过账户单笔最大手数"
-        if not reason and not self._valid_exits(decision["action"], entry, sl, tp):
-            reason = "止盈止损价格无效"
-        order_id = uuid.uuid4().hex[:12]
-        status = "rejected" if reason else "pending"
-        trade_plan_id = str(attribution.get("trade_plan_id") or "")
-        trade_plan_group_id = str(
-            attribution.get("trade_plan_group_id") or ""
-        )
-        claimed_structure_plan = False
-        if trade_plan_id and status == "pending":
-            claimed_structure_plan = self.structure_plans.claim_execution(
-                int(user_id), account_id, deployment_id,
-                str(deployment["strategy_id"]), trade_plan_id,
-                trade_plan_group_id,
-                reason=str(decision.get("decision_reason") or ""),
-                payload=attribution,
-            )
-            if not claimed_structure_plan:
-                # Another Tick/worker (or an earlier decision) has already
-                # consumed this public plan for the same deployment.
-                return False
-        try:
-            self.storage.execute(
-                """
-                INSERT INTO paper_orders(
-                    order_id, user_id, account_id, deployment_id, strategy_id,
-                    decision_id, symbol, direction, status, requested_volume,
-                    requested_price, stop_loss, take_profit, confidence,
-                    signal_source_id, exit_mode, trailing_activation_r,
-                    trailing_distance_r, position_policy_snapshot_json,
-                    position_attribution_json,
-                    rejection_reason, requested_at, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    order_id, user_id, account_id, deployment["deployment_id"],
-                    deployment["strategy_id"], decision["decision_id"],
-                    decision["symbol"], decision["action"], status,
-                    requested_volume, entry, sl, tp,
-                    float(decision.get("confidence_score", 0)), source_id,
-                    "position_manager", 1.0, 1.0,
-                    json.dumps(policy_snapshot, ensure_ascii=False),
-                    json.dumps(attribution, ensure_ascii=False),
-                    reason, now, now, now,
-                ),
-            )
-            if trade_plan_id and status == "pending":
-                self.structure_plans.record_execution(
-                    int(user_id), account_id, deployment["deployment_id"],
-                    deployment["strategy_id"], trade_plan_id,
-                    trade_plan_group_id,
-                    "ordered", order_id=order_id,
-                    reason=str(decision.get("decision_reason") or ""),
-                    payload=attribution,
-                )
-            if status == "rejected":
-                # The order can be rejected by the creation-time second guard
-                # after the decision audit was persisted as pending.  Reflect
-                # that terminal result immediately instead of leaving the
-                # execution centre showing "等待模拟撮合" indefinitely.
-                self._sync_paper_decision_status(
-                    int(user_id), account_id, str(decision.get("decision_id") or ""),
-                    order_id, status="rejected", auto_executed=False,
-                )
-            self._record_execution_receipt(
-                int(user_id), account_id,
-                {**decision, "order_id": order_id, "direction": decision.get("action"),
-                 "requested_price": entry, "requested_volume": requested_volume,
-                 "symbol": decision.get("symbol"),
-                 "position_attribution_json": json.dumps(attribution, ensure_ascii=False)},
-                status,
-                reason,
-            )
-            return True
-        except Exception as exc:
-            if claimed_structure_plan:
-                self.structure_plans.release_claim(
-                    int(user_id), account_id, deployment_id, trade_plan_id,
-                    reason=f"模拟订单写入失败：{exc}",
-                )
-            if "UNIQUE constraint failed" in str(exc):
-                return False
-            raise
-
-    def _process_account_tick(
-        self, user_id: int, account_id: int, symbol: str,
-        bid: float, ask: float, now: int, pivots: List[Dict], structures: Dict[str, Dict],
-    ) -> Dict:
-        point_size, contract_size = market_spec(symbol)
-        settings = self._settings(account_id)
-        slippage = settings["slippage_points"] * point_size
-        configured_spread = settings["spread_points"] * point_size
-        if ask - bid < configured_spread:
-            midpoint = (ask + bid) / 2
-            bid = midpoint - configured_spread / 2
-            ask = midpoint + configured_spread / 2
-        result = {"filled": 0, "closed": 0, "rejected": 0}
-        decision_updates = []
-        with self.storage._lock, self.storage._connect() as conn:
-            conn.execute("PRAGMA foreign_keys=ON")
-            account = conn.execute(
-                "SELECT * FROM trading_accounts WHERE id = ? AND user_id = ?",
-                (account_id, user_id),
-            ).fetchone()
-            balance = float(account["balance"])
-            available_margin = float(account["free_margin"])
-            pending = conn.execute(
-                """
-                SELECT o.*, d.status AS deployment_status
-                FROM paper_orders o
-                JOIN strategy_deployments d ON d.deployment_id = o.deployment_id
-                WHERE o.account_id = ? AND o.symbol = ? AND o.status = 'pending'
-                ORDER BY o.requested_at, o.order_id
-                """,
-                (account_id, symbol),
-            ).fetchall()
-            open_count = int(conn.execute(
-                "SELECT COUNT(*) AS count FROM paper_positions WHERE account_id = ? AND status = 'open'",
-                (account_id,),
-            ).fetchone()["count"])
-            for order in pending:
-                if order["deployment_status"] != "active":
-                    self._reject_order(conn, order["order_id"], "策略运行已暂停", now)
-                    result["rejected"] += 1
-                    continue
-                try:
-                    strategy = self._strategy_config(user_id, order["strategy_id"])
-                except ValueError:
-                    self._reject_order(conn, order["order_id"], "来源策略已删除", now)
-                    result["rejected"] += 1
-                    continue
-                if open_count >= int(account["max_total_positions"]):
-                    self._reject_order(conn, order["order_id"], "成交时已达到账户最大持仓数", now)
-                    result["rejected"] += 1
-                    continue
-                deployment_open_count = int(conn.execute(
-                    "SELECT COUNT(*) AS count FROM paper_positions "
-                    "WHERE account_id = ? AND deployment_id = ? AND status = 'open'",
-                    (account_id, order["deployment_id"]),
-                ).fetchone()["count"])
-                if deployment_open_count >= max(
-                    1, int(strategy.get("max_positions", 3))
-                ):
-                    self._reject_order(conn, order["order_id"], "成交时已达到策略最大持仓数", now)
-                    result["rejected"] += 1
-                    continue
-                deployment_direction_count = int(conn.execute(
-                    "SELECT COUNT(*) AS count FROM paper_positions "
-                    "WHERE account_id = ? AND deployment_id = ? AND symbol = ? "
-                    "AND status = 'open' AND direction = ?",
-                    (account_id, order["deployment_id"], symbol, order["direction"]),
-                ).fetchone()["count"])
-                if deployment_direction_count >= max(
-                    1, int(strategy.get("max_same_direction", 2))
-                ):
-                    self._reject_order(
-                        conn, order["order_id"], "成交时已达到同方向最大持仓数", now
-                    )
-                    result["rejected"] += 1
-                    continue
-                fill_price = ask + slippage if order["direction"] == "buy" else bid - slippage
-                if not self._valid_exits(
-                    order["direction"], fill_price,
-                    float(order["stop_loss"]), float(order["take_profit"]),
-                ):
-                    self._reject_order(conn, order["order_id"], "滑点后止盈止损无效", now)
-                    result["rejected"] += 1
-                    continue
-                volume = float(order["requested_volume"])
-                required_margin = fill_price * volume * contract_size / settings["leverage"]
-                if required_margin > available_margin:
-                    self._reject_order(conn, order["order_id"], "可用保证金不足", now)
-                    result["rejected"] += 1
-                    continue
-                commission = volume * settings["commission_per_lot"]
-                balance -= commission
-                available_margin -= required_margin + commission
-                position_id = uuid.uuid4().hex[:12]
-                conn.execute(
-                    """
-                    UPDATE paper_orders SET status = 'filled', filled_volume = ?,
-                        filled_price = ?, filled_at = ?, updated_at = ?
-                    WHERE order_id = ?
-                    """,
-                    (volume, fill_price, now, now, order["order_id"]),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO paper_positions(
-                        position_id, user_id, account_id, order_id, deployment_id,
-                        strategy_id, symbol, direction, status, volume,
-                        close_reason,
-                        entry_price, stop_loss, take_profit, open_commission,
-                        current_price, remaining_volume,
-                        partial_levels_done_json, signal_source_id, exit_mode,
-                        trailing_activation_r, trailing_distance_r, initial_risk,
-                        favorable_price, position_policy_snapshot_json,
-                        position_attribution_json,
-                        opened_at, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        position_id, user_id, account_id, order["order_id"],
-                        order["deployment_id"], order["strategy_id"], symbol,
-                        order["direction"], volume, fill_price, order["stop_loss"],
-                        order["take_profit"], commission,
-                        bid if order["direction"] == "buy" else ask,
-                        volume, "[]",
-                        order["signal_source_id"], order["exit_mode"],
-                        order["trailing_activation_r"], order["trailing_distance_r"],
-                        abs(fill_price - float(order["stop_loss"])), fill_price,
-                        order["position_policy_snapshot_json"],
-                        order["position_attribution_json"],
-                        now, now, now,
-                    ),
-                )
-                decision_updates.append((
-                    str(order["decision_id"]), str(order["order_id"]),
-                    "confirmed", True,
-                ))
-                policy_snapshot = json.loads(order["position_policy_snapshot_json"] or "{}")
-                conn.execute(
-                    """
-                    INSERT INTO position_management_events(
-                        event_id, user_id, account_id, position_key, position_id,
-                        ticket, symbol, event_time, event_type, rule_type, status,
-                        message, price, stop_loss, take_profit, volume,
-                        payload_json, created_at
-                    ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        uuid.uuid4().hex, user_id, account_id, position_id,
-                        position_id, symbol, now, "initial_plan",
-                        "initial_plan", "triggered",
-                        "模拟成交后建立初始止损止盈保护",
-                        fill_price, float(order["stop_loss"]),
-                        float(order["take_profit"]), volume,
-                        json.dumps({
-                            "policy_id": policy_snapshot.get("policy_id", ""),
-                            "policy_name": policy_snapshot.get("name", ""),
-                            "initial_risk": abs(fill_price - float(order["stop_loss"])),
-                            "exit_levels": policy_snapshot.get("exit_levels", []),
-                            "disaster_stop_loss": policy_snapshot.get(
-                                "disaster_stop_loss", float(order["stop_loss"])
-                            ),
-                            "stop_rule": (
-                                policy_snapshot.get("config", {})
-                                .get("initial_stop_rules", [{}])[0]
-                            ),
-                            "take_profit_rule": (
-                                policy_snapshot.get("config", {})
-                                .get("initial_take_profit_rules", [{}])[0]
-                            ),
-                        }, ensure_ascii=False),
-                        now,
-                    ),
-                )
-                open_count += 1
-                result["filled"] += 1
-
-            positions = conn.execute(
-                """
-                SELECT * FROM paper_positions
-                WHERE account_id = ? AND symbol = ? AND status = 'open'
-                ORDER BY opened_at, position_id
-                """,
-                (account_id, symbol),
-            ).fetchall()
-            for position in positions:
-                mark = bid if position["direction"] == "buy" else ask
-                reason = str(position["close_reason"] or "")
-                policy_snapshot = json.loads(
-                    position["position_policy_snapshot_json"] or "{}"
-                )
-                signal_tp_partial = float(
-                    policy_snapshot.get("config", {}).get(
-                        "signal_take_profit_close_percent", 0
-                    ) or 0
-                )
-                partial_done = set(json.loads(
-                    position["partial_levels_done_json"] or "[]"
-                ))
-                if position["direction"] == "buy":
-                    if mark <= float(position["stop_loss"]):
-                        reason = "stop_loss"
-                    elif (
-                        float(position["take_profit"]) > 0
-                        and mark >= float(position["take_profit"])
-                    ):
-                        reason = (
-                            "" if signal_tp_partial > 0
-                            and "signal_take_profit" not in partial_done
-                            else "take_profit"
-                        )
-                else:
-                    if mark >= float(position["stop_loss"]):
-                        reason = "stop_loss"
-                    elif (
-                        float(position["take_profit"]) > 0
-                        and mark <= float(position["take_profit"])
-                    ):
-                        reason = (
-                            "" if signal_tp_partial > 0
-                            and "signal_take_profit" not in partial_done
-                            else "take_profit"
-                        )
-                if not reason and position["exit_mode"] == "trailing_reverse":
-                    initial_risk = float(position["initial_risk"])
-                    favorable = float(position["favorable_price"])
-                    if position["direction"] == "buy":
-                        favorable = max(favorable, mark)
-                        activated = favorable - float(position["entry_price"]) >= (
-                            initial_risk * float(position["trailing_activation_r"])
-                        )
-                        trailing_price = favorable - initial_risk * float(
-                            position["trailing_distance_r"]
-                        )
-                        if activated and mark <= trailing_price:
-                            reason = "trailing_stop"
-                    else:
-                        favorable = min(favorable, mark)
-                        activated = float(position["entry_price"]) - favorable >= (
-                            initial_risk * float(position["trailing_activation_r"])
-                        )
-                        trailing_price = favorable + initial_risk * float(
-                            position["trailing_distance_r"]
-                        )
-                        if activated and mark >= trailing_price:
-                            reason = "trailing_stop"
-                    conn.execute(
-                        "UPDATE paper_positions SET favorable_price = ? WHERE position_id = ?",
-                        (favorable, position["position_id"]),
-                    )
-                if not reason and position["exit_mode"] == "position_manager":
-                    favorable = float(position["favorable_price"] or position["entry_price"])
-                    favorable = (
-                        max(favorable, mark) if position["direction"] == "buy"
-                        else min(favorable, mark)
-                    )
-                    # Position-manager trailing exits depend on the historical
-                    # high/low watermark. Persist it even when this Tick does
-                    # not emit an action, otherwise the next Tick would reload
-                    # the stale value and a later pullback could not trigger.
-                    conn.execute(
-                        "UPDATE paper_positions SET favorable_price = ? "
-                        "WHERE position_id = ?",
-                        (favorable, position["position_id"]),
-                    )
-                    position_state = dict(position)
-                    position_state["favorable_price"] = favorable
-                    position_state["remaining_volume"] = float(
-                        position["remaining_volume"] or position["volume"]
-                    )
-                    position_state["initial_volume"] = float(position["volume"])
-                    position_state["partial_levels_done"] = json.loads(
-                        position["partial_levels_done_json"] or "[]"
-                    )
-                    # 保本止损不单独占用表字段：根据当前保护价是否已到
-                    # 入场价判断，兼容已有模拟持仓并避免每个 TICK 重复触发。
-                    entry_price = float(position["entry_price"])
-                    current_sl = float(position["stop_loss"] or 0)
-                    position_state["break_even_done"] = bool(
-                        (position["direction"] == "buy" and current_sl >= entry_price)
-                        or (position["direction"] == "sell" and current_sl <= entry_price)
-                    )
-                    max_bars = 0
-                    period_seconds = {
-                        "M1": 60, "M5": 300, "M15": 900,
-                        "H1": 3600, "H4": 14400,
-                    }
-                    for rule in policy_snapshot.get("config", {}).get("management_rules", []):
-                        if rule.get("type") == "max_holding_bars":
-                            seconds = period_seconds.get(rule.get("period", "M1"), 60)
-                            max_bars = max(max_bars, (now - int(position["opened_at"])) // seconds)
-                    position_state["holding_bars"] = max_bars
-                    attribution = json.loads(position["position_attribution_json"] or "{}")
-                    position_state["exit_levels"] = list(
-                        attribution.get("exit_levels") or []
-                    )
-                    structure_period = str(attribution.get("signal_source_period") or "M5").upper()
-                    structure = structures.get(structure_period) or {}
-                    action = self.position_manager.evaluate(
-                        policy_snapshot.get("config", {}), position_state,
-                        {"price": mark, "time": now,
-                         "atr": float(structure.get("atr") or 0),
-                         "structure_hierarchy": structure.get("structure_hierarchy") or {}}, pivots=pivots,
-                    )
-                    for event in action.events:
-                        if event.get("status") == "triggered":
-                            # Persist the effective value so the timeline shows
-                            # the new protection level rather than the old one.
-                            event_stop_loss = event.get(
-                                "new_stop_loss", position["stop_loss"]
-                            )
-                            self.position_events.record(
-                                user_id, account_id, position["position_id"],
-                                event.get("rule_type", "position_management"),
-                                event.get("message", ""),
-                                symbol=symbol,
-                                position_id=position["position_id"],
-                                rule_type=event.get("rule_type", ""),
-                                status=event.get("status", ""),
-                                price=event.get("price", mark),
-                                stop_loss=event_stop_loss,
-                                take_profit=position["take_profit"],
-                                volume=position_state["remaining_volume"],
-                                payload=event,
-                                event_time=now,
-                            )
-                    if action.action == "close":
-                        reason = action.reason
-                    elif action.action == "partial_close" and action.close_volume:
-                        remaining = float(
-                            position["remaining_volume"] or position["volume"]
-                        )
-                        close_volume = min(remaining, float(action.close_volume))
-                        if close_volume > 0:
-                            multiplier = 1 if position["direction"] == "buy" else -1
-                            gross = (
-                                mark - float(position["entry_price"])
-                            ) * multiplier * close_volume * contract_size
-                            commission = close_volume * settings["commission_per_lot"]
-                            net = gross - commission
-                            risk_amount = float(position["initial_risk"] or 0) * close_volume * contract_size
-                            trade_attribution = close_position_attribution(
-                                json.loads(position["position_attribution_json"] or "{}"),
-                                action.reason or "partial_take_profit",
-                                net / risk_amount if risk_amount > 0 else 0,
-                            )
-                            balance += gross - commission
-                            trade_id = uuid.uuid4().hex[:12]
-                            done = set(position_state["partial_levels_done"])
-                            done.update(action.level_ids or [action.level_id])
-                            conn.execute(
-                                """
-                                INSERT INTO paper_trades(
-                                    trade_id, user_id, account_id, order_id, position_id,
-                                    deployment_id, strategy_id, symbol, direction, volume,
-                                    entry_price, exit_price, gross_profit, commission,
-                                    net_profit, exit_reason, opened_at, closed_at, created_at
-                                    , position_attribution_json
-                                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                (
-                                    trade_id, user_id, account_id, position["order_id"],
-                                    position["position_id"], position["deployment_id"],
-                                    position["strategy_id"], symbol, position["direction"],
-                                    close_volume, position["entry_price"], mark,
-                                    gross, commission, net,
-                                    action.reason or "partial_take_profit",
-                                    position["opened_at"], now, now,
-                                    json.dumps(trade_attribution, ensure_ascii=False),
-                                ),
-                            )
-                            conn.execute(
-                                """
-                                UPDATE paper_positions SET remaining_volume = ?,
-                                    partial_levels_done_json = ?, stop_loss = ?,
-                                    take_profit = ?, favorable_price = ?,
-                                    updated_at = ? WHERE position_id = ?
-                                """,
-                                (
-                                    max(0.0, remaining - close_volume),
-                                    json.dumps(sorted(done), ensure_ascii=False),
-                                    action.stop_loss or position["stop_loss"],
-                                    0 if action.level_id == "signal_take_profit"
-                                    else position["take_profit"],
-                                    favorable, now, position["position_id"],
-                                ),
-                            )
-                    elif action.action == "modify_sl" and action.stop_loss:
-                        conn.execute(
-                            """
-                            UPDATE paper_positions SET stop_loss = ?, favorable_price = ?,
-                                holding_bars = ?, updated_at = ? WHERE position_id = ?
-                            """,
-                            (action.stop_loss, favorable, max_bars, now,
-                             position["position_id"]),
-                        )
-                if reason:
-                    exit_price = bid - slippage if position["direction"] == "buy" else ask + slippage
-                    multiplier = 1 if position["direction"] == "buy" else -1
-                    close_volume = float(
-                        position["remaining_volume"] or position["volume"]
-                    )
-                    gross = (
-                        exit_price - float(position["entry_price"])
-                    ) * multiplier * close_volume * contract_size
-                    close_commission = close_volume * settings["commission_per_lot"]
-                    total_commission = float(position["open_commission"]) + close_commission
-                    net = gross - total_commission
-                    risk_amount = float(position["initial_risk"] or 0) * close_volume * contract_size
-                    trade_attribution = close_position_attribution(
-                        json.loads(position["position_attribution_json"] or "{}"),
-                        reason, net / risk_amount if risk_amount > 0 else 0,
-                    )
-                    balance += gross - close_commission
-                    trade_id = uuid.uuid4().hex[:12]
-                    conn.execute(
-                        """
-                        UPDATE paper_positions SET status = 'closed', current_price = ?,
-                            unrealized_profit = 0, net_profit = ?, closed_at = ?,
-                            close_price = ?, close_reason = ?, updated_at = ?
-                        WHERE position_id = ?
-                        """,
-                        (exit_price, net, now, exit_price, reason, now, position["position_id"]),
-                    )
-                    conn.execute(
-                        """
-                        INSERT INTO paper_trades(
-                            trade_id, user_id, account_id, order_id, position_id,
-                            deployment_id, strategy_id, symbol, direction, volume,
-                            entry_price, exit_price, gross_profit, commission,
-                            net_profit, exit_reason, opened_at, closed_at, created_at
-                            , position_attribution_json
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            trade_id, user_id, account_id, position["order_id"],
-                            position["position_id"], position["deployment_id"],
-                            position["strategy_id"], symbol, position["direction"],
-                            close_volume, position["entry_price"], exit_price,
-                            gross, total_commission, net, reason,
-                            position["opened_at"], now, now,
-                            json.dumps(trade_attribution, ensure_ascii=False),
-                        ),
-                    )
-                    result["closed"] += 1
-
-            equity, margin, open_positions = self._mark_all_positions(
-                conn, user_id, account_id, balance, settings["leverage"], now
-            )
-            free_margin = equity - margin
-            conn.execute(
-                """
-                UPDATE trading_accounts SET balance = ?, equity = ?,
-                    free_margin = ?, margin = ?, financial_updated_at = ?,
-                    updated_at = ? WHERE id = ?
-                """,
-                (balance, equity, free_margin, margin, now, now, account_id),
-            )
-            point_time = now - now % 60
-            conn.execute(
-                """
-                INSERT INTO paper_equity_points(
-                    account_id, point_time, user_id, balance, equity,
-                    free_margin, margin, open_positions
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(account_id, point_time) DO UPDATE SET
-                    balance = excluded.balance, equity = excluded.equity,
-                    free_margin = excluded.free_margin, margin = excluded.margin,
-                    open_positions = excluded.open_positions
-                """,
-                (
-                    account_id, point_time, user_id, balance, equity,
-                    free_margin, margin, open_positions,
-                ),
-            )
-            conn.commit()
-        for decision_id, order_id, status, auto_executed in decision_updates:
-            self._sync_paper_decision_status(
-                user_id, account_id, decision_id, order_id,
-                status=status, auto_executed=auto_executed,
-            )
-        for order in pending:
-            try:
-                attribution = json.loads(
-                    order["position_attribution_json"] or "{}"
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                attribution = {}
-            plan_id = str(attribution.get("trade_plan_id") or "")
-            if not plan_id:
-                continue
-            outcome = self.storage.fetchone(
-                "SELECT status,rejection_reason FROM paper_orders WHERE order_id=?",
-                (str(order["order_id"]),),
-            )
-            if not outcome or outcome["status"] not in {"filled", "rejected", "canceled"}:
-                continue
-            self._record_execution_receipt(
-                int(user_id), int(account_id), dict(order),
-                "filled" if outcome["status"] == "filled" else (
-                    "canceled" if outcome["status"] == "canceled" else "rejected"
-                ),
-                str(outcome["rejection_reason"] or ""),
-                executed_price=float(order.get("filled_price") or 0),
-                executed_volume=float(order.get("filled_volume") or 0),
-            )
-            self.structure_plans.record_execution(
-                int(user_id), int(account_id), str(order["deployment_id"]),
-                str(order["strategy_id"]), plan_id,
-                str(attribution.get("trade_plan_group_id") or ""),
-                str(outcome["status"]), order_id=str(order["order_id"]),
-                reason=str(outcome["rejection_reason"] or ""),
-                payload=attribution,
-            )
-        if any(result.values()):
-            parts = [
-                f"成交 {result['filled']} 笔" if result["filled"] else "",
-                f"平仓 {result['closed']} 笔" if result["closed"] else "",
-                f"拒单 {result['rejected']} 笔" if result["rejected"] else "",
-            ]
-            self._log_runtime(
-                user_id,
-                account_id,
-                "execution",
-                "，".join(part for part in parts if part),
-                {"symbol": symbol, **result},
-                now,
-            )
-        return result
-
     def reconcile_decision_statuses(self, user_id: int, account_id: int) -> None:
         """Backfill execution status for paper decisions created before a fill."""
         orders = self.storage.fetchall(
@@ -2380,40 +1626,6 @@ class PaperTradingService:
                 int(created_at or time.time()),
             ),
         )
-
-    def _mark_all_positions(
-        self, conn, user_id: int, account_id: int, balance: float,
-        leverage: float, now: int,
-    ) -> Tuple[float, float, int]:
-        rows = conn.execute(
-            "SELECT * FROM paper_positions WHERE account_id = ? AND status = 'open'",
-            (account_id,),
-        ).fetchall()
-        unrealized_total = margin = 0.0
-        for position in rows:
-            quote = self._quotes.get((user_id, position["symbol"]))
-            mark = (
-                quote[0] if position["direction"] == "buy" else quote[1]
-            ) if quote else float(position["current_price"])
-            _, contract_size = market_spec(position["symbol"])
-            multiplier = 1 if position["direction"] == "buy" else -1
-            active_volume = float(position["remaining_volume"] or position["volume"])
-            unrealized = (
-                mark - float(position["entry_price"])
-            ) * multiplier * active_volume * contract_size
-            margin += (
-                float(position["entry_price"]) * active_volume
-                * contract_size / leverage
-            )
-            unrealized_total += unrealized
-            conn.execute(
-                """
-                UPDATE paper_positions SET current_price = ?,
-                    unrealized_profit = ?, updated_at = ? WHERE position_id = ?
-                """,
-                (mark, unrealized, now, position["position_id"]),
-            )
-        return balance + unrealized_total, margin, len(rows)
 
     def _settings(self, account_id: int) -> Dict:
         row = self.storage.fetchone(

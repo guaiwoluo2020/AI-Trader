@@ -23,7 +23,7 @@ from web_account_context import resolve_web_engine
 from routes_news import _normalize_calendar, _require_items, _validate_day
 from market_event_repository import MarketEventRepository
 from market.store.structure_plan_store import StructureTradePlanRepository
-from market.services.events import ApplicationEvent, ORDER_EXECUTION_REPORTED
+from market.services.events import ApplicationEvent
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +272,8 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
     ) -> Dict:
         try:
             payload = await request.json()
-            report = TradeExecutionRepository().record(
+            server = engine_manager.get_engine_for_ea(identity)
+            report = server.execution_report_service.record(
                 identity.user_id, identity.account_id, payload
             )
             attribution = report.get("position_attribution") or {}
@@ -287,7 +288,6 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     (identity.user_id, identity.account_id, strategy_id),
                 )
                 if deployment:
-                    server = engine_manager.get_engine_for_ea(identity)
                     server.plan_execution_service.update_status(
                         user_id=identity.user_id, account_id=identity.account_id,
                         deployment_id=str(deployment["deployment_id"]),
@@ -297,7 +297,6 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                         reason=str(report.get("error_message") or ""),
                         payload=attribution,
                     )
-            server = engine_manager.get_engine_for_ea(identity)
             action = str(report.get("action") or "").lower()
             if action == "partial_close":
                 instruction_id = str(report.get("instruction_id") or "")
@@ -350,12 +349,6 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 symbol=report["symbol"],
                 message=message,
             )
-            server.event_bus.publish(ApplicationEvent(
-                ORDER_EXECUTION_REPORTED,
-                report,
-                int(identity.user_id or 0), int(identity.account_id or 0),
-                str(report.get("symbol") or ""),
-            ))
             server.event_bus.publish(ApplicationEvent(
                 "position_updated", {"report": report, "action": action},
                 int(identity.user_id or 0), int(identity.account_id or 0),

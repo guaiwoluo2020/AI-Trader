@@ -192,6 +192,25 @@ class MySQLStorage:
                     KEY idx_outbox_pending (status, next_retry_at, created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """)
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS background_tasks (
+                    task_id VARCHAR(64) NOT NULL,
+                    task_key VARCHAR(255) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                    attempts INT NOT NULL DEFAULT 0,
+                    max_retries INT NOT NULL DEFAULT 0,
+                    submitted_at BIGINT NOT NULL,
+                    started_at BIGINT NULL,
+                    finished_at BIGINT NULL,
+                    lease_until BIGINT NULL,
+                    error_message VARCHAR(1000) NOT NULL DEFAULT '',
+                    result_json JSON NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (task_id),
+                    UNIQUE KEY uq_background_task_key (task_key),
+                    KEY idx_background_task_status (status, updated_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """)
                 conn.execute(
                     """
                 CREATE TABLE IF NOT EXISTS platform_instrument_mappings (

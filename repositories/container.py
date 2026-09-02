@@ -19,6 +19,7 @@ from .trade_config import TradeConfigRepository
 from .trading import TradeExecutionRepository
 from .platform import PlatformInstrumentMappingRepository
 from .outbox import OutboxEventRepository
+from market.services.outbox_dispatcher import OutboxDispatcher
 
 
 class RepositoryContainer:
@@ -40,6 +41,7 @@ class RepositoryContainer:
         self.position_events = PositionManagementEventRepository(self.storage)
         self.position_policies = PositionManagementPolicyRepository(self.storage)
         self.outbox = OutboxEventRepository(self.storage)
+        self.outbox_dispatcher = OutboxDispatcher(self.outbox)
 
     def runtime(self, user_id: int, account_id: int) -> RuntimeStateRepository:
         return RuntimeStateRepository(user_id, account_id, self.storage)

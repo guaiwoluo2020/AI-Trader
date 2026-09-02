@@ -17,6 +17,9 @@ from ea_auth import EAIdentity
 from paper_trading import PaperTradingService
 from server import TradingServer
 from mysql_repositories import TradingAccountRepository
+from mysql_repositories import get_storage
+from repositories.outbox import OutboxEventRepository
+from market.services.outbox_dispatcher import OutboxDispatcher
 
 
 @dataclass(frozen=True)
@@ -65,7 +68,15 @@ class TradingEngineManager:
             self._scheduler_tick,
             interval_seconds=scheduler_interval_seconds,
             max_workers=int(os.getenv("AI_TRADER_TASK_WORKERS", "4")),
+            storage=get_storage(),
         )
+        # Outbox delivery shares the process MySQL pool and the same bounded
+        # scheduler; handlers are registered by the application layer.
+        self.outbox_dispatcher = OutboxDispatcher(
+            OutboxEventRepository(get_storage()),
+            retry_seconds=int(os.getenv("AI_TRADER_OUTBOX_RETRY_SECONDS", "60")),
+        )
+        self._scheduler.recover_expired_leases()
         self._scheduler_started = False
         self._paper_maintenance_enabled = os.getenv(
             "AI_TRADER_ENABLE_PAPER_MAINTENANCE", "1"
@@ -76,6 +87,7 @@ class TradingEngineManager:
         self._next_paper_maintenance_at = time.monotonic() + 10
         self._next_data_retention_at = time.monotonic() + 60
         self._next_adaptive_tuning_at = time.monotonic() + 120
+        self._next_outbox_dispatch_at = time.monotonic() + 2
         self._last_data_retention_date = ""
         self._last_daily_review_date = ""
 
@@ -119,6 +131,10 @@ class TradingEngineManager:
 
     def get_background_task(self, task_id: str):
         return self._scheduler.get_task(task_id)
+
+    def register_outbox_handler(self, event_name: str, handler: Callable) -> None:
+        """Register an idempotent handler for a durable domain event."""
+        self.outbox_dispatcher.register(event_name, handler)
 
     def get_engine_for_ea(self, identity: EAIdentity) -> TradingServer:
         return self.get_engine(identity.user_id, identity.account_id)
@@ -270,6 +286,13 @@ class TradingEngineManager:
             scheduler.submit(
                 ("system", "adaptive_signal_tuning"),
                 self.adaptive_signal_tuner.run_once,
+            )
+        if self.outbox_dispatcher.handlers and now >= self._next_outbox_dispatch_at:
+            self._next_outbox_dispatch_at = now + 2
+            scheduler.submit(
+                ("system", "outbox_dispatch"),
+                self.outbox_dispatcher.dispatch_once,
+                max_retries=1,
             )
 
         with self._lock:

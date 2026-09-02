@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 import uuid
+import json
 from dataclasses import dataclass, asdict
 from typing import Callable, Hashable, Dict, Optional, Any
 
@@ -32,6 +33,7 @@ class SharedTaskScheduler:
         tick_callback: Callable,
         interval_seconds: float = 1.0,
         max_workers: int = 4,
+        storage=None,
     ):
         self._tick_callback = tick_callback
         self._interval_seconds = max(float(interval_seconds), 0.05)
@@ -44,6 +46,31 @@ class SharedTaskScheduler:
         self._stop_event = threading.Event()
         self._thread = None
         self._workers = []
+        self._storage = storage
+
+    def _persist(self, record: TaskRecord) -> None:
+        if self._storage is None:
+            return
+        try:
+            now = int(time.time())
+            self._storage.execute(
+                """INSERT INTO background_tasks(
+                    task_id,task_key,status,attempts,max_retries,submitted_at,
+                    started_at,finished_at,lease_until,error_message,result_json,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    status=excluded.status,attempts=excluded.attempts,
+                    started_at=excluded.started_at,finished_at=excluded.finished_at,
+                    lease_until=excluded.lease_until,error_message=excluded.error_message,
+                    result_json=excluded.result_json,updated_at=excluded.updated_at""",
+                (record.task_id, record.task_key, record.status, record.attempts,
+                 record.max_retries, int(record.submitted_at),
+                 int(record.started_at or 0), int(record.finished_at or 0),
+                 int((time.time() + 60) if record.status == "running" else 0),
+                 record.error, json.dumps(record.result, ensure_ascii=False, default=str), now),
+            )
+        except Exception as exc:
+            print(f"[SharedTaskScheduler] 任务状态持久化失败: {exc}")
 
     def start(self) -> None:
         with self._lock:
@@ -79,6 +106,7 @@ class SharedTaskScheduler:
                 task_id=task_id, task_key=repr(task_key),
                 max_retries=max(0, int(max_retries)), submitted_at=time.time(),
             )
+            self._persist(self._tasks[task_id])
             self._queue.put((task_id, task_key, callback))
             return True
 
@@ -91,7 +119,44 @@ class SharedTaskScheduler:
     def list_tasks(self, limit: int = 50) -> list:
         with self._lock:
             records = sorted(self._tasks.values(), key=lambda item: item.submitted_at, reverse=True)
-            return [asdict(item) for item in records[:max(1, min(int(limit), 200))]]
+            result = [asdict(item) for item in records[:max(1, min(int(limit), 200))]]
+        if self._storage is not None and len(result) < max(1, min(int(limit), 200)):
+            try:
+                rows = self._storage.fetchall(
+                    "SELECT task_id,task_key,status,attempts,max_retries,submitted_at,"
+                    "started_at,finished_at,lease_until,error_message,result_json "
+                    "FROM background_tasks ORDER BY submitted_at DESC LIMIT ?",
+                    (max(1, min(int(limit), 200)),),
+                )
+                known = {item["task_id"] for item in result}
+                for row in rows:
+                    if row["task_id"] in known:
+                        continue
+                    item = dict(row)
+                    try:
+                        item["result"] = json.loads(item.pop("result_json") or "null")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        item["result"] = None
+                    item["error"] = item.pop("error_message", "")
+                    result.append(item)
+            except Exception as exc:
+                print(f"[SharedTaskScheduler] 任务历史读取失败: {exc}")
+        return result[:max(1, min(int(limit), 200))]
+
+    def recover_expired_leases(self) -> int:
+        """将崩溃遗留的 running 任务标记为可重试。"""
+        if self._storage is None:
+            return 0
+        now = int(time.time())
+        try:
+            return int(self._storage.execute(
+                "UPDATE background_tasks SET status='queued', lease_until=NULL, "
+                "updated_at=? WHERE status='running' AND lease_until>0 AND lease_until<?",
+                (now, now),
+            ) or 0)
+        except Exception as exc:
+            print(f"[SharedTaskScheduler] 任务租约恢复失败: {exc}")
+            return 0
 
     def is_busy(self, key_prefix: Hashable) -> bool:
         with self._lock:
@@ -146,6 +211,7 @@ class SharedTaskScheduler:
                 if record:
                     record.status = "running"
                     record.started_at = time.time()
+                    self._persist(record)
             try:
                 while True:
                     with self._lock:
@@ -161,6 +227,7 @@ class SharedTaskScheduler:
                                 record.status = "succeeded"
                                 record.result = result
                                 record.finished_at = time.time()
+                                self._persist(record)
                         break
                     except Exception as exc:
                         if attempt <= max_retries and not self._stop_event.is_set():
@@ -171,6 +238,7 @@ class SharedTaskScheduler:
                                 record.status = "failed"
                                 record.error = str(exc)[:1000]
                                 record.finished_at = time.time()
+                                self._persist(record)
                         print(f"[SharedTaskScheduler] 任务 {task_key} 执行失败: {exc}")
                         break
             finally:

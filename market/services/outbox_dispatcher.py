@@ -1,61 +1,76 @@
-"""Background delivery worker for persisted outbox events."""
+"""Durable outbox event dispatcher.
+
+The dispatcher deliberately contains no business logic. Producers persist an
+event through :class:`OutboxEventRepository`; the application registers a
+handler for the event name and this service takes care of claiming, retrying
+and recovering abandoned deliveries.
+"""
+
 from __future__ import annotations
 
-import threading
-import time
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional
 
-from .events import ApplicationEvent
+
+EventHandler = Callable[[Dict], None]
+
+
+@dataclass(frozen=True)
+class DispatchStats:
+    claimed: int = 0
+    published: int = 0
+    failed: int = 0
+    skipped: int = 0
+    recovered: int = 0
 
 
 class OutboxDispatcher:
-    def __init__(self, repository, event_bus, *, interval: float = 2.0, batch_size: int = 50):
+    """Dispatch one bounded batch of outbox events.
+
+    A handler must be idempotent because a process crash after the handler
+    completes and before ``mark_published`` can cause a redelivery.
+    """
+
+    def __init__(self, repository, *, handlers: Optional[Dict[str, EventHandler]] = None,
+                 retry_seconds: int = 60, lease_seconds: int = 30):
         self.repository = repository
-        self.event_bus = event_bus
-        self.interval = max(0.2, float(interval))
-        self.batch_size = max(1, min(int(batch_size), 200))
-        self._stop = threading.Event()
-        self._thread = None
+        self.handlers: Dict[str, EventHandler] = dict(handlers or {})
+        self.retry_seconds = max(1, int(retry_seconds))
+        self.lease_seconds = max(1, int(lease_seconds))
 
-    def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        try:
-            self.repository.recover_stale()
-        except Exception:
-            pass
-        self._thread = threading.Thread(target=self._run, name="outbox-dispatcher", daemon=True)
-        self._thread.start()
+    def register(self, event_name: str, handler: EventHandler) -> None:
+        name = str(event_name or "").strip()
+        if not name:
+            raise ValueError("事件名称不能为空")
+        self.handlers[name] = handler
 
-    def stop(self, timeout: float = 2.0) -> None:
-        self._stop.set()
-        if self._thread and self._thread is not threading.current_thread():
-            self._thread.join(max(0.1, float(timeout)))
-        self._thread = None
-
-    def dispatch_once(self) -> int:
-        self.repository.recover_stale()
-        count = 0
-        for item in self.repository.claim_pending(self.batch_size):
+    def dispatch_once(self, *, limit: int = 100) -> DispatchStats:
+        recovered = int(self.repository.recover_stale(self.lease_seconds) or 0)
+        events = self.repository.claim_pending(limit)
+        stats = DispatchStats(claimed=len(events), recovered=recovered)
+        published = failed = skipped = 0
+        for event in events:
+            handler = self.handlers.get(str(event.get("event_name") or ""))
+            if handler is None:
+                skipped += 1
+                self.repository.mark_failed(
+                    event["event_id"],
+                    f"未注册事件处理器: {event.get('event_name')}",
+                    retry_seconds=self.retry_seconds,
+                )
+                failed += 1
+                continue
             try:
-                payload = dict(item.get("payload") or {})
-                payload["_outbox_replayed"] = True
-                self.event_bus.publish(ApplicationEvent(
-                    item["event_name"], payload,
-                    int(item.get("user_id") or 0), int(item.get("account_id") or 0),
-                    str(item.get("symbol") or ""),
-                ))
-                self.repository.mark_published(item["event_id"])
-                count += 1
+                handler(event)
             except Exception as exc:
-                self.repository.mark_failed(item["event_id"], str(exc))
-        return count
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self.dispatch_once()
-            except Exception:
-                # A database outage must not kill the worker permanently.
-                pass
-            self._stop.wait(self.interval)
+                self.repository.mark_failed(
+                    event["event_id"], str(exc), retry_seconds=self.retry_seconds
+                )
+                failed += 1
+            else:
+                self.repository.mark_published(event["event_id"])
+                published += 1
+        return DispatchStats(
+            claimed=len(events), published=published, failed=failed,
+            skipped=skipped, recovered=recovered,
+        )

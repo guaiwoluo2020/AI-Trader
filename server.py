@@ -58,6 +58,14 @@ from market.services.event_audit_bridge import EventAuditBridge
 from market.services.plan_execution_service import PlanExecutionService
 from market.services.outbox_dispatcher import OutboxDispatcher
 from market.services.plan_lifecycle_service import PlanLifecycleService
+from market.services.execution_report_service import ExecutionReportService
+from market.services.setup_circuit_breaker import SetupCircuitBreaker
+from market.services.plan_replay_guard import PlanReplayGuard
+from market.services.structure_plan_execution_coordinator import StructurePlanExecutionCoordinator
+from market.services.decision_audit_service import DecisionAuditService
+from market.services.runtime_status_query_service import RuntimeStatusQueryService
+from market.services.strategy_runtime_coordinator import StrategyRuntimeCoordinator
+from market.services.entry_guard_service import EntryGuardService
 
 
 class TradingServer:
@@ -85,6 +93,19 @@ class TradingServer:
         self.structure_plans = StructureTradePlanRepository()
         self.plan_execution_service = PlanExecutionService(self.structure_plans)
         self.plan_lifecycle_service = PlanLifecycleService(self.structure_plans, self.event_bus)
+        self.setup_circuit_breaker = SetupCircuitBreaker(
+            self.repositories.storage, self.repositories.position_policies,
+        )
+        self.plan_replay_guard = PlanReplayGuard(self.repositories.storage)
+        self.entry_guard_service = EntryGuardService(
+            replay_guard=self.plan_replay_guard,
+            circuit_breaker=self.setup_circuit_breaker,
+        )
+        self.structure_plan_execution_coordinator = StructurePlanExecutionCoordinator(
+            self.structure_plans, self.plan_execution_service,
+        )
+        self.decision_audit_service = DecisionAuditService()
+        self.runtime_status_query_service = RuntimeStatusQueryService()
 
         # 线程锁
         self.lock = threading.RLock()
@@ -98,6 +119,9 @@ class TradingServer:
         self.event_audit_bridge.attach(self.event_bus, self.repositories.outbox)
         self.outbox_dispatcher = OutboxDispatcher(self.repositories.outbox, self.event_bus)
         self.outbox_dispatcher.start()
+        self.execution_report_service = ExecutionReportService(
+            self.repositories.trade_execution, self.event_bus,
+        )
 
         # ==================== 行情模块（内部） ====================
         # 存储层
@@ -172,6 +196,9 @@ class TradingServer:
         # ==================== 策略层（对外暴露） ====================
         # 存储层
         self._strategy_store = StrategyStore(user_id=user_id)
+        self.strategy_runtime_coordinator = StrategyRuntimeCoordinator(
+            self._strategy_store, self.instrument_mappings, self.account_repository,
+        )
         self.llm_service.set_strategy_store(self._strategy_store)
 
         # 风险管理器
@@ -449,141 +476,6 @@ class TradingServer:
 
     # ==================== 价格处理与决策 ====================
 
-    def _live_loss_streak_guard(self, symbol, strategy, action, signal) -> Dict:
-        """Protect one live strategy/setup/direction and consume AI plans once."""
-        if not self.user_id or not self.account_id or not self._runtime_repository:
-            return {"allowed": True, "loss_streak": 0, "scope": "live"}
-        storage = self._runtime_repository.storage
-        setup_type = str(
-            getattr(signal, "setup_type", "") or "generic_entry"
-        )
-        setup_family = str(getattr(signal, "setup_family", "") or "generic")
-        signal_source = str(getattr(signal, "source", "") or "").lower()
-        plan_id = str(
-            getattr(signal, "trade_plan_id", "")
-            or getattr(signal, "ai_plan_id", "") or ""
-        )
-        plan_valid_from = int(
-            getattr(signal, "trade_plan_valid_from", 0)
-            or getattr(signal, "ai_plan_valid_from", 0) or 0
-        )
-        plan_group_id = str(getattr(signal, "trade_plan_group_id", "") or "")
-        plan_instance_id = (
-            f"{plan_id}:{plan_valid_from}"
-            if plan_id and plan_valid_from else plan_id
-        )
-
-        if plan_instance_id:
-            consumed_payloads = storage.fetchall(
-                "SELECT payload_json FROM runtime_entities WHERE user_id = ? "
-                "AND account_id = ? AND entity_type = 'trading_instruction' "
-                "ORDER BY updated_at DESC LIMIT 500",
-                (int(self.user_id), int(self.account_id)),
-            )
-            consumed_payloads.extend(storage.fetchall(
-                "SELECT position_attribution_json AS payload_json "
-                "FROM trade_execution_reports WHERE user_id = ? AND account_id = ? "
-                "ORDER BY reported_at DESC LIMIT 500",
-                (int(self.user_id), int(self.account_id)),
-            ))
-            for item in consumed_payloads:
-                try:
-                    payload = json.loads(item.get("payload_json") or "{}")
-                except (TypeError, ValueError):
-                    payload = {}
-                attribution = (
-                    payload.get("position_attribution") or payload
-                    if isinstance(payload, dict) else {}
-                )
-                previous_plan = str(
-                    attribution.get("trade_plan_instance_id")
-                    or attribution.get("ai_plan_instance_id") or ""
-                )
-                previous_group = str(attribution.get("trade_plan_group_id") or "")
-                if (
-                    str(attribution.get("strategy_id") or "") == strategy.strategy_id
-                    and (
-                        previous_plan == plan_instance_id
-                        or (plan_group_id and previous_group == plan_group_id)
-                    )
-                ):
-                    return {
-                        "allowed": False, "scope": "live_setup",
-                        "setup_type": setup_type, "setup_family": setup_family,
-                        "plan_instance_id": plan_instance_id,
-                        "reason": "本交易计划已在此实盘部署触发过，不重复开仓",
-                    }
-
-        policy = PositionManagementPolicyRepository().get_for_strategy(
-            int(self.user_id), strategy
-        )
-        config = policy.config if policy is not None else {}
-        if not bool(config.get("loss_streak_circuit_breaker_enabled", True)):
-            return {"allowed": True, "loss_streak": 0, "scope": "deployment"}
-        limit = max(1, int(config.get("loss_streak_limit", 3) or 3))
-        pause_seconds = max(60, int(config.get("loss_streak_pause_minutes", 10) or 10) * 60)
-        # MT5 exits are grouped by position id so partial closes never count as
-        # independent losses. Attribution keeps strategies on the same account
-        # independent from each other.
-        candidates = storage.fetchall(
-            "SELECT profit, swap, commission, deal_timestamp, mt5_position_id, position_attribution_json "
-            "FROM live_trade_deals WHERE user_id = ? AND account_id = ? AND entry_type IN (1, 2, 3) "
-            "ORDER BY deal_timestamp DESC, id DESC LIMIT 1000",
-            (int(self.user_id), int(self.account_id)),
-        )
-        grouped = {}
-        for row in candidates:
-            try:
-                attribution = json.loads(row.get("position_attribution_json") or "{}")
-            except (TypeError, ValueError):
-                attribution = {}
-            if str(attribution.get("strategy_id") or "") != strategy.strategy_id:
-                continue
-            if (plan_id or "structure" in signal_source) and str(
-                attribution.get("setup_type") or "generic_entry"
-            ) != setup_type:
-                continue
-            position_id = str(row.get("mt5_position_id") or "")
-            if not position_id:
-                continue
-            item = grouped.setdefault(position_id, {"net_profit": 0.0, "closed_at": 0})
-            item["net_profit"] += sum(float(row.get(key) or 0) for key in ("profit", "swap", "commission"))
-            item["closed_at"] = max(
-                item["closed_at"], int(row.get("deal_timestamp") or 0)
-            )
-        rows = sorted(grouped.values(), key=lambda item: item["closed_at"], reverse=True)
-        streak = 0
-        for row in rows:
-            if float(row["net_profit"]) < 0:
-                streak += 1
-            else:
-                break
-        if streak < limit:
-            return {"allowed": True, "loss_streak": streak, "scope": "deployment"}
-        # Structure Plan 的熔断按 setup_type 隔离，固定暂停一小时；普通
-        # 信号继续使用原有部署级配置，避免改变既有风控行为。
-        is_structure_setup = bool(plan_id or "structure" in signal_source)
-        if is_structure_setup:
-            pause_seconds = 3600
-        release_at = int(rows[0]["closed_at"] or 0) + pause_seconds
-        if int(time.time()) < release_at:
-            return {
-                "allowed": False, "loss_streak": streak,
-                "scope": "setup_type" if is_structure_setup else "deployment",
-                "setup_type": setup_type if is_structure_setup else "",
-                "release_at": release_at,
-                "reason": (
-                    f"SETUP {setup_type} 连续亏损 {streak} 次，已暂停该 SETUP 一小时，"
-                    f"恢复时间 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}"
-                    if is_structure_setup else
-                    f"连续亏损 {streak} 次，策略部署已风险暂停至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(release_at))}"
-                ),
-            }
-        return {
-            "allowed": True, "loss_streak": streak, "scope": "deployment",
-            "cooldown_completed": True,
-        }
-
     def process_price(self, symbol: str, current_price: float) -> Dict:
         """
         处理价格变动，生成决策
@@ -660,7 +552,9 @@ class TradingServer:
         self.strategy_service.set_allowed_strategy_ids(strategy_ids)
         allowed_ids = set(strategy_ids)
         decisions = []
-        matched_strategies = self._strategies_for_quote(symbol)
+        matched_strategies = self.strategy_runtime_coordinator.strategies_for_quote(
+            self.user_id, self.account_id, symbol,
+        )
         if not matched_strategies:
             print(
                 f"[TradingServer] 未匹配到策略 user={self.user_id} "
@@ -693,7 +587,10 @@ class TradingServer:
                 continue
             decision = self.strategy_service.make_decision(
                 symbol, current_price, force_signals=signals, strategy=strategy,
-                entry_guard=self._live_loss_streak_guard,
+                entry_guard=lambda symbol, strategy, action, signal: self.entry_guard_service.check_live(
+                    int(self.user_id or 0), int(self.account_id or 0), strategy, signal,
+                    enabled=bool(self.user_id and self.account_id and self._runtime_repository),
+                ),
                 audit_no_action=True,
             )
             if decision is not None:
@@ -710,53 +607,22 @@ class TradingServer:
         for decision in decisions:
             # 3. 自动执行决策
             if decision.action != "none" and decision.status != "rejected":
-                summary = decision.signal_summary or {}
-                trade_plan_id = str(
-                    summary.get("selected_trade_plan_id") or ""
+                plan_context = self.structure_plan_execution_coordinator.claim_for_decision(
+                    int(self.user_id or 0), int(self.account_id or 0), decision,
                 )
-                trade_plan_group_id = str(
-                    summary.get("selected_trade_plan_group_id") or ""
-                )
-                deployment = None
-                claimed_structure_plan = False
-                if trade_plan_id:
-                    deployment = self.structure_plans.storage.fetchone(
-                        "SELECT deployment_id FROM strategy_deployments "
-                        "WHERE user_id=? AND account_id=? AND strategy_id=? "
-                        "AND execution_mode='live' AND status='active' LIMIT 1",
-                        (
-                            int(self.user_id or 0), int(self.account_id or 0),
-                            str(decision.strategy_id),
-                        ),
-                    )
-                    if deployment:
-                        claimed_structure_plan = self.plan_execution_service.claim(
-                            user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
-                            deployment_id=str(deployment["deployment_id"]),
-                            strategy_id=str(decision.strategy_id),
-                            plan={**summary, "plan_id": trade_plan_id,
-                                  "plan_group_id": trade_plan_group_id},
-                            reason=str(decision.decision_reason or ""),
-                        )
-                        if not claimed_structure_plan:
-                            decision.status = "rejected"
-                            decision.decision_reason = (
-                                "该公共结构计划已被当前实盘部署消费，不重复下单"
-                            )
+                if plan_context.get("plan_id") and plan_context.get("deployment") \
+                        and not plan_context.get("claimed"):
+                    decision.status = "rejected"
+                    decision.decision_reason = "该公共结构计划已被当前实盘部署消费，不重复下单"
                 order_id = (
                     self.strategy_service.execute_decision(decision)
                     if decision.status != "rejected" else None
                 )
                 if order_id:
-                    if trade_plan_id and deployment:
-                        self.plan_execution_service.record_order(
-                            user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
-                            deployment_id=str(deployment["deployment_id"]),
-                            strategy_id=str(decision.strategy_id),
-                            plan={**summary, "plan_id": trade_plan_id,
-                                  "plan_group_id": trade_plan_group_id},
-                            order_id=order_id, reason=str(decision.decision_reason or ""),
-                        )
+                    self.structure_plan_execution_coordinator.record_order(
+                        int(self.user_id or 0), int(self.account_id or 0),
+                        decision, plan_context, order_id,
+                    )
                     pending_order = {
                         "order_id": order_id,
                         "symbol": decision.symbol,
@@ -775,11 +641,10 @@ class TradingServer:
                         ORDER_COMMAND_CREATED, pending_order,
                         int(self.user_id or 0), int(self.account_id or 0), str(symbol or ""),
                     ))
-                elif claimed_structure_plan and deployment:
-                    self.plan_execution_service.release(
-                        user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
-                        deployment_id=str(deployment["deployment_id"]),
-                        plan={"plan_id": trade_plan_id}, reason="实盘待确认订单创建失败",
+                elif plan_context.get("claimed"):
+                    self.structure_plan_execution_coordinator.release(
+                        int(self.user_id or 0), int(self.account_id or 0),
+                        plan_context, "实盘待确认订单创建失败",
                     )
 
             self._record_decision(decision)
@@ -827,28 +692,9 @@ class TradingServer:
 
     def _strategies_for_quote(self, quote_symbol: str):
         """Match strategy symbols to the EA's native quote symbol."""
-        account = (
-            self.account_repository.get_by_id(self.user_id, self.account_id)
-            if self.user_id is not None and self.account_id else None
+        return self.strategy_runtime_coordinator.strategies_for_quote(
+            self.user_id, self.account_id, quote_symbol,
         )
-        target_server = str(getattr(account, "mt5_server", "") or "")
-        candidates = self._strategy_store.get_all_strategies()
-        matched = []
-        for strategy in candidates:
-            if str(strategy.symbol).upper() == str(quote_symbol).upper():
-                matched.append(strategy)
-                continue
-            source_user_id = int(
-                getattr(strategy, "source_owner_user_id", 0) or self.user_id or 0
-            )
-            source_server = self.instrument_mappings.source_server(
-                source_user_id, strategy.symbol
-            )
-            if self.instrument_mappings.compatible(
-                source_server, strategy.symbol, target_server, quote_symbol
-            ):
-                matched.append(strategy)
-        return matched
 
     def _manage_strategy_positions(
         self, strategy, symbol: str, current_price: float, signals: List[TradingSignal],
@@ -1277,51 +1123,14 @@ class TradingServer:
     # ==================== 决策历史 ====================
 
     def _record_decision(self, decision: TradingDecision) -> None:
-        if decision.action == "none" and decision.decision_type == "no_action":
-            # Quote-driven waiting states are useful operational context but
-            # must not crowd out execution history in MySQL.
-            transient_decision_store.record(
-                self.user_id, self.account_id, decision,
-            )
-            return
-        transient_decision_store.clear_for_strategy(
-            self.user_id, self.account_id, decision.strategy_id, decision.symbol,
+        self.decision_audit_service.record(
+            decision,
+            user_id=self.user_id,
+            account_id=self.account_id,
+            history=self._decision_history,
+            runtime_repository=self._runtime_repository,
+            system_log=self.system_log,
         )
-        self._decision_history.append(decision)
-        rejected = decision.status == "rejected"
-        self.system_log.add_log(
-            "risk_blocked" if rejected else "strategy_decision_created",
-            {
-                "strategy_id": decision.strategy_id,
-                "strategy_name": decision.strategy_name,
-                "action": decision.action,
-                "confidence": decision.confidence_score,
-                "entry_price": decision.entry_price,
-                "volume": decision.volume,
-                "stop_loss": decision.sl,
-                "take_profit": decision.tp,
-                "order_id": decision.order_id,
-                "position_check": decision.position_check,
-                "risk_check": decision.risk_check,
-            },
-            symbol=decision.symbol,
-            message=decision.decision_reason,
-            level="warning" if rejected else "info",
-            category="risk" if rejected else "trading",
-            status=decision.status,
-            entity_type="strategy_decision",
-            entity_id=decision.decision_id,
-            correlation_id=decision.order_id or decision.decision_id,
-        )
-        if self._runtime_repository:
-            self._runtime_repository.upsert_entity(
-                "strategy_decision",
-                decision.decision_id,
-                decision.to_dict(),
-                symbol=decision.symbol,
-                status=decision.status,
-            )
-            self._runtime_repository.trim_entities("strategy_decision", 1000)
 
     def _record_ai_plan_evaluations(self, updates: List[Dict]) -> None:
         """Persist one conclusion per deployment when an AI price plan changes."""
@@ -2016,12 +1825,4 @@ class TradingServer:
 
     def get_status(self) -> Dict:
         """获取服务状态"""
-        return {
-            "ws_clients": self.get_ws_client_count(),
-            "statistics": self.statistics_service.get_status(),
-            "positions": self.position_service.get_status(),
-            "trade_history": self.trade_history_service.get_status(),
-            "pending_orders": self.pending_order_service.get_status(),
-            "trading_instructions": self.trading_instruction_service.get_status(),
-            "strategy_service": self.strategy_service.get_status(),
-        }
+        return self.runtime_status_query_service.build(self)
