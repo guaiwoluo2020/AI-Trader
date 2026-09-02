@@ -150,6 +150,69 @@ class StructurePlanTests(unittest.TestCase):
         self.assertEqual(plans[0]["setup_type"], "range_breakout")
         self.assertEqual(plans[0]["entry_mode"], "breakout_retest")
 
+    def _confirmed_triangle(self, swing="up", external="up"):
+        structure = _triangle_structure("ascending_triangle", "up")
+        structure["external_state"] = external
+        structure["structure_hierarchy"] = {
+            "swing": {"bias": swing},
+            "external": {"bias": external},
+        }
+        structure["range"].update({
+            "status": "breakout_confirmed",
+            "active": False,
+            "breakout_direction": "up",
+            "breakout_level": 120.0,
+        })
+        return structure
+
+    def test_triangle_breakout_requires_half_atr_body(self):
+        self.store.rows[-1].update({
+            "open": 120.2, "high": 121.0, "low": 119.8, "close": 120.6,
+        })
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows,
+            self._confirmed_triangle(),
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("实体仅 0.20 ATR", plans[0]["reason"])
+
+    def test_triangle_breakout_requires_close_beyond_boundary(self):
+        self.store.rows[-1].update({
+            "open": 118.8, "high": 121.5, "low": 118.5, "close": 120.05,
+        })
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows,
+            self._confirmed_triangle(),
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("收盘仅越过边界 0.02 ATR", plans[0]["reason"])
+
+    def test_triangle_breakout_requires_swing_and_external_alignment(self):
+        self.store.rows[-1].update({
+            "open": 119.0, "high": 121.0, "low": 118.8, "close": 120.5,
+        })
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows,
+            self._confirmed_triangle(external="down"),
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("Swing/External 不一致", plans[0]["reason"])
+
+    def test_strong_aligned_triangle_breakout_creates_retest_plan(self):
+        self.store.rows[-1].update({
+            "open": 119.0, "high": 121.0, "low": 118.8, "close": 120.5,
+        })
+        plan = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows,
+            self._confirmed_triangle(),
+        )[0]
+        self.assertEqual(plan["setup_type"], "triangle_breakout")
+        self.assertEqual(plan["entry_mode"], "breakout_retest")
+        self.assertEqual(plan["validation_evidence"]["body_atr"], 0.75)
+        self.assertEqual(plan["validation_evidence"]["close_extension_atr"], 0.25)
+        self.assertEqual(plan["validation_evidence"]["swing_bias"], "up")
+        self.assertEqual(plan["validation_evidence"]["external_bias"], "up")
+
     def test_generation_time_is_not_part_of_plan_identity_or_reason(self):
         with patch(
             "market.services.signal.structure_plan_signal.time.time",

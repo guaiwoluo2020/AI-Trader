@@ -37,6 +37,9 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "min_structure_confidence": 60,
     "breakout_stop_inside_atr": 0.3, "breakout_stop_buffer_atr": 0.8,
     "breakout_target_atr": 3.0, "breakout_retest_valid_bars": 6,
+    "triangle_breakout_min_body_atr": 0.5,
+    "triangle_breakout_min_close_extension_atr": 0.1,
+    "triangle_breakout_require_swing_external_alignment": True,
     "range_plan_valid_bars": 12, "location_plan_valid_bars": 6,
     "require_range_boundary_reclaim": False, "require_location_reclaim": True,
     # Trend continuation is intentionally conservative: a close-confirmed
@@ -117,6 +120,102 @@ class StructurePlanBuilder:
         )
 
     @staticmethod
+    def _direction_bias(value) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"up", "bullish", "buy", "long"}:
+            return "up"
+        if normalized in {"down", "bearish", "sell", "short"}:
+            return "down"
+        return "undetermined"
+
+    def _triangle_breakout_confirmation(
+        self, rows: List[Dict], structure: Dict, box: Dict,
+        direction: str, atr: float,
+    ) -> tuple[bool, Dict, str]:
+        """Validate a triangle break using price displacement and hierarchy.
+
+        The structure engine already distinguishes a close break from a wick
+        sweep.  This second gate is deliberately stricter for executable plans:
+        the breakout candle must have a meaningful body, close beyond the
+        projected boundary, and agree with both Swing and External structure.
+        """
+        event = box.get("lifecycle_event") or {}
+        index = int(event.get("confirmed_at", event.get("index", len(rows) - 1)) or 0)
+        index = min(len(rows) - 1, max(0, index))
+        bar = rows[index]
+        open_price = _number(bar.get("open") or bar.get("open_price"))
+        close_price = _number(bar.get("close") or bar.get("close_price"))
+        body_atr = abs(close_price - open_price) / max(atr, 1e-9)
+
+        if direction == "buy":
+            slope = _number(box.get("high_slope"))
+            intercept = _number(box.get("high_intercept"))
+            boundary = intercept + slope * index if intercept else _number(
+                box.get("breakout_level") or box.get("locked_top") or box.get("top")
+            )
+            extension = close_price - boundary
+            expected_bias = "up"
+        else:
+            slope = _number(box.get("low_slope"))
+            intercept = _number(box.get("low_intercept"))
+            boundary = intercept + slope * index if intercept else _number(
+                box.get("breakout_level") or box.get("locked_bottom") or box.get("bottom")
+            )
+            extension = boundary - close_price
+            expected_bias = "down"
+        extension_atr = extension / max(atr, 1e-9)
+
+        hierarchy = structure.get("structure_hierarchy") or {}
+        swing_bias = self._direction_bias(
+            (hierarchy.get("swing") or {}).get("bias")
+            or structure.get("major_state")
+        )
+        external_bias = self._direction_bias(
+            (hierarchy.get("external") or {}).get("bias")
+            or structure.get("external_state")
+        )
+        min_body = max(0.0, _number(
+            self._param("triangle_breakout_min_body_atr", 0.5)
+        ))
+        min_extension = max(0.0, _number(
+            self._param("triangle_breakout_min_close_extension_atr", 0.1)
+        ))
+        require_alignment = bool(self._param(
+            "triangle_breakout_require_swing_external_alignment", True
+        ))
+        evidence = {
+            "breakout_bar_index": index,
+            "breakout_bar_time": _bar_time(bar),
+            "open_price": round(open_price, 8),
+            "close_price": round(close_price, 8),
+            "boundary_price": round(boundary, 8),
+            "body_atr": round(body_atr, 3),
+            "minimum_body_atr": round(min_body, 3),
+            "close_extension_atr": round(extension_atr, 3),
+            "minimum_close_extension_atr": round(min_extension, 3),
+            "swing_bias": swing_bias,
+            "external_bias": external_bias,
+            "expected_bias": expected_bias,
+        }
+        if body_atr < min_body:
+            return False, evidence, (
+                f"三角形突破K线实体仅 {body_atr:.2f} ATR，低于最低要求 {min_body:.2f} ATR"
+            )
+        if boundary <= 0 or extension_atr < min_extension:
+            return False, evidence, (
+                f"三角形突破收盘仅越过边界 {extension_atr:.2f} ATR，"
+                f"低于最低要求 {min_extension:.2f} ATR"
+            )
+        if require_alignment and (
+            swing_bias != expected_bias or external_bias != expected_bias
+        ):
+            return False, evidence, (
+                f"三角形突破方向与 Swing/External 不一致："
+                f"突破={expected_bias}，Swing={swing_bias}，External={external_bias}"
+            )
+        return True, evidence, ""
+
+    @staticmethod
     def _layer_price(hierarchy: Dict, layer: str, name: str) -> float:
         return _number(((hierarchy.get(layer) or {}).get(name) or {}).get("price"))
 
@@ -187,6 +286,7 @@ class StructurePlanBuilder:
         minimum_risk_reward: float = 0,
         structure_snapshot: Optional[Dict] = None,
         price_discovery: bool = False,
+        validation_evidence: Optional[Dict] = None,
     ) -> Dict:
         group = _hash(source_id, symbol, period, anchor, "group")
         plan_id = _hash(source_id, symbol, period, anchor, setup_type, direction)
@@ -212,6 +312,7 @@ class StructurePlanBuilder:
             "structure_anchor_time": int(anchor),
             "structure_snapshot": structure_snapshot or {},
             "price_discovery": bool(price_discovery),
+            "validation_evidence": validation_evidence or {},
         }
         snapshot = structure_snapshot or {}
         box = snapshot.get("range") or {}
@@ -682,7 +783,17 @@ class StructurePlanBuilder:
 
         if status == "breakout_confirmed" and self._param("enable_range_breakout", True):
             direction = "buy" if box.get("breakout_direction") == "up" else "sell"
-            self._activate_setup("triangle_breakout" if "triangle" in pattern else "range_breakout")
+            is_triangle = "triangle" in pattern
+            setup_type = "triangle_breakout" if is_triangle else "range_breakout"
+            self._activate_setup(setup_type)
+            validation_evidence = {}
+            if is_triangle:
+                accepted, validation_evidence, rejection = self._triangle_breakout_confirmation(
+                    rows, structure, box, direction, atr,
+                )
+                if not accepted:
+                    self._reject(rejection)
+                    return []
             entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
             stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
             target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
@@ -698,14 +809,23 @@ class StructurePlanBuilder:
                 tp = min(measured, obstacle-target_buffer) if direction == "buy" else max(measured, obstacle+target_buffer)
             plan = self._tradable_plan(
                 source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                setup_type=("triangle_breakout" if "triangle" in pattern else "range_breakout"),
+                setup_type=setup_type,
                 direction=direction, entry_mode="breakout_retest", status="active",
                 entry=entry, zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
                 stop_loss=sl, take_profit=tp, confidence=min(95, confidence+5),
-                reason=f"{period} {pattern}收盘确认向{('上' if direction == 'buy' else '下')}突破，等待回踩结构边界",
+                reason=(
+                    f"{period} {pattern}收盘确认向{('上' if direction == 'buy' else '下')}突破，"
+                    + (
+                        f"实体 {validation_evidence['body_atr']:.2f} ATR、"
+                        f"收盘越界 {validation_evidence['close_extension_atr']:.2f} ATR，"
+                        f"Swing/External 同向，等待回踩结构边界"
+                        if is_triangle else "等待回踩结构边界"
+                    )
+                ),
                 valid_from=bar_time,
                 expires_at=bar_time + seconds * max(1, int(self._param("breakout_retest_valid_bars", 6))),
                 invalidation_price=sl, structure_snapshot=snapshot,
+                validation_evidence=validation_evidence,
             )
             return [plan] if plan else []
 
