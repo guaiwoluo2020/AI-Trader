@@ -21,10 +21,13 @@ def resolve_web_engine(
         if account_id is not None
         else repository.get_primary_mt5(user.user_id)
     )
-    if account is None or account.account_type != "mt5":
+    # Web monitoring and execution pages use the same account context for
+    # paper and live accounts. Backtest accounts are intentionally excluded
+    # because they do not have a running execution engine.
+    if account is None or account.account_type not in {"mt5", "paper"}:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="MT5 账户不存在或不属于当前用户",
+            detail="交易账户不存在或不属于当前用户",
         )
     return account, engine_manager.get_engine(
         account.user_id, account.account_id
