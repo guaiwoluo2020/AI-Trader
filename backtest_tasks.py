@@ -15,6 +15,7 @@ from mysql_repositories import (
     get_storage,
 )
 from repositories.strategy_config import StrategyConfigRepository
+from market_tick_store import list_tick_files
 
 
 class BacktestTaskStatus:
@@ -35,6 +36,17 @@ class BacktestTemplateService:
         self.strategies = StrategyConfigRepository(self.storage)
         self.position_policies = PositionManagementPolicyRepository(self.storage)
         self.datasets = BacktestDatasetRepository(self.storage)
+        self._ensure_replay_columns()
+
+    def _ensure_replay_columns(self) -> None:
+        for statement in (
+            "ALTER TABLE backtest_templates ADD COLUMN replay_mode VARCHAR(16) NOT NULL DEFAULT 'bars'",
+            "ALTER TABLE backtest_templates ADD COLUMN tick_file_path VARCHAR(1024) NOT NULL DEFAULT ''",
+        ):
+            try:
+                self.storage.execute(statement)
+            except Exception:
+                pass
 
     def get_context(self, user_id: int) -> Dict:
         strategies = [
@@ -105,8 +117,9 @@ class BacktestTemplateService:
                     description, initial_capital, position_sizing_mode,
                     fixed_volume, risk_percent, spread_points,
                     slippage_points, commission_per_lot, max_positions,
-                    max_same_direction, use_strategy_exits, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_same_direction, use_strategy_exits, replay_mode, tick_file_path,
+                    created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     template_id,
@@ -125,6 +138,8 @@ class BacktestTemplateService:
                     values["max_positions"],
                     values["max_same_direction"],
                     int(values["use_strategy_exits"]),
+                    values["replay_mode"],
+                    values["tick_file_path"],
                     now,
                     now,
                 ),
@@ -152,7 +167,7 @@ class BacktestTemplateService:
                     fixed_volume = ?, risk_percent = ?, spread_points = ?,
                     slippage_points = ?, commission_per_lot = ?,
                     max_positions = ?, max_same_direction = ?,
-                    use_strategy_exits = ?, updated_at = ?
+                    use_strategy_exits = ?, replay_mode = ?, tick_file_path = ?, updated_at = ?
                 WHERE user_id = ? AND template_id = ?
                 """,
                 (
@@ -170,6 +185,8 @@ class BacktestTemplateService:
                     values["max_positions"],
                     values["max_same_direction"],
                     int(values["use_strategy_exits"]),
+                    values["replay_mode"],
+                    values["tick_file_path"],
                     now,
                     user_id,
                     template_id,
@@ -488,7 +505,34 @@ class BacktestTemplateService:
                 payload.get("max_same_direction", strategy.max_same_direction)
             ),
             "use_strategy_exits": bool(payload.get("use_strategy_exits", True)),
+            "replay_mode": str(payload.get("replay_mode", "bars") or "bars").lower(),
+            "tick_file_path": str(payload.get("tick_file_path", "") or "").strip(),
         }
+        if values["replay_mode"] not in {"bars", "ticks"}:
+            raise ValueError("回测行情模式无效")
+        if values["replay_mode"] == "ticks":
+            available = {
+                str(item["file_path"]): item
+                for item in list_tick_files(symbol=str(strategy.symbol))
+            }
+            tick_file = available.get(values["tick_file_path"])
+            if tick_file is None:
+                raise ValueError("请选择该策略品种对应的有效 Tick 文件")
+            for dataset_id in dataset_ids:
+                dataset = self._get_runnable_dataset(user_id, dataset_id)
+                if dataset is None:
+                    continue
+                start_ms = int(dataset["requested_start"]) * 1000
+                end_ms = int(dataset["requested_end"]) * 1000
+                if (
+                    not tick_file.get("start_time_ms")
+                    or tick_file["start_time_ms"] > start_ms
+                    or tick_file["end_time_ms"] < end_ms
+                ):
+                    raise ValueError(
+                        f"Tick 文件覆盖范围不足：仅覆盖 "
+                        f"{tick_file.get('start_time_ms', 0)} ～ {tick_file.get('end_time_ms', 0)} 毫秒"
+                    )
         if values["initial_capital"] <= 0:
             raise ValueError("初始资金必须大于 0")
         if values["fixed_volume"] <= 0:
@@ -523,6 +567,8 @@ class BacktestTemplateService:
     def _template_to_dict(self, row, user_id: int) -> Dict:
         data = dict(row)
         data["use_strategy_exits"] = bool(data["use_strategy_exits"])
+        data.setdefault("replay_mode", "bars")
+        data.setdefault("tick_file_path", "")
         links = self.storage.fetchall(
             """
             SELECT dataset_id FROM backtest_template_datasets

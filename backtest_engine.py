@@ -41,12 +41,18 @@ from market.services.signal.signal_rules import (
 from market.services.signal.key_level_signal import evaluate_key_level_expression
 from market.services.signal.alpha_factor_signal import AlphaRuntimeExecutor
 from market.services.signal.pivot_repository import calculate_pivot_score
+from market.services.signal.structure_plan_signal import (
+    STRUCTURE_PLAN_DEFAULT_CONFIG,
+    StructurePlanBuilder,
+)
+from market.services.market_structure_engine_v2 import analyze_incremental
 from market.services.strategy.strategy_service import StrategyService
 from market.store.llm_store import LLMStore
 from mysql_repositories import MySQLStorage, get_storage
+from market_tick_store import iter_ticks
 
 
-ENGINE_VERSION = "direction-consensus-2"
+ENGINE_VERSION = "structure-plan-replay-1"
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
 PERIOD_LIMITS = {"M1": 60, "M5": 48, "M15": 40, "H1": 30, "H4": 30}
 
@@ -626,6 +632,8 @@ class HistoricalBarReader:
         if not source.exists():
             raise BacktestEngineError("历史行情文件不存在")
         normalized_format = (data_format or "").lower()
+        if normalized_format in {"ticks", "ticks-bin-v1"} or source.suffix == ".ticks":
+            return HistoricalBarReader._ticks_to_bars(path)
         if normalized_format == "parquet" or source.suffix == ".parquet":
             try:
                 import pyarrow.parquet as pq
@@ -648,6 +656,31 @@ class HistoricalBarReader:
                 "tick_volume": int(row.get("tick_volume") or 0),
             })
         return sorted(bars, key=lambda item: item["time"])
+
+    @staticmethod
+    def _ticks_to_bars(path: str) -> List[Dict]:
+        """Build deterministic M1 inputs from sampled fixed-width Tick files."""
+        buckets: Dict[int, Dict] = {}
+        for tick in iter_ticks(path):
+            timestamp = int(tick["event_time_ms"] // 1000)
+            bucket = timestamp - timestamp % 60
+            price = float(tick.get("last_price") or tick.get("bid") or 0)
+            if price <= 0:
+                continue
+            item = buckets.get(bucket)
+            if item is None:
+                item = {
+                    "time": bucket, "open": price, "high": price,
+                    "low": price, "close": price, "spread": 0,
+                    "tick_volume": 1,
+                }
+                buckets[bucket] = item
+            else:
+                item["high"] = max(item["high"], price)
+                item["low"] = min(item["low"], price)
+                item["close"] = price
+                item["tick_volume"] += 1
+        return [buckets[key] for key in sorted(buckets)]
 
 
 def aggregate_period(m1_bars: List[Dict], period: str, limit: int) -> List[Dict]:
@@ -877,14 +910,16 @@ class ReplaySignalEngine:
 
     SIGNAL_TTL = 300
 
-    def __init__(self, strategy: Dict):
+    def __init__(self, strategy: Dict, replay_id: str = ""):
         self.strategy = strategy
+        self.replay_id = str(replay_id or "replay")
         self.signal_sources = TradingStrategy.from_dict(strategy).signal_sources
         self._cooldowns: Dict[str, int] = {}
         self._consumed_ai_recommendations = set()
         self._pending_ma_crosses: Dict[str, Dict] = {}
         self._alpha_executor = AlphaRuntimeExecutor()
         self._alpha_library = None
+        self._structure_consumed: set[str] = set()
 
     def _alpha_definition(self, params: Dict) -> Dict:
         if params.get("alpha_snapshot"):
@@ -914,6 +949,10 @@ class ReplaySignalEngine:
                 )
                 if signal:
                     signals.append(signal)
+            elif config["source"] == "structure_plan":
+                signals.extend(self._structure_plan_signals(
+                    config, seen_bars, current_price, simulated_time,
+                ))
             elif config["source"] == "ai_entry":
                 signals.extend(self._ai_signals(
                     config, llm_analysis or {}, current_price, simulated_time
@@ -936,6 +975,99 @@ class ReplaySignalEngine:
                 )
                 if signal:
                     signals.append(signal)
+        return signals
+
+    def _structure_plan_signals(
+        self, config: Dict, seen_bars: List[Dict], current_price: float,
+        simulated_time: int,
+    ) -> List[TradingSignal]:
+        """Replay STRUCTURE PLAN without reading live/current database plans.
+
+        The structure engine only receives bars available at ``simulated_time``;
+        therefore historical plans cannot see future pivots or confirmations.
+        A plan is consumed once per replay and its entry zone is evaluated on
+        the next replay price, matching the live plan->Tick boundary.
+        """
+        if len(seen_bars) < 3:
+            return []
+        period = str(config.get("period") or "M5").upper()
+        period_seconds = PERIOD_SECONDS.get(period, 300)
+        # The replay stream is M1.  Higher-period structure must only be
+        # evaluated when that bar has closed; aggregating partial M5/M15 bars
+        # would expose unfinished OHLC data and create look-ahead-like entries.
+        bar_close_time = int(seen_bars[-1].get("time") or 0) + 60
+        if period_seconds > 60 and bar_close_time % period_seconds != 0:
+            return []
+        rows = seen_bars[-600:] if period == "M1" else aggregate_period(
+            seen_bars, period, max(60, min(600, 600 // max(1, period_seconds // 60)))
+        )
+        if len(rows) < 3:
+            return []
+        structure = analyze_incremental(
+            self.strategy.get("symbol", ""), period, rows,
+            dict(STRUCTURE_PLAN_DEFAULT_CONFIG),
+            cache_namespace=f"backtest:{self.replay_id}",
+        )
+        params = dict(config.get("params") or {})
+        resolved = dict(STRUCTURE_PLAN_DEFAULT_CONFIG)
+        for key, value in params.items():
+            if key in resolved:
+                resolved[key] = value
+        builder = StructurePlanBuilder(resolved)
+        plans = builder.build(
+            str(config.get("signal_source_id") or "structure-plan-replay"),
+            self.strategy.get("symbol", ""), period, rows, structure,
+        )
+        signals: List[TradingSignal] = []
+        for plan in plans:
+            plan_id = str(plan.get("plan_id") or "")
+            if not plan_id or plan_id in self._structure_consumed:
+                continue
+            if str(plan.get("status") or "") != "active":
+                continue
+            valid_from = int(plan.get("valid_from") or 0)
+            expires_at = int(plan.get("expires_at") or 0)
+            if valid_from and simulated_time < valid_from:
+                continue
+            if expires_at and simulated_time > expires_at:
+                continue
+            zone = plan.get("entry_zone") or {}
+            lower, upper = float(zone.get("lower") or 0), float(zone.get("upper") or 0)
+            if lower <= 0 or upper <= 0 or not lower <= current_price <= upper:
+                continue
+            direction = str(plan.get("direction") or "")
+            if direction not in {"buy", "sell"}:
+                continue
+            allowed = {str(item) for item in params.get("allowed_directions", ["buy", "sell"])}
+            if direction not in allowed:
+                continue
+            self._structure_consumed.add(plan_id)
+            signals.append(TradingSignal(
+                symbol=self.strategy.get("symbol", ""), action=direction,
+                market_direction="up" if direction == "buy" else "down",
+                state_ready=True, is_entry_trigger=True,
+                confidence=int(plan.get("confidence") or 0),
+                source=SignalSource.STRUCTURE_PLAN,
+                source_period=period,
+                signal_source_id=str(config.get("signal_source_id") or ""),
+                setup_family=str(plan.get("setup_family") or "structure"),
+                setup_type=str(plan.get("setup_type") or "structure_plan"),
+                entry_mode=str(plan.get("entry_mode") or "touch_or_near"),
+                trigger_price=float(current_price), suggested_entry=float(current_price),
+                suggested_sl=float(plan.get("stop_loss") or 0),
+                suggested_tp=float(plan.get("take_profit") or 0),
+                risk_reward_ratio=float(plan.get("risk_reward_ratio") or 0),
+                minimum_risk_reward=float(plan.get("minimum_risk_reward") or 0),
+                stop_candidates=list(plan.get("stop_candidates") or []),
+                target_candidates=list(plan.get("target_candidates") or []),
+                trigger_reason=str(plan.get("reason") or "结构交易计划触发"),
+                trade_plan_id=plan_id,
+                trade_plan_group_id=str(plan.get("plan_group_id") or ""),
+                trade_plan_valid_from=valid_from,
+                trade_plan_expires_at=expires_at,
+                created_at=replay_datetime(simulated_time),
+                expires_at=replay_datetime(expires_at) if expires_at else None,
+            ))
         return signals
 
     def _key_level_signal(
@@ -1554,9 +1686,16 @@ class M1BacktestEngine:
         strategy = task["strategy_snapshot"]
         template = task["template_snapshot"]
         self._reject_unsupported_ai_reference_backtest(strategy)
-        bars = HistoricalBarReader.read(
-            task["dataset_file_path"], dataset.get("data_format", "")
-        )
+        replay_mode = str(template.get("replay_mode") or "bars").lower()
+        if replay_mode == "ticks":
+            tick_path = str(template.get("tick_file_path") or "")
+            if not tick_path:
+                raise BacktestEngineError("Tick 回测缺少 Tick 数据文件")
+            bars = HistoricalBarReader.read(tick_path, "ticks-bin-v1")
+        else:
+            bars = HistoricalBarReader.read(
+                task["dataset_file_path"], dataset.get("data_format", "")
+            )
         start = int(dataset["requested_start"])
         end = int(dataset["requested_end"])
         bars = [bar for bar in bars if int(bar["time"]) <= end]
@@ -1605,7 +1744,7 @@ class M1BacktestEngine:
             for source in ai_sources
         }
         ai_enabled = bool(ai_sources)
-        signal_engine = ReplaySignalEngine(strategy)
+        signal_engine = ReplaySignalEngine(strategy, replay_id=str(task["task_id"]))
         decision_service = StrategyService(
             strategy_store=object(), signal_service=object(), risk_manager=object()
         )
@@ -1954,6 +2093,7 @@ class M1BacktestEngine:
             "order_count": len(orders),
             "order_status_counts": order_status_counts,
             "max_concurrent_positions": max_concurrent_positions,
+            "replay_mode": replay_mode,
         })
         result["_ledger"] = {
             "account": {
@@ -2463,14 +2603,16 @@ def build_result(
         source_counts[source] = source_counts.get(source, 0) + 1
     enabled_sources = [
         source for source in (
-            "key_level", "ai_entry", "pivot", "moving_average", "alpha_factor"
+            "key_level", "ai_entry", "pivot", "moving_average", "alpha_factor",
+            "structure_plan",
         )
         if signal_source_enabled(strategy, source)
     ]
     return {
         "engine_version": ENGINE_VERSION,
         "supported_signal_sources": [
-            "key_level", "ai_entry", "pivot", "moving_average", "alpha_factor"
+            "key_level", "ai_entry", "pivot", "moving_average", "alpha_factor",
+            "structure_plan",
         ],
         "enabled_signal_sources": enabled_sources,
         "signal_source_trade_counts": source_counts,

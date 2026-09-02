@@ -19,6 +19,7 @@ from repositories.trading import LiveTradeDealRepository, TradeExecutionReposito
 from repositories.accounts import EAActivationRepository, TradingAccountRepository
 from instrument_price_store import get_instrument_price_store
 from trading_engine_manager import TradingEngineManager
+from market_tick_store import get_local_tick_store
 from web_account_context import resolve_web_engine
 from routes_news import _normalize_calendar, _require_items, _validate_day
 from market_event_repository import MarketEventRepository
@@ -87,6 +88,8 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
     async def get_trades(
         symbol: str = Query(..., description="交易品种"),
         price: Optional[float] = Query(None, description="当前中间价"),
+        bid: Optional[float] = Query(None, description="买价（可选，优先于 price）"),
+        ask: Optional[float] = Query(None, description="卖价（可选，优先于 price）"),
         identity: EAIdentity = Depends(require_ea_auth),
     ) -> Dict:
         """
@@ -126,6 +129,20 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         ```
         """
         server = engine_manager.get_engine_for_ea(identity)
+        tick_price = float(bid if bid is not None and bid > 0 else (price or 0))
+        tick_ask = float(ask if ask is not None and ask > 0 else tick_price)
+        if tick_price > 0:
+            # Tick persistence is deliberately best-effort.  It must never
+            # delay or block the EA trading response.
+            try:
+                get_local_tick_store().record(
+                    source_id=identity.account_id,
+                    symbol=symbol,
+                    bid=tick_price,
+                    ask=tick_ask,
+                )
+            except Exception as exc:
+                print(f"[TickStore] 本地Tick写入失败: {exc}")
         market_policy = market_source_policy.resolve(
             identity.user_id, identity.account_id, symbol,
         )

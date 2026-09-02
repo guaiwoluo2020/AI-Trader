@@ -88,6 +88,36 @@
               variant="outlined"
               density="comfortable"
             />
+            <v-select
+              v-model="form.replayMode"
+              :items="replayModes"
+              label="行情回放模式"
+              hint="Tick 模式使用本地已采集的 Tick 文件；没有 Tick 文件时使用 K 线。"
+              persistent-hint
+              variant="outlined"
+              density="comfortable"
+            />
+            <v-select
+              v-if="form.replayMode === 'ticks'"
+              v-model="form.tickFilePath"
+              :items="tickFileOptions"
+              item-title="label"
+              item-value="value"
+              label="Tick 数据文件"
+              hint="每分钟最多采样 30 笔。"
+              persistent-hint
+              variant="outlined"
+              density="comfortable"
+            />
+            <v-alert
+              v-if="form.replayMode === 'ticks' && form.tickFilePath"
+              type="info"
+              variant="tonal"
+              density="compact"
+              class="mb-3"
+            >
+              {{ tickCoverageHint }}
+            </v-alert>
             <v-textarea
               v-model.trim="form.description"
               label="说明"
@@ -750,7 +780,7 @@ import BacktestReplayChart from '../components/BacktestReplayChart.vue'
 
 const templates = ref([])
 const batches = ref([])
-const context = reactive({ strategies: [], datasets: [] })
+const context = reactive({ strategies: [], datasets: [], tickFiles: [] })
 const batchDetails = reactive({})
 const taskLedgers = reactive({})
 const loading = ref(false)
@@ -781,6 +811,7 @@ const defaults = () => ({
   riskPercent: 1, spreadPoints: 0, slippagePoints: 0,
   commissionPerLot: 0, maxPositions: 1, maxSameDirection: 1,
   useStrategyExits: true,
+  replayMode: 'bars', tickFilePath: '',
 })
 const form = reactive(defaults())
 
@@ -788,6 +819,10 @@ const positionModes = [
   { title: '跟随策略配置', value: 'strategy' },
   { title: '固定手数', value: 'fixed' },
   { title: '按资金风险比例', value: 'risk_percent' },
+]
+const replayModes = [
+  { title: 'K线回放', value: 'bars' },
+  { title: 'Tick回放', value: 'ticks' },
 ]
 const statusMap = {
   queued: { label: '等待引擎', color: 'blue-grey' },
@@ -822,6 +857,20 @@ const datasetOptions = computed(() => context.datasets
     value: item.dataset_id,
     label: `${item.dataset_name} · ${item.symbol} · 质量 ${item.quality_score}`,
   })))
+const tickFileOptions = computed(() => (context.tickFiles || [])
+  .filter(item => !selectedStrategy.value || item.symbol === selectedStrategy.value.symbol)
+  .map(item => ({
+    value: item.file_path,
+    label: `${item.symbol} · ${item.date} · ${item.source} · ${formatTickCoverage(item)}`,
+  })))
+const selectedTickFile = computed(() => (context.tickFiles || [])
+  .find(item => item.file_path === form.tickFilePath))
+const tickCoverageHint = computed(() => {
+  const item = selectedTickFile.value
+  if (!item) return '请选择 Tick 文件。'
+  return `支持时间：${formatTime(Number(item.start_time_ms || 0) / 1000)} ～ ${formatTime(Number(item.end_time_ms || 0) / 1000)}；` +
+    `共 ${Number(item.tick_count || 0).toLocaleString()} 笔，超过每分钟 30 笔时已均匀采样。`
+})
 const canSave = computed(() => Boolean(
   form.templateName && form.strategyId && form.datasetIds.length && Number(form.initialCapital) > 0
 ))
@@ -848,6 +897,9 @@ function aiAnalysisHint(analysis) {
 function severityColor(value) { return { high: 'error', medium: 'warning', low: 'info' }[value] || 'blue-grey' }
 function severityLabel(value) { return { high: '高', medium: '中', low: '低' }[value] || '待评估' }
 function qualityLabel(value) { return { high: '高', medium: '中', low: '低' }[value] || '待评估' }
+function formatTickCoverage(item) {
+  return `${Number(item.tick_count || 0).toLocaleString()} Tick`
+}
 function money(value) { return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }
 function signedMoney(value) {
   const number = Number(value || 0)
@@ -959,6 +1011,9 @@ function applyStrategyDefaults(strategyId) {
     )
   }
   removeIncompatibleDatasets()
+  if (!tickFileOptions.value.some(item => item.value === form.tickFilePath)) {
+    form.tickFilePath = ''
+  }
 }
 
 function payload() {
@@ -977,6 +1032,8 @@ function payload() {
     max_positions: form.maxPositions,
     max_same_direction: form.maxSameDirection,
     use_strategy_exits: form.useStrategyExits,
+    replay_mode: form.replayMode,
+    tick_file_path: form.tickFilePath,
   }
 }
 
@@ -990,6 +1047,7 @@ async function loadAll() {
     ])
     context.strategies = contextData.strategies || []
     context.datasets = contextData.datasets || []
+    context.tickFiles = contextData.tick_files || []
     templates.value = templateData.templates || []
     batches.value = batchData.batches || []
     await Promise.all(Object.keys(batchDetails).map(async (batchId) => {
@@ -1042,6 +1100,8 @@ function editTemplate(template) {
     maxPositions: template.max_positions,
     maxSameDirection: template.max_same_direction ?? template.max_positions,
     useStrategyExits: template.use_strategy_exits,
+    replayMode: template.replay_mode || 'bars',
+    tickFilePath: template.tick_file_path || '',
   })
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }

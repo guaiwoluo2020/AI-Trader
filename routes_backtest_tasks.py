@@ -9,6 +9,7 @@ from auth import AuthUser, require_auth
 from backtest_ai_analysis import BacktestAIAnalysisService
 from llm_governance import LLMQuotaExceeded
 from backtest_tasks import BacktestTemplateService
+from market_tick_store import list_tick_files
 
 
 def create_backtest_task_routes() -> APIRouter:
@@ -21,6 +22,9 @@ def create_backtest_task_routes() -> APIRouter:
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         context = service.get_context(user.user_id)
+        # Tick files are local market-source data and are exposed separately
+        # from uploaded K-line datasets for the replay selector.
+        context["tick_files"] = list_tick_files()
         return {"status": "ok", **context}
 
     @router.get("/backtest/templates")

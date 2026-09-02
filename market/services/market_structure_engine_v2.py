@@ -867,9 +867,17 @@ def _preserve_locked_segments(cached: Dict, result: Dict, rows: List[Dict]) -> D
     return result
 
 
-def analyze_incremental(symbol: str, period: str, rows: List[Dict], config: Dict = None) -> Dict:
+def analyze_incremental(
+    symbol: str, period: str, rows: List[Dict], config: Dict = None,
+    cache_namespace: str = "live",
+) -> Dict:
+    """Run the shared incremental structure pipeline in an isolated scope.
+
+    ``cache_namespace`` keeps replay state separate from live state while
+    preserving exactly the same cache/locked-segment behavior.
+    """
     cfg = {**DEFAULT_CONFIG, **(config or {})}
-    key, latest, signature = f"{symbol}::{period.upper()}", (_time(rows[-1]) if rows else None), _config_signature(cfg)
+    key, latest, signature = f"{cache_namespace}::{symbol}::{period.upper()}", (_time(rows[-1]) if rows else None), _config_signature(cfg)
     window_signature = (str(_time(rows[0])) if rows else None, str(latest), len(rows))
     cached = _CACHE.get(key)
     if (cached and cached.get("engine_version") == ENGINE_VERSION
@@ -898,4 +906,4 @@ def analyze_incremental(symbol: str, period: str, rows: List[Dict], config: Dict
 def restore_snapshot(snapshot: Dict):
     if (isinstance(snapshot, dict) and snapshot.get("engine_version") == ENGINE_VERSION
             and snapshot.get("symbol") and snapshot.get("period")):
-        _CACHE[f"{snapshot['symbol']}::{str(snapshot['period']).upper()}"] = snapshot
+        _CACHE[f"live::{snapshot['symbol']}::{str(snapshot['period']).upper()}"] = snapshot
