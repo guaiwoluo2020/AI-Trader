@@ -554,7 +554,9 @@ class TradingAccountRepository:
         if to_time is not None:
             sql += " AND point_time <= ?"; params.append(int(to_time))
         sql += " ORDER BY point_time DESC LIMIT ?"
-        params.append(max(1, min(int(count), 5000)))
+        # 账户净值按分钟/上报时刻保存，7 天就可能超过 5,000 个点；
+        # 这里的上限只用于防止异常请求，不应截断正常的“全部/最近 7 天”曲线。
+        params.append(max(1, min(int(count), 100000)))
         rows = self.storage.fetchall(sql, tuple(params))
         return [dict(row) for row in rows][::-1]
 

@@ -266,7 +266,7 @@
               <v-window-item value="risk">
                 <div class="detail-section-title"><div><h3>仓位与风险约束</h3><p>控制每次交易的规模，以及策略能够同时持有的仓位。</p></div></div>
                 <v-row><v-col cols="12" sm="6" md="3"><v-text-field v-model.number="selectedStrategy.fixed_volume" label="固定手数" type="number" step="0.01" min="0.01" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" sm="6" md="3"><v-text-field v-model.number="selectedStrategy.max_positions" label="最大持仓数" type="number" min="1" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" sm="6" md="3"><v-text-field v-model.number="selectedStrategy.max_same_direction" label="同向最大持仓" type="number" min="1" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col><v-col cols="12" sm="6" md="3"><v-text-field v-model.number="selectedStrategy.risk_percent" label="单笔风险比例" type="number" min="0.1" step="0.1" suffix="%" :readonly="selectedStrategy.readonly_reference"></v-text-field></v-col></v-row>
-                <div class="detail-section-title mt-5"><div><h3>持仓管理方案</h3><p>策略创建时已完成方案绑定；这里仅展示当前绑定，方案内容请在持仓管理页面维护。</p></div><v-btn to="/position-management" variant="text" color="primary" prepend-icon="mdi-shield-edit-outline">管理方案</v-btn></div>
+                <div class="detail-section-title mt-5"><div><h3>持仓管理方案</h3><p>策略创建时已完成方案绑定；方案内容和账户运行状态统一在交易账户页面查看。</p></div><v-btn to="/accounts" variant="text" color="primary" prepend-icon="mdi-bank-outline">查看交易账户</v-btn></div>
                 <v-text-field
                   :model-value="positionPolicyOptions.find(item => item.value === selectedStrategy.position_management_policy_id)?.title || '未绑定持仓管理方案'"
                   label="当前持仓管理方案"
@@ -1010,7 +1010,7 @@
           <v-text-field v-model="newStrategyName" label="策略名称" placeholder="例如：GOLD M5 趋势策略" prepend-inner-icon="mdi-tag-outline"></v-text-field>
           <v-select v-model="newStrategyPolicyId" :items="positionPolicyOptions" :loading="positionPoliciesLoading" :disabled="positionPoliciesLoading || !!positionPoliciesError" label="持仓管理方案" prepend-inner-icon="mdi-shield-check-outline" no-data-text="暂无可用持仓管理方案"></v-select>
           <v-alert v-if="positionPoliciesError" type="error" variant="tonal" density="compact" class="mb-2">{{ positionPoliciesError }} <v-btn size="small" variant="text" @click="loadPositionPolicies">重试</v-btn></v-alert>
-          <v-alert v-else-if="!positionPoliciesLoading && !positionPolicyOptions.length" type="warning" variant="tonal" density="compact" class="mb-2">暂无启用的持仓管理方案，请先在持仓管理页面创建方案。</v-alert>
+          <v-alert v-else-if="!positionPoliciesLoading && !positionPolicyOptions.length" type="warning" variant="tonal" density="compact" class="mb-2">暂无启用的持仓管理方案，请先在交易账户页面检查账户配置。</v-alert>
           <v-alert type="info" variant="tonal" density="compact">新策略默认为私有草稿，不会立即参与交易。持仓管理方案只需在这里选择一次，创建后在风控选项卡中只展示当前绑定。</v-alert>
         </v-card-text>
         <v-card-actions>

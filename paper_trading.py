@@ -898,15 +898,19 @@ class PaperTradingService:
     def _equity_curve(self, account_id: int, page_size: int, offset: int,
                       equity_from: Optional[int] = None,
                       equity_to: Optional[int] = None) -> List[Dict]:
+        # 净值曲线不应复用订单/成交的分页参数。此前这里使用
+        # ``page_size * 10``（首屏最多 300 点）并共享 offset，导致“全部/7天”
+        # 实际只显示最早几小时的曲线。曲线是时间序列，按选择的时间范围完整返回，
+        # 仅设置一个安全上限，避免异常数据量拖垮账户详情接口。
         sql = "SELECT point_time AS time, balance, equity, free_margin, margin, open_positions FROM paper_equity_points WHERE account_id = ?"
         params: List = [account_id]
         if equity_from is not None:
             sql += " AND point_time >= ?"; params.append(int(equity_from))
         if equity_to is not None:
             sql += " AND point_time <= ?"; params.append(int(equity_to))
-        sql += " ORDER BY point_time DESC LIMIT ? OFFSET ?"
-        params.extend([min(page_size * 10, 500), offset])
-        return [dict(row) for row in self.storage.fetchall(sql, tuple(params))][::-1]
+        sql += " ORDER BY point_time ASC LIMIT ?"
+        params.append(20000)
+        return [dict(row) for row in self.storage.fetchall(sql, tuple(params))]
 
     def get_account_detail(self, user_id: int, account_id: int,
                            page: int = 1, page_size: int = 30,

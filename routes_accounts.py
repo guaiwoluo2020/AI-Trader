@@ -317,7 +317,8 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     repository.storage, user.user_id, account_id, positions,
                 ),
                 "equity_curve": repository.list_live_equity_points(
-                    user.user_id, account_id, from_time=equity_from, to_time=equity_to,
+                    user.user_id, account_id, count=20000,
+                    from_time=equity_from, to_time=equity_to,
                 ),
             },
         }

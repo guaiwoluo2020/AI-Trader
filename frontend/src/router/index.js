@@ -3,7 +3,6 @@ import { isAuthenticated } from '../auth'
 import Dashboard from '../views/Dashboard.vue'
 import Login from '../views/Login.vue'
 import Register from '../views/Register.vue'
-import TradeOrders from '../views/TradeOrders.vue'
 import Market from '../views/Market.vue'
 import StrategyReplay from '../views/StrategyReplay.vue'
 import AIMarket from '../views/AIMarket.vue'
@@ -17,7 +16,6 @@ import Mt5Setup from '../views/Mt5Setup.vue'
 import BacktestDatasets from '../views/BacktestDatasets.vue'
 import BacktestTasks from '../views/BacktestTasks.vue'
 import Accounts from '../views/Accounts.vue'
-import PositionManagement from '../views/PositionManagement.vue'
 import AlphaResearch from '../views/AlphaResearch.vue'
 import StructureAnalysis from '../views/StructureAnalysis.vue'
 import { authState } from '../auth'
@@ -51,12 +49,6 @@ const routes = [
     path: '/accounts',
     name: 'Accounts',
     component: Accounts,
-    meta: { requiresAuth: true }
-  },
-  {
-    path: '/trades',
-    name: 'TradeOrders',
-    component: TradeOrders,
     meta: { requiresAuth: true }
   },
   {
@@ -95,6 +87,18 @@ const routes = [
     component: Positions,
     meta: { requiresAuth: true }
   },
+  // Retired standalone pages: keep old bookmarks usable by returning users
+  // to the consolidated trading-account workspace.
+  {
+    path: '/trades',
+    redirect: '/accounts',
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/position-management',
+    redirect: '/accounts',
+    meta: { requiresAuth: true }
+  },
   {
     path: '/news',
     name: 'News',
@@ -105,12 +109,6 @@ const routes = [
     path: '/strategy-settings',
     name: 'StrategySettings',
     component: StrategySettings,
-    meta: { requiresAuth: true }
-  },
-  {
-    path: '/position-management',
-    name: 'PositionManagement',
-    component: PositionManagement,
     meta: { requiresAuth: true }
   },
   {
