@@ -163,6 +163,28 @@ class DailyReviewCoordinator:
             status=str(payload.get("status") or ""),
         )
 
+    def _save_strategy(self, user_id: int, account_id: int, entity_id: str,
+                       payload: Dict) -> None:
+        """Persist a compact index and keep the potentially large review on disk."""
+        review_path = save_review_file(user_id, entity_id, payload)
+        index_payload = {
+            "review_id": entity_id,
+            "review_date": payload.get("review_date"),
+            "user_id": int(user_id),
+            "account_id": int(account_id),
+            "deployment_id": payload.get("deployment_id", ""),
+            "strategy_id": payload.get("strategy_id", ""),
+            "symbol": payload.get("symbol", ""),
+            "status": payload.get("status", ""),
+            "generated_at": payload.get("generated_at", 0),
+            "review_path": str(review_path),
+        }
+        RuntimeStateRepository(user_id, account_id, self.storage).upsert_entity(
+            self.STRATEGY_ENTITY, entity_id, index_payload,
+            symbol=str(payload.get("symbol") or ""),
+            status=str(payload.get("status") or ""),
+        )
+
     def _review_structure_scope(self, scope: Dict, review_date: str, now: int) -> str:
         user_id = int(scope["user_id"])
         symbol = str(scope["symbol"])
@@ -360,10 +382,7 @@ class DailyReviewCoordinator:
                 "decision_count", "order_count", "trade_count", "structure_plan_count",
             )):
                 payload = {**base, "status": "skipped", "skip_reason": "过去24小时没有策略决策、订单或成交，已自动跳过复盘", "evidence": evidence}
-                RuntimeStateRepository(user_id, account_id, self.storage).upsert_entity(
-                    self.STRATEGY_ENTITY, entity_id, payload,
-                    symbol=base["symbol"], status="skipped",
-                )
+                self._save_strategy(user_id, account_id, entity_id, payload)
                 return "skipped"
             prompt = (
                 "请复盘这个策略部署过去24小时的决策、订单和成交。结合结构计划的领取与消费状态，"
@@ -377,16 +396,12 @@ class DailyReviewCoordinator:
             )
             review = self._call_llm(user_id, prompt, "daily_strategy_execution_review", entity_id)
             payload = {**base, "status": "completed", "evidence": evidence, "review": review}
-            RuntimeStateRepository(user_id, account_id, self.storage).upsert_entity(
-                self.STRATEGY_ENTITY, entity_id, payload,
-                symbol=base["symbol"], status="completed",
-            )
+            self._save_strategy(user_id, account_id, entity_id, payload)
             return "completed"
         except Exception as exc:
-            RuntimeStateRepository(user_id, account_id, self.storage).upsert_entity(
-                self.STRATEGY_ENTITY, entity_id,
+            self._save_strategy(
+                user_id, account_id, entity_id,
                 {**base, "status": "failed", "error": str(exc)[:1000]},
-                symbol=base["symbol"], status="failed",
             )
             return "failed"
 
@@ -607,5 +622,9 @@ class DailyReviewCoordinator:
             "AND entity_type=? ORDER BY created_at DESC,entity_id DESC LIMIT ?",
             (int(user_id), int(account_id), self.STRATEGY_ENTITY, max(1, min(int(limit) * 4, 360))),
         )
-        items = [_json(row["payload_json"]) for row in rows]
+        items = []
+        for row in rows:
+            index = _json(row["payload_json"])
+            item = load_review_file(index.get("review_path", "")) if index.get("review_path") else None
+            items.append(item or index)
         return [item for item in items if str(item.get("strategy_id") or "") == str(strategy_id) and (not deployment_id or str(item.get("deployment_id") or "") == str(deployment_id))][:max(1, min(int(limit), 90))]
