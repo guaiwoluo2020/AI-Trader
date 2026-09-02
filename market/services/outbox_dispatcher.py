@@ -31,12 +31,21 @@ class OutboxDispatcher:
     completes and before ``mark_published`` can cause a redelivery.
     """
 
-    def __init__(self, repository, *, handlers: Optional[Dict[str, EventHandler]] = None,
+    def __init__(self, repository, event_bus=None, *, handlers: Optional[Dict[str, EventHandler]] = None,
                  retry_seconds: int = 60, lease_seconds: int = 30):
         self.repository = repository
+        self.event_bus = event_bus
         self.handlers: Dict[str, EventHandler] = dict(handlers or {})
         self.retry_seconds = max(1, int(retry_seconds))
         self.lease_seconds = max(1, int(lease_seconds))
+        self._running = False
+
+    def start(self) -> None:
+        """Compatibility lifecycle hook; process-level manager owns polling."""
+        self._running = True
+
+    def stop(self) -> None:
+        self._running = False
 
     def register(self, event_name: str, handler: EventHandler) -> None:
         name = str(event_name or "").strip()
