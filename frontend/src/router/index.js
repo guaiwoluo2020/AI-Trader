@@ -18,6 +18,7 @@ import BacktestTasks from '../views/BacktestTasks.vue'
 import Accounts from '../views/Accounts.vue'
 import AlphaResearch from '../views/AlphaResearch.vue'
 import StructureAnalysis from '../views/StructureAnalysis.vue'
+import StructurePlanPerformance from '../views/StructurePlanPerformance.vue'
 import { authState } from '../auth'
 
 const routes = [
@@ -74,6 +75,12 @@ const routes = [
     name: 'StructureAnalysis',
     component: StructureAnalysis,
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/admin/structure-plan-performance',
+    name: 'StructurePlanPerformance',
+    component: StructurePlanPerformance,
+    meta: { requiresAuth: true, requiresAdmin: true }
   },
   {
     path: '/strategy-replay',

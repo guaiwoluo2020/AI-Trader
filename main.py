@@ -28,6 +28,7 @@ from routes_backtest_data import create_backtest_data_routes
 from routes_backtest_tasks import create_backtest_task_routes
 from routes_accounts import create_account_routes
 from routes_alpha_research import create_alpha_research_routes
+from routes_structure_plan_analysis import create_structure_plan_analysis_routes
 from alpha_research import AlphaResearchWorker
 from backtest_engine import BacktestWorker
 from trading_engine_manager import TradingEngineManager
@@ -101,6 +102,7 @@ def create_app():
     app.include_router(create_backtest_task_routes())
     app.include_router(create_account_routes(engine_manager))
     app.include_router(create_alpha_research_routes())
+    app.include_router(create_structure_plan_analysis_routes())
 
     # 启动时设置事件循环
     @app.on_event("startup")
