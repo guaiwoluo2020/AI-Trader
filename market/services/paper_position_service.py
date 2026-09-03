@@ -4,6 +4,7 @@ import json
 import uuid
 
 from market.services.position_attribution import close_position_attribution
+from market.services.tick_execution_core import TickExecutionCore, TickQuote
 
 
 class PaperPositionService:
@@ -20,8 +21,9 @@ class PaperPositionService:
             """,
             (account_id, symbol),
         ).fetchall()
+        quote = TickQuote.create(bid, ask, now)
         for position in positions:
-            mark = bid if position["direction"] == "buy" else ask
+            mark = quote.close_price(position["direction"])
             reason = str(position["close_reason"] or "")
             policy_snapshot = json.loads(
                 position["position_policy_snapshot_json"] or "{}"
@@ -34,30 +36,15 @@ class PaperPositionService:
             partial_done = set(json.loads(
                 position["partial_levels_done_json"] or "[]"
             ))
-            if position["direction"] == "buy":
-                if mark <= float(position["stop_loss"]):
-                    reason = "stop_loss"
-                elif (
-                    float(position["take_profit"]) > 0
-                    and mark >= float(position["take_profit"])
-                ):
-                    reason = (
-                        "" if signal_tp_partial > 0
-                        and "signal_take_profit" not in partial_done
-                        else "take_profit"
-                    )
-            else:
-                if mark >= float(position["stop_loss"]):
-                    reason = "stop_loss"
-                elif (
-                    float(position["take_profit"]) > 0
-                    and mark <= float(position["take_profit"])
-                ):
-                    reason = (
-                        "" if signal_tp_partial > 0
-                        and "signal_take_profit" not in partial_done
-                        else "take_profit"
-                    )
+            hard_exit = TickExecutionCore.exit_state(position, quote)
+            if hard_exit.status == "stop_loss":
+                reason = "stop_loss"
+            elif hard_exit.status == "take_profit":
+                reason = (
+                    "" if signal_tp_partial > 0
+                    and "signal_take_profit" not in partial_done
+                    else "take_profit"
+                )
             if not reason and position["exit_mode"] == "trailing_reverse":
                 initial_risk = float(position["initial_risk"])
                 favorable = float(position["favorable_price"])

@@ -4,6 +4,35 @@ import json
 import uuid
 from typing import Dict, List
 
+from .tick_execution_core import (
+    PendingOrderExecutionAdapter, PendingTickResult, TickExecutionCore, TickQuote,
+)
+
+
+class _PaperPendingExecutionAdapter(PendingOrderExecutionAdapter):
+    """MySQL-backed Paper adapter for the shared Pending quote lifecycle.
+
+    Timeout persistence is performed by ``expire_stale_pending_orders`` in the
+    enclosing Paper service before this transaction begins. The matcher owns
+    the eligible list and performs account/margin validation below.
+    """
+
+    def __init__(self, timeout_seconds: int):
+        self.timeout_seconds = int(timeout_seconds)
+        self.eligible = []
+
+    @staticmethod
+    def requested_at(order) -> int:
+        return int(order["requested_at"])
+
+    def on_timeout(self, order, result: PendingTickResult) -> None:
+        # The service has already persisted this transition and emitted the
+        # execution receipt before opening the matching transaction.
+        return None
+
+    def on_eligible(self, order, quote: TickQuote) -> None:
+        self.eligible.append(order)
+
 
 class PaperMatchingEngine:
     """Delegate matching to the current service while the algorithm migrates."""
@@ -17,6 +46,7 @@ class PaperMatchingEngine:
     ) -> Dict:
         from paper_trading import market_spec
         point_size, contract_size = market_spec(symbol)
+        quote = TickQuote.create(bid, ask, now)
         settings = self.paper_service._settings(account_id)
         slippage = settings["slippage_points"] * point_size
         configured_spread = settings["spread_points"] * point_size
@@ -24,6 +54,7 @@ class PaperMatchingEngine:
             midpoint = (ask + bid) / 2
             bid = midpoint - configured_spread / 2
             ask = midpoint + configured_spread / 2
+        quote = TickQuote.create(bid, ask, now)
         result = {"filled": 0, "closed": 0, "rejected": 0}
         decision_updates = []
         with self.paper_service.storage._lock, self.paper_service.storage._connect() as conn:
@@ -48,7 +79,15 @@ class PaperMatchingEngine:
                 "SELECT COUNT(*) AS count FROM paper_positions WHERE account_id = ? AND status = 'open'",
                 (account_id,),
             ).fetchone()["count"])
-            for order in pending:
+            # The Paper persistence adapter consumes the same quote partition
+            # as historical replay. Timeout persistence happens immediately
+            # before matching in PaperTradingService; only eligible orders are
+            # allowed to reach validation and fill logic here.
+            pending_adapter = _PaperPendingExecutionAdapter(
+                self.paper_service.PENDING_ORDER_TIMEOUT_SECONDS,
+            )
+            TickExecutionCore.advance_pending(pending_adapter, pending, quote)
+            for order in pending_adapter.eligible:
                 if order["deployment_status"] != "active":
                     self.paper_service._reject_order(conn, order["order_id"], "策略运行已暂停", now)
                     result["rejected"] += 1
@@ -88,7 +127,9 @@ class PaperMatchingEngine:
                     )
                     result["rejected"] += 1
                     continue
-                fill_price = ask + slippage if order["direction"] == "buy" else bid - slippage
+                fill_price = quote.entry_price(order["direction"]) + (
+                    slippage if order["direction"] == "buy" else -slippage
+                )
                 if not self.paper_service._valid_exits(
                     order["direction"], fill_price,
                     float(order["stop_loss"]), float(order["take_profit"]),
@@ -283,7 +324,10 @@ class PaperMatchingEngine:
         orders = service.storage.fetchall(
             "SELECT order_id,account_id,decision_id,deployment_id,strategy_id,"
             "position_attribution_json FROM paper_orders "
-            "WHERE user_id=? AND symbol=? AND status='pending' AND requested_at<=?",
+            # Keep the persistence boundary identical to TickExecutionCore:
+            # the quote exactly 60 seconds after a request is still eligible;
+            # only a later quote times out the Pending order.
+            "WHERE user_id=? AND symbol=? AND status='pending' AND requested_at<?",
             (user_id, symbol, cutoff),
         )
         reason = "等待下一次行情撮合超时，订单已自动取消"

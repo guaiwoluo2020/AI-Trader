@@ -50,9 +50,14 @@ from market.services.strategy.strategy_service import StrategyService
 from market.store.llm_store import LLMStore
 from mysql_repositories import MySQLStorage, get_storage
 from market_tick_store import iter_ticks
+from market.services.tick_execution_core import (
+    PendingOrderExecutionAdapter, PendingTickResult, TickExecutionCore, TickQuote,
+)
 
 
-ENGINE_VERSION = "structure-plan-replay-1"
+# Increment when shared execution semantics change so cached replay results are
+# never presented as comparable to the live/Paper execution path.
+ENGINE_VERSION = "structure-plan-replay-2"
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
 PERIOD_LIMITS = {"M1": 60, "M5": 48, "M15": 40, "H1": 30, "H4": 30}
 
@@ -1682,6 +1687,28 @@ class SimPosition:
         }
 
 
+class ReplayPendingExecutionAdapter(PendingOrderExecutionAdapter[SimOrder]):
+    """In-memory adapter for the shared Pending quote state machine."""
+
+    timeout_seconds = 60
+
+    def __init__(self, replay_time: int):
+        self.replay_time = int(replay_time)
+        self.eligible: List[SimOrder] = []
+
+    @staticmethod
+    def requested_at(order: SimOrder) -> int:
+        return int(order.requested_at)
+
+    def on_timeout(self, order: SimOrder, result: PendingTickResult) -> None:
+        order.status = "canceled"
+        order.canceled_at = self.replay_time
+        order.rejection_reason = result.reason
+
+    def on_eligible(self, order: SimOrder, quote: TickQuote) -> None:
+        self.eligible.append(order)
+
+
 class M1BacktestEngine:
     """Bar-close decisions, next-bar-open fills, conservative intrabar exits."""
 
@@ -1803,6 +1830,9 @@ class M1BacktestEngine:
                     # tick.  Bid/ask are preserved, so spread and direction
                     # are handled consistently with live paper execution.
                     for tick in ticks_by_minute.get(timestamp, []):
+                        quote = TickQuote.create(
+                            tick.get("bid"), tick.get("ask"), int(tick["time"])
+                        )
                         tick_bar = {
                             "time": int(tick["time"]),
                             "open": float(tick.get("last_price") or tick.get("bid")),
@@ -1812,34 +1842,29 @@ class M1BacktestEngine:
                             "spread": 0,
                         }
                         fill_bar = tick_bar
-                        still_pending = []
-                        for order in pending_orders:
-                            # The decision is made only after the previous
-                            # bar closes; it cannot fill on an earlier/same
-                            # quote.  A one-minute timeout matches the live
-                            # pending-order safety timeout.
-                            if int(tick["time"]) <= int(order.requested_at):
-                                still_pending.append(order)
-                                continue
-                            if int(tick["time"]) > int(order.requested_at) + 60:
-                                order.status = "canceled"
-                                order.canceled_at = int(tick["time"])
-                                order.rejection_reason = "下一 Tick 撮合超时"
-                                continue
+                        # Shared with Paper: decide the quote lifecycle first,
+                        # then let the replay ledger own its in-memory effects.
+                        pending_adapter = ReplayPendingExecutionAdapter(
+                            int(tick["time"])
+                        )
+                        pending_batch = TickExecutionCore.advance_pending(
+                            pending_adapter, pending_orders, quote,
+                        )
+                        for order in pending_adapter.eligible:
                             reason = position_limit_reason(order.direction, positions, strategy, template)
                             if reason:
                                 order.reject(reason)
                                 continue
-                            side_price = float(tick.get("ask") if order.direction == "buy" else tick.get("bid"))
+                            side_price = quote.entry_price(order.direction)
                             fill_bar = {**tick_bar, "open": side_price}
                             position, balance = self._fill_order(order, fill_bar, balance, template, point_size)
                             if position:
                                 position.opened_at = int(tick["time"])
                                 positions.append(position)
                                 all_positions.append(position)
-                        pending_orders = still_pending
+                        pending_orders = pending_batch.waiting
                         for position in list(positions):
-                            price = float(tick.get("bid") if position.direction == "buy" else tick.get("ask"))
+                            price = quote.close_price(position.direction)
                             position.favorable_price = (
                                 max(position.favorable_price, price)
                                 if position.direction == "buy"
@@ -1876,10 +1901,13 @@ class M1BacktestEngine:
                                     continue
                             if action.action == "modify_sl" and action.stop_loss:
                                 position.stop_loss = float(action.stop_loss)
-                            hit = (price <= position.stop_loss or (position.take_profit > 0 and price >= position.take_profit)) if position.direction == "buy" else (price >= position.stop_loss or (position.take_profit > 0 and price <= position.take_profit))
-                            if hit:
-                                reason = "stop_loss" if ((position.direction == "buy" and price <= position.stop_loss) or (position.direction == "sell" and price >= position.stop_loss)) else "take_profit"
-                                trade, balance = self._close_at_price(position, fill_bar, balance, template, point_size, contract_size, price, reason)
+                            exit_state = TickExecutionCore.exit_state(position, quote)
+                            if exit_state.status != "hold":
+                                trade, balance = self._close_at_price(
+                                    position, fill_bar, balance, template,
+                                    point_size, contract_size, exit_state.price,
+                                    exit_state.status,
+                                )
                                 trades.append(trade)
                                 if position in positions:
                                     positions.remove(position)
