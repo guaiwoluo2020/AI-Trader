@@ -63,8 +63,13 @@
             <small>基于分层 Pivot、结构状态机和局部形态实时计算</small>
           </v-card-title>
           <v-card-text>
+            <div class="d-flex flex-wrap ga-2 align-center mb-3">
+              <v-select v-model="structureConfigScope" :items="structureConfigScopes" item-title="label" item-value="value" label="当前查看的配置" density="compact" variant="outlined" hide-details style="max-width:300px" @update:model-value="switchStructureScope" />
+              <v-btn v-if="structureConfigScope !== 'default'" size="small" variant="text" @click="switchStructureScope('default')">查看公共默认配置</v-btn>
+              <span class="text-caption text-medium-emphasis">{{ structureConfigSourceLabel }}</span>
+            </div>
             <v-divider class="my-5" />
-            <div class="llm-section-head compact"><div><h3>系统结构识别参数</h3><p>规则引擎用于 Pivot、趋势线、箱体和突破确认。参数修改后，下次行情请求立即使用。</p></div><v-btn color="primary" :loading="structureEngineSaving" @click="saveStructureEngineConfig">保存参数</v-btn></div>
+            <div class="llm-section-head compact"><div><h3>{{ structureConfigScope === 'default' ? '公共默认参数' : '品种/周期专属参数' }}</h3><p>规则引擎用于 Pivot、趋势线、箱体和突破确认。参数修改后，下次行情请求立即使用。</p></div><v-btn color="primary" :loading="structureEngineSaving" @click="saveStructureEngineConfig">{{ structureConfigScope === 'default' ? '保存公共默认参数' : '保存当前品种/周期参数' }}</v-btn></div>
             <v-row class="mt-2">
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pivot_legs" type="number" min="2" max="12" label="小级别 Pivot 腿数" hint="左右各观察几根K线" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.medium_pivot_legs" type="number" min="3" max="30" label="中级别 Pivot 腿数" density="compact" variant="outlined" /></v-col>
@@ -1392,9 +1397,20 @@ export default {
     const settingsTab = ref('account')
     const llmWorkspaceTab = ref('providers')
     const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_buffer_atr: 0.1, break_confirm_bars: 2, retest_bars: 2, displacement_atr: 0.8, range_touch_tolerance: 0.003, range_touch_atr: 0.45, range_min_touches: 2, range_min_inside_ratio: 0.65, range_min_bars: 24, range_max_atr: 8, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18, trend_min_direction_ratio: 0.62, trend_relaxed_direction_ratio: 0.55, trend_min_efficiency: 0.30, trend_min_net_change_atr: 1.5, entry_zone_atr: 0.35, stop_buffer_atr: 0.25, min_real_risk_reward: 1.2, trend_min_real_risk_reward: 0.5, location_reclaim_min_body_atr: 0.3, location_reclaim_min_close_extension_atr: 0.1, location_require_swing_external_alignment: true, location_require_internal_confirmation: true, min_breakout_displacement_atr: 0.6, trend_max_event_age_bars_m1: 5, trend_max_event_age_bars_other: 3, trend_continuation_hold_bars: 2, breakout_target_atr: 3, breakout_retest_valid_bars: 6, triangle_breakout_min_body_atr: 0.5, triangle_breakout_min_close_extension_atr: 0.1, triangle_breakout_require_swing_external_alignment: true, enable_triangle_prebreakout: true, require_location_reclaim: true })
+    const structureGlobalConfig = ref({ ...structureEngineConfig.value })
     const structureEngineSaving = ref(false)
     const structureProfiles = ref([])
     const structureProfileDraft = ref({ symbol: '', period: 'M5', allowed_setups: [] })
+    const structureConfigScope = ref('default')
+    const structureConfigScopes = computed(() => [
+      { label: '公共默认配置', value: 'default' },
+      ...structureProfiles.value.map(item => ({ label: `${item.symbol} · ${item.period}`, value: `${item.symbol}::${item.period}` })),
+    ])
+    const structureConfigSourceLabel = computed(() => {
+      if (structureConfigScope.value === 'default') return '当前显示：所有品种和周期使用的公共默认值'
+      const item = structureProfiles.value.find(x => `${x.symbol}::${x.period}` === structureConfigScope.value)
+      return item ? `当前显示：${item.symbol} · ${item.period} 专属值；未覆盖字段继承公共默认值` : '当前显示：公共默认值'
+    })
     const structureSetupProfiles = ref([])
     const structureOptimizerRunning = ref(false)
     const structureOptimizerApplying = ref(false)
@@ -1685,7 +1701,9 @@ export default {
         ])
         const engineData = await marketAPI.getMarketStructureConfig()
         structureEngineConfig.value = { ...structureEngineConfig.value, ...(engineData.config || {}) }
+        structureGlobalConfig.value = { ...structureEngineConfig.value }
         structureProfiles.value = Array.isArray(engineData.profiles) ? engineData.profiles : []
+        structureConfigScope.value = 'default'
         structureSetupProfiles.value = Array.isArray(engineData.setup_profiles) ? engineData.setup_profiles : []
         if (settingsTab.value === 'quota') await loadUserQuotas()
         successMessage.value = '管理员运营数据已刷新'
@@ -1698,14 +1716,33 @@ export default {
     const saveStructureEngineConfig = async () => {
       structureEngineSaving.value = true
       try {
-        const data = await marketAPI.saveMarketStructureConfig({ ...structureEngineConfig.value, profiles: structureProfiles.value, setup_profiles: structureSetupProfiles.value })
+        let payload = { ...structureEngineConfig.value, profiles: structureProfiles.value, setup_profiles: structureSetupProfiles.value }
+        if (structureConfigScope.value !== 'default') {
+          const [symbol, period] = structureConfigScope.value.split('::')
+          const item = { symbol, period, ...structureEngineConfig.value }
+          const index = structureProfiles.value.findIndex(x => x.symbol === symbol && x.period === period)
+          if (index >= 0) structureProfiles.value.splice(index, 1, item); else structureProfiles.value.push(item)
+          payload = { ...structureEngineConfig.value, profiles: structureProfiles.value, setup_profiles: structureSetupProfiles.value }
+        }
+        const data = await marketAPI.saveMarketStructureConfig(payload)
         structureEngineConfig.value = { ...structureEngineConfig.value, ...(data.config || {}) }
+        if (structureConfigScope.value === 'default') structureGlobalConfig.value = { ...structureEngineConfig.value }
         successMessage.value = '系统结构识别参数已保存'
         showSuccess.value = true
       } catch (err) {
         errorMessage.value = err.response?.data?.detail || '保存结构识别参数失败'
         showError.value = true
       } finally { structureEngineSaving.value = false }
+    }
+    const switchStructureScope = value => {
+      structureConfigScope.value = value || 'default'
+      if (structureConfigScope.value === 'default') {
+        structureEngineConfig.value = { ...structureGlobalConfig.value }
+        return
+      }
+      const [symbol, period] = structureConfigScope.value.split('::')
+      const profile = structureProfiles.value.find(x => x.symbol === symbol && x.period === period)
+      if (profile) structureEngineConfig.value = { ...structureEngineConfig.value, ...profile }
     }
     const saveStructureProfile = async () => {
       if (!structureProfileDraft.value.symbol) return
@@ -3592,8 +3629,12 @@ export default {
       settingsTab,
       llmWorkspaceTab,
       structureEngineConfig,
+      structureConfigScope,
+      structureConfigScopes,
+      structureConfigSourceLabel,
       structureEngineSaving,
       saveStructureEngineConfig,
+      switchStructureScope,
       structureProfiles,
       structureProfileDraft,
       structureSetupProfiles,
