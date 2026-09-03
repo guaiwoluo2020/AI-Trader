@@ -112,15 +112,18 @@
               <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.enable_triangle_prebreakout" color="primary" inset hide-details label="启用三角形提前入场" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.require_location_reclaim" color="primary" inset hide-details label="结构位置要求回收确认" /></v-col>
             </v-row>
-            <div class="llm-section-head compact mt-4"><div><h3>品种 / 周期专属覆盖</h3><p>专属参数优先于全局参数；未配置的字段继续使用全局值。</p></div></div>
+            <v-alert type="info" variant="tonal" density="compact" class="mt-4 mb-3">
+              配置按三层生效：<strong>公共默认参数 → 品种+周期参数 → 品种+周期+SETUP 参数</strong>。越靠后的配置优先级越高；没有填写的项目会自动沿用上一层。比如只给 GOLD_ M5 设置参数，不会影响 BTCUSD 或其他周期。
+            </v-alert>
+            <div class="llm-section-head compact mt-4"><div><h3>第二层：品种 + 周期配置</h3><p>控制这个品种在这个周期允许使用哪些 SETUP，并覆盖该组合的公共参数。</p></div></div>
             <div class="d-flex flex-wrap ga-2 align-center">
               <v-select v-model="structureProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:220px" />
               <v-select v-model="structureProfileDraft.period" :items="['M1','M5','M15','H1','H4']" label="周期" density="compact" variant="outlined" hide-details style="max-width:150px" />
               <v-select v-model="structureProfileDraft.allowed_setups" :items="structureSetupTypes" label="允许交易 SETUP（不选=全部）" multiple chips closable-chips density="compact" variant="outlined" hide-details style="min-width:320px;max-width:520px" />
-              <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureProfile">保存当前参数为专属配置</v-btn>
+              <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureProfile">保存品种/周期配置</v-btn>
             </div>
             <v-chip v-for="item in structureProfiles" :key="`${item.symbol}-${item.period}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureProfile(item)">{{ item.symbol }} · {{ item.period }}</v-chip>
-            <div class="llm-section-head compact mt-4"><div><h3>Setup 专属覆盖</h3><p>匹配品种、周期和 Setup 类型时覆盖上面的专属/公共参数；未填写字段继续向上继承。</p></div><v-btn size="small" color="primary" variant="tonal" :loading="structureOptimizerRunning" @click="optimizeStructureSetups">根据近30天成交自动生成优化配置</v-btn></div>
+            <div class="llm-section-head compact mt-4"><div><h3>第三层：品种 + 周期 + SETUP 配置</h3><p>只影响选中的一个 SETUP。例如 BTCUSD · M5 · range_breakout，不会影响同品种的其他 SETUP。</p></div><v-btn size="small" color="primary" variant="tonal" :loading="structureOptimizerRunning" @click="optimizeStructureSetups">生成历史优化建议</v-btn></div>
             <div class="d-flex flex-wrap ga-2 align-center">
               <v-select v-model="structureSetupProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:200px" />
               <v-select v-model="structureSetupProfileDraft.period" :items="['M1','M5','M15','H1','H4']" label="周期" density="compact" variant="outlined" hide-details style="max-width:130px" />
@@ -135,7 +138,7 @@
               <v-text-field v-model.number="structureSetupProfileDraft.entry_zone_atr" type="number" min="0" step="0.05" label="入场 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
               <v-text-field v-model.number="structureSetupProfileDraft.stop_buffer_atr" type="number" min="0" step="0.05" label="止损 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
               <v-text-field v-model.number="structureSetupProfileDraft.target_buffer_atr" type="number" min="0" step="0.05" label="止盈 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
-              <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureSetupProfile">保存当前参数为 Setup 专属配置</v-btn>
+              <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureSetupProfile">保存当前 SETUP 配置</v-btn>
             </div>
             <v-chip v-for="item in structureSetupProfiles" :key="`${item.symbol}-${item.period}-${item.setup_type}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureSetupProfile(item)">{{ item.symbol }} · {{ item.period }} · {{ item.setup_type }}</v-chip>
             <v-dialog v-model="structureOptimizerPreviewOpen" max-width="1100">
