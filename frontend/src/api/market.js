@@ -302,12 +302,6 @@ export const marketAPI = {
     })
     return response.data
   },
-  async getStructurePlanPerformance(params = {}) {
-    const response = await api.get('/admin/structure-plan/performance', {
-      params: { days: 7, ...params },
-    })
-    return response.data
-  },
 
   // 获取转折点数据
   async getPivots(symbol, period = null, direction = null, count = 50) {

@@ -87,7 +87,6 @@ export default {
           { title: '交易账户', path: '/accounts', icon: 'mdi-bank-outline' },
           { title: 'AI 行情', path: '/ai-market', icon: 'mdi-brain' },
           { title: '结构分析', path: '/market-structure', icon: 'mdi-chart-timeline-variant' },
-          { title: '结构计划分析', path: '/admin/structure-plan-performance', icon: 'mdi-chart-bar' , adminOnly: true },
           { title: '策略执行', path: '/market', icon: 'mdi-play-circle-outline' },
           { title: '仓位管理', path: '/positions', icon: 'mdi-chart-box' },
         ],
