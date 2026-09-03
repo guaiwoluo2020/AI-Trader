@@ -159,9 +159,10 @@
                 <v-card-text>
                   <p class="text-body-2 mb-3">仅展示样本不少于 3 笔的品种/周期/SETUP。应用前请核对原配置、建议配置和历史依据。</p>
                   <v-table density="compact">
-                    <thead><tr><th>品种/周期</th><th>SETUP</th><th>历史表现</th><th>建议变更</th><th>原因</th></tr></thead>
+                    <thead><tr><th style="width:48px"><v-checkbox-btn :model-value="structureOptimizerAllSelected" @update:model-value="toggleAllStructureOptimization" /></th><th>品种/周期</th><th>SETUP</th><th>历史表现</th><th>建议变更</th><th>原因</th></tr></thead>
                     <tbody>
                       <tr v-for="item in structureOptimizerPreview" :key="`${item.symbol}-${item.period}-${item.setup_type}`">
+                        <td><v-checkbox-btn v-model="structureOptimizerSelected" :value="`${item.symbol}-${item.period}-${item.setup_type}`" /></td>
                         <td>{{ item.symbol }} · {{ item.period }}</td><td>{{ item.setup_type }}</td>
                         <td>{{ item.orders }} 笔 · 胜率 {{ item.win_rate }}% · 净盈亏 {{ item.net_pnl }}<br><small>近2天 {{ item.recent_net_pnl }}</small></td>
                         <td>{{ item.proposed_enabled === false ? '停用' : '启用' }}<br><small>{{ item.changes || '保持' }}</small></td>
@@ -170,7 +171,7 @@
                     </tbody>
                   </v-table>
                 </v-card-text>
-                <v-card-actions><v-spacer /><v-btn variant="text" @click="structureOptimizerPreviewOpen=false">取消</v-btn><v-btn color="primary" :loading="structureOptimizerApplying" @click="applyStructureOptimization">确认应用选中建议</v-btn></v-card-actions>
+                <v-card-actions><span class="text-caption">已选择 {{ structureOptimizerSelected.length }} / {{ structureOptimizerPreview.length }} 条</span><v-spacer /><v-btn variant="text" @click="structureOptimizerPreviewOpen=false">取消</v-btn><v-btn color="primary" :disabled="!structureOptimizerSelected.length" :loading="structureOptimizerApplying" @click="applyStructureOptimization">确认应用选中建议</v-btn></v-card-actions>
               </v-card>
             </v-dialog>
           </v-card-text>
@@ -1442,6 +1443,8 @@ export default {
     const structureOptimizerPreviewOpen = ref(false)
     const structureOptimizerPreview = ref([])
     const structureOptimizerPayload = ref(null)
+    const structureOptimizerSelected = ref([])
+    const structureOptimizerAllSelected = computed(() => structureOptimizerPreview.value.length > 0 && structureOptimizerSelected.value.length === structureOptimizerPreview.value.length)
     const structureSetupProfileDraft = ref({ symbol: '', period: 'M5', setup_type: 'structure_location_pullback', enabled: true, allowed_directions: ['buy', 'sell'], entry_mode: '', confirmation_bars: null, min_displacement_atr: null, require_reclaim: null, min_real_risk_reward: null, entry_zone_atr: null, stop_buffer_atr: null, target_buffer_atr: null })
     const structureSetupTypes = ['structure_location_pullback', 'range_lower_reversal', 'range_upper_reversal', 'range_breakout', 'range_false_breakout', 'triangle_breakout', 'triangle_breakout_watch', 'triangle_prebreakout_pullback', 'choch_reversal', 'liquidity_sweep_reclaim', 'trend_continuation', 'structure_reversal']
 
@@ -1798,6 +1801,7 @@ export default {
         const data = await marketAPI.optimizeStructureSetups(false, 30)
         const proposals = Array.isArray(data.proposals) ? data.proposals : []
         structureOptimizerPreview.value = Array.isArray(data.diagnostics) ? data.diagnostics : []
+        structureOptimizerSelected.value = structureOptimizerPreview.value.map(item => `${item.symbol}-${item.period}-${item.setup_type}`)
         structureOptimizerPayload.value = data
         structureOptimizerPreviewOpen.value = true
         successMessage.value = proposals.length ? `已生成 ${proposals.length} 条优化建议，请核对变更原因后确认应用` : '样本不足，暂未生成优化配置（至少需要同一品种/周期/Setup 3 笔已平仓订单）'
@@ -1810,9 +1814,13 @@ export default {
     const applyStructureOptimization = async () => {
       const data = structureOptimizerPayload.value
       if (!data) return
+      const selected = new Set(structureOptimizerSelected.value)
+      const proposals = (data.proposals || []).filter(item => selected.has(`${item.symbol}-${item.period}-${item.setup_type}`))
+      const selectedSymbols = new Set(proposals.map(item => `${item.symbol}::${item.period}`))
+      const symbolProfiles = (data.symbol_profiles || []).filter(item => selectedSymbols.has(`${item.symbol}::${item.period}`))
       structureOptimizerApplying.value = true
       try {
-        const applied = await marketAPI.applyStructureSetups(data.proposals || [], data.symbol_profiles || [], data.days || 30)
+        const applied = await marketAPI.applyStructureSetups(proposals, symbolProfiles, data.days || 30)
         const proposals = Array.isArray(applied.proposals) ? applied.proposals : (data.proposals || [])
         const current = [...structureSetupProfiles.value]
         for (const item of proposals) {
@@ -1837,6 +1845,11 @@ export default {
         errorMessage.value = err.response?.data?.detail || '生成优化配置失败'
         showError.value = true
       } finally { structureOptimizerApplying.value = false }
+    }
+    const toggleAllStructureOptimization = checked => {
+      structureOptimizerSelected.value = checked
+        ? structureOptimizerPreview.value.map(item => `${item.symbol}-${item.period}-${item.setup_type}`)
+        : []
     }
     const removeStructureSetupProfile = async item => { structureSetupProfiles.value = structureSetupProfiles.value.filter(x => !(x.symbol === item.symbol && x.period === item.period && x.setup_type === item.setup_type)); await saveStructureEngineConfig() }
     const loadInstrumentMappings = async () => {
@@ -3668,6 +3681,8 @@ export default {
       structureOptimizerApplying,
       structureOptimizerPreviewOpen,
       structureOptimizerPreview,
+      structureOptimizerSelected,
+      structureOptimizerAllSelected,
       structureSetupProfileDraft,
       structureSetupTypes,
       saveStructureProfile,
@@ -3675,6 +3690,7 @@ export default {
       saveStructureSetupProfile,
       optimizeStructureSetups,
       applyStructureOptimization,
+      toggleAllStructureOptimization,
       removeStructureSetupProfile,
       tradeConfig,
       newSymbol,
