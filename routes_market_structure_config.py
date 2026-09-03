@@ -10,9 +10,10 @@ from fastapi import APIRouter, Depends
 
 from auth import AuthUser, require_admin
 from mysql_repositories import RuntimeStateRepository, get_storage
+from llm_governance import AI_SIGNAL_ANALYSIS
 
 
-def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: Dict) -> APIRouter:
+def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: Dict, engine_manager=None) -> APIRouter:
     router = APIRouter()
     allowed = {**market_defaults, **plan_defaults}
     integer_keys = {
@@ -252,5 +253,32 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
         return {"status": "ok", "days": days, "applied": applied,
                 "proposals": proposals, "symbol_profiles": symbol_profiles,
                 "diagnostics": diagnostics}
+
+    @router.post("/admin/market-structure/optimize-setups/review", dependencies=[Depends(require_admin)])
+    async def review_setup_proposals(payload: Dict, user: AuthUser = Depends(require_admin)):
+        """Have the LLM review deterministic proposals without changing config."""
+        if engine_manager is None:
+            return {"status": "unavailable", "reason": "未配置大模型引擎"}
+        proposals = payload.get("proposals") or []
+        diagnostics = payload.get("diagnostics") or []
+        if not proposals:
+            return {"status": "skipped", "reason": "没有可供复核的优化建议"}
+        prompt = (
+            "请审核以下由确定性规则生成的结构交易 SETUP 配置建议。只依据提供的历史统计，"
+            "分别判断建议是否合理，指出应保留、调整或拒绝的建议。不得直接修改配置。"
+            "严格返回 JSON：{\"summary\":\"\",\"recommendations\":[{\"symbol\":\"\",\"period\":\"\",\"setup_type\":\"\",\"decision\":\"apply|reject|review\",\"reason\":\"\",\"risk\":\"\"}],\"global_notes\":[\"\"]}。"
+            "样本少于10笔只能 review，不得建议停用。\n\n"
+            + json.dumps({"proposals": proposals, "diagnostics": diagnostics}, ensure_ascii=False, default=str)
+        )
+        try:
+            engine = engine_manager.get_engine_for_user(user.user_id)
+            review = engine.llm_service.call_llm(
+                prompt, system_prompt="你是交易配置建议审核器，只做复核，不直接写入配置。",
+                scene_code=AI_SIGNAL_ANALYSIS, object_type="structure_setup_optimizer_review",
+                object_id=f"{int(time.time())}:{user.user_id}", max_tokens=3500,
+            )
+            return {"status": "ok", "review": review or {}}
+        except Exception as exc:
+            return {"status": "failed", "reason": str(exc)[:500]}
 
     return router

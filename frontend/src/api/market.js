@@ -302,6 +302,10 @@ export const marketAPI = {
     })
     return response.data
   },
+  async reviewStructureSetups(payload) {
+    const response = await api.post('/admin/market-structure/optimize-setups/review', payload)
+    return response.data
+  },
 
   // 获取转折点数据
   async getPivots(symbol, period = null, direction = null, count = 50) {

@@ -158,6 +158,7 @@
                 <v-card-title>结构 SETUP 优化建议预览</v-card-title>
                 <v-card-text>
                   <p class="text-body-2 mb-3">仅展示样本不少于 3 笔的品种/周期/SETUP。应用前请核对原配置、建议配置和历史依据。</p>
+                  <v-alert v-if="structureOptimizerLLMReview" type="secondary" variant="tonal" density="compact" class="mb-3"><strong>大模型二次审核：</strong>{{ structureOptimizerLLMReview.summary || '已完成审核，请结合下方建议确认。' }}<div v-for="item in (structureOptimizerLLMReview.recommendations || [])" :key="`${item.symbol}-${item.period}-${item.setup_type}`" class="text-caption mt-1">{{ item.symbol }} · {{ item.period }} · {{ item.setup_type }}：{{ item.decision }} · {{ item.reason }}</div></v-alert>
                   <v-table density="compact">
                     <thead><tr><th style="width:48px"><v-checkbox-btn :model-value="structureOptimizerAllSelected" @update:model-value="toggleAllStructureOptimization" /></th><th>品种/周期</th><th>SETUP</th><th>历史表现</th><th>建议变更</th><th>原因</th></tr></thead>
                     <tbody>
@@ -1443,6 +1444,7 @@ export default {
     const structureOptimizerPreviewOpen = ref(false)
     const structureOptimizerPreview = ref([])
     const structureOptimizerPayload = ref(null)
+    const structureOptimizerLLMReview = ref(null)
     const structureOptimizerSelected = ref([])
     const structureOptimizerAllSelected = computed(() => structureOptimizerPreview.value.length > 0 && structureOptimizerSelected.value.length === structureOptimizerPreview.value.length)
     const structureSetupProfileDraft = ref({ symbol: '', period: 'M5', setup_type: 'structure_location_pullback', enabled: true, allowed_directions: ['buy', 'sell'], entry_mode: '', confirmation_bars: null, min_displacement_atr: null, require_reclaim: null, min_real_risk_reward: null, entry_zone_atr: null, stop_buffer_atr: null, target_buffer_atr: null })
@@ -1803,6 +1805,11 @@ export default {
         structureOptimizerPreview.value = Array.isArray(data.diagnostics) ? data.diagnostics : []
         structureOptimizerSelected.value = structureOptimizerPreview.value.map(item => `${item.symbol}-${item.period}-${item.setup_type}`)
         structureOptimizerPayload.value = data
+        structureOptimizerLLMReview.value = null
+        try {
+          const review = await marketAPI.reviewStructureSetups({ proposals: data.proposals || [], diagnostics: data.diagnostics || [] })
+          if (review.status === 'ok') structureOptimizerLLMReview.value = review.review || {}
+        } catch (err) { console.warn('优化建议大模型审核失败', err) }
         structureOptimizerPreviewOpen.value = true
         successMessage.value = proposals.length ? `已生成 ${proposals.length} 条优化建议，请核对变更原因后确认应用` : '样本不足，暂未生成优化配置（至少需要同一品种/周期/Setup 3 笔已平仓订单）'
         showSuccess.value = true
@@ -3681,6 +3688,7 @@ export default {
       structureOptimizerApplying,
       structureOptimizerPreviewOpen,
       structureOptimizerPreview,
+      structureOptimizerLLMReview,
       structureOptimizerSelected,
       structureOptimizerAllSelected,
       structureSetupProfileDraft,

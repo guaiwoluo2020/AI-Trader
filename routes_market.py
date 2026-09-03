@@ -369,7 +369,7 @@ def create_market_routes(
     ))
     router.include_router(create_market_websocket_routes(engine_manager))
     router.include_router(create_market_structure_config_routes(
-        MARKET_STRUCTURE_DEFAULT_CONFIG, STRUCTURE_PLAN_DEFAULT_CONFIG,
+        MARKET_STRUCTURE_DEFAULT_CONFIG, STRUCTURE_PLAN_DEFAULT_CONFIG, engine_manager,
     ), prefix="", dependencies=[Depends(require_auth)])
     router.include_router(create_market_structure_routes(
         engine_manager, account_repo, MARKET_STRUCTURE_DEFAULT_CONFIG,
