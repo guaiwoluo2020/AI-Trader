@@ -127,7 +127,14 @@
               <v-select v-model="structureProfileDraft.allowed_setups" :items="structureSetupTypes" label="允许交易 SETUP（不选=全部）" multiple chips closable-chips density="compact" variant="outlined" hide-details style="min-width:320px;max-width:520px" />
               <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureProfile">保存品种/周期配置</v-btn>
             </div>
-            <v-chip v-for="item in structureProfiles" :key="`${item.symbol}-${item.period}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureProfile(item)">{{ item.symbol }} · {{ item.period }}</v-chip>
+            <div v-if="structureProfiles.length" class="mt-3 text-caption text-medium-emphasis">已配置的品种/周期（点击查看专属参数，带颜色表示当前选中）：</div>
+            <v-chip v-for="item in structureProfiles" :key="`${item.symbol}-${item.period}`" closable size="small" class="mr-2 mt-2" :color="structureConfigScope === `${item.symbol}::${item.period}` ? 'primary' : undefined" :variant="structureConfigScope === `${item.symbol}::${item.period}` ? 'flat' : 'outlined'" @click="switchStructureScope(`${item.symbol}::${item.period}`)" @click:close.stop="removeStructureProfile(item)">{{ item.symbol }} · {{ item.period }}</v-chip>
+            <v-alert v-if="structureConfigScope !== 'default'" type="warning" variant="tonal" density="compact" class="mt-3">
+              <strong>{{ structureConfigSourceLabel }}</strong><br />
+              下面标记的字段是该品种/周期相对公共配置的专属覆盖：
+              <v-chip v-for="field in structureOverrideFields" :key="field" size="x-small" color="warning" class="mx-1 mt-1">{{ field }}</v-chip>
+              <span v-if="!structureOverrideFields.length">暂无专属字段，当前全部继承公共默认值。</span>
+            </v-alert>
             <div class="llm-section-head compact mt-4"><div><h3>第三层：品种 + 周期 + SETUP 配置</h3><p>只影响选中的一个 SETUP。例如 BTCUSD · M5 · range_breakout，不会影响同品种的其他 SETUP。</p></div><v-btn size="small" color="primary" variant="tonal" :loading="structureOptimizerRunning" @click="optimizeStructureSetups">生成历史优化建议</v-btn></div>
             <div class="d-flex flex-wrap ga-2 align-center">
               <v-select v-model="structureSetupProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:200px" />
@@ -1410,6 +1417,16 @@ export default {
       if (structureConfigScope.value === 'default') return '当前显示：所有品种和周期使用的公共默认值'
       const item = structureProfiles.value.find(x => `${x.symbol}::${x.period}` === structureConfigScope.value)
       return item ? `当前显示：${item.symbol} · ${item.period} 专属值；未覆盖字段继承公共默认值` : '当前显示：公共默认值'
+    })
+    const structureOverrideFields = computed(() => {
+      if (structureConfigScope.value === 'default') return []
+      const [symbol, period] = structureConfigScope.value.split('::')
+      const profile = structureProfiles.value.find(x => x.symbol === symbol && x.period === period)
+      if (!profile) return []
+      const labels = {
+        allowed_setups: '允许交易 SETUP', pivot_legs: '小级别 Pivot 腿数', medium_pivot_legs: '中级别 Pivot 腿数', large_pivot_legs: '大级别 Pivot 腿数', min_reversal_atr: '最小反转幅度', break_buffer_atr: '突破缓冲', break_confirm_bars: '突破确认根数', entry_zone_atr: '入场区域', stop_buffer_atr: '止损缓冲', min_real_risk_reward: '最低真实盈亏比', trend_min_real_risk_reward: '趋势最低盈亏比', min_breakout_displacement_atr: '趋势突破最小位移', require_location_reclaim: '结构位置回收确认', enable_range_boundary: '箱体边界计划', enable_range_breakout: '箱体突破计划', enable_choch: 'CHOCH 计划', enable_liquidity_sweep: '扫单计划', enable_trend: '趋势计划'
+      }
+      return Object.keys(profile).filter(key => !['symbol', 'period', 'profiles', 'setup_profiles'].includes(key) && profile[key] !== undefined && structureGlobalConfig.value[key] !== profile[key]).map(key => labels[key] || key)
     })
     const structureSetupProfiles = ref([])
     const structureOptimizerRunning = ref(false)
@@ -3632,6 +3649,7 @@ export default {
       structureConfigScope,
       structureConfigScopes,
       structureConfigSourceLabel,
+      structureOverrideFields,
       structureEngineSaving,
       saveStructureEngineConfig,
       switchStructureScope,
