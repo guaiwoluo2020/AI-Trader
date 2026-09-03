@@ -152,7 +152,8 @@
               <v-text-field v-model.number="structureSetupProfileDraft.target_buffer_atr" type="number" min="0" step="0.05" label="止盈 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
               <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureSetupProfile">保存当前 SETUP 配置</v-btn>
             </div>
-            <v-chip v-for="item in structureSetupProfiles" :key="`${item.symbol}-${item.period}-${item.setup_type}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureSetupProfile(item)">{{ item.symbol }} · {{ item.period }} · {{ item.setup_type }}</v-chip>
+            <div v-if="structureSetupProfiles.length" class="mt-3 text-caption text-medium-emphasis">已配置的 SETUP（点击查看和编辑，带颜色表示当前选中）：</div>
+            <v-chip v-for="item in structureSetupProfiles" :key="`${item.symbol}-${item.period}-${item.setup_type}`" closable size="small" class="mr-2 mt-2" :color="structureSetupScope === `${item.symbol}::${item.period}::${item.setup_type}` ? 'primary' : undefined" :variant="structureSetupScope === `${item.symbol}::${item.period}::${item.setup_type}` ? 'flat' : 'outlined'" @click="selectStructureSetupProfile(item)" @click:close.stop="removeStructureSetupProfile(item)">{{ item.symbol }} · {{ item.period }} · {{ item.setup_type }}</v-chip>
             <v-dialog v-model="structureOptimizerPreviewOpen" max-width="1100">
               <v-card>
                 <v-card-title>结构 SETUP 优化建议预览</v-card-title>
@@ -1439,6 +1440,7 @@ export default {
       }).map(key => labels[key] || key)
     })
     const structureSetupProfiles = ref([])
+    const structureSetupScope = ref('')
     const structureOptimizerRunning = ref(false)
     const structureOptimizerApplying = ref(false)
     const structureOptimizerPreviewOpen = ref(false)
@@ -1785,6 +1787,7 @@ export default {
     const saveStructureSetupProfile = async () => {
       const draft = structureSetupProfileDraft.value
       if (!draft.symbol || !draft.period || !draft.setup_type) return
+      structureSetupScope.value = `${draft.symbol}::${draft.period}::${draft.setup_type}`
       const item = { symbol: draft.symbol, period: draft.period, setup_type: draft.setup_type }
       for (const key of ['min_real_risk_reward', 'entry_zone_atr', 'stop_buffer_atr', 'target_buffer_atr', 'confirmation_bars', 'min_displacement_atr']) {
         if (draft[key] !== null && draft[key] !== '' && Number.isFinite(Number(draft[key]))) item[key] = Number(draft[key])
@@ -1796,6 +1799,22 @@ export default {
       const index = structureSetupProfiles.value.findIndex(x => x.symbol === item.symbol && x.period === item.period && x.setup_type === item.setup_type)
       if (index >= 0) structureSetupProfiles.value.splice(index, 1, item); else structureSetupProfiles.value.push(item)
       await saveStructureEngineConfig()
+    }
+    const selectStructureSetupProfile = item => {
+      structureSetupScope.value = `${item.symbol}::${item.period}::${item.setup_type}`
+      structureSetupProfileDraft.value = {
+        symbol: item.symbol, period: item.period, setup_type: item.setup_type,
+        enabled: item.enabled !== false,
+        allowed_directions: item.allowed_directions || ['buy', 'sell'],
+        entry_mode: item.entry_mode || '',
+        confirmation_bars: item.confirmation_bars ?? null,
+        min_displacement_atr: item.min_displacement_atr ?? null,
+        require_reclaim: item.require_reclaim ?? null,
+        min_real_risk_reward: item.min_real_risk_reward ?? null,
+        entry_zone_atr: item.entry_zone_atr ?? null,
+        stop_buffer_atr: item.stop_buffer_atr ?? null,
+        target_buffer_atr: item.target_buffer_atr ?? null,
+      }
     }
     const optimizeStructureSetups = async () => {
       structureOptimizerRunning.value = true
@@ -3684,6 +3703,7 @@ export default {
       structureProfiles,
       structureProfileDraft,
       structureSetupProfiles,
+      structureSetupScope,
       structureOptimizerRunning,
       structureOptimizerApplying,
       structureOptimizerPreviewOpen,
@@ -3696,6 +3716,7 @@ export default {
       saveStructureProfile,
       removeStructureProfile,
       saveStructureSetupProfile,
+      selectStructureSetupProfile,
       optimizeStructureSetups,
       applyStructureOptimization,
       toggleAllStructureOptimization,
