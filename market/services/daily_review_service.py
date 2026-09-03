@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 import json
+import os
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -21,6 +22,10 @@ from market.services.daily_review_file_store import load as load_review_file, sa
 
 CHINA_TZ = timezone(timedelta(hours=8))
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
+# LLM reviews are retired by default. Set explicitly to true only for a
+# controlled, temporary re-enable; the daily scheduler still records a
+# skipped review so the audit trail remains complete.
+LLM_REVIEW_ENABLED = str(os.getenv("AI_TRADER_DAILY_LLM_REVIEW_ENABLED", "false")).lower() in {"1", "true", "yes", "on"}
 
 
 def _json(value, default=None):
@@ -211,6 +216,12 @@ class DailyReviewCoordinator:
             }
             self._save_structure(user_id, entity_id, payload)
             return "skipped"
+        if not LLM_REVIEW_ENABLED:
+            self._save_structure(user_id, entity_id, {
+                **base, "status": "skipped",
+                "skip_reason": "大模型结构复盘已停用；保留行情证据和历史文件，不调用大模型",
+            })
+            return "skipped"
         try:
             evidence = self._structure_evidence(user_id, symbol, period, now)
             prompt = self._structure_prompt(evidence)
@@ -383,6 +394,12 @@ class DailyReviewCoordinator:
             )):
                 payload = {**base, "status": "skipped", "skip_reason": "过去24小时没有策略决策、订单或成交，已自动跳过复盘", "evidence": evidence}
                 self._save_strategy(user_id, account_id, entity_id, payload)
+                return "skipped"
+            if not LLM_REVIEW_ENABLED:
+                self._save_strategy(user_id, account_id, entity_id, {
+                    **base, "status": "skipped", "evidence": evidence,
+                    "skip_reason": "大模型策略复盘已停用；保留执行证据和历史文件，不调用大模型",
+                })
                 return "skipped"
             prompt = (
                 "请复盘这个策略部署过去24小时的决策、订单和成交。结合结构计划的领取与消费状态，"
