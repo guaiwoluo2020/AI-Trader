@@ -292,6 +292,16 @@ export const marketAPI = {
     const response = await api.put('/admin/market-structure/config', config)
     return response.data
   },
+  async optimizeStructureSetups(apply = true, days = 30) {
+    const response = await api.post('/admin/market-structure/optimize-setups', { apply, days })
+    return response.data
+  },
+  async applyStructureSetups(proposals, symbolProfiles, days = 30) {
+    const response = await api.post('/admin/market-structure/optimize-setups', {
+      apply: true, days, proposals, symbol_profiles: symbolProfiles,
+    })
+    return response.data
+  },
   async getStructurePlanPerformance(params = {}) {
     const response = await api.get('/admin/structure-plan/performance', {
       params: { days: 7, ...params },

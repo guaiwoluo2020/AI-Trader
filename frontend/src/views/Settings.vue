@@ -116,14 +116,21 @@
             <div class="d-flex flex-wrap ga-2 align-center">
               <v-select v-model="structureProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:220px" />
               <v-select v-model="structureProfileDraft.period" :items="['M1','M5','M15','H1','H4']" label="周期" density="compact" variant="outlined" hide-details style="max-width:150px" />
+              <v-select v-model="structureProfileDraft.allowed_setups" :items="structureSetupTypes" label="允许交易 SETUP（不选=全部）" multiple chips closable-chips density="compact" variant="outlined" hide-details style="min-width:320px;max-width:520px" />
               <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureProfile">保存当前参数为专属配置</v-btn>
             </div>
             <v-chip v-for="item in structureProfiles" :key="`${item.symbol}-${item.period}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureProfile(item)">{{ item.symbol }} · {{ item.period }}</v-chip>
-            <div class="llm-section-head compact mt-4"><div><h3>Setup 专属覆盖</h3><p>匹配品种、周期和 Setup 类型时覆盖上面的专属/公共参数；未填写字段继续向上继承。</p></div></div>
+            <div class="llm-section-head compact mt-4"><div><h3>Setup 专属覆盖</h3><p>匹配品种、周期和 Setup 类型时覆盖上面的专属/公共参数；未填写字段继续向上继承。</p></div><v-btn size="small" color="primary" variant="tonal" :loading="structureOptimizerRunning" @click="optimizeStructureSetups">根据近30天成交自动生成优化配置</v-btn></div>
             <div class="d-flex flex-wrap ga-2 align-center">
               <v-select v-model="structureSetupProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:200px" />
               <v-select v-model="structureSetupProfileDraft.period" :items="['M1','M5','M15','H1','H4']" label="周期" density="compact" variant="outlined" hide-details style="max-width:130px" />
               <v-select v-model="structureSetupProfileDraft.setup_type" :items="structureSetupTypes" label="Setup" density="compact" variant="outlined" hide-details style="max-width:250px" />
+              <v-switch v-model="structureSetupProfileDraft.enabled" color="primary" inset hide-details label="允许交易" />
+              <v-select v-model="structureSetupProfileDraft.allowed_directions" :items="['buy','sell']" label="方向" multiple chips density="compact" variant="outlined" hide-details style="max-width:180px" />
+              <v-select v-model="structureSetupProfileDraft.entry_mode" :items="['touch_or_near','touch_and_reclaim','breakout_retest','close_breakout']" label="入场方式" density="compact" variant="outlined" hide-details style="max-width:190px" />
+              <v-text-field v-model.number="structureSetupProfileDraft.confirmation_bars" type="number" min="1" max="10" label="确认K线" density="compact" variant="outlined" hide-details style="max-width:110px" />
+              <v-text-field v-model.number="structureSetupProfileDraft.min_displacement_atr" type="number" min="0" step="0.1" label="最小位移 ATR" density="compact" variant="outlined" hide-details style="max-width:140px" />
+              <v-switch v-model="structureSetupProfileDraft.require_reclaim" color="primary" inset hide-details label="要求回收" />
               <v-text-field v-model.number="structureSetupProfileDraft.min_real_risk_reward" type="number" min="0" step="0.1" label="最低盈亏比" density="compact" variant="outlined" hide-details style="max-width:130px" />
               <v-text-field v-model.number="structureSetupProfileDraft.entry_zone_atr" type="number" min="0" step="0.05" label="入场 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
               <v-text-field v-model.number="structureSetupProfileDraft.stop_buffer_atr" type="number" min="0" step="0.05" label="止损 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
@@ -131,6 +138,26 @@
               <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureSetupProfile">保存当前参数为 Setup 专属配置</v-btn>
             </div>
             <v-chip v-for="item in structureSetupProfiles" :key="`${item.symbol}-${item.period}-${item.setup_type}`" closable size="small" class="mr-2 mt-3" @click:close="removeStructureSetupProfile(item)">{{ item.symbol }} · {{ item.period }} · {{ item.setup_type }}</v-chip>
+            <v-dialog v-model="structureOptimizerPreviewOpen" max-width="1100">
+              <v-card>
+                <v-card-title>结构 SETUP 优化建议预览</v-card-title>
+                <v-card-text>
+                  <p class="text-body-2 mb-3">仅展示样本不少于 3 笔的品种/周期/SETUP。应用前请核对原配置、建议配置和历史依据。</p>
+                  <v-table density="compact">
+                    <thead><tr><th>品种/周期</th><th>SETUP</th><th>历史表现</th><th>建议变更</th><th>原因</th></tr></thead>
+                    <tbody>
+                      <tr v-for="item in structureOptimizerPreview" :key="`${item.symbol}-${item.period}-${item.setup_type}`">
+                        <td>{{ item.symbol }} · {{ item.period }}</td><td>{{ item.setup_type }}</td>
+                        <td>{{ item.orders }} 笔 · 胜率 {{ item.win_rate }}% · 净盈亏 {{ item.net_pnl }}<br><small>近2天 {{ item.recent_net_pnl }}</small></td>
+                        <td>{{ item.proposed_enabled === false ? '停用' : '启用' }}<br><small>{{ item.changes || '保持' }}</small></td>
+                        <td>{{ (item.reasons || []).join('；') }}</td>
+                      </tr>
+                    </tbody>
+                  </v-table>
+                </v-card-text>
+                <v-card-actions><v-spacer /><v-btn variant="text" @click="structureOptimizerPreviewOpen=false">取消</v-btn><v-btn color="primary" :loading="structureOptimizerApplying" @click="applyStructureOptimization">确认应用选中建议</v-btn></v-card-actions>
+              </v-card>
+            </v-dialog>
           </v-card-text>
         </v-card>
       </v-col>
@@ -1364,9 +1391,14 @@ export default {
     const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_buffer_atr: 0.1, break_confirm_bars: 2, retest_bars: 2, displacement_atr: 0.8, range_touch_tolerance: 0.003, range_touch_atr: 0.45, range_min_touches: 2, range_min_inside_ratio: 0.65, range_min_bars: 24, range_max_atr: 8, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18, trend_min_direction_ratio: 0.62, trend_relaxed_direction_ratio: 0.55, trend_min_efficiency: 0.30, trend_min_net_change_atr: 1.5, entry_zone_atr: 0.35, stop_buffer_atr: 0.25, min_real_risk_reward: 1.2, trend_min_real_risk_reward: 0.5, location_reclaim_min_body_atr: 0.3, location_reclaim_min_close_extension_atr: 0.1, location_require_swing_external_alignment: true, location_require_internal_confirmation: true, min_breakout_displacement_atr: 0.6, trend_max_event_age_bars_m1: 5, trend_max_event_age_bars_other: 3, trend_continuation_hold_bars: 2, breakout_target_atr: 3, breakout_retest_valid_bars: 6, triangle_breakout_min_body_atr: 0.5, triangle_breakout_min_close_extension_atr: 0.1, triangle_breakout_require_swing_external_alignment: true, enable_triangle_prebreakout: true, require_location_reclaim: true })
     const structureEngineSaving = ref(false)
     const structureProfiles = ref([])
-    const structureProfileDraft = ref({ symbol: '', period: 'M5' })
+    const structureProfileDraft = ref({ symbol: '', period: 'M5', allowed_setups: [] })
     const structureSetupProfiles = ref([])
-    const structureSetupProfileDraft = ref({ symbol: '', period: 'M5', setup_type: 'structure_location_pullback', min_real_risk_reward: null, entry_zone_atr: null, stop_buffer_atr: null, target_buffer_atr: null })
+    const structureOptimizerRunning = ref(false)
+    const structureOptimizerApplying = ref(false)
+    const structureOptimizerPreviewOpen = ref(false)
+    const structureOptimizerPreview = ref([])
+    const structureOptimizerPayload = ref(null)
+    const structureSetupProfileDraft = ref({ symbol: '', period: 'M5', setup_type: 'structure_location_pullback', enabled: true, allowed_directions: ['buy', 'sell'], entry_mode: '', confirmation_bars: null, min_displacement_atr: null, require_reclaim: null, min_real_risk_reward: null, entry_zone_atr: null, stop_buffer_atr: null, target_buffer_atr: null })
     const structureSetupTypes = ['structure_location_pullback', 'range_lower_reversal', 'range_upper_reversal', 'range_breakout', 'range_false_breakout', 'triangle_breakout', 'triangle_breakout_watch', 'triangle_prebreakout_pullback', 'choch_reversal', 'liquidity_sweep_reclaim', 'trend_continuation', 'structure_reversal']
 
     // 交易配置
@@ -1674,7 +1706,7 @@ export default {
     }
     const saveStructureProfile = async () => {
       if (!structureProfileDraft.value.symbol) return
-      const item = { symbol: structureProfileDraft.value.symbol, period: structureProfileDraft.value.period, ...structureEngineConfig.value }
+      const item = { symbol: structureProfileDraft.value.symbol, period: structureProfileDraft.value.period, ...structureEngineConfig.value, allowed_setups: structureProfileDraft.value.allowed_setups || [] }
       const index = structureProfiles.value.findIndex(x => x.symbol === item.symbol && x.period === item.period)
       if (index >= 0) structureProfiles.value.splice(index, 1, item); else structureProfiles.value.push(item)
       await saveStructureEngineConfig()
@@ -1684,12 +1716,62 @@ export default {
       const draft = structureSetupProfileDraft.value
       if (!draft.symbol || !draft.period || !draft.setup_type) return
       const item = { symbol: draft.symbol, period: draft.period, setup_type: draft.setup_type }
-      for (const key of ['min_real_risk_reward', 'entry_zone_atr', 'stop_buffer_atr', 'target_buffer_atr']) {
+      for (const key of ['min_real_risk_reward', 'entry_zone_atr', 'stop_buffer_atr', 'target_buffer_atr', 'confirmation_bars', 'min_displacement_atr']) {
         if (draft[key] !== null && draft[key] !== '' && Number.isFinite(Number(draft[key]))) item[key] = Number(draft[key])
       }
+      item.enabled = draft.enabled !== false
+      item.allowed_directions = draft.allowed_directions || ['buy', 'sell']
+      if (draft.entry_mode) item.entry_mode = draft.entry_mode
+      if (draft.require_reclaim !== null) item.require_reclaim = Boolean(draft.require_reclaim)
       const index = structureSetupProfiles.value.findIndex(x => x.symbol === item.symbol && x.period === item.period && x.setup_type === item.setup_type)
       if (index >= 0) structureSetupProfiles.value.splice(index, 1, item); else structureSetupProfiles.value.push(item)
       await saveStructureEngineConfig()
+    }
+    const optimizeStructureSetups = async () => {
+      structureOptimizerRunning.value = true
+      try {
+        const data = await marketAPI.optimizeStructureSetups(false, 30)
+        const proposals = Array.isArray(data.proposals) ? data.proposals : []
+        structureOptimizerPreview.value = Array.isArray(data.diagnostics) ? data.diagnostics : []
+        structureOptimizerPayload.value = data
+        structureOptimizerPreviewOpen.value = true
+        successMessage.value = proposals.length ? `已生成 ${proposals.length} 条优化建议，请核对变更原因后确认应用` : '样本不足，暂未生成优化配置（至少需要同一品种/周期/Setup 3 笔已平仓订单）'
+        showSuccess.value = true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '生成优化配置失败'
+        showError.value = true
+      } finally { structureOptimizerRunning.value = false }
+    }
+    const applyStructureOptimization = async () => {
+      const data = structureOptimizerPayload.value
+      if (!data) return
+      structureOptimizerApplying.value = true
+      try {
+        const applied = await marketAPI.applyStructureSetups(data.proposals || [], data.symbol_profiles || [], data.days || 30)
+        const proposals = Array.isArray(applied.proposals) ? applied.proposals : (data.proposals || [])
+        const current = [...structureSetupProfiles.value]
+        for (const item of proposals) {
+          const index = current.findIndex(x => x.symbol === item.symbol && x.period === item.period && x.setup_type === item.setup_type)
+          if (index >= 0) current.splice(index, 1, item); else current.push(item)
+        }
+        structureSetupProfiles.value = current
+        if (Array.isArray(applied.symbol_profiles) && applied.symbol_profiles.length) {
+          const profiles = [...structureProfiles.value]
+          for (const item of applied.symbol_profiles) {
+            const index = profiles.findIndex(x => x.symbol === item.symbol && x.period === item.period)
+            if (index >= 0) profiles.splice(index, 1, { ...profiles[index], ...item })
+            else profiles.push(item)
+          }
+          structureProfiles.value = profiles
+        }
+        // Persist the merged symbol whitelist returned by the optimizer.
+        structureOptimizerPreviewOpen.value = false
+        successMessage.value = proposals.length ? `已应用 ${proposals.length} 条 Setup 优化配置` : '没有可应用的优化建议'
+        showSuccess.value = true
+      } catch (err) {
+        errorMessage.value = err.response?.data?.detail || '生成优化配置失败'
+        showError.value = true
+      } finally { structureOptimizerApplying.value = false }
     }
     const removeStructureSetupProfile = async item => { structureSetupProfiles.value = structureSetupProfiles.value.filter(x => !(x.symbol === item.symbol && x.period === item.period && x.setup_type === item.setup_type)); await saveStructureEngineConfig() }
     const loadInstrumentMappings = async () => {
@@ -3512,11 +3594,17 @@ export default {
       structureProfiles,
       structureProfileDraft,
       structureSetupProfiles,
+      structureOptimizerRunning,
+      structureOptimizerApplying,
+      structureOptimizerPreviewOpen,
+      structureOptimizerPreview,
       structureSetupProfileDraft,
       structureSetupTypes,
       saveStructureProfile,
       removeStructureProfile,
       saveStructureSetupProfile,
+      optimizeStructureSetups,
+      applyStructureOptimization,
       removeStructureSetupProfile,
       tradeConfig,
       newSymbol,

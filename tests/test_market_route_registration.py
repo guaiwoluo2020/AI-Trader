@@ -45,6 +45,7 @@ def test_migrated_market_routes_are_registered_once():
         ("GET", "/market/pivots/{symbol}"),
         ("GET", "/admin/market-structure/config"),
         ("PUT", "/admin/market-structure/config"),
+        ("POST", "/admin/market-structure/optimize-setups"),
         ("WEBSOCKET", "/ws/market"),
         ("WEBSOCKET", "/ws/system-logs"),
     }

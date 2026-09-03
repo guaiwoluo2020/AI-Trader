@@ -1,7 +1,7 @@
 """K-line driven structure plans with deterministic Tick evaluation."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import time
@@ -26,6 +26,18 @@ MARKET_STRUCTURE_PLAN_SOURCE_ID = "market-structure"
 # Public, market-layer defaults.  These parameters describe how a structure
 # becomes a trade plan; they intentionally do not belong to a deployment.
 STRUCTURE_PLAN_DEFAULT_CONFIG = {
+    # Empty means all SETUP types are tradable. A symbol/period profile may
+    # provide a whitelist to restrict execution without disabling analysis.
+    "allowed_setups": [],
+    "enabled": True,
+    "allowed_directions": ["buy", "sell"],
+    "entry_mode": "",
+    "confirmation_bars": 1,
+    "min_body_atr": 0.0,
+    "min_displacement_atr": 0.0,
+    "require_reclaim": False,
+    "same_segment_max_trades": 1,
+    "blocked_hours": [],
     "enable_structure_location": True, "enable_range_boundary": True,
     "enable_range_breakout": True, "enable_triangle_prebreakout": True,
     "enable_choch": True, "enable_liquidity_sweep": True, "enable_trend": True,
@@ -69,6 +81,19 @@ def resolve_structure_plan_config(symbol: str, period: str, setup_type: str = ""
     )
 
 
+def setup_is_allowed(symbol: str, period: str, setup_type: str) -> bool:
+    """Return the effective symbol/period/setup trading gate."""
+    config = resolve_structure_plan_config(symbol, period, setup_type)
+    allowed = {
+        str(item).strip().lower() for item in (config.get("allowed_setups") or [])
+        if str(item).strip()
+    }
+    setup = str(setup_type or "").strip().lower()
+    if allowed and setup not in allowed:
+        return False
+    return bool(config.get("enabled", True))
+
+
 def _number(value, default=0.0) -> float:
     try:
         return float(value)
@@ -105,6 +130,41 @@ class StructurePlanBuilder:
     def _param(self, name, default):
         return self.params.get(name, default)
 
+    def _filter_allowed(self, plans: List[Dict]) -> List[Dict]:
+        allowed = {
+            str(item).strip().lower()
+            for item in (self._base_params.get("allowed_setups") or [])
+            if str(item).strip()
+        }
+        def enabled_for(setup: str) -> bool:
+            for profile in self.setup_profiles:
+                if str(profile.get("setup_type") or "").strip().lower() == setup:
+                    return bool(profile.get("enabled", True))
+            return True
+        def direction_allowed(plan: Dict) -> bool:
+            setup = str(plan.get("setup_type") or "").strip().lower()
+            profile = next((item for item in self.setup_profiles
+                            if str(item.get("setup_type") or "").strip().lower() == setup), None)
+            configured = (profile or {}).get("allowed_directions") if profile else self._base_params.get("allowed_directions")
+            if not configured:
+                return True
+            return str(plan.get("direction") or "").strip().lower() in {
+                str(item).strip().lower() for item in configured
+            }
+        directions = {
+            str(item).strip().lower()
+            for item in (self._base_params.get("allowed_directions") or ["buy", "sell"])
+            if str(item).strip().lower() in {"buy", "sell"}
+        }
+        return [
+            plan for plan in plans
+            if str(plan.get("setup_type") or "").strip().lower() == "no_trade"
+            or (not allowed or str(plan.get("setup_type") or "").strip().lower() in allowed)
+            and enabled_for(str(plan.get("setup_type") or "").strip().lower())
+            and (not directions or str(plan.get("direction") or "").strip().lower() in directions)
+            and direction_allowed(plan)
+        ]
+
     def _activate_setup(self, setup_type: str) -> None:
         """Apply the most specific setup override before deriving a plan."""
         self._active_setup = str(setup_type or "").strip().lower()
@@ -114,6 +174,18 @@ class StructurePlanBuilder:
         for profile in self.setup_profiles:
             if str(profile.get("setup_type") or "").strip().lower() == self._active_setup:
                 self.params.update({k: v for k, v in profile.items() if k in STRUCTURE_PLAN_DEFAULT_CONFIG})
+                # Map the optimizer's common controls onto the existing
+                # setup-specific gates so recommendations affect generation.
+                if "min_displacement_atr" in profile:
+                    self.params["min_breakout_displacement_atr"] = profile["min_displacement_atr"]
+                if "min_body_atr" in profile:
+                    self.params["triangle_breakout_min_body_atr"] = profile["min_body_atr"]
+                    self.params["location_reclaim_min_body_atr"] = profile["min_body_atr"]
+                if "confirmation_bars" in profile:
+                    self.params["trend_continuation_hold_bars"] = profile["confirmation_bars"]
+                if "require_reclaim" in profile:
+                    self.params["require_location_reclaim"] = profile["require_reclaim"]
+                    self.params["require_range_boundary_reclaim"] = profile["require_reclaim"]
                 break
 
     def _reject(self, reason: str) -> None:
@@ -121,6 +193,9 @@ class StructurePlanBuilder:
             self._rejections.append(reason)
 
     def _range_entry_mode(self) -> str:
+        configured = str(self._param("entry_mode", "") or "").strip().lower()
+        if configured in {"touch_or_near", "touch_and_reclaim"}:
+            return configured
         return (
             "touch_and_reclaim"
             if self._param("require_range_boundary_reclaim", False)
@@ -593,6 +668,7 @@ class StructurePlanBuilder:
         plans = self._range_plans(
             source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
         )
+        plans = self._filter_allowed(plans)
         if plans:
             return plans
         # Fresh structural events take precedence over ordinary location
@@ -603,16 +679,19 @@ class StructurePlanBuilder:
             plans = self._event_plans(
                 source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
             )
+            plans = self._filter_allowed(plans)
             if plans:
                 return plans
         plans = self._location_plans(
             source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
         )
+        plans = self._filter_allowed(plans)
         if plans:
             return plans
         plans = self._event_plans(
             source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
         )
+        plans = self._filter_allowed(plans)
         if plans:
             return plans
         state = str(structure.get("major_state") or "undetermined")
@@ -771,7 +850,10 @@ class StructurePlanBuilder:
             key=lambda item: (abs(item["price"] - close), -int(item["confidence"])),
         )
         entry = _number(level["price"])
-        entry_mode = (
+        configured_entry_mode = str(self._param("entry_mode", "") or "").strip().lower()
+        entry_mode = configured_entry_mode if configured_entry_mode in {
+            "touch_or_near", "touch_and_reclaim"
+        } else (
             "touch_and_reclaim"
             if self._param("require_location_reclaim", True) else "touch_or_near"
         )
@@ -1484,6 +1566,7 @@ class StructurePlanSignalGenerator:
         seen_plan_ids = set()
         for config in strategy.get_signal_sources("structure_plan", enabled_only=True):
             params = dict(config.get("params") or {})
+            period = str(config.get("period") or "M5").upper()
             allowed_directions = {
                 str(item) for item in params.get(
                     "allowed_directions", ["buy", "sell"]
@@ -1496,6 +1579,20 @@ class StructurePlanSignalGenerator:
                 if plan_id:
                     seen_plan_ids.add(plan_id)
                 direction = str(plan.get("direction") or "")
+                setup_type = str(plan.get("setup_type") or "").strip().lower()
+                if direction in {"buy", "sell"}:
+                    effective = resolve_structure_plan_config(symbol, period, setup_type)
+                    allowed_setups = {str(item).strip().lower() for item in (effective.get("allowed_setups") or []) if str(item).strip()}
+                    effective_dirs = {str(item).strip().lower() for item in (effective.get("allowed_directions") or ["buy", "sell"]) if str(item).strip().lower() in {"buy", "sell"}}
+                    if (allowed_setups and setup_type not in allowed_setups) or not bool(effective.get("enabled", True)):
+                        continue
+                    if effective_dirs and direction not in effective_dirs:
+                        continue
+                    blocked_hours = {int(item) for item in (effective.get("blocked_hours") or []) if str(item).strip().isdigit()}
+                    if blocked_hours:
+                        beijing_hour = datetime.fromtimestamp(now, timezone.utc).astimezone(timezone(timedelta(hours=8))).hour
+                        if beijing_hour in blocked_hours:
+                            continue
                 if direction in {"buy", "sell"} and direction not in allowed_directions:
                     continue
                 valid_from = int(plan.get("valid_from") or 0)
