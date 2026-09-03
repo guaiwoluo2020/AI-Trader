@@ -1424,9 +1424,17 @@ export default {
       const profile = structureProfiles.value.find(x => x.symbol === symbol && x.period === period)
       if (!profile) return []
       const labels = {
-        allowed_setups: '允许交易 SETUP', pivot_legs: '小级别 Pivot 腿数', medium_pivot_legs: '中级别 Pivot 腿数', large_pivot_legs: '大级别 Pivot 腿数', min_reversal_atr: '最小反转幅度', break_buffer_atr: '突破缓冲', break_confirm_bars: '突破确认根数', entry_zone_atr: '入场区域', stop_buffer_atr: '止损缓冲', min_real_risk_reward: '最低真实盈亏比', trend_min_real_risk_reward: '趋势最低盈亏比', min_breakout_displacement_atr: '趋势突破最小位移', require_location_reclaim: '结构位置回收确认', enable_range_boundary: '箱体边界计划', enable_range_breakout: '箱体突破计划', enable_choch: 'CHOCH 计划', enable_liquidity_sweep: '扫单计划', enable_trend: '趋势计划'
+        allowed_setups: '允许交易 SETUP', allowed_directions: '允许交易方向', blocked_hours: '禁止交易时段', pivot_legs: '小级别 Pivot 腿数', medium_pivot_legs: '中级别 Pivot 腿数', large_pivot_legs: '大级别 Pivot 腿数', min_reversal_atr: '最小反转幅度', break_buffer_atr: '突破缓冲', break_confirm_bars: '突破确认根数', entry_zone_atr: '入场区域', stop_buffer_atr: '止损缓冲', min_real_risk_reward: '最低真实盈亏比', trend_min_real_risk_reward: '趋势最低盈亏比', min_breakout_displacement_atr: '趋势突破最小位移', require_location_reclaim: '结构位置回收确认', enable_range_boundary: '箱体边界计划', enable_range_breakout: '箱体突破计划', enable_choch: 'CHOCH 计划', enable_liquidity_sweep: '扫单计划', enable_trend: '趋势计划'
       }
-      return Object.keys(profile).filter(key => !['symbol', 'period', 'profiles', 'setup_profiles'].includes(key) && profile[key] !== undefined && structureGlobalConfig.value[key] !== profile[key]).map(key => labels[key] || key)
+      return Object.keys(profile).filter(key => {
+        if (['symbol', 'period', 'profiles', 'setup_profiles'].includes(key) || profile[key] === undefined) return false
+        // Empty whitelist/block lists mean "inherit/default" and are not an
+        // effective override. Avoid displaying them as a change merely because
+        // older saved profiles serialized an empty array.
+        if (['allowed_setups', 'allowed_directions', 'blocked_hours'].includes(key)
+            && (!Array.isArray(profile[key]) || profile[key].length === 0)) return false
+        return structureGlobalConfig.value[key] !== profile[key]
+      }).map(key => labels[key] || key)
     })
     const structureSetupProfiles = ref([])
     const structureOptimizerRunning = ref(false)
