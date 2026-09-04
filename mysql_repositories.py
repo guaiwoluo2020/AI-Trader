@@ -577,13 +577,13 @@ class TradingAccountRepository:
                 UPDATE trading_accounts
                 SET initial_balance = CASE WHEN initial_balance = 0 THEN ? ELSE initial_balance END,
                     balance = ?, equity = ?, free_margin = ?, margin = ?,
-                    financial_updated_at = ?, updated_at = ?
-                WHERE id = ? AND account_type = 'mt5'
+                    financial_updated_at = ?, updated_at = ?, last_seen_at = ?
+                WHERE id = ? AND account_type IN ('mt5', 'ibkr')
                 """,
-                (values[0], *values, now, now, account_id),
+                (values[0], *values, now, now, now, account_id),
             )
             account_row = conn.execute(
-                "SELECT user_id FROM trading_accounts WHERE id = ? AND account_type = 'mt5'",
+                "SELECT user_id FROM trading_accounts WHERE id = ? AND account_type IN ('mt5', 'ibkr')",
                 (account_id,),
             ).fetchone()
             if account_row is not None:

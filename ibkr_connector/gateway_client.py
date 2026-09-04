@@ -39,6 +39,7 @@ class IBGatewayClient(EWrapper):
         self._next_request_id = 1
         self._request_symbols: Dict[int, str] = {}
         self._quotes: Dict[int, Dict[str, float]] = {}
+        self._account_summary_request_id: Optional[int] = None
 
     @property
     def connected(self) -> bool:
@@ -141,6 +142,18 @@ class IBGatewayClient(EWrapper):
     def nextValidId(self, orderId):
         self._next_request_id = max(self._next_request_id, int(orderId))
         self.on_event("gateway_ready", {"next_order_id": int(orderId)})
+        # Keep a live account summary subscription so the server can expose
+        # current equity/cash/margin instead of only the managed account id.
+        if self._account_summary_request_id is None:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            self._account_summary_request_id = request_id
+            self._client.reqAccountSummary(
+                request_id,
+                "All",
+                "NetLiquidation,TotalCashValue,AvailableFunds,BuyingPower,MaintMarginReq,InitMarginReq,GrossPositionValue",
+            )
+            self.on_event("account_summary_requested", {"request_id": request_id})
 
     def managedAccounts(self, accountsList):
         self.on_event("accounts", {"accounts": [x for x in accountsList.split(",") if x]})
@@ -149,6 +162,9 @@ class IBGatewayClient(EWrapper):
         self.on_event("account_summary", {"request_id": reqId, "account": account,
                                            "tag": tag, "value": value,
                                            "currency": currency})
+
+    def accountSummaryEnd(self, reqId):
+        self.on_event("account_summary_end", {"request_id": int(reqId)})
 
     def orderStatus(self, orderId, status, filled, remaining, avgFillPrice,
                     permId, parentId, lastFillPrice, clientId, whyHeld,

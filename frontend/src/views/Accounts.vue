@@ -448,7 +448,7 @@
             <span>只读实时监控 · 由 EA 上报账户、仓位和成交数据</span>
           </div>
           <div class="d-flex align-center ga-2">
-            <v-chip size="small" :color="liveDetail.account.connected ? 'success' : 'warning'" variant="tonal">{{ liveDetail.account.connected ? '终端在线' : '终端离线' }}</v-chip>
+            <v-chip size="small" :color="liveDetail.account.connected ? 'success' : 'warning'" variant="tonal">{{ liveDetail.account.account_type === 'ibkr' ? (liveDetail.account.connected ? 'Gateway 在线' : 'Gateway 离线') : (liveDetail.account.connected ? '终端在线' : '终端离线') }}</v-chip>
             <v-btn icon="mdi-close" variant="text" @click="closeLiveRuntime" />
           </div>
         </v-card-title>
@@ -739,8 +739,8 @@ function typeMeta(type) { return typeMap[type] || typeMap.paper }
 function statusMeta(account) {
   if (account.status === 'archived') return { label: '已归档', color: 'grey' }
   if (['mt5', 'ibkr'].includes(account.account_type)) return account.connected
-    ? { label: '终端在线', color: 'success' }
-    : { label: '终端离线', color: 'grey' }
+    ? { label: account.account_type === 'ibkr' ? 'Gateway 在线' : '终端在线', color: 'success' }
+    : { label: account.account_type === 'ibkr' ? 'Gateway 离线' : '终端离线', color: 'grey' }
   return { label: '模拟引擎就绪', color: 'teal' }
 }
 function environmentLabel(value) {

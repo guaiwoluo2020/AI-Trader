@@ -58,6 +58,10 @@ def _bind_discovered_ibkr_accounts(
         "ibkr_accounts": normalized,
         "trading_account_id": primary.account_id if primary else 0,
         "primary_ibkr_account": primary.mt5_login if primary else "",
+        "bound_accounts": [
+            {"ibkr_account": item.mt5_login, "trading_account_id": item.account_id}
+            for item in bound
+        ],
     })
     return {
         "user_id": user_id,
@@ -126,6 +130,7 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                 "trading_account_id": int(hello.get("trading_account_id") or 0),
                 "connected_at": datetime.now(timezone.utc).isoformat(),
                 "last_event_at": None,
+                "account_financials": {},
             }
             _connector_sockets[connector_id] = websocket
             await websocket.send_json({"type": "connected", "connector_id": connector_id,
@@ -143,9 +148,37 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                                 _connectors[connector_id], hello,
                                 detail.get("accounts") or [], account_repository,
                             )
+                            _connectors[connector_id]["bound_accounts"] = binding.get("accounts", [])
                             await websocket.send_json({"type": "binding", **binding})
                         except Exception:
                             logger.exception("failed to auto-bind IBKR accounts: %s", connector_id)
+                    if payload.get("event") == "account_summary":
+                        detail = payload.get("payload") or {}
+                        broker_account = str(detail.get("account") or "").strip().upper()
+                        tag = str(detail.get("tag") or "").strip()
+                        try:
+                            value = float(detail.get("value"))
+                        except (TypeError, ValueError):
+                            value = None
+                        binding = _connectors.get(connector_id, {})
+                        user_id = int(binding.get("user_id") or hello.get("user_id") or 0)
+                        account_id = next((
+                            int(item.get("trading_account_id") or 0)
+                            for item in (binding.get("bound_accounts") or [])
+                            if str(item.get("ibkr_account") or "").upper() == broker_account
+                        ), 0)
+                        if user_id > 0 and account_id > 0 and broker_account and tag and value is not None:
+                            cache = binding.setdefault("account_financials", {}).setdefault(broker_account, {})
+                            cache[tag] = value
+                            account = account_repository.get_by_id(user_id, account_id)
+                            if account is not None:
+                                account_repository.update_financial_snapshot(
+                                    account_id,
+                                    balance=cache.get("TotalCashValue", account.balance),
+                                    equity=cache.get("NetLiquidation", account.equity),
+                                    free_margin=cache.get("AvailableFunds", account.free_margin),
+                                    margin=cache.get("MaintMarginReq", account.margin),
+                                )
                     if payload.get("event") == "quote" and engine_manager is not None:
                         detail = payload.get("payload") or {}
                         binding = _connectors.get(connector_id, {})

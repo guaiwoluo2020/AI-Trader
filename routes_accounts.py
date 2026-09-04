@@ -505,7 +505,7 @@ def _account_payload(
     account: TradingAccountRecord, deployments: Optional[List[Dict]] = None,
 ) -> Dict:
     connected = bool(
-        account.account_type == "mt5"
+        account.account_type in {"mt5", "ibkr"}
         and account.last_seen_at
         and int(time.time()) - account.last_seen_at <= 120
     )
@@ -567,7 +567,7 @@ def _account_payload(
         "created_at": account.created_at,
         "engine_status": (
             "connected" if connected else "offline"
-        ) if account.account_type == "mt5" else (
+        ) if account.account_type in {"mt5", "ibkr"} else (
             "running" if active else "ready"
         ),
     }
