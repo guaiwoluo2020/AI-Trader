@@ -50,9 +50,22 @@
           <v-tab v-if="isAdmin" value="instruments"><v-icon start>mdi-swap-horizontal-bold</v-icon>品种映射</v-tab>
           <v-tab v-if="isAdmin" value="quota"><v-icon start>mdi-account-star-outline</v-icon>用户与会员</v-tab>
           <v-tab v-if="isAdmin" value="structure"><v-icon start>mdi-chart-timeline-variant</v-icon>结构分析</v-tab>
+          <v-tab v-if="isAdmin" value="ibkr"><v-icon start>mdi-connection</v-icon>IBKR行情</v-tab>
           <v-tab value="llm"><v-icon start>mdi-brain</v-icon>{{ isAdmin ? 'AI 服务管理' : 'AI 功能' }}</v-tab>
         </v-tabs>
       </v-col>
+    </v-row>
+
+    <v-row v-if="!isStrategyPage && isAdmin && settingsTab === 'ibkr'">
+      <v-col cols="12"><v-card class="user-settings-card admin-service-card" elevation="0">
+        <v-card-title class="settings-card-title"><div><v-icon>mdi-connection</v-icon><span>IBKR Gateway 行情 Connector</span></div><small>配置精确合约并复用现有行情与结构分析链</small></v-card-title>
+        <v-card-text>
+          <v-alert type="info" variant="tonal" density="compact" class="mb-4">这里只配置关注的行情合约，不保存 IBKR 逐笔 Tick。建议填写 con_id，避免同名合约订阅错误。</v-alert>
+          <v-textarea v-model="ibkrSymbolsText" label="关注合约（每行一个 JSON 对象）" variant="outlined" rows="6" hint='例如 {"symbol":"AAPL","con_id":265598,"sec_type":"STK","exchange":"SMART","currency":"USD"}' persistent-hint />
+          <div class="d-flex align-center ga-3 mt-2"><v-btn color="primary" :loading="ibkrSaving" @click="saveIBKRConfig">保存并推送到在线 Connector</v-btn><span class="text-caption text-medium-emphasis">在线 Connector：{{ ibkrConnectorCount }}</span><v-btn size="small" variant="text" @click="loadIBKRConfig">刷新</v-btn></div>
+          <v-alert v-if="ibkrError" type="error" variant="tonal" density="compact" class="mt-3">{{ ibkrError }}</v-alert>
+        </v-card-text>
+      </v-card></v-col>
     </v-row>
 
     <v-row v-if="!isStrategyPage && isAdmin && settingsTab === 'structure'">
@@ -1467,6 +1480,32 @@ export default {
     const newKeyLevels = ref('')
     const newKeyLevelThreshold = ref(0.0008)
     const symbols = ref([])
+    const ibkrSymbolsText = ref('')
+    const ibkrConnectorCount = ref(0)
+    const ibkrSaving = ref(false)
+    const ibkrError = ref('')
+    const loadIBKRConfig = async () => {
+      try {
+        const [config, connectors] = await Promise.all([marketAPI.getIBKRMarketConfig(), marketAPI.getIBKRConnectors()])
+        ibkrSymbolsText.value = (config.symbols || []).map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
+        ibkrConnectorCount.value = Number(connectors.count || 0)
+        ibkrError.value = ''
+      } catch (err) { ibkrError.value = err.response?.data?.detail || '加载 IBKR 配置失败' }
+    }
+    const saveIBKRConfig = async () => {
+      ibkrSaving.value = true
+      try {
+        const symbols = ibkrSymbolsText.value.split('\n').map(item => item.trim()).filter(Boolean).map(item => {
+          if (item.startsWith('{')) return JSON.parse(item)
+          return item
+        })
+        await marketAPI.saveIBKRMarketConfig({ symbols })
+        ibkrError.value = ''
+        successMessage.value = 'IBKR 合约配置已保存并推送'
+        showSuccess.value = true
+      } catch (err) { ibkrError.value = err.response?.data?.detail || `配置格式错误：${err.message}`
+      } finally { ibkrSaving.value = false }
+    }
 
     // 提示
     const showError = ref(false)
@@ -1737,6 +1776,7 @@ export default {
         structureProfiles.value = Array.isArray(engineData.profiles) ? engineData.profiles : []
         structureConfigScope.value = 'default'
         structureSetupProfiles.value = Array.isArray(engineData.setup_profiles) ? engineData.setup_profiles : []
+        await loadIBKRConfig()
         if (settingsTab.value === 'quota') await loadUserQuotas()
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
@@ -3685,6 +3725,7 @@ export default {
       if (tab === 'quota' && isAdmin.value && !quotaUsers.value.length && !quotaLoading.value) {
         loadUserQuotas()
       }
+      if (tab === 'ibkr' && isAdmin.value) loadIBKRConfig()
     })
 
     return {
@@ -3774,6 +3815,12 @@ export default {
       formatInvitationTime,
       myQuota,
       loadAdminWorkspace,
+      ibkrSymbolsText,
+      ibkrConnectorCount,
+      ibkrSaving,
+      ibkrError,
+      loadIBKRConfig,
+      saveIBKRConfig,
       adminStrategies,
       adminStrategiesLoading,
       adminStrategySaving,

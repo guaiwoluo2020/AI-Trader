@@ -306,6 +306,18 @@ export const marketAPI = {
     const response = await api.post('/admin/market-structure/optimize-setups/review', payload)
     return response.data
   },
+  async getIBKRMarketConfig() {
+    const response = await api.get('/admin/ibkr/market-config')
+    return response.data
+  },
+  async saveIBKRMarketConfig(payload) {
+    const response = await api.put('/admin/ibkr/market-config', payload)
+    return response.data
+  },
+  async getIBKRConnectors() {
+    const response = await api.get('/admin/ibkr/connectors')
+    return response.data
+  },
 
   // 获取转折点数据
   async getPivots(symbol, period = null, direction = null, count = 50) {

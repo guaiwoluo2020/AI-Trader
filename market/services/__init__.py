@@ -16,6 +16,7 @@ from .strategy_execution_coordinator import StrategyExecutionCoordinator
 from .position_action_applier import apply_action
 from .position_management_coordinator import PositionManagementCoordinator
 from .event_bus import EventBus
+from .market_tick_ingress import MarketTickIngress
 from .events import ApplicationEvent
 from .event_audit_bridge import EventAuditBridge
 from .plan_execution_service import PlanExecutionService
@@ -48,6 +49,7 @@ __all__ = [
     'apply_action',
     'PositionManagementCoordinator',
     'EventBus', 'ApplicationEvent',
+    'MarketTickIngress',
     'EventAuditBridge',
     'PlanExecutionService',
     'OutboxDispatcher',

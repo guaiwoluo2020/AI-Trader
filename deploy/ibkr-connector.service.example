@@ -1,0 +1,18 @@
+[Unit]
+Description=AI-Trader IBKR Gateway Connector
+After=network-online.target ibgateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aitrader
+WorkingDirectory=/opt/ai-trader
+EnvironmentFile=/etc/ai-trader/ibkr-connector.env
+ExecStart=/usr/bin/python3 -m ibkr_connector.main
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

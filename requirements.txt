@@ -11,3 +11,6 @@ pandas>=2.0.0,<3
 optuna>=3.6,<5
 pandas-ta-classic>=0.3.59,<0.4
 PyMySQL>=1.1,<2
+# Official Interactive Brokers TWS API Python client (used only by the
+# standalone ibkr_connector process).
+ibapi>=9.81,<10
