@@ -14,11 +14,59 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from auth import AuthUser, require_auth
 from system_event_log import SystemEventLogRepository
 from mysql_repositories import RuntimeStateRepository
+from repositories.accounts import TradingAccountRepository
 from market.services.market_tick_ingress import MarketTickIngress
 
 logger = logging.getLogger(__name__)
 _connectors: Dict[str, Dict] = {}
 _connector_sockets: Dict[str, WebSocket] = {}
+
+
+def _admin_user_id(account_repository: TradingAccountRepository) -> int:
+    """Resolve the owner for a Gateway that has not been manually assigned."""
+    row = account_repository.storage.fetchone(
+        "SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+    )
+    return int(row["id"]) if row else 0
+
+
+def _bind_discovered_ibkr_accounts(
+    connector_state: Dict,
+    hello: Dict,
+    accounts: list,
+    account_repository: TradingAccountRepository,
+) -> Dict:
+    """Bind Gateway-discovered broker accounts to the configured AI Trader user.
+
+    A fresh connector does not need a pre-filled IBKR account number: IBKR's
+    managedAccounts callback is authoritative.  Until a dedicated owner is
+    supplied, this installation deliberately binds it to the admin user.
+    """
+    user_id = int(hello.get("user_id") or connector_state.get("user_id") or 0)
+    if user_id <= 0:
+        user_id = _admin_user_id(account_repository)
+    if user_id <= 0:
+        raise RuntimeError("未找到 admin 用户，无法自动绑定 IBKR Gateway")
+
+    normalized = [str(value).strip().upper() for value in accounts if str(value).strip()]
+    bound = [account_repository.ensure_ibkr_account(user_id, value) for value in normalized]
+    requested_id = int(hello.get("trading_account_id") or 0)
+    primary = next((item for item in bound if item.account_id == requested_id), None)
+    primary = primary or (bound[0] if bound else None)
+    connector_state.update({
+        "user_id": user_id,
+        "ibkr_accounts": normalized,
+        "trading_account_id": primary.account_id if primary else 0,
+        "primary_ibkr_account": primary.mt5_login if primary else "",
+    })
+    return {
+        "user_id": user_id,
+        "trading_account_id": primary.account_id if primary else 0,
+        "accounts": [
+            {"ibkr_account": item.mt5_login, "trading_account_id": item.account_id}
+            for item in bound
+        ],
+    }
 
 
 def _record_connector_event(connector_id: str, payload: Dict) -> None:
@@ -52,6 +100,7 @@ def _record_connector_event(connector_id: str, payload: Dict) -> None:
 def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
     router = APIRouter()
     tick_ingress = MarketTickIngress(engine_manager) if engine_manager is not None else None
+    account_repository = TradingAccountRepository()
 
     @router.websocket("/ws/ibkr")
     async def ibkr_connector(websocket: WebSocket):
@@ -73,6 +122,8 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                 "account": hello.get("account", ""),
                 "client_id": hello.get("client_id"),
                 "read_only": bool(hello.get("read_only", True)),
+                "user_id": int(hello.get("user_id") or 0),
+                "trading_account_id": int(hello.get("trading_account_id") or 0),
                 "connected_at": datetime.now(timezone.utc).isoformat(),
                 "last_event_at": None,
             }
@@ -85,14 +136,25 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                 payload = json.loads(message)
                 if payload.get("type") == "event":
                     _connectors[connector_id]["last_event_at"] = datetime.now(timezone.utc).isoformat()
+                    if payload.get("event") == "accounts":
+                        detail = payload.get("payload") or {}
+                        try:
+                            binding = _bind_discovered_ibkr_accounts(
+                                _connectors[connector_id], hello,
+                                detail.get("accounts") or [], account_repository,
+                            )
+                            await websocket.send_json({"type": "binding", **binding})
+                        except Exception:
+                            logger.exception("failed to auto-bind IBKR accounts: %s", connector_id)
                     if payload.get("event") == "quote" and engine_manager is not None:
                         detail = payload.get("payload") or {}
-                        user_id = int(hello.get("user_id") or 0)
+                        binding = _connectors.get(connector_id, {})
+                        user_id = int(binding.get("user_id") or hello.get("user_id") or 0)
                         symbol = str(detail.get("symbol") or "").strip()
                         price = float(detail.get("price") or 0)
                         bid = float(detail.get("bid") or price)
                         ask = float(detail.get("ask") or price)
-                        trading_account_id = int(hello.get("trading_account_id") or 0)
+                        trading_account_id = int(binding.get("trading_account_id") or hello.get("trading_account_id") or 0)
                         if user_id > 0 and symbol and price > 0 and tick_ingress is not None:
                             try:
                                 tick_ingress.ingest(

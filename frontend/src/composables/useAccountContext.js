@@ -24,7 +24,7 @@ async function loadAccountContext() {
   try {
     const data = await accountAPI.list()
     accounts.value = (Array.isArray(data.accounts) ? data.accounts : []).filter(item => (
-      item.account_type === 'mt5' || item.account_type === 'paper'
+      item.account_type === 'mt5' || item.account_type === 'ibkr' || item.account_type === 'paper'
     ))
     const selectedExists = accounts.value.some(
       item => item.account_id === selectedAccountId.value

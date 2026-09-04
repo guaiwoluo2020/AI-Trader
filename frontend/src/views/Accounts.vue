@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">ACCOUNT LEDGER</div>
         <h1>交易账户</h1>
-        <p>MT5 连接、Paper 模拟和未来回测账户共享统一身份，但资金与持仓始终相互隔离。</p>
+    <p>MT5、IBKR Gateway、Paper 模拟和未来回测账户共享统一身份，但资金与持仓始终相互隔离。</p>
       </div>
       <v-btn variant="outlined" color="white" prepend-icon="mdi-refresh" :loading="loading" @click="loadAccounts">
         刷新账户
@@ -12,7 +12,7 @@
     </section>
 
     <v-alert type="info" variant="tonal" class="mb-5">
-      MT5 实盘账户由 EA 上报自动发现，无需手工创建；Paper 账户可以部署自动交易策略，使用 EA 实时行情进行独立模拟撮合，不会向 MT5 下发订单。
+      MT5 实盘账户由 EA 上报自动发现；IBKR Gateway 账户会在连接后按 IBKR 返回的账户号自动绑定。Paper 账户可以部署自动交易策略，使用实时行情进行独立模拟撮合。
     </v-alert>
     <v-alert v-if="message" :type="messageType" variant="tonal" closable class="mb-5" @click:close="message = ''">
       {{ message }}
@@ -56,7 +56,7 @@
               <div class="account-chips">
                 <v-chip v-if="account.is_default" size="small" variant="tonal" color="amber-darken-2">默认实盘</v-chip>
                 <v-chip v-if="account.status === 'archived'" size="small" variant="tonal" color="grey">已归档</v-chip>
-                <v-chip v-else-if="account.account_type === 'mt5'" size="small" variant="flat" :color="account.active ? 'success' : 'error'">
+                <v-chip v-else-if="['mt5', 'ibkr'].includes(account.account_type)" size="small" variant="flat" :color="account.active ? 'success' : 'error'">
                   {{ account.active ? '活跃账户' : '不活跃账户' }}
                 </v-chip>
                 <v-chip v-if="account.status !== 'archived'" size="small" variant="tonal" :color="account.trading_enabled ? 'success' : 'warning'">
@@ -90,6 +90,8 @@
               <div><dt>账户币种</dt><dd>{{ account.currency }}</dd></div>
               <div v-if="account.account_type === 'mt5'"><dt>MT5 登录号</dt><dd>{{ account.mt5_login || '未上报' }}</dd></div>
               <div v-if="account.account_type === 'mt5'"><dt>交易服务器</dt><dd>{{ account.mt5_server || '未上报' }}</dd></div>
+              <div v-if="account.account_type === 'ibkr'"><dt>IBKR 账户号</dt><dd>{{ account.mt5_login || '等待 Gateway 上报' }}</dd></div>
+              <div v-if="account.account_type === 'ibkr'"><dt>连接方式</dt><dd>{{ account.mt5_server || 'IBKR Gateway' }}</dd></div>
               <div><dt>资金更新时间</dt><dd>{{ formatTime(account.financial_updated_at) }}</dd></div>
               <div><dt>连接更新时间</dt><dd>{{ formatTime(account.last_seen_at) }}</dd></div>
               <div><dt>自动下单</dt><dd>{{ account.auto_trading_enabled ? '允许' : '仅推荐' }}</dd></div>
@@ -729,13 +731,14 @@ const reportStrategyOptions = computed(() => [
 
 const typeMap = {
   mt5: { label: 'MT5 经纪商账户', icon: 'mdi-server-network' },
+  ibkr: { label: 'IBKR Gateway 账户', icon: 'mdi-bank-outline' },
   paper: { label: 'Paper 模拟账户', icon: 'mdi-flask-outline' },
   backtest: { label: '回测账户', icon: 'mdi-history' },
 }
 function typeMeta(type) { return typeMap[type] || typeMap.paper }
 function statusMeta(account) {
   if (account.status === 'archived') return { label: '已归档', color: 'grey' }
-  if (account.account_type === 'mt5') return account.connected
+  if (['mt5', 'ibkr'].includes(account.account_type)) return account.connected
     ? { label: '终端在线', color: 'success' }
     : { label: '终端离线', color: 'grey' }
   return { label: '模拟引擎就绪', color: 'teal' }

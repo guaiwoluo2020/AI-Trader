@@ -115,7 +115,7 @@ class TradingAccountRepository:
     """统一交易账户仓库；MT5 连接信息由独立连接表维护。"""
 
     DEFAULT_ACCOUNT_KEY = "default"
-    ACCOUNT_TYPES = {"mt5", "paper", "backtest"}
+    ACCOUNT_TYPES = {"mt5", "ibkr", "paper", "backtest"}
     ACCOUNT_SELECT = """
         SELECT a.id, a.user_id, a.account_key, a.account_name,
                a.account_type, a.environment, a.currency,
@@ -181,8 +181,70 @@ class TradingAccountRepository:
             " AND (a.account_type != 'mt5' "
             "OR COALESCE(c.activated_at, a.activated_at) IS NOT NULL)"
         )
-        sql += " ORDER BY CASE a.account_type WHEN 'mt5' THEN 0 WHEN 'paper' THEN 1 ELSE 2 END, a.created_at"
+        sql += " ORDER BY CASE a.account_type WHEN 'mt5' THEN 0 WHEN 'ibkr' THEN 1 WHEN 'paper' THEN 2 ELSE 3 END, a.created_at"
         return [self._row_to_account(row) for row in self.storage.fetchall(sql, params)]
+
+    def ensure_ibkr_account(
+        self,
+        user_id: int,
+        ibkr_account: str,
+    ) -> TradingAccountRecord:
+        """Create or refresh the account discovered from IBKR ``managedAccounts``.
+
+        The Gateway API is the authority for the broker account identifier.
+        This account is created with automatic trading disabled: discovering a
+        Gateway must never turn a read-only market-data connector into a live
+        execution permission.
+        """
+        broker_account = str(ibkr_account or "").strip().upper()
+        if not broker_account or len(broker_account) > 64:
+            raise ValueError("IBKR 账户号无效")
+        account_key = f"ibkr-{broker_account.casefold()}"
+        now = _now_ts()
+        existing = self.storage.fetchone(
+            "SELECT id FROM trading_accounts WHERE user_id = ? AND account_key = ? LIMIT 1",
+            (int(user_id), account_key),
+        )
+        if existing is None:
+            placeholder_hash = self._hash_token(secrets.token_urlsafe(32))
+            self.storage.execute(
+                """
+                INSERT INTO trading_accounts(
+                    user_id, account_key, account_name, account_type,
+                    environment, currency, token_hash, enabled, status,
+                    trading_enabled, auto_trading_enabled, last_seen_at,
+                    activated_at, mt5_login, mt5_server, created_at, updated_at
+                ) VALUES(?, ?, ?, 'ibkr', ?, 'USD', ?, 1, 'active', 1, 0, ?, ?, ?, 'IBKR Gateway', ?, ?)
+                """,
+                (
+                    int(user_id), account_key, f"IBKR {broker_account}",
+                    "demo" if broker_account.startswith("DU") else "live",
+                    placeholder_hash, now, now, broker_account, now, now,
+                ),
+            )
+        else:
+            self.storage.execute(
+                """
+                UPDATE trading_accounts
+                SET account_name = ?, environment = ?, last_seen_at = ?,
+                    mt5_login = ?, mt5_server = 'IBKR Gateway',
+                    status = 'active', archived_at = NULL, updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    f"IBKR {broker_account}",
+                    "demo" if broker_account.startswith("DU") else "live",
+                    now, broker_account, now, int(existing["id"]), int(user_id),
+                ),
+            )
+        row = self.storage.fetchone(
+            "SELECT id FROM trading_accounts WHERE user_id = ? AND account_key = ? LIMIT 1",
+            (int(user_id), account_key),
+        )
+        account = self.get_by_id(int(user_id), int(row["id"])) if row else None
+        if account is None:
+            raise RuntimeError("创建 IBKR 账户绑定失败")
+        return account
 
     def update_controls(
         self,
