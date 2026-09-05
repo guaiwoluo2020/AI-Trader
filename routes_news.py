@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
@@ -369,7 +370,17 @@ def create_news_routes():
                 "L4" if major else "L3", before, after, major or "economic_calendar",
                 list(_REVERSAL_SETUP_LABELS.keys()),
             ))
-        items.sort(key=lambda item: (item["event_timestamp"], item["level"], item["label"]))
+        # The same MT5 event may be present in both calendar and key-event
+        # tables. Collapse it for the risk view while retaining the strongest
+        # severity and the most specific label.
+        deduped = {}
+        for item in items:
+            normalized_label = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", item["label"].lower())
+            key = (item["event_type"], item["event_timestamp"], normalized_label)
+            previous = deduped.get(key)
+            if previous is None or item["level"] > previous["level"]:
+                deduped[key] = item
+        items = sorted(deduped.values(), key=lambda item: (item["event_timestamp"], item["level"], item["label"]))
         return {"status": "ok", "date": day, "count": len(items), "data": items}
 
     @router.get("/status")

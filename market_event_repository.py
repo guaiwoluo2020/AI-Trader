@@ -40,7 +40,12 @@ class MarketEventRepository:
     ) -> int:
         now = int(time.time())
         with self.storage._lock, self.storage._connect() as conn:
-            conn.execute(f"DELETE FROM {table} WHERE event_date = ?", (event_date,))
+            # Each provider owns only its own slice of a day.  An MT5 upload
+            # must not erase official BLS/FOMC events (and vice versa).
+            conn.execute(
+                f"DELETE FROM {table} WHERE event_date = ? AND source = ?",
+                (event_date, source),
+            )
             for event in events:
                 conn.execute(
                     f"""

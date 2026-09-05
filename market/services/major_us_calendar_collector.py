@@ -133,9 +133,10 @@ class MajorUSCalendarCollector:
             by_date.setdefault(event["event_date"], []).append(event)
         written = 0
         for event_date, new_events in by_date.items():
-            existing = self.repository.list_calendar(event_date)
-            merged = {str(item.get("id")): item for item in existing if item.get("id")}
-            merged.update({str(item["id"]): item for item in new_events})
-            self.repository.replace_calendar_day(event_date, list(merged.values()), "official_major_us_calendar")
+            # Repository replacement is source-scoped: retain MT5 events while
+            # replacing the official provider's previous snapshot.
+            self.repository.replace_calendar_day(
+                event_date, new_events, "official_major_us_calendar"
+            )
             written += len(new_events)
         return {"year": year, "nfp": len(nfp), "fomc": len(fomc), "written": written}
