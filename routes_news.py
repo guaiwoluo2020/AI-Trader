@@ -24,6 +24,11 @@ from fastapi import (
 from auth import AuthUser, get_auth_manager, require_admin, require_auth
 from market.utils.ws_manager import WebSocketManager
 from market_event_repository import MarketEventRepository
+from market.services.market_event_risk_service import (
+    DEFAULT_EVENT_RISK_RULES,
+    _calendar_timestamp,
+    _major_us_event,
+)
 
 
 class MarketEventHub:
@@ -66,6 +71,40 @@ def _normalize_importance(value: object) -> int:
         return max(0, min(int(value or 0), 3))
     except (TypeError, ValueError):
         return 0
+
+
+_REVERSAL_SETUP_LABELS = {
+    "range_lower_reversal": "箱体下沿反转",
+    "range_upper_reversal": "箱体上沿反转",
+    "range_false_breakout": "箱体假突破",
+    "structure_location_pullback": "结构位置回撤",
+    "liquidity_sweep_reclaim": "流动性扫单回收",
+    "choch_reversal": "CHOCH 反转",
+    "structure_reversal": "结构反转",
+}
+
+
+def _risk_calendar_item(rule: Dict, event_time: int, source: str, label: str,
+                        level: str, before: int, after: int, event_type: str,
+                        affected_setups: List[str]) -> Dict:
+    start = event_time - before * 60
+    end = event_time + after * 60
+    beijing = ZoneInfo("Asia/Shanghai")
+    return {
+        "id": str(rule.get("id") or f"risk:{event_type}:{event_time}"),
+        "label": label,
+        "event_type": event_type,
+        "level": level,
+        "source": source,
+        "event_timestamp": event_time,
+        "event_time_beijing": datetime.fromtimestamp(event_time, timezone.utc).astimezone(beijing).isoformat(),
+        "suppress_from": start,
+        "suppress_until": end,
+        "suppress_from_beijing": datetime.fromtimestamp(start, timezone.utc).astimezone(beijing).isoformat(),
+        "suppress_until_beijing": datetime.fromtimestamp(end, timezone.utc).astimezone(beijing).isoformat(),
+        "affected_setups": affected_setups,
+        "affected_setup_labels": [_REVERSAL_SETUP_LABELS.get(item, item) for item in affected_setups],
+    }
 
 
 def _normalize_symbols(value: object) -> List[str]:
@@ -284,6 +323,54 @@ def create_news_routes():
     ) -> Dict:
         items = repository.list_flash_news(limit)
         return {"status": "ok", "count": len(items), "data": items}
+
+    @router.get("/risk-calendar")
+    async def get_risk_calendar(
+        date_value: Optional[str] = Query(None, alias="date"),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Return one Beijing day of macro/opening risk windows and affected setups."""
+        day = _validate_day(date_value) if date_value else date.today().isoformat()
+        target = date.fromisoformat(day)
+        beijing = ZoneInfo("Asia/Shanghai")
+        day_start = int(datetime(target.year, target.month, target.day, tzinfo=beijing).timestamp())
+        day_end = day_start + 24 * 60 * 60
+        items: List[Dict] = []
+
+        # Recurring market opens are evaluated in their native time zones. This
+        # automatically produces the correct Beijing time through DST changes.
+        for raw in DEFAULT_EVENT_RISK_RULES:
+            tz = ZoneInfo(str(raw.get("timezone") or "Asia/Shanghai"))
+            hour, minute = (int(part) for part in str(raw.get("time", "00:00")).split(":", 1))
+            occurrence = datetime(target.year, target.month, target.day, hour, minute, tzinfo=tz)
+            if raw.get("weekdays") and occurrence.weekday() not in {int(x) for x in raw["weekdays"]}:
+                continue
+            event_time = int(occurrence.timestamp())
+            affected = list(raw.get("affect_setups") or _REVERSAL_SETUP_LABELS.keys())
+            items.append(_risk_calendar_item(
+                raw, event_time, "system", str(raw.get("label") or "市场开盘"),
+                str(raw.get("level") or "L2"), int(raw.get("before_minutes") or 0),
+                int(raw.get("after_minutes") or 0), str(raw.get("event_type") or "market_open"), affected,
+            ))
+
+        # Stored macro events use a timestamp and are already normalized to UTC.
+        for event in repository.list_calendar(day) + repository.list_key_events(day):
+            event_time = _calendar_timestamp(event)
+            if not event_time or not day_start <= event_time < day_end:
+                continue
+            major = _major_us_event(event)
+            importance = _normalize_importance(event.get("importance"))
+            if not major and importance < 3:
+                continue
+            before, after = (45, 90) if major else (30, 45)
+            label = str(event.get("name") or event.get("title") or "财经日历高影响事件")
+            items.append(_risk_calendar_item(
+                event, event_time, str(event.get("source") or "calendar"), label,
+                "L4" if major else "L3", before, after, major or "economic_calendar",
+                list(_REVERSAL_SETUP_LABELS.keys()),
+            ))
+        items.sort(key=lambda item: (item["event_timestamp"], item["level"], item["label"]))
+        return {"status": "ok", "date": day, "count": len(items), "data": items}
 
     @router.get("/status")
     async def get_status(user: AuthUser = Depends(require_auth)) -> Dict:

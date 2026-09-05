@@ -12,7 +12,7 @@
       <v-card-text>
         <div v-if="tradePlans.length" class="plan-grid">
           <article v-for="plan in tradePlans" :key="plan.plan_id">
-            <div class="card-head"><v-chip size="small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><v-chip size="x-small" variant="tonal">{{ ({ candidate:'候选', confirmed:'已确认', active:'可交易' }[plan.plan_stage] || '候选') }}</v-chip><span>{{ ({ watching_breakout:'等待突破', waiting_retest:'等待回踩', waiting_reclaim:'等待回收', waiting_touch:'等待触碰', active:'等待价格' }[plan.plan_phase] || (plan.status==='active'?'等待价格':'等待确认')) }}</span></div>
+            <div class="card-head"><v-chip size="small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><v-chip size="x-small" :color="plan.status==='event_suppressed'?'warning':undefined" variant="tonal">{{ ({ candidate:'候选', confirmed:'已确认', active:'可交易', event_suppressed:'事件风险暂停' }[plan.plan_stage] || (plan.status==='event_suppressed'?'事件风险暂停':'候选')) }}</v-chip><span>{{ plan.status==='event_suppressed'?'暂停触发':(({ watching_breakout:'等待突破', waiting_retest:'等待回踩', waiting_reclaim:'等待回收', waiting_touch:'等待触碰', active:'等待价格' }[plan.plan_phase] || (plan.status==='active'?'等待价格':'等待确认'))) }}</span></div>
             <div class="plan-values"><span>入场 {{ Number(plan.entry_price||0).toFixed(2) }}</span><span>止损 {{ Number(plan.stop_loss||0).toFixed(2) }}</span><span>止盈 {{ Number(plan.take_profit||0).toFixed(2) }}</span><span v-if="plan.direction==='buy'||plan.direction==='sell'">盈亏比 {{ Number(plan.risk_reward_ratio||0).toFixed(2) }} / 最低 {{ Number(plan.minimum_risk_reward||0).toFixed(2) }}</span></div>
             <div v-if="plan.price_sources" class="plan-source-summary">
               <span>入场来源：{{ plan.price_sources.entry?.source || '--' }}</span>
@@ -24,6 +24,7 @@
               <div><small>止盈候选</small><v-chip v-for="item in plan.target_candidates" :key="item.level_id" size="x-small" color="success" variant="tonal">{{ item.structure_layer }} {{ Number(item.price).toFixed(2) }}</v-chip></div>
             </div>
             <p>{{ plan.reason || '结构条件尚未满足' }}</p>
+            <v-alert v-if="plan.event_risk" type="warning" variant="tonal" density="compact" class="mt-2">{{ plan.event_risk.reason || plan.event_risk.label }} · {{ plan.event_risk.level || 'L3' }}<br />暂停至 {{ formatPlanTime(plan.event_risk.resume_after) }}；事件结束后等待 {{ plan.event_risk.resume_confirmation_bars ?? 1 }} 根确认K线重新评估。</v-alert>
             <small>产生于 {{ formatPlanTime(plan.generated_at) }} · 由结构失效事件管理</small>
             <div class="subscription-summary">
               <v-chip size="x-small" variant="tonal">订阅策略 {{ plan.subscription_summary?.strategy_count || 0 }}</v-chip>

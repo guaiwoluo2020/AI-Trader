@@ -45,6 +45,7 @@
       <div class="toolbar">
         <v-tabs v-model="activeTab" color="primary" density="comfortable">
           <v-tab value="calendar" prepend-icon="mdi-calendar-month-outline">财经日历</v-tab>
+          <v-tab value="risk-calendar" prepend-icon="mdi-shield-clock-outline">市场风险日历</v-tab>
           <v-tab value="key-events" prepend-icon="mdi-star-four-points-outline">关键事件</v-tab>
           <v-tab value="flash" prepend-icon="mdi-flash-outline">市场快讯</v-tab>
         </v-tabs>
@@ -94,6 +95,34 @@
             </article>
           </div>
           <EmptyState v-else icon="mdi-calendar-blank-outline" text="该日期暂无财经日历数据" />
+        </v-window-item>
+
+        <v-window-item value="risk-calendar">
+          <div class="risk-intro">
+            <v-icon color="warning">mdi-information-outline</v-icon>
+            <span>时间统一按北京时间展示；伦敦和纽约开盘按当地时区自动处理夏令时。风险窗口默认影响反转类结构计划。</span>
+          </div>
+          <div v-if="riskCalendar.length" class="risk-list">
+            <article v-for="item in riskCalendar" :key="`${item.id}-${item.event_timestamp}`" class="risk-row">
+              <div class="risk-time">
+                <strong>{{ formatDateTime(item.event_time_beijing) }}</strong>
+                <small>事件时间（北京时间）</small>
+              </div>
+              <div class="risk-copy">
+                <div class="event-title-line">
+                  <strong>{{ item.label }}</strong>
+                  <v-chip size="x-small" :color="item.level === 'L4' ? 'error' : item.level === 'L3' ? 'warning' : 'primary'" variant="tonal">{{ item.level }}</v-chip>
+                  <v-chip size="x-small" variant="outlined">{{ item.event_type === 'market_open' ? '开盘风险' : '财经事件' }}</v-chip>
+                </div>
+                <div class="risk-window">暂停：{{ formatDateTime(item.suppress_from_beijing) }} → {{ formatDateTime(item.suppress_until_beijing) }}</div>
+                <div class="risk-setups">
+                  <span>影响 SETUP：</span>
+                  <v-chip v-for="setup in item.affected_setup_labels" :key="setup" size="x-small" variant="tonal">{{ setup }}</v-chip>
+                </div>
+              </div>
+            </article>
+          </div>
+          <EmptyState v-else icon="mdi-shield-check-outline" text="当天没有配置中的市场风险窗口" />
         </v-window-item>
 
         <v-window-item value="key-events">
@@ -179,6 +208,7 @@ const selectedDate = ref(localDateInput())
 const status = ref({})
 const calendar = ref([])
 const keyEvents = ref([])
+const riskCalendar = ref([])
 const flashNews = ref([])
 const loading = ref(false)
 const errorMessage = ref('')
@@ -202,6 +232,11 @@ async function loadKeyEvents() {
   keyEvents.value = response.data || []
 }
 
+async function loadRiskCalendar() {
+  const response = await marketAPI.getMarketRiskCalendar(selectedDate.value)
+  riskCalendar.value = response.data || []
+}
+
 async function loadFlashNews() {
   const response = await marketAPI.getMarketFlashNews(100)
   flashNews.value = response.data || []
@@ -221,7 +256,7 @@ async function runLoad(loaders) {
 
 function loadDailyData() {
   return runLoad([
-    activeTab.value === 'calendar' ? loadCalendar : loadKeyEvents,
+    activeTab.value === 'calendar' ? loadCalendar : activeTab.value === 'risk-calendar' ? loadRiskCalendar : loadKeyEvents,
     loadStatus,
   ])
 }
@@ -229,7 +264,8 @@ function loadDailyData() {
 function loadActiveData() {
   const loader = activeTab.value === 'calendar'
     ? loadCalendar
-    : activeTab.value === 'key-events' ? loadKeyEvents : loadFlashNews
+    : activeTab.value === 'risk-calendar' ? loadRiskCalendar
+      : activeTab.value === 'key-events' ? loadKeyEvents : loadFlashNews
   return runLoad([loader, loadStatus])
 }
 
@@ -300,7 +336,7 @@ function importanceColor(value) {
 }
 
 onMounted(() => {
-  runLoad([loadStatus, loadCalendar, loadKeyEvents, loadFlashNews])
+  runLoad([loadStatus, loadCalendar, loadRiskCalendar, loadKeyEvents, loadFlashNews])
   connectRealtime()
 })
 
@@ -343,6 +379,15 @@ onUnmounted(() => {
 .toolbar-actions { display: flex; align-items: center; gap: 10px; min-width: 330px; }
 .toolbar-actions :deep(.v-input) { flex: 1; }
 .calendar-list, .flash-list { padding: 8px 20px 24px; }
+.risk-intro { display: flex; align-items: center; gap: 9px; margin: 18px 20px 6px; padding: 12px 14px; color: #6d624d; border: 1px solid #eadbb9; border-radius: 12px; background: #fffaf0; font-size: .82rem; }
+.risk-list { padding: 8px 20px 24px; }
+.risk-row { display: grid; grid-template-columns: 190px 1fr; gap: 20px; padding: 19px 8px; border-bottom: 1px solid #e7ebe8; }
+.risk-time { display: grid; align-content: start; gap: 4px; color: #1d6755; }
+.risk-time strong { font: 700 1rem Georgia, serif; }
+.risk-time small { color: #87908c; font-size: .72rem; }
+.risk-copy { display: grid; gap: 8px; }
+.risk-window { color: #8d5947; font-size: .8rem; }
+.risk-setups { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: #78837e; font-size: .78rem; }
 .calendar-row { display: grid; grid-template-columns: 80px minmax(220px, 1fr) auto; align-items: center; gap: 18px; padding: 18px 8px; border-bottom: 1px solid #e7ebe8; }
 .calendar-row time { color: #1d6755; font: 700 1.05rem Georgia, serif; }
 .event-title-line, .symbol-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
@@ -370,6 +415,7 @@ onUnmounted(() => {
   .metric-grid { grid-template-columns: 1fr; }
   .toolbar-actions { width: 100%; min-width: 0; }
   .calendar-row, .flash-row { grid-template-columns: 1fr; gap: 8px; }
+  .risk-row { grid-template-columns: 1fr; gap: 8px; }
   .value-strip { flex-wrap: wrap; }
   .key-grid { grid-template-columns: 1fr; }
 }

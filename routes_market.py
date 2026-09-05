@@ -60,6 +60,8 @@ from alpha_research import AlphaLibraryRepository
 from system_event_log import SystemEventLogRepository
 from market.services.market_structure_engine_v2 import DEFAULT_CONFIG as MARKET_STRUCTURE_DEFAULT_CONFIG
 from market.services.signal.structure_plan_signal import STRUCTURE_PLAN_DEFAULT_CONFIG
+from market.services.signal.structure_plan_signal import resolve_structure_plan_config
+from market.services.market_event_risk_service import active_event
 from market_data_source_policy import MarketDataSourcePolicy
 from routes_market_ea import create_ea_cursor_routes
 from routes_market_websocket import create_market_websocket_routes
@@ -142,7 +144,7 @@ def _deployment_is_running(deployment, account, trade_config_enabled=True, now=N
     if str(deployment.get("execution_mode")) == "live":
         current_time = int(time.time() if now is None else now)
         return bool(
-            account.account_type == "mt5"
+            account.account_type in {"mt5", "ibkr"}
             and account.last_seen_at
             and current_time - int(account.last_seen_at) <= 120
         )
@@ -1799,30 +1801,40 @@ def create_market_routes(
             decisions = engine.get_decision_history(
                 strategy_id=strategy_id, count=10,
             )
+            symbol = str(deployment.get("symbol") or strategy.symbol or "")
+            strategy_sources = getattr(strategy, "signal_sources", None) or []
+            structure_sources = [
+                item for item in strategy_sources
+                if isinstance(item, dict) and str(item.get("source") or item.get("type") or "").lower() == "structure_plan"
+                and item.get("enabled", True) is not False
+            ]
+            source_periods = [str(item.get("period") or "").upper() for item in structure_sources]
+            period = str((getattr(strategy, "config", None) or {}).get("primary_period") or next(
+                (value for value in source_periods if value), "M5"
+            )).upper()
+            if period not in {"M1", "M5", "M15", "H1", "H4"}:
+                period = "M5"
+            event_risk = None
+            if structure_sources:
+                event_risk = active_event(
+                    resolve_structure_plan_config(symbol, period), symbol, period,
+                    "structure_reversal", int(time.time()),
+                )
             if not include_chart:
                 # 策略执行中心只展示部署和最近决策；K 线交易回放页显式请求
                 # include_chart=true 后再加载 K 线及成交轨迹，避免首屏超时。
                 account_views.append({
                     **deployment,
                     "runtime_active": runtime_active,
-                    "symbol": str(deployment.get("symbol") or strategy.symbol or ""),
+                    "symbol": symbol,
+                    "period": period,
+                    "event_risk": event_risk,
                     "chart": None,
                     "decisions": decisions,
                 })
                 continue
-            symbol = str(deployment.get("symbol") or strategy.symbol or "")
             configured_symbol = symbol
             strategy_config = getattr(strategy, "config", None) or {}
-            source_periods = [
-                str(item.get("period") or "").upper()
-                for item in (getattr(strategy, "signal_sources", None) or [])
-                if isinstance(item, dict)
-            ]
-            period = str(strategy_config.get("primary_period") or next(
-                (value for value in source_periods if value), "M5"
-            )).upper()
-            if period not in {"M1", "M5", "M15", "H1", "H4"}:
-                period = "M5"
             def load_chart_bars(
                 source_engine, requested_symbol, source_account_id=None,
             ):

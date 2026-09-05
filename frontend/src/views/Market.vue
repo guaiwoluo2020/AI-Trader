@@ -37,6 +37,10 @@
               <div><strong>{{ deployment.account_name }}</strong><span>{{ deployment.symbol }}</span></div>
               <div class="deployment-actions"><v-btn size="small" color="primary" variant="outlined" prepend-icon="mdi-chart-candlestick" :to="{ path: '/strategy-replay', query: { strategy_id: decisionFilters.strategy_id, deployment_id: deployment.deployment_id } }">K线交易</v-btn><v-chip size="x-small" :color="deployment.execution_mode === 'paper' ? 'info' : 'success'" variant="tonal">{{ executionModeLabel(deployment.execution_mode) }}</v-chip><v-chip size="x-small" variant="outlined">{{ deployment.status === 'active' ? '运行中' : deployment.status }}</v-chip></div>
             </div>
+            <v-alert v-if="deployment.event_risk" type="warning" variant="tonal" density="compact" class="deployment-risk-alert">
+              <strong>事件风险暂停</strong> · {{ deployment.event_risk.reason || deployment.event_risk.label }} · {{ deployment.event_risk.level || 'L3' }}<br>
+              {{ deployment.symbol }} · {{ deployment.period }} 结构计划暂停至 {{ formatEpochTime(deployment.event_risk.resume_after) }}；恢复前等待 {{ deployment.event_risk.resume_confirmation_bars ?? 1 }} 根确认 K 线。
+            </v-alert>
             <div class="deployment-tools"><span>最近 {{ deployment.decisions.length }} 条策略决策</span></div>
             <p v-if="!deployment.decisions.length" class="empty-decision">该部署尚未生成决策记录。</p>
             <div v-else class="decision-list">
@@ -654,6 +658,7 @@ export default {
 .deployment-heading strong { color: #203239; font-size: .92rem; }
 .deployment-heading span { color: #748187; font-size: .75rem; margin-top: 2px; }
 .empty-decision { margin: 0; padding: 24px 16px; color: #7a878c; font-size: .84rem; }
+.deployment-risk-alert { margin: 12px 0 4px; font-size: .78rem; line-height: 1.5; }
 
 .decision-list { display: flex; flex-direction: column; }
 

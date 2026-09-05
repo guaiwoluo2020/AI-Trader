@@ -18,6 +18,7 @@ from .structure_plan.price_calculator import (
 )
 from .structure_plan.lifecycle import invalidate_reason, resolve_conflicts, stage_for
 from .structure_plan.config_resolver import resolve as resolve_plan_config
+from ..market_event_risk_service import active_event
 
 
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
@@ -70,6 +71,16 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "trend_continuation_hold_bars": 2,
     "min_choch_displacement_atr": 0.2,
     "min_trendline_touches": 2,
+    # Reversal setups are paused around regular market opens and manually
+    # configured macro events.  Times are evaluated in their native time zone.
+    "event_risk_enabled": True,
+    "event_risk_rules": [],
+    "event_risk_min_importance": 3,
+    "event_risk_calendar_before_minutes": 30,
+    "event_risk_calendar_after_minutes": 45,
+    "event_risk_major_before_minutes": 45,
+    "event_risk_major_after_minutes": 90,
+    "event_risk_resume_confirmation_bars": 1,
 }
 
 
@@ -1488,6 +1499,7 @@ class StructurePlanSignalGenerator:
                 source_id, symbol, period, rows[-600:], result,
             )
             plans = self._resolve_plan_conflicts(plans)
+            plans = self._apply_event_risk(plans, resolved_config, symbol, period, int(time.time()))
             self.repository.replace_scope(
                 self.user_id, 0, "",
                 source_id, symbol, period, plans, bar_time,
@@ -1554,6 +1566,18 @@ class StructurePlanSignalGenerator:
         """Keep one direction when simultaneous active plans conflict."""
         return resolve_conflicts(plans)
 
+    def _apply_event_risk(self, plans: List[Dict], config: Dict, symbol: str, period: str, now: int) -> List[Dict]:
+        """Persist a visible pause instead of silently deleting reversal plans."""
+        for plan in plans:
+            event = active_event(config, symbol, period, str(plan.get("setup_type") or ""), now)
+            if not event:
+                continue
+            plan["status"] = "event_suppressed"
+            plan["plan_stage"] = "event_suppressed"
+            plan["event_risk"] = event
+            plan["reason"] = f"{plan.get('reason') or '结构交易计划'} · {event['reason']}，暂停触发"
+        return plans
+
     def _event_invalidated(self, plan: Dict, price: float) -> str:
         """Evaluate cheap Tick-time invalidations from the persisted snapshot."""
         return invalidate_reason(plan, price)
@@ -1593,6 +1617,13 @@ class StructurePlanSignalGenerator:
                         beijing_hour = datetime.fromtimestamp(now, timezone.utc).astimezone(timezone(timedelta(hours=8))).hour
                         if beijing_hour in blocked_hours:
                             continue
+                    event = active_event(effective, symbol, period, setup_type, now)
+                    if event:
+                        self.repository.suppress_plan(plan_id, event)
+                        plan["status"] = "event_suppressed"
+                        plan["event_risk"] = event
+                        waiting.append(plan)
+                        continue
                 if direction in {"buy", "sell"} and direction not in allowed_directions:
                     continue
                 valid_from = int(plan.get("valid_from") or 0)

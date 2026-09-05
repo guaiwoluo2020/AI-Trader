@@ -39,6 +39,11 @@ export const marketAPI = {
     return response.data
   },
 
+  async getMarketRiskCalendar(date) {
+    const response = await api.get('/news/risk-calendar', { params: { date } })
+    return response.data
+  },
+
   async getMarketKeyEvents(date) {
     const response = await api.get('/news/key-events', { params: { date } })
     return response.data

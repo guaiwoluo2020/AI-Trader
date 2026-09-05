@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Optional
 
 from mysql_repositories import get_storage
+from system_event_log import SystemEventLogRepository
 
 
 class StructureTradePlanRepository:
@@ -41,7 +42,7 @@ class StructureTradePlanRepository:
             "payload_json,created_at "
             "FROM structure_trade_plans WHERE user_id=? AND account_id=? "
             "AND strategy_id=? AND signal_source_id=? AND symbol=? AND period=? "
-            "AND status IN ('active','watching') ORDER BY updated_at DESC",
+            "AND status IN ('active','watching','event_suppressed') ORDER BY updated_at DESC",
             (user_id, account_id, strategy_id, signal_source_id, symbol, period),
         )
         previous_generated_at = {}
@@ -67,7 +68,7 @@ class StructureTradePlanRepository:
             "WHERE user_id=? AND account_id=? AND strategy_id=? "
             "AND signal_source_id=? AND symbol=? AND period=? "
             "AND expires_at>0 AND expires_at<=? "
-            "AND status IN ('active','watching')",
+            "AND status IN ('active','watching','event_suppressed')",
             (now, user_id, account_id, strategy_id, signal_source_id,
              symbol, period, now),
         )
@@ -75,7 +76,7 @@ class StructureTradePlanRepository:
             "SELECT plan_id,status,direction,payload_json FROM structure_trade_plans "
             "WHERE user_id=? AND account_id=? "
             "AND strategy_id=? AND signal_source_id=? AND symbol=? AND period=? "
-            "AND status IN ('active','watching')",
+            "AND status IN ('active','watching','event_suppressed')",
             (user_id, account_id, strategy_id, signal_source_id, symbol, period),
         )
         for row in current:
@@ -166,7 +167,7 @@ class StructureTradePlanRepository:
             "SELECT payload_json,status FROM structure_trade_plans "
             "WHERE user_id=? AND account_id=? AND strategy_id=? "
             "AND signal_source_id=? AND symbol=? AND period=? "
-            "AND status IN ('active','watching') ORDER BY updated_at DESC",
+            "AND status IN ('active','watching','event_suppressed') ORDER BY updated_at DESC",
             (user_id, account_id, strategy_id, signal_source_id, symbol, period),
         )
         result = []
@@ -183,7 +184,7 @@ class StructureTradePlanRepository:
             "SELECT payload_json,status FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
             (str(plan_id),),
         )
-        if not row or str(row["status"] or "") not in {"active", "watching"}:
+        if not row or str(row["status"] or "") not in {"active", "watching", "event_suppressed"}:
             return
         try:
             payload = json.loads(row["payload_json"] or "{}")
@@ -195,6 +196,52 @@ class StructureTradePlanRepository:
             "UPDATE structure_trade_plans SET status='invalidated', payload_json=?, updated_at=? WHERE plan_id=?",
             (json.dumps(payload, ensure_ascii=False), now, str(plan_id)),
         )
+
+    def suppress_plan(self, plan_id: str, event_risk: Dict) -> None:
+        """Pause a live plan during an event window while retaining its audit trail."""
+        row = self.storage.fetchone(
+            "SELECT payload_json,status,user_id,account_id,symbol,period,strategy_id "
+            "FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
+            (str(plan_id),),
+        )
+        if not row or str(row["status"] or "") not in {"active", "watching", "event_suppressed"}:
+            return
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        previous_status = str(row["status"] or "")
+        previous_event = (payload.get("event_risk") or {}).get("id")
+        if previous_status == "event_suppressed" and previous_event == (event_risk or {}).get("id"):
+            return
+        payload["status"] = "event_suppressed"
+        payload["plan_stage"] = "event_suppressed"
+        payload["event_risk"] = dict(event_risk or {})
+        now = int(time.time())
+        self.storage.execute(
+            "UPDATE structure_trade_plans SET status='event_suppressed', payload_json=?, updated_at=? WHERE plan_id=?",
+            (json.dumps(payload, ensure_ascii=False), now, str(plan_id)),
+        )
+        # Keep a durable, searchable audit record instead of relying only on the
+        # plan JSON, so the execution center can explain every risk suppression.
+        try:
+            SystemEventLogRepository(self.storage).add({
+                "occurred_at": now, "level": "warning", "category": "risk",
+                "event_type": "structure_plan_event_suppressed",
+                "event_name": "结构计划被市场事件暂停",
+                "user_id": row.get("user_id"), "account_id": row.get("account_id"),
+                "symbol": row.get("symbol"), "actor_type": "system",
+                "entity_type": "structure_trade_plan", "entity_id": str(plan_id),
+                "correlation_id": str(plan_id), "status": "event_suppressed",
+                "message": str((event_risk or {}).get("reason") or "市场事件风险窗口"),
+                "detail": {"plan_id": str(plan_id), "strategy_id": row.get("strategy_id"),
+                           "period": row.get("period"), "event_risk": dict(event_risk or {}),
+                           "entry_price": payload.get("entry_price"), "stop_loss": payload.get("stop_loss"),
+                           "take_profit": payload.get("take_profit")},
+            })
+        except Exception as exc:
+            # Audit failure must not block the risk decision itself.
+            print(f"[StructurePlan] 风险暂停审计写入失败: {exc}")
 
     def supersede_plan(self, plan_id: str, reason: str = "superseded_by_new_plan") -> None:
         """Mark a live plan as replaced while preserving an explicit audit reason."""

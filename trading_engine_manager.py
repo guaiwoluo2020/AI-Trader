@@ -13,6 +13,7 @@ from background_scheduler import SharedTaskScheduler
 from data_retention import DataRetentionService
 from market.services.adaptive_signal_tuner import AdaptiveSignalTuner
 from market.services.daily_review_service import DailyReviewCoordinator, CHINA_TZ
+from market.services.major_us_calendar_collector import MajorUSCalendarCollector
 from ea_auth import EAIdentity
 from paper_trading import PaperTradingService
 from server import TradingServer
@@ -63,6 +64,7 @@ class TradingEngineManager:
         self.daily_reviews = DailyReviewCoordinator(
             engine_provider=self.get_market_engine,
         )
+        self.major_us_calendar = MajorUSCalendarCollector()
         self._idle_timeout_seconds = float(
             idle_timeout_seconds
             if idle_timeout_seconds is not None
@@ -94,6 +96,7 @@ class TradingEngineManager:
         self._next_outbox_dispatch_at = time.monotonic() + 2
         self._last_data_retention_date = ""
         self._last_daily_review_date = ""
+        self._last_major_us_calendar_date = ""
 
     def _create_engine(self, user_id: int, account_id: int) -> TradingServer:
         market_source = (
@@ -282,6 +285,21 @@ class TradingEngineManager:
             scheduler.submit(
                 ("system", "daily_reviews"),
                 lambda: self.daily_reviews.run_once(review_date),
+            )
+        # Daily official refresh means NFP/FOMC are available even when the
+        # administrative MT5 EA is offline.  05:10 Beijing leaves time for the
+        # calendar to be ready before the 06:00 review and the trading day.
+        major_calendar_due = (
+            current_wall.hour == 5
+            and current_wall.minute >= 10
+            and self._last_major_us_calendar_date != review_date
+        )
+        if major_calendar_due:
+            self._last_major_us_calendar_date = review_date
+            scheduler.submit(
+                ("system", "official_major_us_calendar"),
+                self.major_us_calendar.sync,
+                max_retries=1,
             )
         if now >= self._next_adaptive_tuning_at:
             # A completed sample is fingerprinted, so running every five
