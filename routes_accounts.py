@@ -2,6 +2,7 @@
 """统一交易账户管理接口。"""
 
 import time
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from auth import AuthUser, require_auth
 from membership import MembershipService
 from market.services.account_strategy_performance import build_live_performance
+from market.models.trading_strategy import StrategyLifecycle
 from mysql_repositories import (
     TradingAccountRecord,
 )
@@ -20,6 +22,7 @@ from repositories.trading import (
 )
 from trading_engine_manager import TradingEngineManager
 from market_data_source_policy import MarketDataSourcePolicy
+from system_event_log import SystemEventLogRepository
 
 
 def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -55,8 +58,9 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 f"策略品种「{symbol}」没有匹配的实时行情；最近上报品种：{reported}。"
                 "部署仍可继续，但策略不会产生订单，直到品种一致或建立映射。"
             )
-        if account.account_type == "mt5" and (not account.last_seen_at or now - int(account.last_seen_at) > 180):
-            warnings.append("目标 MT5 账户超过3分钟未心跳，实盘部署后暂时不会接收交易指令。")
+        if account.account_type in {"mt5", "ibkr"} and (not account.last_seen_at or now - int(account.last_seen_at) > 180):
+            label = "MT5 终端" if account.account_type == "mt5" else "IBKR Gateway"
+            warnings.append(f"目标 {label} 超过3分钟未心跳，实盘部署后暂时不会接收交易指令。")
         return warnings
 
     @router.get("/accounts")
@@ -171,6 +175,139 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.get("/accounts/{account_id}/close-check")
+    async def close_paper_account_check(
+        account_id: int,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        account = repository.get_by_id(user.user_id, account_id)
+        if account is None or account.account_type != "paper":
+            raise HTTPException(status_code=404, detail="Paper 模拟账户不存在")
+        storage = repository.storage
+        positions = storage.fetchall(
+            "SELECT position_id, symbol, direction, volume FROM paper_positions "
+            "WHERE account_id=? AND status='open' ORDER BY opened_at DESC",
+            (int(account_id),),
+        )
+        pending = storage.fetchone(
+            "SELECT COUNT(*) AS count FROM paper_orders WHERE account_id=? AND status='pending'",
+            (int(account_id),),
+        )
+        deployments = storage.fetchall(
+            "SELECT d.deployment_id,d.strategy_id,d.status,COALESCE(s.config_json,'{}') AS config_json "
+            "FROM strategy_deployments d LEFT JOIN user_strategy_configs s "
+            "ON s.user_id=d.user_id AND s.strategy_id=d.strategy_id "
+            "WHERE d.user_id=? AND d.account_id=? AND d.status IN ('active','paused','pending')",
+            (int(user.user_id), int(account_id)),
+        )
+        strategy_ids = list(dict.fromkeys(str(row["strategy_id"]) for row in deployments))
+        strategy_items = []
+        for strategy_id in strategy_ids:
+            other_row = storage.fetchone(
+                "SELECT COUNT(DISTINCT account_id) AS count FROM strategy_deployments "
+                "WHERE user_id=? AND strategy_id=? AND account_id<>? "
+                "AND status IN ('active','paused','pending')",
+                (int(user.user_id), strategy_id, int(account_id)),
+            )
+            other = int(other_row["count"] if other_row else 0)
+            # Count other accounts, not rows: duplicate deployments on this
+            # account must still allow the strategy to retire after closing.
+            strategy = strategy_repository.get_strategy_by_id(user.user_id, strategy_id)
+            strategy_items.append({
+                "strategy_id": strategy_id,
+                "strategy_name": strategy.strategy_name if strategy else strategy_id,
+                "other_active_deployments": other,
+                "will_retire": other == 0,
+            })
+        missing_quotes = []
+        for row in positions:
+            symbol = str(row["symbol"] or "")
+            if engine_manager.paper_trading.last_quote(user.user_id, symbol) is None:
+                historical = storage.fetchone(
+                    "SELECT close_price FROM historical_klines WHERE user_id=? AND account_id=0 AND symbol=? "
+                    "ORDER BY COALESCE(timestamp_utc,timestamp) DESC LIMIT 1",
+                    (int(user.user_id), symbol),
+                )
+                if not historical or float(historical["close_price"] or 0) <= 0:
+                    missing_quotes.append(symbol)
+        return {
+            "status": "ok", "account_id": int(account_id),
+            "can_close": not missing_quotes,
+            "positions": [dict(row) for row in positions],
+            "position_count": len(positions),
+            "pending_order_count": int(pending["count"] if pending else 0),
+            "deployments": [dict(row) for row in deployments],
+            "strategies": strategy_items,
+            "missing_quotes": sorted(set(missing_quotes)),
+        }
+
+    @router.post("/accounts/{account_id}/close")
+    async def close_paper_account(
+        account_id: int,
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        account = repository.get_by_id(user.user_id, account_id)
+        if account is None or account.account_type != "paper":
+            raise HTTPException(status_code=404, detail="Paper 模拟账户不存在")
+        try:
+            payload = await request.json()
+            reason = str(payload.get("reason") or "用户关闭模拟账户").strip()
+            check = await close_paper_account_check(account_id, user)
+            if not check["can_close"]:
+                raise ValueError(
+                    "以下持仓没有可用最后报价，不能关闭：" + "、".join(check["missing_quotes"])
+                )
+            result = engine_manager.paper_trading.close_paper_account(
+                user.user_id, account_id, reason=reason,
+            )
+            retired = []
+            for strategy_id in result.get("strategy_ids") or []:
+                if strategy_repository.strategy_deployment_count(user.user_id, strategy_id) != 0:
+                    continue
+                strategy = strategy_repository.get_strategy_by_id(user.user_id, strategy_id)
+                if strategy is None or strategy.lifecycle_status == StrategyLifecycle.RETIRED:
+                    continue
+                previous = strategy.lifecycle_status
+                now = datetime.now()
+                strategy.lifecycle_status = StrategyLifecycle.RETIRED
+                strategy.lifecycle_updated_at = now
+                strategy.updated_at = now
+                strategy.lifecycle_history.append({
+                    "from_status": previous, "to_status": StrategyLifecycle.RETIRED,
+                    "changed_at": now.isoformat(),
+                    "reason": f"Paper 账户 {account_id} 关闭后无其他活跃部署",
+                })
+                strategy_repository.save_strategy(user.user_id, strategy)
+                retired.append({"strategy_id": strategy_id, "strategy_name": strategy.strategy_name})
+                SystemEventLogRepository(repository.storage).add({
+                    "level": "warning", "category": "trading",
+                    "event_type": "strategy_retired_by_account_closed",
+                    "event_name": "策略因模拟账户关闭而下线",
+                    "user_id": user.user_id, "account_id": account_id,
+                    "symbol": strategy.symbol, "actor_type": "user",
+                    "entity_type": "strategy", "entity_id": strategy_id,
+                    "message": f"策略 {strategy.strategy_name} 无其他活跃部署，已自动下线",
+                    "detail": {"strategy_id": strategy_id, "account_id": account_id,
+                               "previous_status": previous, "reason": reason},
+                })
+            SystemEventLogRepository(repository.storage).add({
+                "level": "warning", "category": "trading",
+                "event_type": "paper_account_closed",
+                "event_name": "Paper 模拟账户已关闭",
+                "user_id": user.user_id, "account_id": account_id,
+                "actor_type": "user", "entity_type": "trading_account",
+                "entity_id": str(account_id), "status": "closed",
+                "message": reason,
+                "detail": {"settled_positions": result.get("settled_positions", 0),
+                           "strategy_ids": result.get("strategy_ids", []),
+                           "retired_strategies": retired},
+            })
+            return {"status": "ok", "message": "Paper 模拟账户已关闭", "account": _account_payload(result["account"]),
+                    "retired_strategies": retired}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @router.post("/accounts/{account_id}/archive")
     async def archive_account(
         account_id: int,
@@ -234,8 +371,8 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         account = repository.get_by_id(user.user_id, account_id)
-        if account is None or account.account_type != "mt5":
-            raise HTTPException(status_code=404, detail="MT5 实盘账户不存在")
+        if account is None or account.account_type not in {"mt5", "ibkr"}:
+            raise HTTPException(status_code=404, detail="实盘账户不存在")
 
         engine = engine_manager.get_engine(user.user_id, account_id)
         positions = engine.position_service.get_positions()

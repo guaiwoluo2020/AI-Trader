@@ -236,6 +236,16 @@ export const accountAPI = {
     return response.data
   },
 
+  async checkPaperClose(accountId) {
+    const response = await api.get(`/accounts/${encodeURIComponent(accountId)}/close-check`)
+    return response.data
+  },
+
+  async closePaper(accountId, reason = '用户关闭模拟账户') {
+    const response = await api.post(`/accounts/${encodeURIComponent(accountId)}/close`, { reason })
+    return response.data
+  },
+
   async archive(accountId) {
     const response = await api.post(
       `/accounts/${encodeURIComponent(accountId)}/archive`

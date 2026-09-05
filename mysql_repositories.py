@@ -173,7 +173,7 @@ class TradingAccountRepository:
     def list_for_user(
         self, user_id: int, include_backtest: bool = False
     ) -> List[TradingAccountRecord]:
-        sql = self.ACCOUNT_SELECT + " WHERE a.user_id = ?"
+        sql = self.ACCOUNT_SELECT + " WHERE a.user_id = ? AND a.status != 'closed'"
         params: tuple = (user_id,)
         if not include_backtest:
             sql += " AND a.account_type != 'backtest'"
@@ -3350,14 +3350,15 @@ class StrategyConfigRepository:
         offset = (page - 1) * page_size
         from market.models.trading_strategy import TradingStrategy
         total_row = self.storage.fetchone(
-            "SELECT COUNT(*) AS total FROM user_strategy_configs WHERE user_id = ?",
+            "SELECT COUNT(*) AS total FROM user_strategy_configs "
+            "WHERE user_id = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(config_json, '$.lifecycle_status')), 'draft') != 'retired'",
             (int(user_id),),
         )
         rows = self.storage.fetchall(
             """
             SELECT strategy_id, symbol, config_json
             FROM user_strategy_configs
-            WHERE user_id = ?
+            WHERE user_id = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(config_json, '$.lifecycle_status')), 'draft') != 'retired'
             ORDER BY created_at DESC, strategy_id DESC
             LIMIT ? OFFSET ?
             """,

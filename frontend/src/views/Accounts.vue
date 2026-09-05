@@ -20,7 +20,7 @@
 
     <section class="metric-grid">
       <article><span>账户总数</span><strong>{{ accounts.length }}</strong></article>
-      <article><span>MT5 账户</span><strong>{{ mt5Accounts.length }}</strong></article>
+      <article><span>实盘账户</span><strong>{{ liveAccounts.length }}</strong></article>
       <article><span>在线终端</span><strong>{{ connectedCount }}</strong></article>
       <article><span>Paper 账户</span><strong>{{ paperAccounts.length }}</strong></article>
     </section>
@@ -123,14 +123,17 @@
               <v-btn v-if="account.account_type === 'mt5'" color="secondary" variant="tonal" prepend-icon="mdi-download" :loading="eaDownloadingId === account.account_id" @click="downloadAccountEA(account)">
                 重新下载 EA
               </v-btn>
-              <v-btn v-if="account.account_type === 'mt5'" color="primary" variant="tonal" prepend-icon="mdi-link-variant" @click="openStrategyManager(account)">
+              <v-btn v-if="isLiveAccount(account)" color="primary" variant="tonal" prepend-icon="mdi-link-variant" @click="openStrategyManager(account)">
                 管理绑定策略
               </v-btn>
-              <v-btn v-if="account.account_type === 'mt5'" color="success" variant="tonal" prepend-icon="mdi-chart-timeline-variant" :loading="runtimeLoadingId === account.account_id" @click="openLiveRuntime(account)">
+              <v-btn v-if="isLiveAccount(account)" color="success" variant="tonal" prepend-icon="mdi-chart-timeline-variant" :loading="runtimeLoadingId === account.account_id" @click="openLiveRuntime(account)">
                 打开实盘运行台
               </v-btn>
               <v-btn v-if="account.account_type === 'paper'" color="primary" variant="tonal" prepend-icon="mdi-monitor-dashboard" :loading="runtimeLoadingId === account.account_id" @click="openPaperRuntime(account)">
                 打开模拟运行台
+              </v-btn>
+              <v-btn v-if="account.account_type === 'paper'" color="error" variant="text" prepend-icon="mdi-close-octagon-outline" :loading="accountClosingId === account.account_id" @click="closePaperAccount(account)">
+                关闭模拟账户
               </v-btn>
             </div>
           </article>
@@ -597,7 +600,7 @@
               <article v-for="deployment in selectedAccount.deployments" :key="deployment.deployment_id">
                 <v-icon :color="deploymentStatusColor(deployment.status)" size="16">mdi-server-network</v-icon>
                 <strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong>
-                <small>{{ deployment.symbol }} · MT5 实盘</small>
+                <small>{{ deployment.symbol }} · {{ selectedAccount.account_type === 'ibkr' ? 'IBKR 实盘' : 'MT5 实盘' }}</small>
                 <v-chip size="x-small" :color="deploymentStatusColor(deployment.status)">{{ deploymentStatusLabel(deployment.status) }}</v-chip>
               </article>
             </div>
@@ -616,11 +619,11 @@
           <div v-if="!selectedAccount.deployments?.length" class="runtime-empty compact">当前账户尚未绑定策略</div>
           <div v-else class="binding-list">
             <article v-for="deployment in selectedAccount.deployments" :key="deployment.deployment_id">
-              <div><strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong><span>{{ deployment.symbol }} · {{ deployment.execution_mode === 'live' ? 'MT5 实盘' : 'Paper 模拟' }}</span></div>
+              <div><strong>{{ deployment.strategy_name || deployment.strategy_id }}</strong><span>{{ deployment.symbol }} · {{ deployment.execution_mode === 'live' ? (selectedAccount.account_type === 'ibkr' ? 'IBKR 实盘' : 'MT5 实盘') : 'Paper 模拟' }}</span></div>
               <div class="binding-controls">
                 <v-switch :model-value="deployment.status === 'active'" color="success" inset hide-details :loading="deploymentLoadingId === deployment.deployment_id" @update:model-value="value => toggleAccountDeployment(deployment, value)" />
                 <v-btn icon="mdi-stop-circle-outline" size="small" variant="text" color="error" title="结束部署" :loading="deploymentLoadingId === deployment.deployment_id" @click="endDeployment(deployment, selectedAccount.account_id)" />
-                <v-btn v-if="selectedAccount.account_type === 'mt5'" icon="mdi-link-variant-off" size="small" variant="text" color="error" @click="removeAccountDeployment(deployment)" />
+                <v-btn v-if="isLiveAccount(selectedAccount)" icon="mdi-link-variant-off" size="small" variant="text" color="error" @click="removeAccountDeployment(deployment)" />
               </div>
             </article>
           </div>
@@ -661,6 +664,7 @@ const selectedStrategyId = ref('')
 const deploying = ref(false)
 const deploymentLoadingId = ref('')
 const runtimeLoadingId = ref(null)
+const accountClosingId = ref(null)
 const reportLoading = ref(false)
 const paperReport = ref(null)
 const reportStrategyId = ref('')
@@ -685,7 +689,8 @@ const paperForm = reactive({
   spreadPoints: 0, slippagePoints: 0, commissionPerLot: 0,
 })
 
-const mt5Accounts = computed(() => accounts.value.filter(item => item.account_type === 'mt5'))
+const liveAccounts = computed(() => accounts.value.filter(item => ['mt5', 'ibkr'].includes(item.account_type)))
+const mt5Accounts = liveAccounts
 const paperAccounts = computed(() => accounts.value.filter(item => item.account_type === 'paper'))
 function equityRangeParams(range) {
   if (range === 'all') return [null, null]
@@ -693,7 +698,8 @@ function equityRangeParams(range) {
   const seconds = { '6h': 6 * 3600, '24h': 24 * 3600, '7d': 7 * 86400 }[range]
   return [to - (seconds || 0), to]
 }
-const connectedCount = computed(() => mt5Accounts.value.filter(item => item.connected).length)
+const connectedCount = computed(() => liveAccounts.value.filter(item => item.connected).length)
+function isLiveAccount(account) { return ['mt5', 'ibkr'].includes(account?.account_type) }
 const strategyOptions = computed(() => paperContext.strategies.filter(
   strategy => strategy.paper_eligible
 ).map(strategy => {
@@ -712,7 +718,7 @@ const accountStrategyOptions = computed(() => {
   if (!selectedAccount.value) return []
   const existing = new Set((selectedAccount.value.deployments || []).map(item => item.strategy_id))
   return paperContext.strategies.filter(strategy => {
-    const eligible = selectedAccount.value.account_type === 'mt5'
+    const eligible = isLiveAccount(selectedAccount.value)
       ? strategy.live_eligible : strategy.paper_eligible
     return eligible && !existing.has(strategy.strategy_id)
   }).map(strategy => ({
@@ -1170,6 +1176,41 @@ async function loadPaperReport() {
     message.value = error.response?.data?.detail || '生成模拟盘报告失败'
   } finally {
     reportLoading.value = false
+  }
+}
+
+async function closePaperAccount(account) {
+  accountClosingId.value = account.account_id
+  try {
+    const check = await accountAPI.checkPaperClose(account.account_id)
+    const strategyText = (check.strategies || []).map(item => (
+      `- ${item.strategy_name}${item.will_retire ? '（无其他账户部署，关闭后将自动下线）' : '（其他账户仍在使用，不会下线）'}`
+    )).join('\n') || '无已部署策略'
+    const positionText = check.position_count
+      ? `当前有 ${check.position_count} 笔持仓，将按最后一次有效报价模拟平仓。`
+      : '当前没有未平仓持仓。'
+    const pendingText = check.pending_order_count
+      ? `当前有 ${check.pending_order_count} 笔等待撮合订单，将全部取消。`
+      : '当前没有等待撮合订单。'
+    if (!check.can_close) {
+      throw new Error(`无法关闭：以下持仓没有可用的最后报价：${(check.missing_quotes || []).join('、')}`)
+    }
+    const confirmed = window.confirm(
+      `关闭 Paper 模拟账户「${account.account_name}」？\n\n` +
+      `${positionText}\n${pendingText}\n\n` +
+      `策略处理：\n${strategyText}\n\n` +
+      '账户关闭后将从账户列表隐藏，历史订单、成交和资金曲线保留。确认继续吗？'
+    )
+    if (!confirmed) return
+    const data = await accountAPI.closePaper(account.account_id)
+    messageType.value = 'success'
+    message.value = `${data.message}${data.retired_strategies?.length ? `；自动下线 ${data.retired_strategies.length} 个策略` : ''}`
+    await loadAccounts()
+  } catch (error) {
+    messageType.value = 'error'
+    message.value = error.response?.data?.detail || error.message || '关闭模拟账户失败'
+  } finally {
+    accountClosingId.value = null
   }
 }
 

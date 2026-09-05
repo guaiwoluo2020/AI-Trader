@@ -261,10 +261,10 @@ class PaperTradingService:
                 )
                 strategy = current_strategy.to_dict()
             execution_mode = "paper"
-        elif account.account_type == "mt5":
+        elif account.account_type in {"mt5", "ibkr"}:
             self.memberships.assert_live_trading(user_id, account.account_id)
             if lifecycle != "production":
-                raise ValueError("只有已批准用于实盘的策略才能绑定 MT5 账户")
+                raise ValueError("只有已批准用于实盘的策略才能绑定实盘账户")
             execution_mode = "live"
         else:
             raise ValueError("当前账户类型不支持策略部署")
@@ -379,7 +379,7 @@ class PaperTradingService:
         if active and current and current["scheduled_end_at"]:
             if int(current["scheduled_end_at"]) <= now:
                 raise ValueError("模拟运行期限已结束，请从回测报告重新部署")
-        if active and account.account_type == "mt5":
+        if active and account.account_type in {"mt5", "ibkr"}:
             self.memberships.assert_live_trading(user_id, account_id)
         status = "active" if active else "paused"
         with self.storage._lock, self.storage._connect() as conn:
@@ -406,6 +406,114 @@ class PaperTradingService:
             (deployment_id,),
         )
         return dict(row) if row else None
+
+    def close_paper_account(
+        self, user_id: int, account_id: int, *, reason: str = "",
+    ) -> Dict:
+        """Close a Paper account, settle open positions at the last quote, and
+        retain all orders/trades for read-only history."""
+        account = self._paper_account(user_id, account_id)
+        if account.status == "closed":
+            return {"account": account, "strategy_ids": [], "already_closed": True}
+        now = int(time.time())
+        with self._lock:
+            open_rows = self.storage.fetchall(
+                "SELECT DISTINCT symbol FROM paper_positions WHERE account_id = ? AND status = 'open'",
+                (account_id,),
+            )
+            quotes = {}
+            for row in open_rows:
+                symbol = str(row["symbol"] or "")
+                quote = self._quotes.get((int(user_id), symbol))
+                if quote is None:
+                    historical = self.storage.fetchone(
+                        "SELECT close_price, COALESCE(timestamp_utc, timestamp) AS quote_time "
+                        "FROM historical_klines WHERE user_id = ? AND account_id = 0 AND symbol = ? "
+                        "ORDER BY COALESCE(timestamp_utc, timestamp) DESC LIMIT 1",
+                        (int(user_id), symbol),
+                    )
+                    if historical and float(historical["close_price"] or 0) > 0:
+                        price = float(historical["close_price"])
+                        quote = (price, price)
+                if quote is None:
+                    raise ValueError(f"持仓品种 {symbol} 没有可用的最后报价，暂不能关闭账户")
+                quotes[symbol] = (float(quote[0]), float(quote[1]))
+
+            settings = self._settings(account_id)
+            strategy_rows = self.storage.fetchall(
+                "SELECT DISTINCT strategy_id FROM strategy_deployments "
+                "WHERE user_id = ? AND account_id = ? AND status IN ('active','paused','pending')",
+                (int(user_id), int(account_id)),
+            )
+            strategy_ids = [str(row["strategy_id"]) for row in strategy_rows]
+            with self.storage._lock, self.storage._connect() as conn:
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.execute(
+                    "UPDATE trading_accounts SET status='closing', enabled=0, "
+                    "trading_enabled=0, auto_trading_enabled=0, updated_at=? "
+                    "WHERE id=? AND user_id=? AND account_type='paper'",
+                    (now, int(account_id), int(user_id)),
+                )
+                conn.execute(
+                    "UPDATE paper_orders SET status='canceled', canceled_at=?, updated_at=?, "
+                    "rejection_reason='模拟账户已关闭' WHERE account_id=? AND status='pending'",
+                    (now, now, int(account_id)),
+                )
+                conn.execute(
+                    "UPDATE strategy_deployments SET status='account_closed', updated_at=? "
+                    "WHERE user_id=? AND account_id=? AND status IN ('active','paused','pending')",
+                    (now, int(user_id), int(account_id)),
+                )
+                balance = float(account.balance or 0)
+                result = {"filled": 0, "closed": 0, "rejected": 0}
+                for symbol, (bid, ask) in quotes.items():
+                    conn.execute(
+                        "UPDATE paper_positions SET close_reason='account_closed', updated_at=? "
+                        "WHERE account_id=? AND symbol=? AND status='open'",
+                        (now, int(account_id), symbol),
+                    )
+                    point_size, contract_size = market_spec(symbol)
+                    slippage = settings["slippage_points"] * point_size
+                    balance = self.position_service.manage(
+                        conn, int(user_id), int(account_id), symbol, bid, ask, now,
+                        settings, [], {}, result, balance, contract_size, slippage,
+                    )
+                equity, margin, open_positions = self.accounting_service.mark_positions(
+                    conn, int(user_id), int(account_id), balance,
+                    settings["leverage"], now,
+                )
+                if open_positions:
+                    raise ValueError("账户关闭结算后仍存在未平仓持仓")
+                conn.execute(
+                    "UPDATE trading_accounts SET status='closed', archived_at=?, "
+                    "balance=?, equity=?, free_margin=?, margin=?, financial_updated_at=?, updated_at=? "
+                    "WHERE id=? AND user_id=?",
+                    (now, balance, equity, equity - margin, margin, now, now,
+                     int(account_id), int(user_id)),
+                )
+                point_time = now - now % 60
+                conn.execute(
+                    "INSERT INTO paper_equity_points(account_id, point_time, user_id, balance, equity, free_margin, margin, open_positions) "
+                    "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id, point_time) DO UPDATE SET "
+                    "balance=excluded.balance,equity=excluded.equity,free_margin=excluded.free_margin,margin=excluded.margin,open_positions=excluded.open_positions",
+                    (int(account_id), point_time, int(user_id), balance, equity,
+                     equity - margin, margin, 0),
+                )
+                conn.commit()
+        return {
+            "account": self.accounts.get_by_id(user_id, account_id),
+            "strategy_ids": strategy_ids,
+            "settled_positions": int(result.get("closed") or 0),
+            "canceled_orders": True,
+            "reason": str(reason or ""),
+        }
+
+    def last_quote(self, user_id: int, symbol: str) -> Optional[Dict]:
+        """Expose the latest in-memory quote for account close preflight."""
+        quote = self._quotes.get((int(user_id), str(symbol)))
+        if quote is None:
+            return None
+        return {"bid": float(quote[0]), "ask": float(quote[1])}
 
     def end_deployment(
         self, user_id: int, account_id: int, deployment_id: str,
@@ -503,7 +611,7 @@ class PaperTradingService:
             if item["status"] in {"active", "paused"}:
                 if account.account_type == "paper":
                     runtime_lifecycle = StrategyLifecycle.PAPER_TRADING
-                elif account.account_type == "mt5":
+                elif account.account_type in {"mt5", "ibkr"}:
                     runtime_lifecycle = StrategyLifecycle.PRODUCTION
             item["runtime_lifecycle_status"] = runtime_lifecycle
             item["lifecycle_status"] = runtime_lifecycle
