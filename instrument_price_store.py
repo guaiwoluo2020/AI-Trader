@@ -44,6 +44,9 @@ class InstrumentPriceStore:
         now = time.time()
         mid = (float(bid) + float(ask)) / 2 if ask is not None and ask > 0 else float(bid)
         item = {
+            "user_id": int(user_id),
+            "account_id": int(account_id),
+            "account_name": str(account.account_name or f"账户 {account_id}"),
             "timestamp": int(now),
             "bid": float(bid),
             "ask": float(ask) if ask is not None and ask > 0 else None,
@@ -61,7 +64,7 @@ class InstrumentPriceStore:
         while samples and samples[0]["timestamp"] < cutoff:
             samples.popleft()
 
-    def list(self) -> list:
+    def list(self, user_id: Optional[int] = None) -> list:
         now = time.time()
         try:
             mapping_rows = self.mappings.list(enabled_only=True)
@@ -79,16 +82,34 @@ class InstrumentPriceStore:
         with self._lock:
             result = []
             for (broker, symbol), samples in list(self._samples.items()):
+                if user_id is not None:
+                    samples = deque(
+                        item for item in samples
+                        if int(item.get("user_id") or 0) == int(user_id)
+                    )
+                    if not samples:
+                        continue
                 self._trim(samples, now)
                 if not samples:
                     self._samples.pop((broker, symbol), None)
                     continue
                 mapping = mapping_by_key.get((broker, symbol))
+                source_accounts = []
+                seen_accounts = set()
+                for item in samples:
+                    account_id = int(item.get("account_id") or 0)
+                    if account_id and account_id not in seen_accounts:
+                        seen_accounts.add(account_id)
+                        source_accounts.append({
+                            "account_id": account_id,
+                            "account_name": item.get("account_name") or f"账户 {account_id}",
+                        })
                 result.append({
                     "broker_name": broker,
                     "symbol": symbol,
                     "sample_count": len(samples),
                     "latest": dict(samples[-1]),
+                    "source_accounts": source_accounts,
                     "prices": [dict(item) for item in reversed(samples)],
                     "mapped": bool(mapping),
                     "mapping_group": mapping.get("mapping_group", "") if mapping else "",

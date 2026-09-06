@@ -6,6 +6,7 @@ const accounts = ref([])
 const storage = typeof window === 'undefined' ? null : window.localStorage
 const selectedAccountId = ref(Number(storage?.getItem(STORAGE_KEY)) || null)
 const loadingAccounts = ref(false)
+let initializedSelection = false
 
 function stateMeta(account) {
   if (account.status === 'archived') return { label: '已归档', color: 'grey' }
@@ -26,17 +27,21 @@ async function loadAccountContext() {
     accounts.value = (Array.isArray(data.accounts) ? data.accounts : []).filter(item => (
       item.account_type === 'mt5' || item.account_type === 'ibkr' || item.account_type === 'paper'
     ))
-    const selectedExists = accounts.value.some(
-      item => item.account_id === selectedAccountId.value
-    )
-    if (!selectedExists) {
+    const selectedExists = accounts.value.some(item => item.account_id === selectedAccountId.value)
+    // 首次进入应用时优先展示当前用户的活跃账户，避免沿用上次保存的离线账户。
+    // 用户完成手动切换后保留选择，不在普通刷新时强制改回活跃账户。
+    if (!initializedSelection || !selectedExists) {
+      const activeAccount = accounts.value.find(item => (
+        item.status === 'active' && (item.account_type === 'paper' || item.active)
+      ))
       selectedAccountId.value = (
-        accounts.value.find(item => item.active)
+        activeAccount
         || accounts.value.find(item => item.status === 'active')
         || accounts.value[0]
         || {}
       ).account_id || null
     }
+    initializedSelection = true
     if (selectedAccountId.value) {
       storage?.setItem(STORAGE_KEY, String(selectedAccountId.value))
     } else {

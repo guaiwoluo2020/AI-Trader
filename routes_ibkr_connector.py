@@ -20,6 +20,43 @@ from market.services.market_tick_ingress import MarketTickIngress
 logger = logging.getLogger(__name__)
 _connectors: Dict[str, Dict] = {}
 _connector_sockets: Dict[str, WebSocket] = {}
+_connector_loops: Dict[str, asyncio.AbstractEventLoop] = {}
+
+
+def dispatch_order_to_ibkr(account_id: int, order, instruction_id: str = "") -> bool:
+    """Queue one live order on the Gateway socket bound to ``account_id``.
+
+    Strategy execution is synchronous, while WebSocket writes belong to the
+    connector event loop.  ``run_coroutine_threadsafe`` keeps this boundary
+    non-blocking and preserves the same instruction id for idempotency.
+    """
+    account_id = int(account_id or 0)
+    for connector_id, state in list(_connectors.items()):
+        if account_id not in {
+            int(item.get("trading_account_id") or 0)
+            for item in (state.get("bound_accounts") or [])
+        } and int(state.get("trading_account_id") or 0) != account_id:
+            continue
+        websocket = _connector_sockets.get(connector_id)
+        loop = _connector_loops.get(connector_id)
+        if websocket is None or loop is None or loop.is_closed():
+            return False
+        action = "BUY" if str(getattr(order, "action", "")).lower() in {"b", "buy"} else "SELL"
+        command_id = str(instruction_id or getattr(order, "order_id", ""))
+        command = {
+            "type": "order", "command_id": command_id, "live": True,
+            "account_id": account_id, "symbol": str(getattr(order, "symbol", "")),
+            "action": action, "quantity": float(getattr(order, "mount", 0) or 0),
+            "price": float(getattr(order, "price", 0) or 0),
+            "sl": float(getattr(order, "sl", 0) or 0),
+            "tp": float(getattr(order, "tp", 0) or 0),
+            "order_id": str(getattr(order, "order_id", "")),
+            "strategy_id": str(getattr(order, "strategy_id", "")),
+        }
+        future = asyncio.run_coroutine_threadsafe(websocket.send_json(command), loop)
+        future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+        return True
+    return False
 
 
 def _admin_user_id(account_repository: TradingAccountRepository) -> int:
@@ -115,6 +152,7 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
             await websocket.close(code=1008, reason="Connector 凭证无效")
             return
         await websocket.accept()
+        loop = asyncio.get_running_loop()
         connector_id = "unknown"
         try:
             hello = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=10))
@@ -133,6 +171,7 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                 "account_financials": {},
             }
             _connector_sockets[connector_id] = websocket
+            _connector_loops[connector_id] = loop
             await websocket.send_json({"type": "connected", "connector_id": connector_id,
                                        "read_only": _connectors[connector_id]["read_only"]})
             config = RuntimeStateRepository(0, 0).get_entity("ibkr_market_config", "default") or {}
@@ -179,6 +218,53 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                                     free_margin=cache.get("AvailableFunds", account.free_margin),
                                     margin=cache.get("MaintMarginReq", account.margin),
                                 )
+                    if payload.get("event") == "positions_snapshot" and engine_manager is not None:
+                        detail = payload.get("payload") or {}
+                        binding = _connectors.get(connector_id, {})
+                        broker_account = str(
+                            detail.get("account") or payload.get("account") or
+                            binding.get("primary_ibkr_account") or ""
+                        ).strip().upper()
+                        account_id = next((
+                            int(item.get("trading_account_id") or 0)
+                            for item in (binding.get("bound_accounts") or [])
+                            if str(item.get("ibkr_account") or "").strip().upper() == broker_account
+                        ), 0)
+                        user_id = int(binding.get("user_id") or hello.get("user_id") or 0)
+                        # A Gateway can deliver a position snapshot before the
+                        # managedAccounts callback (especially after a server
+                        # restart). Resolve the exact broker account directly
+                        # instead of dropping the snapshot as unbound.
+                        if user_id > 0 and account_id <= 0 and broker_account:
+                            try:
+                                account_id = account_repository.ensure_ibkr_account(
+                                    user_id, broker_account
+                                ).account_id
+                                binding.setdefault("bound_accounts", []).append({
+                                    "ibkr_account": broker_account,
+                                    "trading_account_id": account_id,
+                                })
+                            except Exception:
+                                logger.exception(
+                                    "failed to resolve IBKR account binding: %s",
+                                    broker_account,
+                                )
+                        if user_id > 0 and account_id > 0:
+                            raw_positions = detail.get("positions") or []
+                            try:
+                                engine = engine_manager.get_engine(user_id, account_id)
+                                result = engine.position_service.replace_all_positions(raw_positions)
+                                logger.info(
+                                    "IBKR positions snapshot applied connector=%s account=%s count=%s closed=%s",
+                                    connector_id, broker_account, result.get("count", 0), result.get("closed", 0),
+                                )
+                            except Exception:
+                                logger.exception("failed to apply IBKR positions snapshot: %s", broker_account)
+                        else:
+                            logger.warning(
+                                "ignoring IBKR positions snapshot with no exact account binding: %s",
+                                broker_account,
+                            )
                     if payload.get("event") == "quote" and engine_manager is not None:
                         detail = payload.get("payload") or {}
                         binding = _connectors.get(connector_id, {})
@@ -205,6 +291,7 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
             pass
         finally:
             _connector_sockets.pop(connector_id, None)
+            _connector_loops.pop(connector_id, None)
             _connectors.pop(connector_id, None)
 
     @router.get("/admin/ibkr/connectors")

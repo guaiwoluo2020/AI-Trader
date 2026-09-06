@@ -475,6 +475,7 @@ class TradingAccountRepository:
         spread_points: float = 0,
         slippage_points: float = 0,
         commission_per_lot: float = 0,
+        reference_account_id: Optional[int] = None,
     ) -> TradingAccountRecord:
         name = str(account_name or "").strip()
         if not name:
@@ -485,6 +486,16 @@ class TradingAccountRepository:
         normalized_currency = str(currency or "USD").strip().upper()
         if not normalized_currency or len(normalized_currency) > 8:
             raise ValueError("账户币种无效")
+        # 选择参考账户时，优先复制 Paper 账户的完整撮合参数；实盘账户
+        # 没有固定的滑点/手续费配置，则使用其最近 EA 上报的真实点差，
+        # 其它不可观测成本保留安全默认值。
+        if reference_account_id:
+            resolved = self.resolve_paper_reference(user_id, int(reference_account_id))
+            normalized_currency = str(resolved.get("currency") or normalized_currency).upper()
+            leverage = resolved["leverage"]
+            spread_points = resolved["spread_points"]
+            slippage_points = resolved["slippage_points"]
+            commission_per_lot = resolved["commission_per_lot"]
         settings = tuple(float(value) for value in (
             leverage, spread_points, slippage_points, commission_per_lot
         ))
@@ -525,6 +536,38 @@ class TradingAccountRepository:
             )
             conn.commit()
         return self.get_by_id(user_id, account_id)
+
+    def resolve_paper_reference(self, user_id: int, reference_account_id: int) -> Dict:
+        """Resolve Paper matching defaults from a live/Paper reference account."""
+        reference = self.get_by_id(user_id, int(reference_account_id))
+        if reference is None or reference.account_type not in {"mt5", "ibkr", "paper"}:
+            raise ValueError("参考账户不存在或类型不支持")
+        result = {
+            "reference_account_id": reference.account_id,
+            "reference_account_name": reference.account_name,
+            "currency": reference.currency,
+            "leverage": 100.0,
+            "spread_points": 0.0,
+            "slippage_points": 0.0,
+            "commission_per_lot": 0.0,
+            "spread_source": "默认值",
+        }
+        if reference.account_type == "paper":
+            row = self.storage.fetchone(
+                "SELECT leverage, spread_points, slippage_points, commission_per_lot "
+                "FROM paper_account_settings WHERE account_id = ?",
+                (int(reference.account_id),),
+            )
+            if row:
+                for key in ("leverage", "spread_points", "slippage_points", "commission_per_lot"):
+                    result[key] = float(row[key] or 0)
+                result["spread_source"] = "参考 Paper 账户配置"
+            return result
+        # 实盘点差是品种和时刻相关的，不能把某一条 BTC/GOLD 的快照写成
+        # Paper 账户全局固定点差。Paper 会直接使用共享行情的 Bid/Ask，
+        # 因此这里保持 0，表示“不额外加固定点差”。
+        result["spread_source"] = "按品种实时 Bid/Ask"
+        return result
 
     def authenticate(self, user_id: int, token: str) -> Optional[TradingAccountRecord]:
         token_hash = self._hash_token(token)
@@ -572,6 +615,28 @@ class TradingAccountRepository:
             raise ValueError("账户资金数据无效")
         now = _now_ts()
         with self.storage._lock, self.storage._connect() as conn:
+            # MT5 EA 在终端刚启动、尚未收到首个 Tick 时，账户信息变量仍是
+            # 初始化值 0。不能让这类心跳覆盖最近一次有效资金快照，否则页面
+            # 会在有效余额和 0 之间闪烁，净值曲线也会被画出大量假跌落。
+            # 只对已有正余额的 MT5 账户保护；真实的账户归零仍可在初始快照
+            # 尚未建立时正常写入，IBKR/Paper 不受此规则影响。
+            existing = conn.execute(
+                "SELECT account_type, balance, equity FROM trading_accounts WHERE id = ?",
+                (int(account_id),),
+            ).fetchone()
+            incoming_is_empty = all(value == 0 for value in values)
+            if (
+                incoming_is_empty
+                and existing is not None
+                and str(existing["account_type"]).lower() == "mt5"
+                and max(float(existing["balance"] or 0), float(existing["equity"] or 0)) > 0
+            ):
+                conn.execute(
+                    "UPDATE trading_accounts SET last_seen_at = ?, updated_at = ? WHERE id = ?",
+                    (now, now, int(account_id)),
+                )
+                conn.commit()
+                return True
             cursor = conn.execute(
                 """
                 UPDATE trading_accounts
@@ -611,6 +676,18 @@ class TradingAccountRepository:
             WHERE user_id = ? AND account_id = ?
         """
         params = [user_id, account_id]
+        # 清除 MT5 首 Tick 前产生的全零心跳点。账户当前已有有效余额时，
+        # 这些点不代表真实资金变化，只会把曲线错误拉回 0。
+        account = self.storage.fetchone(
+            "SELECT account_type, balance, equity FROM trading_accounts WHERE id = ? AND user_id = ?",
+            (int(account_id), int(user_id)),
+        )
+        if (
+            account is not None
+            and str(account["account_type"]).lower() == "mt5"
+            and max(float(account["balance"] or 0), float(account["equity"] or 0)) > 0
+        ):
+            sql += " AND NOT (balance = 0 AND equity = 0 AND free_margin = 0 AND margin = 0)"
         if from_time is not None:
             sql += " AND point_time >= ?"; params.append(int(from_time))
         if to_time is not None:

@@ -40,19 +40,52 @@ class IBGatewayClient(EWrapper):
         self._request_symbols: Dict[int, str] = {}
         self._quotes: Dict[int, Dict[str, float]] = {}
         self._account_summary_request_id: Optional[int] = None
+        self._positions: Dict[int, Dict] = {}
+        self._positions_requested = False
+        # ``isConnected`` only means the TCP socket is open.  IBKR requests
+        # must wait until nextValidId, otherwise Gateway can immediately drop
+        # a client that starts sending subscriptions during its handshake.
+        self._ready = threading.Event()
 
     @property
     def connected(self) -> bool:
         return bool(self._client.isConnected())
 
-    def connect_and_run(self) -> None:
+    @property
+    def ready(self) -> bool:
+        return self.connected and self._ready.is_set()
+
+    def connect_and_run(self, ready_timeout: float = 20.0) -> None:
         self._client.connect(self._host, self._port, self._client_id)
         self._thread = threading.Thread(target=self._client.run, name="ibkr-api", daemon=True)
         self._thread.start()
+        if not self._ready.wait(timeout=max(1.0, float(ready_timeout))):
+            self.close()
+            raise TimeoutError("IBKR Gateway API 握手超时，未收到 nextValidId")
 
     def close(self) -> None:
+        self._ready.clear()
         if self.connected:
             self._client.disconnect()
+
+    def request_positions(self) -> bool:
+        """Request a fresh complete broker position snapshot.
+
+        Gateway sends ``positionEnd`` even when the account is flat, so the
+        server can clear stale positions.  The guard prevents overlapping
+        requests while callbacks for the previous snapshot are still active.
+        """
+        if not self.ready or self._positions_requested:
+            return False
+        self._positions_requested = True
+        self._positions.clear()
+        self._client.reqPositions()
+        self.on_event("positions_requested", {})
+        return True
+
+    def connectionClosed(self):
+        self._ready.clear()
+        self.on_event("gateway_disconnected", {})
 
     def subscribe_symbols(self, symbols: Iterable[str]) -> None:
         """Subscribe to US stock/forex/future symbols supplied as ``SYM[:SEC]``.
@@ -141,7 +174,12 @@ class IBGatewayClient(EWrapper):
 
     def nextValidId(self, orderId):
         self._next_request_id = max(self._next_request_id, int(orderId))
+        self._ready.set()
         self.on_event("gateway_ready", {"next_order_id": int(orderId)})
+        # Request a complete broker position snapshot after the API handshake.
+        # The snapshot is finalized by positionEnd(), including an empty list
+        # when the account genuinely has no open positions.
+        self.request_positions()
         # Keep a live account summary subscription so the server can expose
         # current equity/cash/margin instead of only the managed account id.
         if self._account_summary_request_id is None:
@@ -165,6 +203,47 @@ class IBGatewayClient(EWrapper):
 
     def accountSummaryEnd(self, reqId):
         self.on_event("account_summary_end", {"request_id": int(reqId)})
+
+    def position(self, account, contract, pos, avgCost):
+        """Collect one IBKR position callback for the current full snapshot."""
+        try:
+            quantity = float(pos or 0)
+        except (TypeError, ValueError):
+            return
+        symbol = str(getattr(contract, "symbol", "") or "").strip()
+        if not symbol or quantity == 0:
+            return
+        con_id = int(getattr(contract, "conId", 0) or 0)
+        # conId is stable and unique within an IBKR account.  Fall back to a
+        # deterministic symbol key for mocked/older Gateway callbacks.
+        key = con_id if con_id > 0 else abs(hash(symbol))
+        self._positions[key] = {
+            "ticket": key,
+            "symbol": symbol,
+            "volume": abs(quantity),
+            "priceOpen": float(avgCost or 0),
+            "type": "BUY" if quantity > 0 else "SELL",
+            "profit": 0.0,
+            "sl": 0.0,
+            "tp": 0.0,
+            "comment": "IBKR",
+            "con_id": con_id,
+            "account": str(account or "").strip().upper(),
+            "sec_type": str(getattr(contract, "secType", "") or ""),
+        }
+        logger.info("IBKR position callback account=%s symbol=%s quantity=%s",
+                    account, symbol, quantity)
+
+    def positionEnd(self):
+        """Publish the complete position snapshot, including an empty one."""
+        positions = list(self._positions.values())
+        self.on_event("positions_snapshot", {
+            "account": str(positions[0].get("account") if positions else "").upper(),
+            "positions": positions,
+        })
+        logger.info("IBKR position snapshot complete count=%s", len(positions))
+        self._positions.clear()
+        self._positions_requested = False
 
     def orderStatus(self, orderId, status, filled, remaining, avgFillPrice,
                     permId, parentId, lastFillPrice, clientId, whyHeld,

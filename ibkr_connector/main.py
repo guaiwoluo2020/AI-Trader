@@ -7,6 +7,7 @@ order submission while ``IBKR_READ_ONLY=true``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 
@@ -35,13 +36,30 @@ async def run(config: ConnectorConfig) -> None:
                     await ws.send_json(hello(config))
                     loop = asyncio.get_running_loop()
                     def publish(name, payload):
+                        # An empty IBKR position snapshot is valid but has no
+                        # position callback from which to derive the account.
+                        # Preserve the configured account in both envelope and
+                        # payload so the server can still clear stale state.
+                        if name == "positions_snapshot" and not payload.get("account"):
+                            payload = dict(payload)
+                            payload["account"] = config.account
                         msg = event(name, payload, account=config.account)
-                        asyncio.run_coroutine_threadsafe(ws.send_json(msg), loop)
+                        future = asyncio.run_coroutine_threadsafe(ws.send_json(msg), loop)
+                        def _report_send_failure(done):
+                            if done.cancelled():
+                                return
+                            exc = done.exception()
+                            if exc:
+                                logger.warning("IBKR event send failed event=%s: %s", name, exc)
+                        future.add_done_callback(_report_send_failure)
                     gateway = IBGatewayClient(config.gateway_host, config.gateway_port,
                                               config.client_id, publish)
                     gateway.connect_and_run()
                     gateway.subscribe_symbols(config.symbols)
                     delay = config.reconnect_seconds
+                    gateway_watchdog = asyncio.create_task(
+                        _watch_gateway_connection(ws, gateway, config.heartbeat_seconds)
+                    )
                     try:
                         async for message in ws:
                             if message.type == aiohttp.WSMsgType.TEXT:
@@ -78,6 +96,9 @@ async def run(config: ConnectorConfig) -> None:
                                     await ws.send_json(event("order_rejected", {
                                         "reason": "connector_read_only"}, account=config.account))
                     finally:
+                        gateway_watchdog.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await gateway_watchdog
                         gateway.close()
                     # A clean server-side close is still a disconnect; avoid a
                     # tight reconnect loop when the service is being restarted.
@@ -88,6 +109,34 @@ async def run(config: ConnectorConfig) -> None:
                 logger.exception("IBKR connector disconnected; retrying in %.1fs", delay)
                 await asyncio.sleep(delay)
                 delay = min(60.0, delay * 2)
+
+
+async def _watch_gateway_connection(ws, gateway: IBGatewayClient, heartbeat_seconds: float) -> None:
+    """Force the outer reconnect loop when the local Gateway drops.
+
+    ``ibapi`` runs its reader in a background thread.  Previously a Gateway
+    disconnect only invoked ``connectionClosed`` in that thread while the
+    WebSocket receive loop kept waiting forever, leaving the systemd process
+    healthy-looking but no longer publishing account or quote events.
+    Closing the server WebSocket makes ``run`` leave its inner context and
+    recreate both connections.
+    """
+    interval = max(2.0, min(float(heartbeat_seconds), 10.0))
+    # Give the API client a short grace period to complete its initial socket
+    # handshake before treating a transient false value as a disconnect.
+    await asyncio.sleep(interval)
+    position_refresh_at = asyncio.get_running_loop().time()
+    while True:
+        if not gateway.ready:
+            logger.warning("IBKR Gateway API not ready; forcing connector reconnect")
+            with contextlib.suppress(Exception):
+                await ws.close(code=1011, message=b"IBKR Gateway disconnected")
+            return
+        now = asyncio.get_running_loop().time()
+        if now >= position_refresh_at:
+            gateway.request_positions()
+            position_refresh_at = now + 60.0
+        await asyncio.sleep(interval)
 
 
 def main() -> None:

@@ -44,11 +44,12 @@ class MarketDataSourcePolicy:
 
     def resolve(self, user_id: int, account_id: int, symbol: str) -> Dict:
         account = self.accounts.get_by_id(int(user_id), int(account_id))
-        if account is None or account.account_type != "mt5":
-            return {"mode": "blocked", "message": "MT5 实盘账户不存在"}
-        broker_name = self.mappings.broker_name_from_server(
-            account.mt5_server or ""
-        ).casefold()
+        if account is None or account.account_type not in {"mt5", "ibkr"}:
+            return {"mode": "blocked", "message": "实盘账户不存在"}
+        broker_name = (
+            "ibkr" if account.account_type == "ibkr" else
+            self.mappings.broker_name_from_server(account.mt5_server or "").casefold()
+        )
         canonical = self.canonical_symbol(broker_name, symbol)
         cache_key = (int(user_id), int(account_id), canonical)
         now = time.time()
@@ -65,51 +66,29 @@ class MarketDataSourcePolicy:
         self, account, broker_name: str, native_symbol: str, canonical: str,
     ) -> Dict:
         blocked = self.storage.fetchone(
-            "SELECT * FROM market_data_account_policies "
-            "WHERE user_id = ? AND account_id = ? AND mode = 'blocked'",
-            (account.user_id, account.account_id),
+            "SELECT * FROM market_data_symbol_policies "
+            "WHERE user_id = ? AND account_id = ? AND canonical_symbol = ? AND mode = 'blocked'",
+            (account.user_id, account.account_id, canonical),
         )
         if blocked:
             return self._policy_payload(blocked, canonical)
 
-        broker_accounts = [
-            item for item in self.accounts.list_for_user(account.user_id)
-            if item.account_type == "mt5" and item.status == "active"
-            and self.mappings.broker_name_from_server(
-                item.mt5_server or ""
-            ).casefold() == broker_name
-        ]
-        broker_accounts.sort(key=lambda item: (
-            int(item.activated_at or item.created_at or 0), item.account_id,
-        ))
-        broker_primary = broker_accounts[0] if broker_accounts else account
-        if broker_primary.account_id != account.account_id:
-            source = self._claim_source(
-                account.user_id, canonical, broker_primary.account_id,
-                broker_name, native_symbol,
-            )
-            if str(source.get("broker_name") or "").casefold() != broker_name:
-                return self._block(
-                    account, broker_name, canonical,
-                    int(source.get("primary_account_id") or 0),
-                )
-            return self._save_policy(
-                account, broker_name, "reuse", broker_primary.account_id, [],
-                f"复用同交易商账户「{broker_primary.account_name}」的行情和策略触发 Tick",
-                canonical,
-            )
-
+        # 主行情源按“用户 + 标准品种”竞争，而不是按整个账户竞争。
+        # 同一账户可以负责 BTCUSD，另一个同交易商账户负责 GOLD_。
         source = self._claim_source(
             account.user_id, canonical, account.account_id,
             broker_name, native_symbol,
         )
-        if (
-            int(source.get("primary_account_id") or 0) != account.account_id
-            and str(source.get("broker_name") or "").casefold() != broker_name
-        ):
-            return self._block(
-                account, broker_name, canonical,
-                int(source.get("primary_account_id") or 0),
+        source_account_id = int(source.get("primary_account_id") or 0)
+        source_broker = str(source.get("broker_name") or "").casefold()
+        if source_broker and source_broker != broker_name:
+            return self._block(account, broker_name, canonical, source_account_id)
+        if source_account_id and source_account_id != account.account_id:
+            primary = self.accounts.get_by_id(account.user_id, source_account_id)
+            return self._save_policy(
+                account, broker_name, "reuse", source_account_id, [],
+                f"复用同品种主行情账户「{primary.account_name if primary else source_account_id}」的行情和策略触发 Tick",
+                canonical,
             )
         return self._save_policy(
             account, broker_name, "primary", account.account_id, [],
@@ -161,17 +140,17 @@ class MarketDataSourcePolicy:
         now = int(time.time())
         self.storage.execute(
             """
-            INSERT INTO market_data_account_policies(
-                user_id, account_id, broker_name, mode, primary_account_id,
-                conflict_symbols_json, message, created_at, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, account_id) DO UPDATE SET
+            INSERT INTO market_data_symbol_policies(
+                user_id, account_id, canonical_symbol, broker_name, mode,
+                primary_account_id, conflict_symbols_json, message, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, account_id, canonical_symbol) DO UPDATE SET
                 broker_name = excluded.broker_name, mode = excluded.mode,
                 primary_account_id = excluded.primary_account_id,
                 conflict_symbols_json = excluded.conflict_symbols_json,
                 message = excluded.message, updated_at = excluded.updated_at
             """,
-            (account.user_id, account.account_id, broker_name, mode,
+            (account.user_id, account.account_id, canonical, broker_name, mode,
              primary_account_id, json.dumps(conflicts, ensure_ascii=False),
              message, now, now),
         )
@@ -202,11 +181,19 @@ class MarketDataSourcePolicy:
             "can_open_trade": item.get("mode") != "blocked",
         }
 
-    def account_status(self, user_id: int, account_id: int) -> Dict:
+    def account_status(self, user_id: int, account_id: int, symbol: str = "") -> Dict:
+        canonical = ""
+        if symbol:
+            account = self.accounts.get_by_id(int(user_id), int(account_id))
+            if account:
+                broker = "ibkr" if account.account_type == "ibkr" else self.mappings.broker_name_from_server(account.mt5_server or "").casefold()
+                canonical = self.canonical_symbol(broker, symbol)
         row = self.storage.fetchone(
-            "SELECT * FROM market_data_account_policies "
-            "WHERE user_id = ? AND account_id = ?",
-            (int(user_id), int(account_id)),
+            "SELECT * FROM market_data_symbol_policies "
+            "WHERE user_id = ? AND account_id = ? "
+            + ("AND canonical_symbol = ?" if canonical else "")
+            + " ORDER BY updated_at DESC LIMIT 1",
+            (int(user_id), int(account_id), canonical) if canonical else (int(user_id), int(account_id)),
         )
         return self._policy_payload(row) if row else {
             "mode": "pending", "message": "等待 EA 上报品种后确认行情来源",
@@ -215,7 +202,7 @@ class MarketDataSourcePolicy:
         }
 
     def execution_account_ids(
-        self, user_id: int, broker_name: str,
+        self, user_id: int, broker_name: str, symbol: str = "",
     ) -> list[int]:
         """All active same-broker accounts driven by the primary market Tick."""
         result = []
@@ -230,7 +217,7 @@ class MarketDataSourcePolicy:
             ).casefold()
             if account_broker != str(broker_name or "").casefold():
                 continue
-            status = self.account_status(user_id, account.account_id)
+            status = self.account_status(user_id, account.account_id, symbol)
             if status.get("mode") != "blocked":
                 result.append(account.account_id)
         return result

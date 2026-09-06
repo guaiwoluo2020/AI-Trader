@@ -326,6 +326,25 @@ class MySQLStorage:
                 )
                 conn.execute(
                     """
+                CREATE TABLE IF NOT EXISTS market_data_symbol_policies (
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    canonical_symbol VARCHAR(64) NOT NULL,
+                    broker_name VARCHAR(120) NOT NULL,
+                    mode VARCHAR(24) NOT NULL,
+                    primary_account_id BIGINT NOT NULL DEFAULT 0,
+                    conflict_symbols_json LONGTEXT NOT NULL,
+                    message VARCHAR(512) NOT NULL DEFAULT '',
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (user_id, account_id, canonical_symbol),
+                    KEY idx_market_symbol_policy_mode (user_id, canonical_symbol, mode),
+                    KEY idx_market_symbol_policy_account (user_id, account_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
                 CREATE TABLE IF NOT EXISTS structure_plan_executions (
                     execution_id VARCHAR(64) NOT NULL,
                     user_id BIGINT NOT NULL,

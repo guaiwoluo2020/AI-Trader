@@ -139,6 +139,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 spread_points=payload.get("spread_points", 0),
                 slippage_points=payload.get("slippage_points", 0),
                 commission_per_lot=payload.get("commission_per_lot", 0),
+                reference_account_id=payload.get("reference_account_id"),
             )
             return {
                 "status": "ok",
@@ -146,6 +147,19 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 "account": _account_payload(account),
             }
         except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/accounts/paper/reference-preview")
+    async def preview_paper_reference(
+        reference_account_id: int = Query(...),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        try:
+            settings = repository.resolve_paper_reference(
+                user.user_id, int(reference_account_id),
+            )
+            return {"status": "ok", "settings": settings}
+        except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.patch("/accounts/{account_id}")

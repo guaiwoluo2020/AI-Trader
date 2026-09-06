@@ -256,7 +256,17 @@ class KlineService:
             return None
         if isinstance(ts, datetime):
             return ts
+        if isinstance(ts, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(ts))
+            except (ValueError, OSError, OverflowError):
+                return None
         ts_str = str(ts)
+        try:
+            if ts_str.replace('.', '', 1).isdigit():
+                return datetime.fromtimestamp(float(ts_str))
+        except (ValueError, OSError, OverflowError):
+            return None
         for fmt in ["%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M", "%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
             try:
                 return datetime.strptime(ts_str, fmt)

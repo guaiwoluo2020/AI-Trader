@@ -66,6 +66,7 @@ from market.services.decision_audit_service import DecisionAuditService
 from market.services.runtime_status_query_service import RuntimeStatusQueryService
 from market.services.strategy_runtime_coordinator import StrategyRuntimeCoordinator
 from market.services.entry_guard_service import EntryGuardService
+from instrument_price_store import get_instrument_price_store
 
 
 class TradingServer:
@@ -1387,7 +1388,97 @@ class TradingServer:
             })
 
         market_health = []
-        for symbol in sorted(self.kline_service.get_symbols()):
+        quote_health = {
+            str(item.get("symbol") or "").strip().upper(): item
+            for item in get_instrument_price_store().list(user_id=account.user_id)
+            if str(item.get("symbol") or "").strip()
+        }
+        # 进程重启会清空短期报价缓存；用最近的 EA 统计事件补充“上报账号”
+        # 信息，避免行情仍在但来源标签消失。
+        try:
+            recent_stats = self.repositories.storage.fetchall(
+                """
+                SELECT symbol, account_id, MAX(occurred_at) AS latest_time
+                FROM system_event_logs
+                WHERE user_id = ? AND event_type = 'ea_statistics'
+                  AND occurred_at >= ?
+                GROUP BY symbol, account_id
+                """,
+                (int(account.user_id), now - 3600),
+            )
+            account_names = {
+                int(item.account_id): str(item.account_name or f"账户 {item.account_id}")
+                for item in self.account_repository.list_for_user(account.user_id)
+            }
+            for row in recent_stats:
+                key = str(row["symbol"] or "").strip().upper()
+                source_id = int(row["account_id"] or 0)
+                if not key or not source_id:
+                    continue
+                item = quote_health.setdefault(key, {
+                    "symbol": str(row["symbol"]),
+                    "latest": {"timestamp": int(row["latest_time"] or 0)},
+                    "source_accounts": [],
+                })
+                known = {int(source.get("account_id") or 0) for source in item.get("source_accounts", [])}
+                if source_id not in known:
+                    item.setdefault("source_accounts", []).append({
+                        "account_id": source_id,
+                        "account_name": account_names.get(source_id, f"账户 {source_id}"),
+                    })
+        except Exception as exc:
+            print(f"[Dashboard] 读取行情来源失败: {exc}")
+        market_symbols = sorted(self.kline_service.get_symbols())
+        # 服务重启后行情服务的内存缓存可能尚未被 EA 再次初始化，但共享
+        # historical_klines 仍然有最近行情。首页不能因此显示成“没有行情”；
+        # 先用共享持久化数据恢复健康度，状态仍按最新 K 线时间标记为实时/延迟。
+        persisted_health = {}
+        if not market_symbols:
+            try:
+                rows = self.repositories.storage.fetchall(
+                    """
+                    SELECT symbol, period, MAX(COALESCE(timestamp_utc, timestamp)) AS latest_time
+                    FROM historical_klines
+                    WHERE user_id = ? AND account_id IN (0, ?)
+                    GROUP BY symbol, period
+                    ORDER BY latest_time DESC
+                    """,
+                    (int(account.user_id), int(account.account_id)),
+                )
+                for row in rows:
+                    symbol = str(row["symbol"] or "").strip()
+                    period = str(row["period"] or "").upper()
+                    if not symbol:
+                        continue
+                    item = persisted_health.setdefault(
+                        symbol, {"latest_time": 0, "periods": []}
+                    )
+                    latest = int(row["latest_time"] or 0)
+                    item["latest_time"] = max(item["latest_time"], latest)
+                    if period and period not in item["periods"]:
+                        item["periods"].append(period)
+                market_symbols = sorted(persisted_health)
+            except Exception as exc:
+                # 健康度是展示辅助信息，不能影响账户首页其它数据。
+                print(f"[Dashboard] 读取持久化行情健康度失败: {exc}")
+
+        for symbol in market_symbols:
+            if symbol in persisted_health:
+                latest_epoch = int(persisted_health[symbol]["latest_time"] or 0)
+                seconds_ago = max(0, now - latest_epoch) if latest_epoch else None
+                market_health.append({
+                    "symbol": symbol,
+                    "status": "active" if seconds_ago is not None and seconds_ago <= 180 else "closed",
+                    "is_stale": seconds_ago is None or seconds_ago > 180,
+                    "seconds_ago": seconds_ago,
+                    "latest_time": (
+                        datetime.fromtimestamp(latest_epoch).isoformat()
+                        if latest_epoch else None
+                    ),
+                    "periods": sorted(persisted_health[symbol]["periods"]),
+                    "source_accounts": quote_health.get(symbol.upper(), {}).get("source_accounts", []),
+                })
+                continue
             status = self.kline_service.check_m1_updated_within(symbol, 180)
             periods = [
                 period for period in ("M1", "M5", "M15", "H1", "H4")
@@ -1402,6 +1493,27 @@ class TradingServer:
                 "seconds_ago": status.get("seconds_ago"),
                 "latest_time": latest.isoformat() if latest else None,
                 "periods": periods,
+                "source_accounts": quote_health.get(symbol.upper(), {}).get("source_accounts", []),
+            })
+
+        # Tick 可能先于 K 线到达（例如 MT5 品种带有 # 后缀，历史 K 线仍在
+        # 等待初始化）。也要展示这类真实报价，并明确是哪一个账户上报。
+        existing_symbols = {str(item.get("symbol") or "").upper() for item in market_health}
+        for symbol_key, quote in quote_health.items():
+            if symbol_key in existing_symbols:
+                continue
+            latest = quote.get("latest") or {}
+            latest_epoch = int(latest.get("timestamp") or 0)
+            seconds_ago = max(0, now - latest_epoch) if latest_epoch else None
+            market_health.append({
+                "symbol": quote.get("symbol") or symbol_key,
+                "status": "active" if seconds_ago is not None and seconds_ago <= 180 else "closed",
+                "is_stale": seconds_ago is None or seconds_ago > 180,
+                "seconds_ago": seconds_ago,
+                "latest_time": datetime.fromtimestamp(latest_epoch).isoformat() if latest_epoch else None,
+                "periods": [],
+                "source_accounts": quote.get("source_accounts", []),
+                "quote_only": True,
             })
 
         ai_cards = [

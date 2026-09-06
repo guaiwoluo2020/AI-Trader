@@ -269,7 +269,12 @@ def create_news_routes():
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         day = _validate_day(date_value) if date_value else None
-        events = repository.list_calendar(day)
+        # 低影响事件噪声较大，财经日历默认只展示中影响及以上事件。
+        # 原始数据仍保留在数据库，便于审计和后续风控规则使用。
+        events = [
+            item for item in repository.list_calendar(day)
+            if _normalize_importance(item.get("importance")) >= 2
+        ]
         return {"status": "ok", "date": day, "count": len(events), "data": events}
 
     @router.post("/key-events/daily")

@@ -3,7 +3,11 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from market.services.market_event_risk_service import _event_at, active_event
+from market.services.market_event_risk_service import (
+    DEFAULT_EVENT_RISK_RULES,
+    _event_at,
+    active_event,
+)
 from market.services.major_us_calendar_collector import parse_bls_nfp_ics, parse_fomc_calendar
 from market.services.signal.structure_plan_signal import STRUCTURE_PLAN_DEFAULT_CONFIG
 
@@ -27,6 +31,28 @@ class MarketEventRiskTests(unittest.TestCase):
             _event_at(rule, summer_now),
             int(datetime(2026, 7, 6, 9, 30, tzinfo=ZoneInfo("America/New_York")).timestamp()),
         )
+
+    @patch("market.services.market_event_risk_service._calendar_events", return_value=[])
+    def test_shanghai_futures_afternoon_open_uses_beijing_time_and_pauses_reversals(self, _events):
+        rule = next(
+            item for item in DEFAULT_EVENT_RISK_RULES
+            if item["id"] == "shanghai_futures_afternoon_open"
+        )
+        event_time = int(datetime(
+            2026, 9, 7, 13, 30, tzinfo=ZoneInfo("Asia/Shanghai")
+        ).timestamp())
+
+        self.assertEqual(_event_at(rule, event_time), event_time)
+        event = active_event(
+            self.config, "GOLD#", "M5", "range_upper_reversal",
+            event_time - 5 * 60,
+        )
+        self.assertIsNotNone(event)
+        self.assertEqual(event["id"], "shanghai_futures_afternoon_open")
+        self.assertEqual(event["label"], "上海期货午盘")
+        self.assertEqual(event["suppress_from"], event_time - 10 * 60)
+        self.assertEqual(event["resume_after"], event_time + 20 * 60 + 5 * 60)
+        self.assertEqual(event["resume_confirmation_bars"], 1)
 
     @patch("market.services.market_event_risk_service._calendar_events")
     def test_nfp_is_l4_even_when_calendar_marks_medium_impact(self, events):

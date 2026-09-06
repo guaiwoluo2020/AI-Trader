@@ -6,7 +6,7 @@ K线数据存储模块
 """
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 import threading
 
@@ -208,7 +208,14 @@ class KlineStore:
             if not klines:
                 return None
 
-            latest_ts = klines[-1].get('timestamp') or klines[-1].get('time')
+            latest = klines[-1]
+            utc_ts = latest.get('timestamp_utc')
+            if utc_ts not in (None, ""):
+                try:
+                    return datetime.fromtimestamp(float(utc_ts), tz=timezone.utc)
+                except (TypeError, ValueError, OSError):
+                    pass
+            latest_ts = latest.get('timestamp') or latest.get('time')
             return self._parse_timestamp(latest_ts)
 
     def check_m1_updated_within(self, symbol: str, seconds: int = 180) -> Dict:
@@ -276,7 +283,17 @@ class KlineStore:
             return None
         if isinstance(ts, datetime):
             return ts
+        if isinstance(ts, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(ts))
+            except (ValueError, OSError, OverflowError):
+                return None
         ts_str = str(ts)
+        try:
+            if ts_str.replace('.', '', 1).isdigit():
+                return datetime.fromtimestamp(float(ts_str))
+        except (ValueError, OSError, OverflowError):
+            return None
         for fmt in ["%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M", "%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
             try:
                 return datetime.strptime(ts_str, fmt)

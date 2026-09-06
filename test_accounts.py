@@ -60,6 +60,26 @@ class TradingAccountRepositoryTests(unittest.TestCase):
         self.assertEqual(refreshed.initial_balance, 12000)
         self.assertIsNotNone(refreshed.financial_updated_at)
 
+    def test_mt5_zero_pre_tick_snapshot_does_not_erase_valid_financials(self):
+        account, _ = self.repository.create_or_rotate_default(self.user.user_id)
+        self.repository.update_financial_snapshot(
+            account.account_id, balance=10000, equity=10025,
+            free_margin=9800, margin=225,
+        )
+        self.repository.update_financial_snapshot(
+            account.account_id, balance=0, equity=0,
+            free_margin=0, margin=0,
+        )
+
+        refreshed = self.repository.get_by_id(self.user.user_id, account.account_id)
+        points = self.repository.list_live_equity_points(
+            self.user.user_id, account.account_id,
+        )
+        self.assertEqual(refreshed.balance, 10000)
+        self.assertEqual(refreshed.equity, 10025)
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["equity"], 10025)
+
     def test_paper_account_is_isolated_and_has_no_mt5_connection(self):
         activations = EAActivationRepository(self.storage)
         code, _ = activations.create(self.user.user_id)

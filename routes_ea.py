@@ -155,6 +155,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 identity.user_id,
                 market_source_policy.execution_account_ids(
                     identity.user_id, market_policy.get("broker_name", ""),
+                    symbol,
                 ),
                 symbol, float(price),
             )

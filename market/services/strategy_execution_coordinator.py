@@ -38,8 +38,17 @@ class StrategyExecutionCoordinator:
                 self.account_repository.get_by_id(self.user_id, self.account_id)
                 if self.user_id and self.account_id else None
             )
-            execution_mode = "live" if account and account.account_type == "mt5" else "paper"
-            result = adapter_for_mode(execution_mode).submit(order, self.instruction_service)
+            account_type = account.account_type if account else ""
+            execution_mode = "live" if account_type in {"mt5", "ibkr"} else "paper"
+            # The adapter needs the account identity to select the matching
+            # Gateway socket; keep it on the transient order object only.
+            try:
+                order.account_id = self.account_id
+            except Exception:
+                pass
+            result = adapter_for_mode(
+                execution_mode, account_type=account_type, account_id=self.account_id or 0,
+            ).submit(order, self.instruction_service)
             if not result.accepted:
                 raise RuntimeError(result.reason or "执行适配器拒绝订单")
             print(f"[StrategyExecutionCoordinator] {result.transport} 交易指令已创建: {result.instruction_id}")

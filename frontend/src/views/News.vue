@@ -224,7 +224,8 @@ async function loadStatus() {
 
 async function loadCalendar() {
   const response = await marketAPI.getMarketCalendar(selectedDate.value)
-  calendar.value = response.data || []
+  // 后端已过滤低影响事件，前端再兜底一次，避免旧服务或缓存数据混入列表。
+  calendar.value = (response.data || []).filter(item => Number(item.importance || 0) >= 2)
 }
 
 async function loadKeyEvents() {

@@ -155,12 +155,28 @@
           <v-form @submit.prevent="createPaper">
             <v-text-field v-model.trim="paperForm.name" label="账户名称" placeholder="例如：GOLD 策略模拟盘" variant="outlined" density="comfortable" class="mt-5" />
             <v-text-field v-model.number="paperForm.initialBalance" label="初始资金" type="number" min="1" variant="outlined" density="comfortable" />
-            <v-select v-model="paperForm.currency" :items="currencies" label="账户币种" variant="outlined" density="comfortable" />
+            <v-select
+              v-model="paperForm.referenceAccountId"
+              :items="liveAccounts"
+              item-title="account_name"
+              item-value="account_id"
+              label="参考实盘账户（可选）"
+              clearable
+              variant="outlined"
+              density="comfortable"
+              hint="选择后自动读取该账户最近上报的点差；不需要填写其它撮合参数"
+              persistent-hint
+            />
+            <div v-if="paperReferencePreview" class="paper-note paper-reference-preview">
+              <v-icon icon="mdi-link-variant" />
+              <span>已读取：{{ paperReferencePreview.spread_source }}；杠杆 {{ paperReferencePreview.leverage }}。不同品种使用各自实时 Bid/Ask 点差。</span>
+            </div>
+            <v-select v-model="paperForm.currency" :items="currencies" label="账户币种" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
             <div class="paper-setting-grid">
-              <v-text-field v-model.number="paperForm.leverage" label="杠杆" type="number" min="1" variant="outlined" density="comfortable" />
-              <v-text-field v-model.number="paperForm.spreadPoints" label="模拟点差（点）" type="number" min="0" variant="outlined" density="comfortable" />
-              <v-text-field v-model.number="paperForm.slippagePoints" label="滑点（点）" type="number" min="0" variant="outlined" density="comfortable" />
-              <v-text-field v-model.number="paperForm.commissionPerLot" label="每手手续费" type="number" min="0" variant="outlined" density="comfortable" />
+              <v-text-field v-model.number="paperForm.leverage" label="杠杆" type="number" min="1" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
+              <v-text-field v-model.number="paperForm.spreadPoints" label="模拟点差（点）" type="number" min="0" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
+              <v-text-field v-model.number="paperForm.slippagePoints" label="滑点（点）" type="number" min="0" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
+              <v-text-field v-model.number="paperForm.commissionPerLot" label="每手手续费" type="number" min="0" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
             </div>
             <div class="paper-note">
               <v-icon icon="mdi-flask-outline" />
@@ -634,7 +650,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import { accountAPI } from '../api/trading'
 
@@ -686,7 +702,27 @@ const messageType = ref('success')
 const currencies = ['USD', 'CNY', 'EUR', 'GBP', 'JPY']
 const paperForm = reactive({
   name: '', initialBalance: 100000, currency: 'USD', leverage: 100,
-  spreadPoints: 0, slippagePoints: 0, commissionPerLot: 0,
+  spreadPoints: 0, slippagePoints: 0, commissionPerLot: 0, referenceAccountId: null,
+})
+const paperReferencePreview = ref(null)
+
+watch(() => paperForm.referenceAccountId, async (accountId) => {
+  paperReferencePreview.value = null
+  const reference = liveAccounts.value.find(item => item.account_id === accountId)
+  if (reference?.currency) paperForm.currency = reference.currency
+  if (!accountId) return
+  try {
+    const response = await accountAPI.previewPaperReference(accountId)
+    paperReferencePreview.value = response.settings || null
+    if (response.settings?.currency) paperForm.currency = response.settings.currency
+    if (response.settings?.leverage) paperForm.leverage = response.settings.leverage
+    paperForm.spreadPoints = 0
+    paperForm.slippagePoints = response.settings?.slippage_points || 0
+    paperForm.commissionPerLot = response.settings?.commission_per_lot || 0
+  } catch {
+    messageType.value = 'warning'
+    message.value = '无法读取参考账户参数，将使用默认值'
+  }
 })
 
 const liveAccounts = computed(() => accounts.value.filter(item => ['mt5', 'ibkr'].includes(item.account_type)))
@@ -929,10 +965,13 @@ async function createPaper() {
       spread_points: paperForm.spreadPoints,
       slippage_points: paperForm.slippagePoints,
       commission_per_lot: paperForm.commissionPerLot,
+      reference_account_id: paperForm.referenceAccountId,
     })
     messageType.value = 'success'
     message.value = data.message
     paperForm.name = ''
+    paperForm.referenceAccountId = null
+    paperReferencePreview.value = null
     await loadAccounts()
   } catch (error) {
     messageType.value = 'error'

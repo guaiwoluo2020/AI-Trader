@@ -40,6 +40,15 @@ class PositionService:
         ]
         return self.store.update(symbol, positions)
 
+    def replace_all_positions(self, positions_data: List[Dict]) -> Dict:
+        """Apply a broker's complete account position snapshot."""
+        positions = [
+            PositionData.from_ea_data(data, data.get("symbol", ""))
+            for data in positions_data
+            if data.get("symbol")
+        ]
+        return self.store.replace_all(positions)
+
     def get_positions(self, symbol: str = None) -> List[Dict]:
         """获取持仓数据（字典格式）"""
         return self.store.get_dict(symbol)

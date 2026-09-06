@@ -228,6 +228,13 @@ export const accountAPI = {
     return response.data
   },
 
+  async previewPaperReference(accountId) {
+    const response = await api.get('/accounts/paper/reference-preview', {
+      params: { reference_account_id: accountId },
+    })
+    return response.data
+  },
+
   async update(accountId, data) {
     const response = await api.patch(
       `/accounts/${encodeURIComponent(accountId)}`,

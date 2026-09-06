@@ -90,6 +90,25 @@ class PositionStore:
             print(f"[PositionStore] {symbol}: {result['count']} 持仓, {result['closed']} 平仓")
             return result
 
+    def replace_all(self, positions: List[PositionData]) -> Dict:
+        """Replace the complete account snapshot and remove stale symbols."""
+        with self._lock:
+            previous = {p.ticket for p in self.get()}
+            incoming = {p.ticket for p in positions}
+            if self._repository:
+                self._repository.delete_entities(self.ENTITY_TYPE)
+            self._positions.clear()
+            self._last_update_time.clear()
+            for pos in positions:
+                self._positions[pos.symbol][pos.ticket] = pos
+                self._persist(pos)
+                self._last_update_time[pos.symbol] = datetime.now(timezone.utc)
+            return {
+                "status": "ok",
+                "count": len(positions),
+                "closed": len(previous - incoming),
+            }
+
     def get(self, symbol: str = None) -> List[PositionData]:
         """获取持仓数据"""
         with self._lock:

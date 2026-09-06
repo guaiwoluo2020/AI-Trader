@@ -145,7 +145,7 @@
         <div v-if="overview.market_health.length" class="market-health-grid">
           <article v-for="item in overview.market_health" :key="item.symbol">
             <span class="health-dot" :class="`is-${item.status}`"></span>
-            <div><strong>{{ item.symbol }}</strong><span>{{ item.periods.join(' · ') || '等待周期数据' }}</span></div>
+            <div><strong>{{ item.symbol }}</strong><span>{{ item.periods.join(' · ') || 'Tick报价（等待K线初始化）' }}</span><small v-if="item.source_accounts?.length">上报：{{ item.source_accounts.map(source => source.account_name).join('、') }}</small></div>
             <div class="market-time"><v-chip :color="item.is_stale ? 'warning' : 'success'" size="x-small" variant="tonal">{{ item.is_stale ? '数据延迟' : '实时' }}</v-chip><span>{{ formatTime(item.latest_time) }}</span></div>
           </article>
         </div>
