@@ -14,6 +14,7 @@ from data_retention import DataRetentionService
 from market.services.adaptive_signal_tuner import AdaptiveSignalTuner
 from market.services.daily_review_service import DailyReviewCoordinator, CHINA_TZ
 from market.services.major_us_calendar_collector import MajorUSCalendarCollector
+from market.services.ibkr_kline_file_store import maintenance as maintain_ibkr_kline_files
 from ea_auth import EAIdentity
 from paper_trading import PaperTradingService
 from server import TradingServer
@@ -100,6 +101,7 @@ class TradingEngineManager:
         self._last_data_retention_date = ""
         self._last_daily_review_date = ""
         self._last_major_us_calendar_date = ""
+        self._last_ibkr_kline_maintenance_date = ""
 
     def _create_engine(self, user_id: int, account_id: int) -> TradingServer:
         market_source = (
@@ -302,6 +304,21 @@ class TradingEngineManager:
             scheduler.submit(
                 ("system", "official_major_us_calendar"),
                 self.major_us_calendar.sync,
+                max_retries=1,
+            )
+        # IBKR bars live on disk.  Back up the current compact files once a
+        # day, retain recent bars, and remove dated backups past the short
+        # recovery window.  This is independent of market/account engines.
+        ibkr_maintenance_due = (
+            current_wall.hour == 2
+            and current_wall.minute >= 10
+            and self._last_ibkr_kline_maintenance_date != review_date
+        )
+        if ibkr_maintenance_due:
+            self._last_ibkr_kline_maintenance_date = review_date
+            scheduler.submit(
+                ("system", "ibkr_kline_file_maintenance"),
+                maintain_ibkr_kline_files,
                 max_retries=1,
             )
         if now >= self._next_adaptive_tuning_at:

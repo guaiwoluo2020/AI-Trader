@@ -8,14 +8,20 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 
 _LOCK = threading.RLock()
 _MAX_ROWS = 20000
+_DEFAULT_RETENTION_DAYS = 30
+_DEFAULT_BACKUP_DAYS = 7
+_CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _root() -> Path:
@@ -103,6 +109,85 @@ def save_batch(user_id: int, symbol: str, period: str,
     return path
 
 
+def _configured_days(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def backup_current(now: Optional[int] = None) -> Dict[str, int]:
+    """Copy current bars to one dated directory, without touching the live files."""
+    root = _root()
+    date_key = datetime.fromtimestamp(now or time.time(), tz=_CHINA_TZ).strftime("%Y%m%d")
+    target_root = root / "_backups" / date_key
+    copied = 0
+    with _LOCK:
+        for source in root.glob("**/*.bars"):
+            if "_backups" in source.parts:
+                continue
+            relative = source.relative_to(root)
+            target = target_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(source, target)
+                copied += 1
+            except OSError:
+                continue
+    return {"files": copied, "date": int(date_key)}
+
+
+def prune(retention_days: Optional[int] = None, backup_days: Optional[int] = None,
+          now: Optional[int] = None) -> Dict[str, int]:
+    """Keep recent bars and dated backups; all rewrites are atomic."""
+    current = int(now or time.time())
+    keep_after = current - 86400 * (retention_days or _configured_days(
+        "AI_TRADER_IBKR_KLINE_RETENTION_DAYS", _DEFAULT_RETENTION_DAYS))
+    backup_after = current - 86400 * (backup_days or _configured_days(
+        "AI_TRADER_IBKR_KLINE_BACKUP_DAYS", _DEFAULT_BACKUP_DAYS))
+    root = _root()
+    files = rows_removed = backups_removed = 0
+    with _LOCK:
+        for path in root.glob("**/*.bars"):
+            if "_backups" in path.parts:
+                continue
+            rows = _read(path)
+            selected = [(ts, row) for ts, row in sorted(rows.items()) if ts >= keep_after]
+            if len(selected) != len(rows):
+                temporary = path.with_name(f".{path.name}.{os.getpid()}.prune.tmp")
+                temporary.write_text(
+                    "".join(
+                        f"{ts}|{row['open']:.12g}|{row['high']:.12g}|"
+                        f"{row['low']:.12g}|{row['close']:.12g}|{row['volume']:.12g}\n"
+                        for ts, row in selected
+                    ), encoding="utf-8")
+                os.replace(temporary, path)
+                rows_removed += len(rows) - len(selected)
+                files += 1
+        backup_root = root / "_backups"
+        if backup_root.exists():
+            for directory in backup_root.iterdir():
+                if not directory.is_dir() or not re.fullmatch(r"\d{8}", directory.name):
+                    continue
+                try:
+                    stamp = int(datetime.strptime(directory.name, "%Y%m%d")
+                                .replace(tzinfo=_CHINA_TZ).timestamp())
+                except ValueError:
+                    continue
+                if stamp < backup_after:
+                    shutil.rmtree(directory, ignore_errors=True)
+                    backups_removed += 1
+    return {"files_pruned": files, "rows_removed": rows_removed,
+            "backup_days_removed": backups_removed}
+
+
+def maintenance(now: Optional[int] = None) -> Dict[str, int]:
+    """Daily, deliberately small maintenance operation for IBKR bar files."""
+    result = backup_current(now)
+    result.update(prune(now=now))
+    return result
+
+
 def load_recent(user_id: int, symbol: str, period: str, limit: int = 1200) -> List[Dict]:
     with _LOCK:
         rows = sorted(_read(path_for(user_id, symbol, period)).values(), key=lambda item: item["timestamp"])
@@ -116,4 +201,3 @@ def latest_cursors(user_id: int, symbol: str) -> Dict[str, int]:
         if rows:
             result[period] = int(rows[-1]["timestamp"])
     return result
-
