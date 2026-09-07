@@ -256,6 +256,11 @@ def build_key_level_state_signal(
 ) -> TradingSignal:
     """Describe key-level direction continuously; proximity remains the trigger."""
     trigger_config = trigger_config or {}
+    # Keep the two key-level setups independently selectable.  ``both`` is
+    # the compatibility default and preserves the historical behaviour.
+    setup_mode = str(trigger_config.get("setup_mode") or "both").lower()
+    if setup_mode not in {"reversal", "breakout", "breakout_retest", "level_19", "both"}:
+        setup_mode = "both"
     candidates = list(levels or automatic_key_levels(current_price))
     if current_price <= 0 or not candidates:
         return TradingSignal(
@@ -300,24 +305,33 @@ def build_key_level_state_signal(
     downward_breakout = (
         previous is not None and previous > nearest >= current_price
     )
-    upward_approach = near and current_price < nearest
-    downward_approach = near and current_price > nearest
+    # An approach must stay on the same side of the level.  Without this
+    # guard, disabling breakout would let the first tick after a crossing be
+    # misclassified as a reversal, re-mixing the two setup families.
+    upward_approach = (
+        near and current_price < nearest
+        and (previous is None or previous < nearest)
+    )
+    downward_approach = (
+        near and current_price > nearest
+        and (previous is None or previous > nearest)
+    )
     trigger_type = ""
     action = "none"
     direction = "sideways"
-    if upward_breakout and trigger_config.get("upward_breakout_buy", True):
+    if setup_mode in {"breakout", "both"} and upward_breakout and trigger_config.get("upward_breakout_buy", True):
         trigger_type = "upward_breakout"
         action = "buy"
         direction = "up"
-    elif downward_breakout and trigger_config.get("downward_breakout_sell", True):
+    elif setup_mode in {"breakout", "both"} and downward_breakout and trigger_config.get("downward_breakout_sell", True):
         trigger_type = "downward_breakout"
         action = "sell"
         direction = "down"
-    elif upward_approach and trigger_config.get("upward_approach_sell", True):
+    elif setup_mode in {"reversal", "both"} and upward_approach and trigger_config.get("upward_approach_sell", True):
         trigger_type = "upward_approach"
         action = "sell"
         direction = "down"
-    elif downward_approach and trigger_config.get("downward_approach_buy", True):
+    elif setup_mode in {"reversal", "both"} and downward_approach and trigger_config.get("downward_approach_buy", True):
         trigger_type = "downward_approach"
         action = "buy"
         direction = "up"

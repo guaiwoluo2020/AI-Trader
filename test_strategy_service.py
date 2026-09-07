@@ -430,6 +430,36 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(second[0].suggested_sl, 4099.0)
         self.assertAlmostEqual(second[0].suggested_tp, 4101.0 * 1.0032, places=6)
 
+    def test_key_level_setup_mode_separates_reversal_and_breakout(self):
+        from market.services.signal.signal_rules import build_key_level_state_signal
+        reversal = build_key_level_state_signal(
+            "GOLD_", 4105, [4100], previous_price=4090,
+            threshold=0.001, trigger_config={"setup_mode": "reversal"},
+        )
+        breakout = build_key_level_state_signal(
+            "GOLD_", 4105, [4100], previous_price=4090,
+            threshold=0.001, trigger_config={"setup_mode": "breakout"},
+        )
+        self.assertFalse(reversal.is_entry_trigger)
+        self.assertTrue(breakout.is_entry_trigger)
+        self.assertEqual(breakout.setup_type, "key_level_breakout")
+
+    def test_key_level_19_mode_supports_resistance_rejection(self):
+        from market.services.signal.key_level_signal import KeyLevelSignalGenerator
+        from market.models.trading_strategy import TradingStrategy
+        strategy = TradingStrategy(symbol="GOLD_", signal_sources=[{
+            "signal_source_id": "key-19", "source": "key_level", "period": "M1",
+            "params": {"level_mode": "levels", "levels": [4419],
+                        "setup_mode": "level_19", "breakout_retest_tolerance": 1.0,
+                        "cooldown_seconds": 0},
+        }])
+        generator = KeyLevelSignalGenerator()
+        generator.generate_signals_for_strategy("GOLD_", 4417.0, strategy)
+        signal = generator.generate_signals_for_strategy("GOLD_", 4418.6, strategy)[0]
+        self.assertTrue(signal.is_entry_trigger)
+        self.assertEqual(signal.action, "sell")
+        self.assertEqual(signal.setup_type, "key_level_19_resistance_reversal")
+
     def test_legacy_key_level_reversal_uses_latest_atr_tolerance(self):
         class _KlineStore:
             def get_all_klines(self, symbol, period):

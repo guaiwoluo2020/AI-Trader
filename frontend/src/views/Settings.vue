@@ -1182,6 +1182,18 @@
               <v-col cols="12" sm="6">
                 <v-select v-model="newSignalSource.params.level_mode" :items="keyLevelModeOptions" label="关键点位来源"></v-select>
               </v-col>
+              <v-col cols="12" sm="6">
+                <v-select v-model="newSignalSource.params.setup_mode" :items="keyLevelSetupModeOptions" label="关键位 SETUP 类型" hint="反转和突破分开计算；兼容旧策略默认同时启用" persistent-hint></v-select>
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-switch v-model="newSignalSource.params.level_19_enabled" label="启用 19 阻力/突破回踩 SETUP" color="success" density="compact" hide-details></v-switch>
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-text-field v-model="newSignalSource.params.level_19_levels_text" label="19 专用关键位（可选）" placeholder="4419" hint="留空时自动使用已配置且价格尾数为 19 的关键位" persistent-hint></v-text-field>
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-text-field v-model.number="newSignalSource.params.breakout_retest_tolerance_atr" label="19 接近/回踩距离（ATR）" type="number" min="0" max="10" step="0.1" hint="默认 0.7 ATR；ATR 不可用时回退到绝对距离" persistent-hint></v-text-field>
+              </v-col>
               <v-col v-if="newSignalSource.params.level_mode === 'levels'" cols="12" sm="6">
                 <v-text-field v-model="newSignalSource.params.levels_text" label="关键点位数字（逗号分隔）" placeholder="4000, 4050, 4100"></v-text-field>
               </v-col>
@@ -2633,6 +2645,13 @@ export default {
       { title: '固定数字列表', value: 'levels' },
       { title: '价格表达式', value: 'expression' }
     ]
+    const keyLevelSetupModeOptions = [
+      { title: '反转（key_level_reversal）', value: 'reversal' },
+      { title: '突破（key_level_breakout）', value: 'breakout' },
+      { title: '19 突破回踩（key_level_19_breakout_retest）', value: 'breakout_retest' },
+      { title: '19 阻力反转 + 突破回踩', value: 'level_19' },
+      { title: '反转 + 突破（兼容旧配置）', value: 'both' }
+    ]
     const movingAverageTypeOptions = [
       { title: '简单移动平均线（SMA）', value: 'sma' },
       { title: '指数移动平均线（EMA）', value: 'ema' }
@@ -2772,6 +2791,13 @@ export default {
       weight: 30,
       params: source === 'key_level'
           ? {
+              setup_mode: 'both',
+              level_19_enabled: true,
+              level_19_levels: [],
+              level_19_levels_text: '',
+              breakout_retest_tolerance_atr: 0.7,
+              breakout_retest_confirmation_offset: 3,
+              breakout_retest_tolerance: 1,
               level_mode: 'automatic', levels: [], levels_text: '',
               expression: '', proximity_threshold: 0.0008,
               order_distance: 0.0008,
@@ -3061,7 +3087,12 @@ export default {
             params.upward_breakout_buy ? '向上突破买' : '',
             params.downward_breakout_sell ? '向下突破卖' : ''
           ].filter(Boolean).join(' / ')
-          return `下单距离 ${params.order_distance ?? params.proximity_threshold ?? 0}，冷却 ${params.cooldown_seconds ?? 0}s，${triggers || '未启用触发'}`
+          const setupMode = params.setup_mode === 'reversal'
+            ? '仅反转'
+            : params.setup_mode === 'breakout' ? '仅突破'
+              : params.setup_mode === 'breakout_retest' ? '19突破回踩'
+                : params.setup_mode === 'level_19' ? '19阻力反转+突破回踩' : '反转+突破'
+          return `${setupMode} · 下单距离 ${params.order_distance ?? params.proximity_threshold ?? 0}，冷却 ${params.cooldown_seconds ?? 0}s，${triggers || '未启用触发'}`
         }
         if (source.source === 'moving_average') {
           return `${params.ma_type || 'sma'} 快线 ${params.fast_period} / 慢线 ${params.slow_period}，最低置信度 ${params.min_confidence ?? 0}%`
@@ -3440,6 +3471,11 @@ export default {
         if (source.source === 'key_level') {
           source.period = 'M1'
           source.params.order_distance ??= source.params.proximity_threshold ?? 0.0008
+          source.params.setup_mode ??= 'both'
+          source.params.level_19_enabled ??= true
+          source.params.level_19_levels ??= []
+          source.params.breakout_retest_tolerance_atr ??= 0.7
+          source.params.level_19_levels_text ??= (source.params.level_19_levels || []).join(', ')
           source.params.proximity_threshold = source.params.order_distance
           delete source.params.stop_loss_distance
           source.params.cooldown_seconds ??= 180
@@ -3479,6 +3515,11 @@ export default {
           .split(/[,，\s]+/)
           .map(Number)
           .filter(value => Number.isFinite(value) && value > 0)
+        clean.params.level_19_levels = String(clean.params.level_19_levels_text || '')
+          .split(/[,，\s]+/)
+          .map(Number)
+          .filter(value => Number.isFinite(value) && value > 0)
+        delete clean.params.level_19_levels_text
         delete clean.params.levels_text
       }
       if (clean.source === 'pivot') serializePivotPercentParams(clean.params)

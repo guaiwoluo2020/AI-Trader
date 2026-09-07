@@ -75,6 +75,8 @@ class KeyLevelSignalGenerator:
         # 冷却记录
         self._signal_cooldowns: Dict[str, datetime] = {}
         self._last_prices: Dict[str, float] = {}
+        # Per strategy/source state for the special level-19 staged breakout.
+        self._breakout_retest_states: Dict[str, str] = {}
 
         print("[KeyLevelSignalGenerator] 关键点位信号生成器已初始化")
 
@@ -195,6 +197,159 @@ class KeyLevelSignalGenerator:
     ) -> str:
         return f"{strategy_id}_{signal_source_id}_{symbol}_{key_level}"
 
+    def _breakout_retest_key(
+        self, symbol: str, key_level: float, strategy_id: str,
+        signal_source_id: str, period: str,
+    ) -> str:
+        return "|".join(str(value or "") for value in (
+            strategy_id, signal_source_id, symbol, key_level, period,
+        ))
+
+    def _evaluate_breakout_retest(
+        self, signal: TradingSignal, current_price: float,
+        previous_price: Optional[float], strategy_id: str,
+        source_id: str, period: str, params: Dict,
+    ) -> TradingSignal:
+        """Evaluate level-19 breakout -> confirmation -> retest -> entry."""
+        level = float(signal.key_level or 0)
+        if level <= 0:
+            return signal
+        offset = max(0.0, float(params.get(
+            "breakout_retest_confirmation_offset", 3.0
+        )))
+        fallback_tolerance = max(0.0, float(params.get(
+            "breakout_retest_tolerance", 1.0
+        )))
+        try:
+            atr = float(params.get("atr") or 0.0)
+        except (TypeError, ValueError):
+            atr = 0.0
+        try:
+            tolerance_atr = max(0.0, float(params.get(
+                "breakout_retest_tolerance_atr", 0.7
+            )))
+        except (TypeError, ValueError):
+            tolerance_atr = 0.7
+        tolerance = atr * tolerance_atr if atr > 0 else fallback_tolerance
+        key = self._breakout_retest_key(
+            signal.symbol, level, strategy_id, source_id, period
+        )
+        phase = self._breakout_retest_states.get(key, "idle")
+        previous = float(previous_price) if previous_price is not None else None
+        confirmation = level + offset
+
+        # The GOLD 19-level pattern also treats the first approach from below
+        # as a resistance rejection. It is deliberately emitted only for the
+        # explicit level_19 mode; ordinary breakout_retest remains buy-only.
+        if (
+            str(params.get("setup_mode") or "") == "level_19"
+            and phase == "idle"
+            and previous is not None
+            and previous < current_price < level
+            and level - current_price <= tolerance
+        ):
+            signal.action = "sell"
+            signal.market_direction = "down"
+            signal.is_entry_trigger = True
+            signal.setup_family = "reversal"
+            signal.setup_type = "key_level_19_resistance_reversal"
+            signal.entry_mode = "touch_or_near"
+            signal.suggested_entry = current_price
+            signal.suggested_sl = level + 1.0
+            signal.suggested_tp = round(
+                current_price * (1.0 - float(
+                    params.get("take_profit_percent", 0.0032)
+                )), 8
+            )
+            signal.trigger_reason = (
+                f"首次接近关键阻力 {level} 未突破，生成阻力反转卖出"
+            )
+            self._breakout_retest_states[key] = "rejected"
+            return signal
+
+        # This setup is intentionally an upward continuation pattern. A
+        # future downward version can use the same state machine inverted.
+        if current_price < level:
+            phase = "idle"
+        elif phase in {"idle", "rejected"} and previous is not None and previous < level <= current_price:
+            phase = "broken"
+        elif phase in {"broken", "confirmed"} and current_price >= confirmation:
+            phase = "confirmed"
+        elif phase == "confirmed":
+            # Require a later pullback from above the confirmation boundary;
+            # the confirmation tick itself never opens a position.
+            if (
+                previous is not None
+                and previous > confirmation + tolerance
+                and level <= current_price <= confirmation + tolerance
+            ):
+                signal.action = "buy"
+                signal.market_direction = "up"
+                signal.is_entry_trigger = True
+                signal.setup_family = "breakout"
+                signal.setup_type = "key_level_19_breakout_retest"
+                signal.entry_mode = "breakout_retest"
+                signal.suggested_entry = current_price
+                signal.suggested_sl = level - 1.0
+                signal.suggested_tp = round(
+                    current_price * (1.0 + float(
+                        params.get("take_profit_percent", 0.0032)
+                    )), 8
+                )
+                signal.trigger_reason = (
+                    f"突破关键位 {level} 并确认到 {confirmation} 后回踩确认，生成买入"
+                )
+                phase = "triggered"
+        self._breakout_retest_states[key] = phase
+        if not signal.is_entry_trigger:
+            signal.action = "none"
+            signal.market_direction = "up" if phase in {"broken", "confirmed"} else "sideways"
+            signal.setup_family = "breakout"
+            signal.setup_type = (
+                "key_level_19_resistance_reversal"
+                if phase == "rejected" else "key_level_19_breakout_retest"
+            )
+            signal.entry_mode = "breakout_retest"
+            signal.trigger_reason = {
+                "idle": f"等待突破关键位 {level}",
+                "broken": f"已突破关键位 {level}，等待确认到 {confirmation}",
+                "confirmed": f"已确认突破 {confirmation}，等待回踩确认",
+                "triggered": "突破回踩已触发",
+            }.get(phase, "等待突破回踩确认")
+        return signal
+
+    @staticmethod
+    def _level_19_candidates(
+        levels: List[float], params: Dict, symbol: str = "",
+        current_price: Optional[float] = None,
+    ) -> List[float]:
+        """Return explicitly configured 19-levels, or levels ending in 19.
+
+        We never infer a special level from the current quote alone: this
+        prevents enabling the GOLD 4419 rule on unrelated symbols.
+        """
+        explicit = params.get("level_19_levels") or []
+        if explicit:
+            return sorted({float(value) for value in explicit if float(value) > 0})
+        candidates = sorted({
+            float(level) for level in levels
+            if int(round(float(level))) % 100 == 19
+        })
+        if candidates or "gold" not in str(symbol).lower():
+            return candidates
+        # GOLD integer-level configurations commonly store 4400/4500 while
+        # the actionable resistance is 4419/4519. Derive the nearest such
+        # level automatically so existing KEY LEVEL sources get the setup
+        # without a database rewrite.
+        derived = sorted({
+            float(int(float(level) // 100) * 100 + 19)
+            for level in levels if float(level) > 0
+        })
+        if current_price and derived:
+            nearest = min(derived, key=lambda level: abs(level - current_price))
+            return [nearest]
+        return derived
+
     def generate_signal(
         self, symbol: str, current_price: float, strategy_id: str = "",
     ) -> Optional[TradingSignal]:
@@ -265,6 +420,7 @@ class KeyLevelSignalGenerator:
             atr = self._atr_for(symbol, config.get("period", "M1"))
             if atr > 0:
                 trigger_config["atr"] = atr
+            setup_params = {**params, "atr": trigger_config.get("atr", 0.0)}
             signal = build_key_level_state_signal(
                 symbol,
                 current_price,
@@ -292,7 +448,38 @@ class KeyLevelSignalGenerator:
                 previous_price=previous_price,
                 trigger_config=trigger_config,
             )
+            if str(params.get("setup_mode") or "both").lower() in {"breakout_retest", "level_19"}:
+                signal = self._evaluate_breakout_retest(
+                    signal, current_price, previous_price, strategy.strategy_id,
+                    source_id, config.get("period", ""), setup_params,
+                )
             self._last_prices[state_key] = current_price
+            extra_level_19 = []
+            if params.get("level_19_enabled", True):
+                for level_19 in self._level_19_candidates(
+                    levels, params, symbol, current_price
+                ):
+                    special_state_key = self._price_state_key(
+                        symbol, level_19, strategy.strategy_id,
+                        f"{source_id}:19",
+                    )
+                    special_previous_price = self._last_prices.get(special_state_key)
+                    special = build_key_level_state_signal(
+                        symbol, current_price, [level_19],
+                        threshold=float(params.get(
+                            "order_distance",
+                            params.get("proximity_threshold", self.threshold),
+                        )),
+                        previous_price=special_previous_price,
+                        trigger_config={**trigger_config, "setup_mode": "level_19"},
+                    )
+                    special = self._evaluate_breakout_retest(
+                        special, current_price, special_previous_price, strategy.strategy_id,
+                        source_id, config.get("period", ""), setup_params,
+                    )
+                    self._last_prices[special_state_key] = current_price
+                    if special.is_entry_trigger or special.market_direction == "up":
+                        extra_level_19.append(special)
             setup_type = str(signal.setup_type or "")
             if setup_type == "key_level_reversal":
                 # Migrate old signal-source configs (often 180 seconds) to the
@@ -328,6 +515,26 @@ class KeyLevelSignalGenerator:
             signal.source_period = config["period"]
             signal.signal_source_id = source_id
             signals.append(signal)
+            for special in extra_level_19:
+                special_setup = str(special.setup_type or "")
+                special_cooldown = max(
+                    self.cooldown if "reversal" in special_setup else 0,
+                    int(params.get("breakout_cooldown_seconds", 0) or 0),
+                )
+                if special.is_entry_trigger and self._check_cooldown(
+                    symbol, special.key_level, strategy.strategy_id, source_id,
+                    special_cooldown, special_setup, special.action,
+                    config.get("period", ""),
+                ):
+                    continue
+                if special.is_entry_trigger and special_cooldown > 0:
+                    self._set_cooldown(
+                        symbol, special.key_level, strategy.strategy_id, source_id,
+                        special_setup, special.action, config.get("period", ""),
+                    )
+                special.source_period = config["period"]
+                special.signal_source_id = source_id
+                signals.append(special)
         return signals
 
     def __call__(self, symbol: str, current_price: float) -> Optional[TradingSignal]:

@@ -106,6 +106,14 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
     params = {}
     if source == "key_level":
         params = {
+            # A single key-level source can now be explicitly limited to one
+            # setup family. ``both`` keeps existing strategies unchanged.
+            "setup_mode": "both",
+            "level_19_enabled": True,
+            "level_19_levels": [],
+            "breakout_retest_confirmation_offset": 3.0,
+            "breakout_retest_tolerance": 1.0,
+            "breakout_retest_tolerance_atr": 0.7,
             "level_mode": "automatic",
             "levels": [],
             "expression": "",
@@ -284,6 +292,32 @@ def normalize_signal_sources(
         item["params"].update(raw.get("params") or {})
         params = item["params"]
         if source == "key_level":
+            params["setup_mode"] = str(params.get("setup_mode") or "both").lower()
+            if params["setup_mode"] not in {"reversal", "breakout", "breakout_retest", "level_19", "both"}:
+                raise ValueError("关键点位 SETUP 类型无效")
+            params["breakout_retest_confirmation_offset"] = max(
+                0.0, min(100000.0, float(params.get(
+                    "breakout_retest_confirmation_offset", 3.0
+                )))
+            )
+            params["breakout_retest_tolerance"] = max(
+                0.0, min(100000.0, float(params.get(
+                    "breakout_retest_tolerance", 1.0
+                )))
+            )
+            params["breakout_retest_tolerance_atr"] = max(
+                0.0, min(10.0, float(params.get(
+                    "breakout_retest_tolerance_atr", 0.7
+                )))
+            )
+            params["level_19_enabled"] = bool(params.get("level_19_enabled", True))
+            raw_19_levels = params.get("level_19_levels") or []
+            if isinstance(raw_19_levels, str):
+                raw_19_levels = raw_19_levels.replace("，", ",").split(",")
+            params["level_19_levels"] = sorted({
+                float(value) for value in raw_19_levels
+                if str(value).strip() and float(value) > 0
+            })
             if params["level_mode"] not in {"automatic", "levels", "expression"}:
                 raise ValueError("关键点位来源配置无效")
             raw_levels = params.get("levels") or []
