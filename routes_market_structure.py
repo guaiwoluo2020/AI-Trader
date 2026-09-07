@@ -11,6 +11,7 @@ from mysql_repositories import RuntimeStateRepository, get_storage
 from market.services.market_structure_engine_v2 import analyze_incremental, DEFAULT_CONFIG
 from market.services.market_structure_snapshot_store import current_path, load_current, save_checkpoint
 from market.services.market_structure_engine_v2 import restore_snapshot
+from market.services.ibkr_kline_file_store import load_recent as load_ibkr_klines
 
 
 def create_market_structure_routes(engine_manager, account_repo, plan_defaults: Dict) -> APIRouter:
@@ -21,6 +22,8 @@ def create_market_structure_routes(engine_manager, account_repo, plan_defaults: 
         period = period.upper(); limit = min(1000, max(50, count))
         engine = engine_manager.get_market_engine(user.user_id)
         rows = engine.kline_service.get_klines(symbol, period, limit)
+        if not rows:
+            rows = load_ibkr_klines(user.user_id, symbol, period, limit)
         if not rows:
             historical = get_storage().fetchall(
                 """SELECT timestamp,timestamp_utc,broker_utc_offset_seconds,

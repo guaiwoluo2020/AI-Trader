@@ -14,9 +14,9 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from auth import AuthUser, require_auth
 from system_event_log import SystemEventLogRepository
 from mysql_repositories import RuntimeStateRepository
-from mysql_repositories import get_storage
 from repositories.accounts import TradingAccountRepository
 from market.services.market_tick_ingress import MarketTickIngress
+from market.services.ibkr_kline_file_store import latest_cursors, load_recent, save_batch
 
 logger = logging.getLogger(__name__)
 _connectors: Dict[str, Dict] = {}
@@ -114,7 +114,7 @@ def _bind_discovered_ibkr_accounts(
 def _record_connector_event(connector_id: str, payload: Dict) -> None:
     """Persist low-volume broker lifecycle events; quotes stay hot-path only."""
     event_name = str(payload.get("event") or "")
-    if event_name == "quote":
+    if event_name in {"quote", "kline"}:
         return
     detail = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
     try:
@@ -182,11 +182,7 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                 symbol = str(item.get("symbol") or "") if isinstance(item, dict) else str(item).split(":", 1)[0]
                 if not symbol:
                     continue
-                rows = get_storage().fetchall(
-                    "SELECT period, MAX(timestamp) AS last_bar_time FROM historical_klines WHERE user_id=? AND account_id=0 AND symbol=? GROUP BY period",
-                    (int(hello.get("user_id") or 0), symbol),
-                )
-                cursors[symbol] = {str(x.get("period")): int(x.get("last_bar_time") or 0) for x in rows}
+                cursors[symbol] = latest_cursors(int(hello.get("user_id") or 0), symbol)
             await websocket.send_json({"type": "market_config", "symbols": configured_symbols, "kline_cursors": cursors})
             async for message in websocket.iter_text():
                 payload = json.loads(message)
@@ -307,20 +303,21 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                             try:
                                 # Reuse the same ingestion coordinator as MT5
                                 # without exposing a new transport-specific API.
-                                from types import SimpleNamespace
-                                from routes_market import _persist_historical_klines
                                 from market.services.kline_ingestion_coordinator import KlineIngestionCoordinator
                                 engine = engine_manager.get_engine(user_id, account_id)
-                                identity = SimpleNamespace(user_id=user_id, account_id=account_id)
+                                def persist_ibkr_bars(item_symbol, item_period, items, _offset):
+                                    save_batch(user_id, item_symbol, item_period, items)
                                 coordinator = KlineIngestionCoordinator(
                                     engine.kline_service, engine.pivot_service,
                                     engine.refresh_structure_plans,
-                                    lambda s, p, items, offset: _persist_historical_klines(
-                                        identity, s, p, items, offset,
-                                    ),
+                                    persist_ibkr_bars,
                                     event_bus=engine.event_bus,
                                     user_id=user_id, account_id=account_id,
                                 )
+                                if not engine.kline_service.is_initialized(symbol, period):
+                                    restored = load_recent(user_id, symbol, period, 1200)
+                                    if restored:
+                                        coordinator.process_batch(symbol, {period: restored}, True, 0)
                                 coordinator.process_batch(symbol, {period: bars}, bool(detail.get("is_full")), 0)
                             except Exception:
                                 logger.exception("failed to ingest IBKR K-line: %s %s", symbol, period)
