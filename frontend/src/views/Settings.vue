@@ -61,8 +61,29 @@
         <v-card-title class="settings-card-title"><div><v-icon>mdi-connection</v-icon><span>IBKR Gateway 行情 Connector</span></div><small>配置精确合约并复用现有行情与结构分析链</small></v-card-title>
         <v-card-text>
           <v-alert type="info" variant="tonal" density="compact" class="mb-4">这里只配置关注的行情合约，不保存 IBKR 逐笔 Tick。建议填写 con_id，避免同名合约订阅错误。</v-alert>
-          <v-textarea v-model="ibkrSymbolsText" label="关注合约（每行一个 JSON 对象）" variant="outlined" rows="6" hint='例如 {"symbol":"AAPL","con_id":265598,"sec_type":"STK","exchange":"SMART","currency":"USD"}' persistent-hint />
-          <div class="d-flex align-center ga-3 mt-2"><v-btn color="primary" :loading="ibkrSaving" @click="saveIBKRConfig">保存并推送到在线 Connector</v-btn><span class="text-caption text-medium-emphasis">在线 Connector：{{ ibkrConnectorCount }}</span><v-btn size="small" variant="text" @click="loadIBKRConfig">刷新</v-btn></div>
+          <div class="d-flex align-center justify-space-between flex-wrap ga-2 mb-3">
+            <div class="text-subtitle-2">关注合约 <span class="text-caption text-medium-emphasis">{{ ibkrContracts.length }} 个</span></div>
+            <div class="d-flex ga-2">
+              <v-btn size="small" variant="tonal" color="primary" @click="addIBKRContract"><v-icon start>mdi-plus</v-icon>添加合约</v-btn>
+              <v-btn size="small" variant="text" @click="ibkrAdvancedMode = !ibkrAdvancedMode"><v-icon start>{{ ibkrAdvancedMode ? 'mdi-table' : 'mdi-code-json' }}</v-icon>{{ ibkrAdvancedMode ? '返回表格' : '高级 JSON' }}</v-btn>
+            </div>
+          </div>
+          <div v-if="!ibkrAdvancedMode" class="ibkr-contract-list">
+            <div v-if="!ibkrContracts.length" class="text-center text-medium-emphasis py-6">还没有关注合约，点击“添加合约”开始配置。</div>
+            <div v-for="(contract, index) in ibkrContracts" :key="contract._key" class="ibkr-contract-row">
+              <v-text-field v-model="contract.symbol" label="Symbol" placeholder="AAPL" density="compact" variant="outlined" hide-details @update:model-value="onIBKRContractSymbolInput(contract)" />
+              <v-text-field v-model.number="contract.con_id" label="con_id" placeholder="265598" type="number" density="compact" variant="outlined" hide-details />
+              <v-select v-model="contract.sec_type" label="类型" :items="ibkrSecTypeOptions" density="compact" variant="outlined" hide-details />
+              <v-text-field v-model="contract.exchange" label="交易所" placeholder="SMART" density="compact" variant="outlined" hide-details />
+              <v-text-field v-model="contract.currency" label="币种" placeholder="USD" density="compact" variant="outlined" hide-details />
+              <v-text-field v-model="contract.expiry" label="到期日（可选）" placeholder="202612" density="compact" variant="outlined" hide-details />
+              <v-btn icon="mdi-content-copy" size="small" variant="text" color="primary" title="复制" @click="duplicateIBKRContract(index)" />
+              <v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" title="删除" @click="removeIBKRContract(index)" />
+            </div>
+            <div class="text-caption text-medium-emphasis mt-2">输入 Symbol 后会自动填充股票/指数常用的类型、交易所和币种；con_id 仍建议按 IBKR 合约精确填写。</div>
+          </div>
+          <v-textarea v-else v-model="ibkrSymbolsText" label="高级 JSON（每行一个对象）" variant="outlined" rows="8" hint='例如 {"symbol":"AAPL","con_id":265598,"sec_type":"STK","exchange":"SMART","currency":"USD"}' persistent-hint />
+          <div class="d-flex align-center ga-3 mt-3"><v-btn color="primary" :loading="ibkrSaving" @click="saveIBKRConfig">保存并推送到在线 Connector</v-btn><span class="text-caption text-medium-emphasis">在线 Connector：{{ ibkrConnectorCount }}</span><v-btn size="small" variant="text" @click="loadIBKRConfig">刷新</v-btn></div>
           <v-alert v-if="ibkrError" type="error" variant="tonal" density="compact" class="mt-3">{{ ibkrError }}</v-alert>
         </v-card-text>
       </v-card></v-col>
@@ -1516,25 +1537,59 @@ export default {
     const newKeyLevelThreshold = ref(0.0008)
     const symbols = ref([])
     const ibkrSymbolsText = ref('')
+    const ibkrContracts = ref([])
+    const ibkrAdvancedMode = ref(false)
+    const ibkrSecTypeOptions = ['STK', 'IND', 'FUT', 'CASH', 'CFD']
     const ibkrConnectorCount = ref(0)
     const ibkrSaving = ref(false)
     const ibkrError = ref('')
     const loadIBKRConfig = async () => {
       try {
         const [config, connectors] = await Promise.all([marketAPI.getIBKRMarketConfig(), marketAPI.getIBKRConnectors()])
-        ibkrSymbolsText.value = (config.symbols || []).map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
+        const loaded = (config.symbols || []).map(item => typeof item === 'string'
+          ? { symbol: item, con_id: null, sec_type: 'STK', exchange: 'SMART', currency: 'USD', expiry: '' }
+          : { symbol: '', con_id: null, sec_type: 'STK', exchange: 'SMART', currency: 'USD', expiry: '', ...item }
+        )
+        ibkrContracts.value = loaded.map(item => ({ ...item, _key: `${item.symbol || 'new'}-${item.con_id || Math.random()}` }))
+        ibkrSymbolsText.value = loaded.map(item => JSON.stringify(item)).join('\n')
         ibkrConnectorCount.value = Number(connectors.count || 0)
         ibkrError.value = ''
       } catch (err) { ibkrError.value = err.response?.data?.detail || '加载 IBKR 配置失败' }
     }
+    const defaultIBKRContract = (symbol) => {
+      const upper = String(symbol || '').trim().toUpperCase()
+      const indexDefaults = {
+        SPX: { sec_type: 'IND', exchange: 'CBOE' },
+        NDX: { sec_type: 'IND', exchange: 'NASDAQ' },
+        RUT: { sec_type: 'IND', exchange: 'RUSSELL' },
+        VIX: { sec_type: 'IND', exchange: 'CBOE' }
+      }
+      return { symbol: upper, con_id: null, ...(indexDefaults[upper] || { sec_type: 'STK', exchange: 'SMART' }), currency: 'USD', expiry: '' }
+    }
+    const addIBKRContract = () => ibkrContracts.value.push({ ...defaultIBKRContract(''), _key: `new-${Date.now()}-${Math.random()}` })
+    const removeIBKRContract = (index) => ibkrContracts.value.splice(index, 1)
+    const duplicateIBKRContract = (index) => {
+      const copy = { ...ibkrContracts.value[index], _key: `copy-${Date.now()}-${Math.random()}` }
+      ibkrContracts.value.splice(index + 1, 0, copy)
+    }
+    const onIBKRContractSymbolInput = (contract) => {
+      const defaults = defaultIBKRContract(contract.symbol)
+      if (!contract.sec_type || contract.sec_type === 'STK') contract.sec_type = defaults.sec_type
+      if (!contract.exchange || contract.exchange === 'SMART') contract.exchange = defaults.exchange
+      if (!contract.currency) contract.currency = defaults.currency
+    }
     const saveIBKRConfig = async () => {
       ibkrSaving.value = true
       try {
-        const symbols = ibkrSymbolsText.value.split('\n').map(item => item.trim()).filter(Boolean).map(item => {
-          if (item.startsWith('{')) return JSON.parse(item)
-          return item
-        })
+        const symbols = ibkrAdvancedMode.value
+          ? ibkrSymbolsText.value.split('\n').map(item => item.trim()).filter(Boolean).map(item => item.startsWith('{') ? JSON.parse(item) : item)
+          : ibkrContracts.value.map(({ _key, ...item }) => {
+            if (!item.symbol) throw new Error('存在未填写 Symbol 的合约')
+            if (!Number(item.con_id) || Number(item.con_id) <= 0) throw new Error(`${item.symbol} 需要填写有效 con_id`)
+            return { ...item, con_id: Number(item.con_id), sec_type: String(item.sec_type || 'STK').toUpperCase(), exchange: String(item.exchange || 'SMART').toUpperCase(), currency: String(item.currency || 'USD').toUpperCase() }
+          })
         await marketAPI.saveIBKRMarketConfig({ symbols })
+        ibkrSymbolsText.value = symbols.map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
         ibkrError.value = ''
         successMessage.value = 'IBKR 合约配置已保存并推送'
         showSuccess.value = true
@@ -3883,11 +3938,18 @@ export default {
       myQuota,
       loadAdminWorkspace,
       ibkrSymbolsText,
+      ibkrContracts,
+      ibkrAdvancedMode,
+      ibkrSecTypeOptions,
       ibkrConnectorCount,
       ibkrSaving,
       ibkrError,
       loadIBKRConfig,
       saveIBKRConfig,
+      addIBKRContract,
+      removeIBKRContract,
+      duplicateIBKRContract,
+      onIBKRContractSymbolInput,
       adminStrategies,
       adminStrategiesLoading,
       adminStrategySaving,
@@ -4155,6 +4217,9 @@ export default {
 .shared-ai-runtime-list p { margin: 5px 0 0; color: #61756c; font-size: .76rem; }
 .shared-ai-runtime-list summary { margin-top: 9px; color: #176b4d; font-size: .76rem; font-weight: 700; cursor: pointer; }
 .shared-prompt-preview { max-height: 130px; margin-top: 8px; padding: 9px; overflow: auto; border-radius: 8px; background: rgba(255,255,255,.82); color: #53675e; font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .7rem; white-space: pre-wrap; }
+.ibkr-contract-list { display: grid; gap: 10px; }
+.ibkr-contract-row { display: grid; grid-template-columns: 1.1fr 1fr .9fr 1fr .8fr 1fr auto auto; gap: 8px; align-items: center; padding: 10px; border: 1px solid #dce7e2; border-radius: 12px; background: #fbfdfc; }
+@media (max-width: 1100px) { .ibkr-contract-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 960px) { .strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; }.strategy-toolbar { grid-template-columns: 1fr 1fr; }.strategy-toolbar>*:first-child { grid-column: 1 / -1; } }
 	@media (max-width: 700px) { .admission-stages { grid-template-columns: 1fr; }.strategy-hero,.settings-hero,.strategy-detail-head,.detail-section-title,.lifecycle-banner,.danger-zone { align-items: flex-start; flex-direction: column; }.strategy-hero,.settings-hero { padding: 26px 22px; }.strategy-primary-action,.strategy-quick-action,.settings-hero .v-btn { width: 100%; }.strategy-metrics,.settings-metrics { grid-template-columns: 1fr 1fr; gap: 9px; }.strategy-metrics article,.settings-metrics article { min-height: 104px; padding: 15px; }.settings-metrics strong { font-size: 1.28rem; }.settings-card-title { align-items: flex-start; flex-direction: column; }.user-settings-card :deep(.v-card-text) { padding: 18px 16px 22px; }.quota-table { min-width: 860px; }.quota-table :deep(.v-table__wrapper) { overflow-x: auto; }.strategy-governance-toolbar { grid-template-columns: 1fr; }.invitation-form { grid-template-columns: 1fr; }.invite-result { align-items: flex-start; flex-direction: column; }.strategy-toolbar { grid-template-columns: 1fr; }.strategy-toolbar>*:first-child { grid-column: auto; }.strategy-detail-content { padding: 20px 16px; }.strategy-detail-head>div:last-child { width: 100%; }.strategy-detail-head>div:last-child .v-btn { flex: 1; }.shared-card-footer { align-items: flex-start; flex-direction: column; } }
 </style>
