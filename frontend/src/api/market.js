@@ -934,38 +934,6 @@ export const marketAPI = {
     return response.data
   },
 
-  async reviewStrategyExecution(strategyId, deploymentId, hours = 24) {
-    const response = await api.post(
-      `/strategy/${encodeURIComponent(strategyId)}/ai-review`,
-      { deployment_id: deploymentId, hours },
-    )
-    return response.data
-  },
-
-  async getStrategyReviewStatus(strategyId, jobId) {
-    const response = await api.get(
-      `/strategy/${encodeURIComponent(strategyId)}/ai-review/${encodeURIComponent(jobId)}`,
-      { params: { _ts: Date.now() } },
-    )
-    return response.data
-  },
-
-  async getDailyStrategyReviews(strategyId, deploymentId, limit = 30) {
-    const response = await api.get(
-      `/strategy/${encodeURIComponent(strategyId)}/daily-reviews`,
-      { params: { deployment_id: deploymentId, limit, _ts: Date.now() } },
-    )
-    return response.data
-  },
-
-  async applyStrategyReview(strategyId, payload) {
-    const response = await api.post(
-      `/strategy/${encodeURIComponent(strategyId)}/ai-review/apply`,
-      payload,
-    )
-    return response.data
-  },
-
   // 手动触发策略决策
   async triggerStrategyDecision(symbol) {
     const response = await api.post(`/strategy/trigger/${encodeURIComponent(symbol)}`)

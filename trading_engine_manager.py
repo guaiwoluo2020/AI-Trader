@@ -12,7 +12,7 @@ from typing import Callable, Dict, Optional, Tuple
 from background_scheduler import SharedTaskScheduler
 from data_retention import DataRetentionService
 from market.services.adaptive_signal_tuner import AdaptiveSignalTuner
-from market.services.daily_review_service import DailyReviewCoordinator, CHINA_TZ
+from market.services.daily_review_service import CHINA_TZ
 from market.services.major_us_calendar_collector import MajorUSCalendarCollector
 from market.services.ibkr_kline_file_store import maintenance as maintain_ibkr_kline_files
 from ea_auth import EAIdentity
@@ -63,9 +63,6 @@ class TradingEngineManager:
         self.adaptive_signal_tuner = AdaptiveSignalTuner(
             refresh_callback=self.refresh_user_strategies,
         )
-        self.daily_reviews = DailyReviewCoordinator(
-            engine_provider=self.get_market_engine,
-        )
         self.major_us_calendar = MajorUSCalendarCollector()
         self.structure_plan_repository = StructureTradePlanRepository(get_storage())
         self._idle_timeout_seconds = float(
@@ -99,7 +96,6 @@ class TradingEngineManager:
         self._next_outbox_dispatch_at = time.monotonic() + 2
         self._next_structure_plan_cleanup_at = time.monotonic() + 30
         self._last_data_retention_date = ""
-        self._last_daily_review_date = ""
         self._last_major_us_calendar_date = ""
         self._last_ibkr_kline_maintenance_date = ""
 
@@ -281,16 +277,6 @@ class TradingEngineManager:
                 self.data_retention.run_maintenance,
             )
         review_date = current_wall.date().isoformat()
-        review_due = (
-            current_wall.hour == 6
-            and self._last_daily_review_date != review_date
-        )
-        if review_due:
-            self._last_daily_review_date = review_date
-            scheduler.submit(
-                ("system", "daily_reviews"),
-                lambda: self.daily_reviews.run_once(review_date),
-            )
         # Daily official refresh means NFP/FOMC are available even when the
         # administrative MT5 EA is offline.  05:10 Beijing leaves time for the
         # calendar to be ready before the 06:00 review and the trading day.
