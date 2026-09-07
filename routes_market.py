@@ -2180,7 +2180,6 @@ def create_market_routes(
             items.append({"decision": decision, "signals": decision.get("signals") or [], "orders": orders, "trades": trades})
         return {"status": "ok", "strategy": {"strategy_id": strategy_id, "strategy_name": strategy.strategy_name}, "deployment": deployment, "items": items}
 
-    @protected_router.post("/strategy/{strategy_id}/ai-review")
     async def review_strategy_execution(
         strategy_id: str,
         request: Request,
@@ -2483,7 +2482,6 @@ def create_market_routes(
             },
         }
 
-    @protected_router.get("/strategy/{strategy_id}/ai-review/{job_id}")
     async def get_strategy_review_status(
         strategy_id: str,
         job_id: str,
@@ -2504,7 +2502,6 @@ def create_market_routes(
             response["error"] = str(job.get("error") or "AI 策略复盘失败")
         return response
 
-    @protected_router.post("/strategy/{strategy_id}/ai-review/apply")
     async def apply_strategy_review_changes(
         strategy_id: str,
         request: Request,
