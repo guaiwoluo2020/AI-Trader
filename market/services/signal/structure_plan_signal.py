@@ -1619,12 +1619,7 @@ class StructurePlanSignalGenerator:
                             continue
                     event = active_event(effective, symbol, period, setup_type, now)
                     if event:
-                        # Older/in-memory repositories used by replay tests may
-                        # not expose the persistence helper.  The event gate is
-                        # still enforced locally; persistence is best-effort.
-                        suppress_plan = getattr(self.repository, "suppress_plan", None)
-                        if callable(suppress_plan):
-                            suppress_plan(plan_id, event)
+                        self.repository.suppress_plan(plan_id, event)
                         plan["status"] = "event_suppressed"
                         plan["event_risk"] = event
                         waiting.append(plan)

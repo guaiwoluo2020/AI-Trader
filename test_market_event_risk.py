@@ -54,24 +54,6 @@ class MarketEventRiskTests(unittest.TestCase):
         self.assertEqual(event["resume_after"], event_time + 20 * 60 + 5 * 60)
         self.assertEqual(event["resume_confirmation_bars"], 1)
 
-    @patch("market.services.market_event_risk_service._calendar_events", return_value=[])
-    def test_beijing_daily_rollover_pauses_only_box_reversals(self, _events):
-        event_time = int(datetime(
-            2026, 9, 7, 6, 0, tzinfo=ZoneInfo("Asia/Shanghai")
-        ).timestamp())
-        event = active_event(
-            self.config, "GOLD#", "M5", "range_lower_reversal",
-            event_time + 30 * 60,
-        )
-        self.assertIsNotNone(event)
-        self.assertEqual(event["id"], "beijing_daily_rollover")
-        self.assertEqual(event["suppress_from"], event_time)
-        self.assertEqual(event["resume_after"], event_time + 90 * 60 + 5 * 60)
-        self.assertIsNone(active_event(
-            self.config, "GOLD#", "M5", "trend_continuation",
-            event_time + 30 * 60,
-        ))
-
     @patch("market.services.market_event_risk_service._calendar_events")
     def test_nfp_is_l4_even_when_calendar_marks_medium_impact(self, events):
         at = int(datetime(2026, 9, 4, 12, 30, tzinfo=timezone.utc).timestamp())

@@ -303,8 +303,7 @@ class StructurePlanTests(unittest.TestCase):
         self.assertEqual(plans[1]["setup_type"], "triangle_breakout_watch")
         self.assertEqual(plans[0]["entry_mode"], "touch_or_near")
 
-    @patch("market.services.signal.structure_plan_signal.active_event", return_value=None)
-    def test_tick_uses_persisted_plan_without_reanalyzing(self, _event):
+    def test_tick_uses_persisted_plan_without_reanalyzing(self):
         repository = _Repository()
         generator = StructurePlanSignalGenerator(self.store, repository, 1, 2)
         strategy = _Strategy()

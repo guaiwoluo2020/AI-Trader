@@ -19,22 +19,8 @@ REVERSAL_SETUPS = {
     "choch_reversal", "structure_reversal",
 }
 
-# The daily post-rollover window is intentionally narrower than the general
-# reversal set.  It protects only box/range reversal decisions, which are the
-# setups most exposed to the liquidity and spread transition around the
-# broker's 06:00 Beijing re-quote.  Existing positions are not affected by
-# this plan-generation gate; position management continues normally.
-BOX_REVERSAL_SETUPS = {
-    "range_lower_reversal", "range_upper_reversal", "range_false_breakout",
-}
-
 
 DEFAULT_EVENT_RISK_RULES = [
-    {"id": "beijing_daily_rollover", "label": "北京时间日切换后重新报价",
-     "event_type": "daily_rollover", "level": "L2", "timezone": "Asia/Shanghai",
-     "time": "06:00", "weekdays": [0, 1, 2, 3, 4, 5, 6],
-     "before_minutes": 0, "after_minutes": 90,
-     "affect_setups": sorted(BOX_REVERSAL_SETUPS)},
     {"id": "tokyo_open", "label": "东京开盘", "event_type": "market_open", "level": "L1",
      "timezone": "Asia/Tokyo", "time": "09:00", "weekdays": [0, 1, 2, 3, 4],
      "before_minutes": 10, "after_minutes": 20},
@@ -226,21 +212,6 @@ def active_event(config: Dict, symbol: str, period: str, setup_type: str, now: O
     rules = config.get("event_risk_rules")
     if not isinstance(rules, list) or not rules:
         rules = DEFAULT_EVENT_RISK_RULES
-    else:
-        # The Beijing rollover guard is a system safety rule, not an optional
-        # per-symbol override. Keep it active even when the user supplies a
-        # custom event-rule list, while allowing the rest of the calendar/open
-        # rules to be customized normally.
-        rollover = next(
-            (item for item in DEFAULT_EVENT_RISK_RULES
-             if item.get("id") == "beijing_daily_rollover"),
-            None,
-        )
-        if rollover and not any(
-            isinstance(item, dict) and item.get("id") == "beijing_daily_rollover"
-            for item in rules
-        ):
-            rules = [rollover, *rules]
     for raw in rules:
         if not isinstance(raw, dict) or raw.get("enabled", True) is False:
             continue
