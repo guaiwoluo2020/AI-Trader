@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, Mapping, Optional
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,9 @@ class IBGatewayClient(EWrapper):
         self._next_request_id = 1
         self._request_symbols: Dict[int, str] = {}
         self._quotes: Dict[int, Dict[str, float]] = {}
+        self._bars: Dict[tuple, Dict] = {}
+        self._history_requests: Dict[int, Dict] = {}
+        self._history_rows: Dict[int, list] = {}
         self._account_summary_request_id: Optional[int] = None
         self._positions: Dict[int, Dict] = {}
         self._positions_requested = False
@@ -87,7 +92,7 @@ class IBGatewayClient(EWrapper):
         self._ready.clear()
         self.on_event("gateway_disconnected", {})
 
-    def subscribe_symbols(self, symbols: Iterable[str]) -> None:
+    def subscribe_symbols(self, symbols: Iterable[str], kline_cursors: Optional[Dict] = None) -> None:
         """Subscribe to US stock/forex/future symbols supplied as ``SYM[:SEC]``.
 
         Contract qualification is intentionally explicit in phase one.  The
@@ -120,6 +125,78 @@ class IBGatewayClient(EWrapper):
             self._next_request_id += 1
             self._request_symbols[request_id] = symbol
             self._client.reqMktData(request_id, contract, "", False, False, [])
+            cursor = (kline_cursors or {}).get(symbol, {}) if isinstance(kline_cursors, dict) else {}
+            required_periods = ("M1", "M5", "M15", "H1", "H4")
+            # A cursor is tracked per period.  For example, a backend that
+            # already has M1 but was just upgraded to H4 must still receive a
+            # bounded history request to initialize the missing periods.
+            needs_history = not all(
+                int(cursor.get(period) or 0) > 0 for period in required_periods
+            ) if isinstance(cursor, dict) else True
+            if needs_history:
+                history_id = self._next_request_id
+                self._next_request_id += 1
+                self._history_requests[history_id] = {"symbol": symbol, "cursor": {}}
+                self._history_rows[history_id] = []
+                self._client.reqHistoricalData(
+                    history_id, contract, "", "2 D", "1 min", "TRADES",
+                    0, 2, False, [],
+                )
+
+    def historicalData(self, reqId, bar):
+        request = self._history_requests.get(reqId)
+        if request is None:
+            return
+        raw_date = str(getattr(bar, "date", "")).strip()
+        try:
+            timestamp = int(float(raw_date))
+        except (TypeError, ValueError):
+            # IBKR may return a UTC epoch or a wall-clock string depending on
+            # the Gateway/API version.  Historical bars are requested in UTC.
+            parsed = None
+            for fmt in ("%Y%m%d %H:%M:%S", "%Y%m%d"):
+                try:
+                    parsed = datetime.strptime(raw_date, fmt).replace(tzinfo=timezone.utc)
+                    break
+                except ValueError:
+                    continue
+            if parsed is None:
+                logger.warning("Ignoring IBKR historical bar with invalid date: %r", raw_date)
+                return
+            timestamp = int(parsed.timestamp())
+        if timestamp <= 0:
+            return
+        self._history_rows.setdefault(reqId, []).append({
+            "timestamp": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
+            "open": float(bar.open), "high": float(bar.high),
+            "low": float(bar.low), "close": float(bar.close),
+            "volume": float(getattr(bar, "volume", 0) or 0),
+        })
+
+    def historicalDataEnd(self, reqId, start, end):
+        request = self._history_requests.pop(reqId, None)
+        rows = self._history_rows.pop(reqId, [])
+        if not request or not rows:
+            return
+        rows.sort(key=lambda item: item["timestamp"])
+        for period, seconds in (("M1", 60), ("M5", 300), ("M15", 900), ("H1", 3600), ("H4", 14400)):
+            grouped = {}
+            for row in rows:
+                ts = int(datetime.fromisoformat(row["timestamp"]).timestamp())
+                bucket = ts - ts % seconds
+                item = grouped.setdefault(bucket, {
+                    "timestamp": datetime.fromtimestamp(bucket, timezone.utc).isoformat(),
+                    "open": row["open"], "high": row["high"], "low": row["low"],
+                    "close": row["close"], "volume": row.get("volume", 0),
+                })
+                item["high"] = max(item["high"], row["high"])
+                item["low"] = min(item["low"], row["low"])
+                item["close"] = row["close"]
+                item["volume"] += row.get("volume", 0)
+            self.on_event("kline", {
+                "symbol": request["symbol"], "period": period,
+                "is_full": True, "klines": list(grouped.values()),
+            })
 
     def place_market_order(self, command: Dict) -> int:
         if not self.connected or Order is None:
@@ -171,6 +248,39 @@ class IBGatewayClient(EWrapper):
                                  "symbol": self._request_symbols.get(reqId, ""),
                                  "bid": bid, "ask": ask,
                                  "price": (bid + ask) / 2.0})
+        self._update_bars(self._request_symbols.get(reqId, ""), (bid + ask) / 2.0)
+
+    def _update_bars(self, symbol: str, price: float) -> None:
+        """Build completed M1/M5/M15 bars in memory; never persist raw ticks."""
+        if not symbol or price <= 0:
+            return
+        now = int(time.time())
+        for period, seconds in (
+            ("M1", 60), ("M5", 300), ("M15", 900),
+            ("H1", 3600), ("H4", 14400),
+        ):
+            bucket = now - (now % seconds)
+            key = (symbol, period)
+            current = self._bars.get(key)
+            if current is not None and current["timestamp"] != bucket:
+                self.on_event("kline", {
+                    "symbol": symbol, "period": period, "is_full": False,
+                    "klines": [current],
+                })
+                current = None
+            if current is None:
+                current = {
+                    "timestamp": datetime.fromtimestamp(
+                        bucket, timezone.utc
+                    ).isoformat(),
+                    "open": price, "high": price, "low": price,
+                    "close": price, "volume": 0,
+                }
+                self._bars[key] = current
+            else:
+                current["high"] = max(float(current["high"]), price)
+                current["low"] = min(float(current["low"]), price)
+                current["close"] = price
 
     def nextValidId(self, orderId):
         self._next_request_id = max(self._next_request_id, int(orderId))

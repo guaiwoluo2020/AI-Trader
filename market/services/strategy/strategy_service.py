@@ -492,11 +492,22 @@ class StrategyService:
                     )
                 )
         try:
+            key_level_value = getattr(best_signal, "key_level", None)
+            try:
+                is_integer_level = (
+                    str(best_signal.source or "") == str(SignalSource.KEY_LEVEL)
+                    and key_level_value is not None
+                    and abs(float(key_level_value) - round(float(key_level_value))) < 1e-9
+                )
+            except (TypeError, ValueError):
+                is_integer_level = False
             setup_context = {
                 "signal_source": str(best_signal.source or ""),
                 "setup_family": str(getattr(best_signal, "setup_family", "") or "generic"),
                 "setup_type": str(getattr(best_signal, "setup_type", "") or "generic_entry"),
                 "entry_mode": str(getattr(best_signal, "entry_mode", "") or "touch_or_near"),
+                "key_level": float(key_level_value or 0),
+                "integer_level": is_integer_level,
                 "signal_min_risk_reward": float(
                     getattr(best_signal, "minimum_risk_reward", 0) or 0
                 ),

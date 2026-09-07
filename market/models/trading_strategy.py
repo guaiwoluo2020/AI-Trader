@@ -112,6 +112,9 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "level_19_enabled": True,
             "level_19_levels": [],
             "breakout_retest_confirmation_offset": 3.0,
+            # GOLD 19-level setup uses the integer-level rule: one point
+            # above the level confirms the breakout (e.g. 4419 -> 4420).
+            "level_19_confirmation_offset": 1.0,
             "breakout_retest_tolerance": 1.0,
             "breakout_retest_tolerance_atr": 0.7,
             "level_mode": "automatic",
@@ -298,6 +301,11 @@ def normalize_signal_sources(
             params["breakout_retest_confirmation_offset"] = max(
                 0.0, min(100000.0, float(params.get(
                     "breakout_retest_confirmation_offset", 3.0
+                )))
+            )
+            params["level_19_confirmation_offset"] = max(
+                0.0, min(100000.0, float(params.get(
+                    "level_19_confirmation_offset", 1.0
                 )))
             )
             params["breakout_retest_tolerance"] = max(

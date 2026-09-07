@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from auth import AuthUser, require_auth
 from system_event_log import SystemEventLogRepository
 from mysql_repositories import RuntimeStateRepository
+from mysql_repositories import get_storage
 from repositories.accounts import TradingAccountRepository
 from market.services.market_tick_ingress import MarketTickIngress
 
@@ -175,7 +176,18 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
             await websocket.send_json({"type": "connected", "connector_id": connector_id,
                                        "read_only": _connectors[connector_id]["read_only"]})
             config = RuntimeStateRepository(0, 0).get_entity("ibkr_market_config", "default") or {}
-            await websocket.send_json({"type": "market_config", "symbols": config.get("symbols", [])})
+            configured_symbols = config.get("symbols", [])
+            cursors = {}
+            for item in configured_symbols:
+                symbol = str(item.get("symbol") or "") if isinstance(item, dict) else str(item).split(":", 1)[0]
+                if not symbol:
+                    continue
+                rows = get_storage().fetchall(
+                    "SELECT period, MAX(timestamp) AS last_bar_time FROM historical_klines WHERE user_id=? AND account_id=0 AND symbol=? GROUP BY period",
+                    (int(hello.get("user_id") or 0), symbol),
+                )
+                cursors[symbol] = {str(x.get("period")): int(x.get("last_bar_time") or 0) for x in rows}
+            await websocket.send_json({"type": "market_config", "symbols": configured_symbols, "kline_cursors": cursors})
             async for message in websocket.iter_text():
                 payload = json.loads(message)
                 if payload.get("type") == "event":
@@ -283,6 +295,35 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                                 )
                             except Exception:
                                 logger.exception("failed to ingest IBKR quote: %s", symbol)
+                    if payload.get("event") == "kline" and engine_manager is not None:
+                        detail = payload.get("payload") or {}
+                        symbol = str(detail.get("symbol") or "").strip()
+                        period = str(detail.get("period") or "").upper()
+                        bars = detail.get("klines") or []
+                        binding = _connectors.get(connector_id, {})
+                        user_id = int(binding.get("user_id") or hello.get("user_id") or 0)
+                        account_id = int(binding.get("trading_account_id") or hello.get("trading_account_id") or 0)
+                        if user_id > 0 and symbol and period in {"M1", "M5", "M15", "H1", "H4"} and bars:
+                            try:
+                                # Reuse the same ingestion coordinator as MT5
+                                # without exposing a new transport-specific API.
+                                from types import SimpleNamespace
+                                from routes_market import _persist_historical_klines
+                                from market.services.kline_ingestion_coordinator import KlineIngestionCoordinator
+                                engine = engine_manager.get_engine(user_id, account_id)
+                                identity = SimpleNamespace(user_id=user_id, account_id=account_id)
+                                coordinator = KlineIngestionCoordinator(
+                                    engine.kline_service, engine.pivot_service,
+                                    engine.refresh_structure_plans,
+                                    lambda s, p, items, offset: _persist_historical_klines(
+                                        identity, s, p, items, offset,
+                                    ),
+                                    event_bus=engine.event_bus,
+                                    user_id=user_id, account_id=account_id,
+                                )
+                                coordinator.process_batch(symbol, {period: bars}, bool(detail.get("is_full")), 0)
+                            except Exception:
+                                logger.exception("failed to ingest IBKR K-line: %s %s", symbol, period)
                     _record_connector_event(connector_id, payload)
                     logger.info("IBKR event connector=%s event=%s", connector_id, payload.get("event"))
                 elif payload.get("type") == "ping":

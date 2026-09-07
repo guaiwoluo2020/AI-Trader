@@ -55,6 +55,10 @@ async def run(config: ConnectorConfig) -> None:
                     gateway = IBGatewayClient(config.gateway_host, config.gateway_port,
                                               config.client_id, publish)
                     gateway.connect_and_run()
+                    # The server sends the persisted K-line cursors after the
+                    # websocket handshake.  Subscribe to quotes immediately,
+                    # but wait for that command before requesting history so a
+                    # reconnect does not download the same two days twice.
                     gateway.subscribe_symbols(config.symbols)
                     delay = config.reconnect_seconds
                     gateway_watchdog = asyncio.create_task(
@@ -68,7 +72,9 @@ async def run(config: ConnectorConfig) -> None:
                                     symbols = tuple(x for x in command.get("symbols", [])
                                                      if isinstance(x, dict) or str(x).strip())
                                     if symbols:
-                                        gateway.subscribe_symbols(symbols)
+                                        gateway.subscribe_symbols(
+                                            symbols, command.get("kline_cursors") or {}
+                                        )
                                 elif command.get("type") == "ping":
                                     await ws.send_json({"type": "pong"})
                                 elif command.get("type") == "shutdown":

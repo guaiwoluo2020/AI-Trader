@@ -259,6 +259,17 @@ class PositionManager:
             raise ValueError("多层级持仓管理仅支持结构交易信号")
         exit_levels: List[Dict] = []
         reference_take_profit = 0.0
+        setup_type = str((setup_context or {}).get("setup_type") or "").lower()
+        # Integer-level 19 signals carry their own exact protection points.
+        # They must not be replaced by a distant generic Pivot rule or widened
+        # by the policy's percentage floor.
+        dedicated_key_level_19 = setup_type in {
+            "key_level_19_breakout", "key_level_19_resistance_reversal",
+        }
+        dedicated_integer_level = bool(
+            (setup_context or {}).get("integer_level")
+        ) and str((setup_context or {}).get("signal_source") or "").lower() == "key_level"
+        dedicated_key_level = dedicated_key_level_19 or dedicated_integer_level
         if multi_level:
             stop, reference_take_profit, exit_levels = self._multi_level_exit_plan(
                 direction, entry_price, config,
@@ -280,16 +291,26 @@ class PositionManager:
                 ),
             }
         else:
-            stop, stop_rule = self._resolve_rule(
-                config["initial_stop_rules"], direction, entry_price,
-                float(signal_stop_loss or 0), 0, pivots, atr, True, current_time,
-            )
+            if dedicated_key_level and float(signal_stop_loss or 0) > 0:
+                stop = float(signal_stop_loss)
+                stop_rule = {
+                    "type": "signal",
+                    "source": "key_level_integer_level",
+                    "reason": "整数点位专属止损",
+                }
+            else:
+                stop, stop_rule = self._resolve_rule(
+                    config["initial_stop_rules"], direction, entry_price,
+                    float(signal_stop_loss or 0), 0, pivots, atr, True, current_time,
+                )
             if stop is None:
                 raise ValueError("没有止损规则能够生成有效价格")
             reference_stop = stop
         risk = abs(entry_price - stop)
         minimum = entry_price * float(config.get("min_stop_percent", 0.1) or 0) / 100.0
         maximum = entry_price * float(config.get("max_stop_percent", 0.7) or 0) / 100.0
+        if dedicated_key_level:
+            minimum = 0.0
         if not minimum:
             minimum = float(config.get("min_stop_distance", 0) or 0)
         if not maximum:
@@ -328,11 +349,19 @@ class PositionManager:
             reward = abs(take_profit - entry_price)
             rr = reward / reference_risk if reference_risk else 0
         else:
-            take_profit, take_rule = self._resolve_rule(
-                config["initial_take_profit_rules"], direction, entry_price,
-                float(signal_take_profit or 0), risk, pivots, atr, False,
-                current_time,
-            )
+            if dedicated_key_level and float(signal_take_profit or 0) > 0:
+                take_profit = float(signal_take_profit)
+                take_rule = {
+                    "type": "signal",
+                    "source": "key_level_integer_level",
+                    "reason": "整数点位专属止盈",
+                }
+            else:
+                take_profit, take_rule = self._resolve_rule(
+                    config["initial_take_profit_rules"], direction, entry_price,
+                    float(signal_take_profit or 0), risk, pivots, atr, False,
+                    current_time,
+                )
             if take_profit is None:
                 raise ValueError("没有止盈规则能够生成有效价格")
             reward = abs(take_profit - entry_price) if take_profit else 0

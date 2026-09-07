@@ -2703,7 +2703,7 @@ export default {
     const keyLevelSetupModeOptions = [
       { title: '反转（key_level_reversal）', value: 'reversal' },
       { title: '突破（key_level_breakout）', value: 'breakout' },
-      { title: '19 突破回踩（key_level_19_breakout_retest）', value: 'breakout_retest' },
+      { title: '19 突破直入（key_level_19_breakout）', value: 'level_19' },
       { title: '19 阻力反转 + 突破回踩', value: 'level_19' },
       { title: '反转 + 突破（兼容旧配置）', value: 'both' }
     ]

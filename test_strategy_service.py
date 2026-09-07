@@ -460,6 +460,27 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(signal.action, "sell")
         self.assertEqual(signal.setup_type, "key_level_19_resistance_reversal")
 
+    def test_key_level_19_breaks_one_point_above_and_enters_directly(self):
+        from market.services.signal.key_level_signal import KeyLevelSignalGenerator
+        from market.models.trading_strategy import TradingStrategy
+        strategy = TradingStrategy(symbol="GOLD_", signal_sources=[{
+            "signal_source_id": "key-19-breakout", "source": "key_level",
+            "period": "M1", "params": {
+                "level_mode": "levels", "levels": [4419],
+                "setup_mode": "level_19", "cooldown_seconds": 0,
+            },
+        }])
+        generator = KeyLevelSignalGenerator()
+        first = generator.generate_signals_for_strategy("GOLD_", 4418.5, strategy)
+        second = generator.generate_signals_for_strategy("GOLD_", 4420.0, strategy)
+        self.assertFalse(first[0].is_entry_trigger)
+        signal = next(item for item in second if item.is_entry_trigger)
+        self.assertEqual(signal.action, "buy")
+        self.assertEqual(signal.setup_type, "key_level_19_breakout")
+        self.assertEqual(signal.entry_mode, "breakout")
+        self.assertEqual(signal.suggested_sl, 4418.0)
+        self.assertAlmostEqual(signal.suggested_tp, 4420.0 * 1.0032, places=6)
+
     def test_legacy_key_level_reversal_uses_latest_atr_tolerance(self):
         class _KlineStore:
             def get_all_klines(self, symbol, period):

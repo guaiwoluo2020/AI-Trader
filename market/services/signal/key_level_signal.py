@@ -214,7 +214,10 @@ class KeyLevelSignalGenerator:
         level = float(signal.key_level or 0)
         if level <= 0:
             return signal
+        is_level_19 = str(params.get("setup_mode") or "") == "level_19"
         offset = max(0.0, float(params.get(
+            "level_19_confirmation_offset", 1.0
+        ) if is_level_19 else params.get(
             "breakout_retest_confirmation_offset", 3.0
         )))
         fallback_tolerance = max(0.0, float(params.get(
@@ -267,9 +270,32 @@ class KeyLevelSignalGenerator:
             self._breakout_retest_states[key] = "rejected"
             return signal
 
-        # This setup is intentionally an upward continuation pattern. A
-        # future downward version can use the same state machine inverted.
-        if current_price < level:
+        # The 19-level breakout follows the integer-level rule: once price
+        # crosses level + 1, buy immediately.  There is no retest entry.
+        if (
+            is_level_19
+            and phase in {"idle", "rejected"}
+            and previous is not None
+            and previous < confirmation <= current_price
+        ):
+            signal.action = "buy"
+            signal.market_direction = "up"
+            signal.is_entry_trigger = True
+            signal.setup_family = "breakout"
+            signal.setup_type = "key_level_19_breakout"
+            signal.entry_mode = "breakout"
+            signal.suggested_entry = current_price
+            signal.suggested_sl = level - 1.0
+            signal.suggested_tp = round(
+                current_price * (1.0 + float(
+                    params.get("take_profit_percent", 0.0032)
+                )), 8
+            )
+            signal.trigger_reason = (
+                f"突破关键位 {level} 上方确认点 {confirmation}，生成买入"
+            )
+            phase = "triggered"
+        elif current_price < level:
             phase = "idle"
         elif phase in {"idle", "rejected"} and previous is not None and previous < level <= current_price:
             phase = "broken"
@@ -287,8 +313,8 @@ class KeyLevelSignalGenerator:
                 signal.market_direction = "up"
                 signal.is_entry_trigger = True
                 signal.setup_family = "breakout"
-                signal.setup_type = "key_level_19_breakout_retest"
-                signal.entry_mode = "breakout_retest"
+                signal.setup_type = "key_level_19_breakout"
+                signal.entry_mode = "breakout"
                 signal.suggested_entry = current_price
                 signal.suggested_sl = level - 1.0
                 signal.suggested_tp = round(
@@ -297,7 +323,7 @@ class KeyLevelSignalGenerator:
                     )), 8
                 )
                 signal.trigger_reason = (
-                    f"突破关键位 {level} 并确认到 {confirmation} 后回踩确认，生成买入"
+                    f"突破关键位 {level} 上方确认点 {confirmation}，生成买入"
                 )
                 phase = "triggered"
         self._breakout_retest_states[key] = phase
@@ -307,9 +333,9 @@ class KeyLevelSignalGenerator:
             signal.setup_family = "breakout"
             signal.setup_type = (
                 "key_level_19_resistance_reversal"
-                if phase == "rejected" else "key_level_19_breakout_retest"
+                if phase == "rejected" else "key_level_19_breakout"
             )
-            signal.entry_mode = "breakout_retest"
+            signal.entry_mode = "breakout"
             signal.trigger_reason = {
                 "idle": f"等待突破关键位 {level}",
                 "broken": f"已突破关键位 {level}，等待确认到 {confirmation}",

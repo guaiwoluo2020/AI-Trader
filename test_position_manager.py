@@ -36,6 +36,48 @@ class PositionManagerTests(unittest.TestCase):
                 "initial_take_profit_rules": [{"type": "risk_reward", "value": 2}],
             })
 
+    def test_key_level_19_uses_exact_signal_protection_over_pivots(self):
+        plan = PositionManager().create_plan(
+            policy({
+                "initial_stop_rules": [{"type": "pivot", "period": "M5"},
+                                        {"type": "fixed_percent", "value": 0.003}],
+                "initial_take_profit_rules": [{"type": "risk_reward", "value": 2}],
+                "management_rules": [], "min_risk_reward": 0,
+                "min_stop_percent": 0.1, "max_stop_percent": 0.7,
+            }),
+            "buy", 4420, signal_stop_loss=4418,
+            signal_take_profit=4434.144,
+            pivots=[{"period": "M5", "direction": "low", "price": 4380}],
+            setup_context={
+                "signal_source": "key_level",
+                "setup_type": "key_level_19_breakout",
+                "setup_family": "breakout",
+            },
+        )
+        self.assertEqual(plan.stop_loss, 4418)
+        self.assertAlmostEqual(plan.take_profit, 4434.144, places=6)
+        self.assertEqual(plan.stop_rule["source"], "key_level_integer_level")
+
+    def test_any_integer_key_level_uses_signal_protection_over_policy(self):
+        plan = PositionManager().create_plan(
+            policy({
+                "initial_stop_rules": [{"type": "pivot", "period": "M5"}],
+                "initial_take_profit_rules": [{"type": "risk_reward", "value": 2}],
+                "management_rules": [], "min_risk_reward": 0,
+                "min_stop_percent": 0.1, "max_stop_percent": 0.7,
+            }),
+            "buy", 4300, signal_stop_loss=4299,
+            signal_take_profit=4313.76,
+            pivots=[{"period": "M5", "direction": "low", "price": 4260}],
+            setup_context={
+                "signal_source": "key_level", "setup_type": "key_level_reversal",
+                "setup_family": "reversal", "integer_level": True,
+                "key_level": 4300,
+            },
+        )
+        self.assertEqual(plan.stop_loss, 4299)
+        self.assertAlmostEqual(plan.take_profit, 4313.76, places=6)
+
     def test_multi_level_policy_rejects_non_structure_signal(self):
         with self.assertRaisesRegex(ValueError, "仅支持结构交易信号"):
             PositionManager().create_plan(
