@@ -1382,7 +1382,7 @@ class StructurePlanBuilder:
             )
             stop_ratio = self._stop_risk_atr(entry, sl, atr)
             max_stop_ratio = max(0.1, _number(
-                self._param("choch_max_stop_atr", 2.0)
+                self._param("choch_max_stop_atr", 3.0)
             ))
             if stop_ratio > max_stop_ratio:
                 self._reject(
