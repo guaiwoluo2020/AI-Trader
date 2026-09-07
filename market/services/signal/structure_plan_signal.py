@@ -1778,8 +1778,11 @@ class StructurePlanSignalGenerator:
                     seen_plan_ids.add(plan_id)
                 direction = str(plan.get("direction") or "")
                 setup_type = str(plan.get("setup_type") or "").strip().lower()
+                effective_config = resolve_structure_plan_config(
+                    symbol, period, setup_type
+                ) if direction in {"buy", "sell"} else {}
                 if direction in {"buy", "sell"}:
-                    effective = resolve_structure_plan_config(symbol, period, setup_type)
+                    effective = effective_config
                     allowed_setups = {str(item).strip().lower() for item in (effective.get("allowed_setups") or []) if str(item).strip()}
                     effective_dirs = {str(item).strip().lower() for item in (effective.get("allowed_directions") or ["buy", "sell"]) if str(item).strip().lower() in {"buy", "sell"}}
                     if (allowed_setups and setup_type not in allowed_setups) or not bool(effective.get("enabled", True)):
