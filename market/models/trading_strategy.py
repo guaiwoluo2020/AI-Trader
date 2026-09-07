@@ -111,11 +111,17 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             "expression": "",
             "proximity_threshold": 0.0008,
             "order_distance": 0.0008,
+            "use_atr_proximity": True,
+            # Key-level reversal staging defaults.  The ATR value is consumed
+            # by the staged-entry evaluator; the legacy proximity percentage
+            # remains available for signal-source compatibility.
+            "reversal_entry_tolerance_atr": 0.7,
+            "take_profit_percent": 0.0032,
             "upward_approach_sell": True,
             "downward_approach_buy": True,
             "upward_breakout_buy": True,
             "downward_breakout_sell": True,
-            "cooldown_seconds": 180,
+            "cooldown_seconds": 7200,
         }
     elif source == "ai_entry":
         params = {
@@ -301,6 +307,19 @@ def normalize_signal_sources(
                     "proximity_threshold",
                     params["order_distance"],
                 ))),
+            )
+            params["reversal_entry_tolerance_atr"] = max(
+                0.0, min(10.0, float(params.get(
+                    "reversal_entry_tolerance_atr", 0.7
+                )))
+            )
+            params["take_profit_percent"] = max(
+                0.0, min(0.10, float(params.get(
+                    "take_profit_percent", 0.0032
+                )))
+            )
+            params["use_atr_proximity"] = bool(
+                params.get("use_atr_proximity", True)
             )
             params.pop("stop_loss_distance", None)
             for flag in (

@@ -21,6 +21,11 @@ class StructureTradePlanRepository:
         plans: List[Dict], structure_bar_time: int,
     ) -> List[Dict]:
         now = int(time.time())
+        self.expire_due_plans(
+            user_id=user_id, account_id=account_id, strategy_id=strategy_id,
+            signal_source_id=signal_source_id, symbol=symbol, period=period,
+            now=now,
+        )
         keep = {str(plan["plan_id"]) for plan in plans}
         new_actionable = {
             str(plan["plan_id"])
@@ -163,6 +168,10 @@ class StructureTradePlanRepository:
         self, user_id: int, account_id: int, strategy_id: str,
         signal_source_id: str, symbol: str, period: str,
     ) -> List[Dict]:
+        self.expire_due_plans(
+            user_id=user_id, account_id=account_id, strategy_id=strategy_id,
+            signal_source_id=signal_source_id, symbol=symbol, period=period,
+        )
         rows = self.storage.fetchall(
             "SELECT payload_json,status FROM structure_trade_plans "
             "WHERE user_id=? AND account_id=? AND strategy_id=? "
@@ -176,6 +185,65 @@ class StructureTradePlanRepository:
             payload["status"] = row["status"]
             result.append(payload)
         return result
+
+    def expire_due_plans(
+        self, user_id: int = None, account_id: int = None,
+        strategy_id: str = None, signal_source_id: str = None,
+        symbol: str = None, period: str = None, now: int = None,
+        max_age_seconds: int = 24 * 60 * 60,
+    ) -> int:
+        """Invalidate stale waiting plans even when no new Tick arrives.
+
+        ``expires_at`` is authoritative for new plans, while the generated
+        timestamp/created timestamp provides a hard 24-hour safety cap for
+        rows created before that rule existed or rows whose lifetime was
+        configured too broadly.  Filtering is done in Python to keep this
+        compatible with the shared MySQL storage adapter without relying on
+        database-specific JSON functions.
+        """
+        now = int(now or time.time())
+        clauses = [
+            "status IN ('active','watching','event_suppressed')",
+        ]
+        params = []
+        for column, value in (
+            ("user_id", user_id), ("account_id", account_id),
+            ("strategy_id", strategy_id), ("signal_source_id", signal_source_id),
+            ("symbol", symbol), ("period", period),
+        ):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                params.append(value)
+        rows = self.storage.fetchall(
+            "SELECT plan_id,status,payload_json,created_at,expires_at "
+            "FROM structure_trade_plans WHERE " + " AND ".join(clauses),
+            tuple(params),
+        )
+        expired = 0
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            generated_at = int(payload.get("generated_at") or row["created_at"] or 0)
+            expires_at = int(row["expires_at"] or payload.get("expires_at") or 0)
+            due_by_expiry = expires_at > 0 and expires_at <= now
+            due_by_safety = generated_at > 0 and generated_at + max_age_seconds <= now
+            if not due_by_expiry and not due_by_safety:
+                continue
+            payload["status"] = "invalidated"
+            payload["invalidated_reason"] = (
+                "计划超过24小时未触发，自动取消"
+                if due_by_safety else "计划有效期已结束"
+            )
+            self.storage.execute(
+                "UPDATE structure_trade_plans SET status='invalidated', "
+                "payload_json=?, updated_at=? WHERE plan_id=? "
+                "AND status IN ('active','watching','event_suppressed')",
+                (json.dumps(payload, ensure_ascii=False), now, str(row["plan_id"])),
+            )
+            expired += 1
+        return expired
 
     def invalidate_plan(self, plan_id: str, reason: str) -> None:
         """Persist an event-driven invalidation for a public structure plan."""

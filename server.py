@@ -334,7 +334,7 @@ class TradingServer:
         )
 
         # 关键点位信号生成器
-        key_level_generator = KeyLevelSignalGenerator()
+        key_level_generator = KeyLevelSignalGenerator(self.kline_store)
         self._signal_service.register_generator("key_level", key_level_generator)
 
         # AI入场信号生成器

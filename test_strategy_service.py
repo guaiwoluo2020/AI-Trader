@@ -428,7 +428,67 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(second[0].action, "buy")
         self.assertEqual(second[0].source_period, "M1")
         self.assertEqual(second[0].suggested_sl, 4099.0)
-        self.assertAlmostEqual(second[0].suggested_tp, 4101.0 * 1.0037, places=6)
+        self.assertAlmostEqual(second[0].suggested_tp, 4101.0 * 1.0032, places=6)
+
+    def test_legacy_key_level_reversal_uses_latest_atr_tolerance(self):
+        class _KlineStore:
+            def get_all_klines(self, symbol, period):
+                self.last_request = (symbol, period)
+                return [
+                    {"high": 4103, "low": 4099, "close": 4101},
+                    {"high": 4104, "low": 4100, "close": 4102},
+                    {"high": 4103, "low": 4101, "close": 4102},
+                ]
+
+        strategy = TradingStrategy(
+            symbol="GOLD_",
+            signal_sources=[{
+                "signal_source_id": "key-atr",
+                "source": "key_level",
+                "period": "M1",
+                "weight": 40,
+                "params": {
+                    "level_mode": "levels",
+                    "levels": [4100],
+                    # The old percentage threshold is intentionally narrower
+                    # than 0.7 ATR; ATR should now control proximity.
+                    "order_distance": 0.0001,
+                    "cooldown_seconds": 0,
+                },
+            }],
+        )
+        generator = KeyLevelSignalGenerator(_KlineStore())
+        signal = generator.generate_signals_for_strategy(
+            "GOLD_", 4102.0, strategy
+        )[0]
+
+        self.assertTrue(signal.is_entry_trigger)
+        self.assertEqual(signal.action, "buy")
+        self.assertEqual(signal.suggested_sl, 4099.0)
+        self.assertAlmostEqual(signal.suggested_tp, 4102.0 * 1.0032, places=6)
+
+    def test_key_level_reversal_cooldown_is_separate_from_breakout(self):
+        generator = KeyLevelSignalGenerator()
+        generator._set_cooldown(
+            "GOLD#", 4300, "strategy", "source",
+            "key_level_reversal", "sell", "M1",
+        )
+        self.assertTrue(generator._check_cooldown(
+            "GOLD#", 4300, "strategy", "source", 7200,
+            "key_level_reversal", "sell", "M1",
+        ))
+        self.assertFalse(generator._check_cooldown(
+            "GOLD#", 4300, "strategy", "source", 0,
+            "key_level_breakout", "buy", "M1",
+        ))
+        generator._clear_setup_cooldown(
+            "GOLD#", 4300, "strategy", "source",
+            "key_level_reversal", "M1",
+        )
+        self.assertFalse(generator._check_cooldown(
+            "GOLD#", 4300, "strategy", "source", 7200,
+            "key_level_reversal", "sell", "M1",
+        ))
 
     def test_signal_generation_assigns_each_signal_to_its_strategy(self):
         service = SignalService()

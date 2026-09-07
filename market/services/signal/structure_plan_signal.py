@@ -69,6 +69,15 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "trend_retest_tolerance_atr": 0.25,
     "trend_min_retest_bars": 1,
     "trend_continuation_hold_bars": 2,
+    "trend_require_healthy_phase": True,
+    "trend_mature_retest_only": True,
+    # Trend entries are tiered by the distance to the structural invalidation
+    # point.  A moderately distant entry is kept as a retest opportunity;
+    # an excessively distant stop is not made artificially tighter.
+    "trend_normal_stop_atr": 2.5,
+    "trend_retest_stop_atr": 4.0,
+    "trend_max_stop_atr": 6.0,
+    "choch_max_stop_atr": 3.0,
     "min_choch_displacement_atr": 0.2,
     "min_trendline_touches": 2,
     # Reversal setups are paused around regular market opens and manually
@@ -464,11 +473,19 @@ class StructurePlanBuilder:
         reward = abs(take_profit - entry) if entry and take_profit else 0.0
         generated_at = int(time.time())
         safety_bars = max(1, int(_number(self._param("max_plan_lifetime_bars", 100))))
-        safety_expiry = int(valid_from or time.time()) + PERIOD_SECONDS.get(str(period).upper(), 300) * safety_bars
+        plan_start = int(valid_from or time.time())
+        safety_expiry = plan_start + PERIOD_SECONDS.get(str(period).upper(), 300) * safety_bars
+        # A plan is an opportunity tied to one structure snapshot.  The
+        # configured bar count remains a useful short-time fallback, but it
+        # must never leave a stale waiting plan alive for days when Tick data
+        # stops.  The repository also enforces this cap for already-persisted
+        # plans, so this protects both new and legacy rows.
+        safety_expiry = min(safety_expiry, plan_start + 24 * 60 * 60)
         payload = {
             "plan_id": plan_id, "plan_group_id": group,
             "setup_type": setup_type, "setup_family": self._setup_family(setup_type),
             "direction": direction, "entry_mode": entry_mode, "status": status,
+            "symbol": str(symbol), "period": str(period).upper(),
             "entry_price": round(entry, 8),
             "entry_zone": {"lower": round(zone_lower, 8), "upper": round(zone_upper, 8)},
             "stop_loss": round(stop_loss, 8), "take_profit": round(take_profit, 8),
@@ -652,6 +669,61 @@ class StructurePlanBuilder:
         kwargs["minimum_risk_reward"] = minimum_rr
         return self._plan(**kwargs)
 
+    def _stop_risk_atr(self, entry: float, stop_loss: float, atr: float) -> float:
+        return abs(_number(entry) - _number(stop_loss)) / max(_number(atr), 1e-9)
+
+    def _trend_stop_gate(
+        self, *, entry: float, stop_loss: float, atr: float,
+        entry_mode: str, breakout_level: float,
+    ) -> tuple[str, float, Dict]:
+        """Apply a graduated stop-distance gate without tightening structure SL.
+
+        ``normal`` entries can trigger immediately.  A moderately distant
+        continuation is converted to a breakout-retest plan at the original
+        breakout level.  Larger distances are rejected until a new HL/LH is
+        formed; the structural invalidation point is never moved closer just
+        to satisfy the risk gate.
+        """
+        ratio = self._stop_risk_atr(entry, stop_loss, atr)
+        normal = max(0.1, _number(self._param("trend_normal_stop_atr", 2.5)))
+        retest = max(normal, _number(self._param("trend_retest_stop_atr", 4.0)))
+        maximum = max(retest, _number(self._param("trend_max_stop_atr", 6.0)))
+        evidence = {
+            "stop_distance": round(abs(entry - stop_loss), 8),
+            "stop_distance_atr": round(ratio, 3),
+            "normal_stop_atr": round(normal, 3),
+            "retest_stop_atr": round(retest, 3),
+            "maximum_stop_atr": round(maximum, 3),
+            "risk_tier": "normal",
+        }
+        if ratio <= normal:
+            return entry_mode, entry, evidence
+        if ratio > maximum:
+            evidence["risk_tier"] = "rejected"
+            return "rejected", 0.0, evidence
+        if ratio > retest:
+            evidence["risk_tier"] = "new_structure_required"
+            return "new_structure_required", 0.0, evidence
+        if entry_mode == "breakout_retest":
+            evidence["risk_tier"] = "retest"
+            return entry_mode, entry, evidence
+        level = _number(breakout_level)
+        if level <= 0:
+            evidence["risk_tier"] = "new_structure_required"
+            return "new_structure_required", 0.0, evidence
+        retest_ratio = self._stop_risk_atr(level, stop_loss, atr)
+        evidence.update({
+            "risk_tier": "retest",
+            "original_entry": round(entry, 8),
+            "retest_entry": round(level, 8),
+            "retest_stop_distance": round(abs(level - stop_loss), 8),
+            "retest_stop_distance_atr": round(retest_ratio, 3),
+        })
+        if retest_ratio > retest:
+            evidence["risk_tier"] = "new_structure_required"
+            return "new_structure_required", 0.0, evidence
+        return "breakout_retest", level, evidence
+
     def build(
         self, source_id: str, symbol: str, period: str,
         rows: List[Dict], structure: Dict,
@@ -669,6 +741,8 @@ class StructurePlanBuilder:
             "major_state": structure.get("major_state"),
             "internal_state": structure.get("internal_state"),
             "external_state": structure.get("external_state"),
+            "trend_phase": structure.get("trend_phase", "undetermined"),
+            "trend_phase_evidence": structure.get("trend_phase_evidence") or {},
             "range": {key: box.get(key) for key in (
                 "active", "pattern", "status", "top", "bottom", "start_index",
                 "high_touches", "low_touches", "inside_ratio", "width_atr",
@@ -1306,6 +1380,16 @@ class StructurePlanBuilder:
             ) if protected else (
                 entry - stop_buffer if direction == "buy" else entry + stop_buffer
             )
+            stop_ratio = self._stop_risk_atr(entry, sl, atr)
+            max_stop_ratio = max(0.1, _number(
+                self._param("choch_max_stop_atr", 2.0)
+            ))
+            if stop_ratio > max_stop_ratio:
+                self._reject(
+                    f"CHOCH 止损距离 {stop_ratio:.2f} ATR 超过上限 "
+                    f"{max_stop_ratio:.2f} ATR，等待新的结构回踩"
+                )
+                return []
             target = self._next_target(hierarchy, direction, entry)
             risk = abs(entry - sl)
             price_discovery = not bool(target)
@@ -1330,6 +1414,12 @@ class StructurePlanBuilder:
                 valid_from=bar_time, expires_at=expires,
                 invalidation_price=sl, structure_snapshot=snapshot,
                 price_discovery=price_discovery,
+                validation_evidence={
+                    "stop_distance": round(abs(entry - sl), 8),
+                    "stop_distance_atr": round(stop_ratio, 3),
+                    "maximum_stop_atr": round(max_stop_ratio, 3),
+                    "risk_tier": "normal",
+                },
             )
             return [plan] if plan else []
 
@@ -1389,6 +1479,15 @@ class StructurePlanBuilder:
             return []
         direction_state = str(latest.get("direction") or "")
         major = str(structure.get("major_state") or "")
+        trend_phase = str(structure.get("trend_phase") or "strong").lower()
+        if self._param("trend_require_healthy_phase", True) and trend_phase in {
+            "weakening", "failed",
+        }:
+            self._reject(
+                f"趋势阶段为 {trend_phase}，推进力度衰减或保护点已失效，"
+                "暂停趋势延续计划"
+            )
+            return []
         swing_bias = self._direction_bias(swing.get("bias") or major)
         if direction_state != major or swing_bias != major or major not in {"up", "down"}:
             self._reject("趋势延续要求主结构、Swing 与突破方向一致")
@@ -1409,15 +1508,44 @@ class StructurePlanBuilder:
         if not entry_mode or entry <= 0:
             self._reject("趋势延续尚未完成回踩确认或连续收盘站稳")
             return []
+        if (
+            trend_phase == "mature"
+            and self._param("trend_mature_retest_only", True)
+            and entry_mode != "breakout_retest"
+        ):
+            self._reject("趋势已进入成熟阶段，只允许回踩突破位确认，不追价延续")
+            return []
         direction = "buy" if major == "up" else "sell"
         entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
         stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
         expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
         protected = self._protected_reference(hierarchy, direction, entry)
         if not protected or not entry:
             return []
         sl = protected-stop_buffer if direction == "buy" else protected+stop_buffer
+        risk_entry_mode, risk_entry, risk_evidence = self._trend_stop_gate(
+            entry=entry, stop_loss=sl, atr=atr, entry_mode=entry_mode,
+            breakout_level=_number(latest.get("level")),
+        )
+        if risk_entry_mode == "rejected":
+            self._reject(
+                f"趋势延续止损距离 {risk_evidence['stop_distance_atr']:.2f} ATR "
+                f"超过上限 {risk_evidence['maximum_stop_atr']:.2f} ATR，取消追价计划"
+            )
+            return []
+        if risk_entry_mode == "new_structure_required":
+            self._reject(
+                f"趋势延续止损距离 {risk_evidence['stop_distance_atr']:.2f} ATR "
+                f"过大，等待新的 HL/LH 后再生成计划"
+            )
+            return []
+        if risk_entry_mode == "breakout_retest":
+            entry_mode = risk_entry_mode
+            entry = risk_entry
+            entry_buffer = atr * max(
+                0.0, _number(self._param("entry_zone_atr", 0.35))
+            )
+        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
         target = self._next_target(hierarchy, direction, entry)
         risk = abs(entry-sl)
         price_discovery = not bool(target)
@@ -1432,6 +1560,8 @@ class StructurePlanBuilder:
             if entry_mode == "breakout_retest"
             else f"连续 {confirmation_evidence.get('held_bars') or confirmation_evidence.get('required_hold_bars')} 根K线收在突破位外"
         )
+        confirmation_evidence = dict(confirmation_evidence)
+        confirmation_evidence["risk_gate"] = risk_evidence
         plan = self._tradable_plan(
             source_id=source_id, symbol=symbol, period=period, anchor=anchor,
             setup_type=setup, direction=direction, entry_mode=entry_mode,
@@ -1582,6 +1712,50 @@ class StructurePlanSignalGenerator:
         """Evaluate cheap Tick-time invalidations from the persisted snapshot."""
         return invalidate_reason(plan, price)
 
+    def _tick_stop_gate(
+        self, plan: Dict, price: float, effective_config: Optional[Dict] = None,
+    ) -> tuple[bool, str]:
+        """Re-check stop distance against the actual Tick trigger price."""
+        setup = str(plan.get("setup_type") or "").strip().lower()
+        snapshot = plan.get("structure_snapshot") or {}
+        atr = _number(snapshot.get("atr"))
+        stop = _number(plan.get("stop_loss"))
+        if atr <= 0 or stop <= 0 or price <= 0:
+            return True, ""
+        ratio = abs(price - stop) / atr
+        effective_config = effective_config or {}
+        risk_gate = (plan.get("validation_evidence") or {}).get("risk_gate") or {}
+        if setup == "trend_continuation":
+            normal = max(0.1, _number(
+                risk_gate.get("normal_stop_atr",
+                              effective_config.get("trend_normal_stop_atr", 2.5))
+            ))
+            maximum = max(3.0, _number(
+                risk_gate.get("maximum_stop_atr",
+                              effective_config.get("trend_max_stop_atr", 6.0))
+            ))
+            if ratio > maximum:
+                return False, (
+                    f"Tick触发价使趋势止损距离达到 {ratio:.2f} ATR，"
+                    f"超过上限 {maximum:.2f} ATR"
+                )
+            if ratio > normal and str(plan.get("entry_mode") or "") != "breakout_retest":
+                return False, (
+                    f"Tick触发价距离结构保护点 {ratio:.2f} ATR，"
+                    "趋势延续必须等待回踩确认"
+                )
+        elif setup == "choch_reversal":
+            maximum = max(0.1, _number(
+                risk_gate.get("maximum_stop_atr",
+                              effective_config.get("choch_max_stop_atr", 3.0))
+            ))
+            if ratio > maximum:
+                return False, (
+                    f"Tick触发价使 CHOCH 止损距离达到 {ratio:.2f} ATR，"
+                    f"超过上限 {maximum:.2f} ATR"
+                )
+        return True, ""
+
     def generate_signals_for_strategy(
         self, symbol: str, current_price: float, strategy,
     ) -> List[TradingSignal]:
@@ -1619,7 +1793,9 @@ class StructurePlanSignalGenerator:
                             continue
                     event = active_event(effective, symbol, period, setup_type, now)
                     if event:
-                        self.repository.suppress_plan(plan_id, event)
+                        suppress_plan = getattr(self.repository, "suppress_plan", None)
+                        if suppress_plan:
+                            suppress_plan(plan_id, event)
                         plan["status"] = "event_suppressed"
                         plan["event_risk"] = event
                         waiting.append(plan)
@@ -1635,6 +1811,15 @@ class StructurePlanSignalGenerator:
                 invalid_reason = self._event_invalidated(plan, float(current_price))
                 if invalid_reason:
                     self.repository.invalidate_plan(plan_id, invalid_reason)
+                    continue
+                stop_ok, stop_reason = self._tick_stop_gate(
+                    plan, float(current_price), effective_config,
+                )
+                if not stop_ok:
+                    if "超过上限" in stop_reason:
+                        self.repository.invalidate_plan(plan_id, stop_reason)
+                    else:
+                        waiting.append(plan)
                     continue
                 if self._triggered(plan, float(current_price)):
                     active.append((config, plan))

@@ -125,6 +125,18 @@ def _trend_structure(direction="down", close=110.0):
 
 
 class StructurePlanTests(unittest.TestCase):
+    def test_plan_lifetime_is_capped_at_24_hours(self):
+        plan = StructurePlanBuilder({
+            "max_plan_lifetime_bars": 10_000,
+        })._plan(
+            source_id="source", symbol="BTCUSD", period="M5",
+            anchor=1_000, setup_type="triangle_breakout_watch",
+            direction="sell", entry_mode="close_breakout", status="watching",
+            entry=100, stop_loss=102, take_profit=96,
+            valid_from=1_000,
+        )
+        self.assertLessEqual(plan["expires_at"], 1_000 + 24 * 60 * 60)
+
     def test_structure_strategy_drops_private_plan_age_limit(self):
         source = normalize_signal_sources([{
             "signal_source_id": "structure-1",
@@ -650,6 +662,46 @@ class StructurePlanTests(unittest.TestCase):
         self.assertEqual(plans[0]["setup_type"], "no_trade")
         self.assertIn("主结构、Swing", plans[0]["reason"])
 
+    def test_trend_continuation_rejects_weakening_phase(self):
+        structure = _trend_structure("up")
+        structure["trend_phase"] = "weakening"
+        structure["trend_phase_evidence"] = {
+            "pushes_atr": [1.4, 0.9, 0.5],
+            "push_decay_count": 2,
+            "latest_pullback_ratio": 0.72,
+        }
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "up", "level": 109.0,
+            "confirmed_at": 39, "displacement_atr": 0.8,
+            "confirmation": "retest_confirmed",
+            "retest_status": "touched_and_held",
+        }]
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("推进力度衰减", plans[0]["reason"])
+
+    def test_mature_trend_requires_retest_instead_of_chasing(self):
+        structure = _trend_structure("up")
+        structure["trend_phase"] = "mature"
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "up", "level": 109.0,
+            "confirmed_at": 38, "displacement_atr": 0.6,
+            "confirmation": "close_confirmed",
+        }]
+        self.store.rows[38].update({
+            "open": 109.0, "high": 110.5, "low": 109.2, "close": 110.0,
+        })
+        self.store.rows[39].update({
+            "open": 110.0, "high": 111.0, "low": 109.8, "close": 110.5,
+        })
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("成熟阶段", plans[0]["reason"])
+
     def test_trend_continuation_default_displacement_is_point_six_atr(self):
         structure = _trend_structure("down")
         structure["internal_events"] = [{
@@ -701,6 +753,55 @@ class StructurePlanTests(unittest.TestCase):
             plans[0]["validation_evidence"]["confirmation_mode"],
             "continuation_hold",
         )
+
+    def test_distant_trend_entry_is_kept_as_breakout_retest(self):
+        structure = _trend_structure("up")
+        for layer in structure["structure_hierarchy"].values():
+            if layer.get("protected_low"):
+                layer["protected_low"]["price"] = 104.0
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "up", "level": 109.0,
+            "confirmed_at": 38, "displacement_atr": 0.6,
+            "confirmation": "close_confirmed",
+        }]
+        self.store.rows[38].update({
+            "open": 109.0, "high": 110.5, "low": 109.2, "close": 110.0,
+        })
+        self.store.rows[39].update({
+            "open": 110.0, "high": 111.0, "low": 109.8, "close": 110.5,
+        })
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "trend_continuation")
+        self.assertEqual(plans[0]["entry_mode"], "breakout_retest")
+        self.assertEqual(plans[0]["entry_price"], 109.0)
+        self.assertEqual(
+            plans[0]["validation_evidence"]["risk_gate"]["risk_tier"],
+            "retest",
+        )
+
+    def test_excessively_distant_trend_stop_is_rejected(self):
+        structure = _trend_structure("up")
+        for layer in structure["structure_hierarchy"].values():
+            if layer.get("protected_low"):
+                layer["protected_low"]["price"] = 85.0
+        structure["internal_events"] = [{
+            "type": "bos", "direction": "up", "level": 109.0,
+            "confirmed_at": 38, "displacement_atr": 0.6,
+            "confirmation": "close_confirmed",
+        }]
+        self.store.rows[38].update({
+            "open": 109.0, "high": 110.5, "low": 109.2, "close": 110.0,
+        })
+        self.store.rows[39].update({
+            "open": 110.0, "high": 111.0, "low": 109.8, "close": 110.5,
+        })
+        plans = StructurePlanBuilder({"enable_structure_location": False}).build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        self.assertEqual(plans[0]["setup_type"], "no_trade")
+        self.assertIn("超过上限", plans[0]["reason"])
 
     def test_no_retest_single_close_remains_observation_only(self):
         structure = _trend_structure("up")

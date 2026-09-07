@@ -267,7 +267,32 @@ def build_key_level_state_signal(
         )
     nearest = min(candidates, key=lambda level: abs(current_price - level))
     distance = abs(current_price - nearest) / current_price
-    near = distance <= threshold
+    # Legacy key-level sources historically used a fixed percentage distance.
+    # When a recent ATR is supplied, use the configured ATR multiple instead so
+    # the same rule scales across GOLD, BTC and index symbols.  Breakout
+    # detection remains based on the previous/current price crossing; ATR only
+    # changes the proximity used by the reversal approach.
+    atr = trigger_config.get("atr")
+    try:
+        atr = float(atr) if atr is not None else 0.0
+    except (TypeError, ValueError):
+        atr = 0.0
+    use_atr = bool(trigger_config.get("use_atr_proximity", True)) and atr > 0
+    if use_atr:
+        try:
+            atr_multiple = max(
+                0.0,
+                min(10.0, float(
+                    trigger_config.get("reversal_entry_tolerance_atr", 0.7)
+                )),
+            )
+        except (TypeError, ValueError):
+            atr_multiple = 0.7
+        near_distance = atr * atr_multiple
+        near = abs(current_price - nearest) <= near_distance
+    else:
+        near_distance = current_price * threshold
+        near = distance <= threshold
     previous = float(previous_price) if previous_price else None
     upward_breakout = (
         previous is not None and previous < nearest <= current_price
@@ -307,16 +332,22 @@ def build_key_level_state_signal(
     # Previously this
     # source returned zero and the position manager silently fell back to a
     # 0.2% fixed-percent stop, which widened GOLD stops to roughly 9 points.
-    # The initial target is deliberately expressed as a 0.37% percentage of the
+    # The initial target is deliberately expressed as a 0.32% percentage of the
     # actual trigger price so it remains useful for both automatic and manual
     # integer levels.
     sl = tp = 0
+    try:
+        take_profit_percent = max(
+            0.0, min(0.10, float(trigger_config.get("take_profit_percent", 0.0032)))
+        )
+    except (TypeError, ValueError):
+        take_profit_percent = 0.0032
     if trigger_type and action == "buy":
         sl = float(nearest) - 1.0
-        tp = float(current_price) * 1.0037
+        tp = float(current_price) * (1.0 + take_profit_percent)
     elif trigger_type and action == "sell":
         sl = float(nearest) + 1.0
-        tp = float(current_price) * 0.9963
+        tp = float(current_price) * (1.0 - take_profit_percent)
 
     if not near and not upward_breakout and not downward_breakout:
         direction = "sideways"
@@ -332,10 +363,16 @@ def build_key_level_state_signal(
         confidence = 86
         reason = f"价格向下突破关键位 {nearest}，按配置触发卖出"
     elif trigger_type == "upward_approach":
-        confidence = min(90, 65 + int((threshold - distance) / max(threshold, 1e-12) * 20))
+        confidence = min(90, 65 + int(
+            max(0.0, near_distance - abs(current_price - nearest))
+            / max(near_distance, 1e-12) * 20
+        ))
         reason = f"价格从下方向上接近关键位 {nearest}，按配置触发卖出"
     elif trigger_type == "downward_approach":
-        confidence = min(90, 65 + int((threshold - distance) / max(threshold, 1e-12) * 20))
+        confidence = min(90, 65 + int(
+            max(0.0, near_distance - abs(current_price - nearest))
+            / max(near_distance, 1e-12) * 20
+        ))
         reason = f"价格从上方向下接近关键位 {nearest}，按配置触发买入"
     elif current_price > nearest:
         confidence = min(80, 55 + int(max(0, threshold - distance) / max(threshold, 1e-12) * 15))

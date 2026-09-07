@@ -106,6 +106,15 @@
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_relaxed_direction_ratio" type="number" min="0.5" max="0.9" step="0.01" label="明显位移时一致率" hint="净位移达到阈值时使用的宽松比例，避免轻中度趋势被判成箱体" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_min_efficiency" type="number" min="0.1" max="1" step="0.05" label="趋势方向效率" hint="净位移/结构路径的最低比例" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_min_net_change_atr" type="number" min="0.5" max="10" step="0.5" label="趋势最小净位移（ATR）" hint="主导方向还需达到的整体位移" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_push_decay_ratio" type="number" min="0.5" max="0.95" step="0.05" label="推进衰减比例" hint="连续推进低于上一段的该比例时计为衰减，默认 0.75" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_mature_pullback_ratio" type="number" min="0.2" max="1.5" step="0.05" label="成熟阶段回撤比例" hint="回撤相对最近推进达到该比例后进入成熟阶段" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_weakening_pullback_ratio" type="number" min="0.3" max="2" step="0.05" label="衰竭阶段回撤比例" hint="回撤相对最近推进达到该比例后暂停趋势延续" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.trend_require_healthy_phase" color="primary" inset hide-details label="趋势延续要求健康阶段" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.trend_mature_retest_only" color="primary" inset hide-details label="成熟趋势仅允许回踩" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_normal_stop_atr" type="number" min="0.5" max="10" step="0.1" label="趋势正常止损上限（ATR）" hint="低于此值可直接触发，默认 2.5" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_retest_stop_atr" type="number" min="1" max="15" step="0.1" label="趋势回踩止损上限（ATR）" hint="超过正常上限后必须回踩，默认 4.0" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_max_stop_atr" type="number" min="1" max="20" step="0.1" label="趋势最大止损上限（ATR）" hint="超过后取消计划，默认 6.0" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.choch_max_stop_atr" type="number" min="0.5" max="10" step="0.1" label="CHOCH 最大止损（ATR）" hint="超过后等待新的结构回踩，默认 3.0" persistent-hint density="compact" variant="outlined" /></v-col>
             </v-row>
             <div class="llm-section-head compact mt-4"><div><h3>结构交易计划参数</h3><p>行情层统一生成计划；按品种/周期专属配置覆盖默认值，策略仅负责引用和执行筛选。</p></div></div>
             <v-row class="mt-2">
@@ -1184,6 +1193,12 @@
                 <v-text-field v-model.number="newSignalSource.params.order_distance" label="下单距离比例" type="number" step="0.0001" min="0"></v-text-field>
               </v-col>
               <v-col cols="12" sm="6">
+                <v-text-field v-model.number="newSignalSource.params.reversal_entry_tolerance_atr" label="反转接近范围（ATR 倍数）" type="number" step="0.1" min="0"></v-text-field>
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-text-field v-model.number="newSignalSource.params.take_profit_percent" label="止盈比例" type="number" step="0.0001" min="0"></v-text-field>
+              </v-col>
+              <v-col cols="12" sm="6">
                 <v-text-field v-model.number="newSignalSource.params.cooldown_seconds" label="信号冷却（秒）" type="number" min="0"></v-text-field>
               </v-col>
               <v-col cols="12">
@@ -1194,7 +1209,7 @@
                   <v-switch v-model="newSignalSource.params.downward_breakout_sell" label="向下突破下卖单" color="success" density="compact" hide-details></v-switch>
                 </div>
                 <div class="text-caption text-medium-emphasis mt-2">
-                  下单距离沿用比例语义，例如 0.0008 表示价格距离关键位万分之八内可触发；止盈止损统一由持仓管理方案生成。
+                  有效 ATR 数据时，反转接近范围优先使用 ATR 倍数（默认 0.7）；没有足够 K 线时才回退到下单距离比例。止损为关键位 ±1，止盈按止盈比例计算。
                 </div>
               </v-col>
             </v-row>
@@ -1427,7 +1442,7 @@ export default {
     const pageTitle = computed(() => isStrategyPage.value ? '策略管理' : '用户配置')
     const settingsTab = ref('account')
     const llmWorkspaceTab = ref('providers')
-    const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_buffer_atr: 0.1, break_confirm_bars: 2, retest_bars: 2, displacement_atr: 0.8, range_touch_tolerance: 0.003, range_touch_atr: 0.45, range_min_touches: 2, range_min_inside_ratio: 0.65, range_min_bars: 24, range_max_atr: 8, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18, trend_min_direction_ratio: 0.62, trend_relaxed_direction_ratio: 0.55, trend_min_efficiency: 0.30, trend_min_net_change_atr: 1.5, entry_zone_atr: 0.35, stop_buffer_atr: 0.25, min_real_risk_reward: 1.2, trend_min_real_risk_reward: 0.5, location_reclaim_min_body_atr: 0.3, location_reclaim_min_close_extension_atr: 0.1, location_require_swing_external_alignment: true, location_require_internal_confirmation: true, min_breakout_displacement_atr: 0.6, trend_max_event_age_bars_m1: 5, trend_max_event_age_bars_other: 3, trend_continuation_hold_bars: 2, breakout_target_atr: 3, breakout_retest_valid_bars: 6, triangle_breakout_min_body_atr: 0.5, triangle_breakout_min_close_extension_atr: 0.1, triangle_breakout_require_swing_external_alignment: true, enable_triangle_prebreakout: true, require_location_reclaim: true, event_risk_enabled: true, event_risk_rules: [], event_risk_min_importance: 3, event_risk_calendar_before_minutes: 30, event_risk_calendar_after_minutes: 45, event_risk_major_before_minutes: 45, event_risk_major_after_minutes: 90, event_risk_resume_confirmation_bars: 1 })
+    const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_buffer_atr: 0.1, break_confirm_bars: 2, retest_bars: 2, displacement_atr: 0.8, range_touch_tolerance: 0.003, range_touch_atr: 0.45, range_min_touches: 2, range_min_inside_ratio: 0.65, range_min_bars: 24, range_max_atr: 8, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18, trend_min_direction_ratio: 0.62, trend_relaxed_direction_ratio: 0.55, trend_min_efficiency: 0.30, trend_min_net_change_atr: 1.5, trend_push_decay_ratio: 0.75, trend_mature_pullback_ratio: 0.45, trend_weakening_pullback_ratio: 0.618, trend_require_healthy_phase: true, trend_mature_retest_only: true, trend_normal_stop_atr: 2.5, trend_retest_stop_atr: 4, trend_max_stop_atr: 6, choch_max_stop_atr: 3, entry_zone_atr: 0.35, stop_buffer_atr: 0.25, min_real_risk_reward: 1.2, trend_min_real_risk_reward: 0.5, location_reclaim_min_body_atr: 0.3, location_reclaim_min_close_extension_atr: 0.1, location_require_swing_external_alignment: true, location_require_internal_confirmation: true, min_breakout_displacement_atr: 0.6, trend_max_event_age_bars_m1: 5, trend_max_event_age_bars_other: 3, trend_continuation_hold_bars: 2, breakout_target_atr: 3, breakout_retest_valid_bars: 6, triangle_breakout_min_body_atr: 0.5, triangle_breakout_min_close_extension_atr: 0.1, triangle_breakout_require_swing_external_alignment: true, enable_triangle_prebreakout: true, require_location_reclaim: true, event_risk_enabled: true, event_risk_rules: [], event_risk_min_importance: 3, event_risk_calendar_before_minutes: 30, event_risk_calendar_after_minutes: 45, event_risk_major_before_minutes: 45, event_risk_resume_confirmation_bars: 1 })
     const structureGlobalConfig = ref({ ...structureEngineConfig.value })
     const structureEngineSaving = ref(false)
     const structureProfiles = ref([])
@@ -2760,9 +2775,12 @@ export default {
               level_mode: 'automatic', levels: [], levels_text: '',
               expression: '', proximity_threshold: 0.0008,
               order_distance: 0.0008,
+              use_atr_proximity: true,
+              reversal_entry_tolerance_atr: 0.7,
+              take_profit_percent: 0.0032,
               upward_approach_sell: true, downward_approach_buy: true,
               upward_breakout_buy: true, downward_breakout_sell: true,
-              cooldown_seconds: 180
+              cooldown_seconds: 7200
             }
           : source === 'pivot'
             ? {

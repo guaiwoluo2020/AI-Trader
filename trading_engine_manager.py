@@ -21,6 +21,7 @@ from mysql_repositories import TradingAccountRepository
 from mysql_repositories import get_storage
 from repositories.outbox import OutboxEventRepository
 from market.services.outbox_dispatcher import OutboxDispatcher
+from market.store.structure_plan_store import StructureTradePlanRepository
 from repositories.container import RepositoryContainer
 
 
@@ -65,6 +66,7 @@ class TradingEngineManager:
             engine_provider=self.get_market_engine,
         )
         self.major_us_calendar = MajorUSCalendarCollector()
+        self.structure_plan_repository = StructureTradePlanRepository(get_storage())
         self._idle_timeout_seconds = float(
             idle_timeout_seconds
             if idle_timeout_seconds is not None
@@ -94,6 +96,7 @@ class TradingEngineManager:
         self._next_data_retention_at = time.monotonic() + 60
         self._next_adaptive_tuning_at = time.monotonic() + 120
         self._next_outbox_dispatch_at = time.monotonic() + 2
+        self._next_structure_plan_cleanup_at = time.monotonic() + 30
         self._last_data_retention_date = ""
         self._last_daily_review_date = ""
         self._last_major_us_calendar_date = ""
@@ -314,6 +317,16 @@ class TradingEngineManager:
             scheduler.submit(
                 ("system", "outbox_dispatch"),
                 self.outbox_dispatcher.dispatch_once,
+                max_retries=1,
+            )
+        # Plan expiry must not depend on a new Tick.  A disconnected symbol
+        # can otherwise leave a waiting breakout visible and executable
+        # indefinitely, so sweep the shared market-layer plans periodically.
+        if now >= self._next_structure_plan_cleanup_at:
+            self._next_structure_plan_cleanup_at = now + 60
+            scheduler.submit(
+                ("system", "structure_plan_expiry"),
+                self.structure_plan_repository.expire_due_plans,
                 max_retries=1,
             )
 

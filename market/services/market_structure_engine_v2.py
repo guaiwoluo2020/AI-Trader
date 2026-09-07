@@ -7,7 +7,7 @@ import json
 from typing import Dict, List, Optional, Tuple
 
 _CACHE: Dict[str, Dict] = {}
-ENGINE_VERSION = "hierarchical-structure-v9"
+ENGINE_VERSION = "hierarchical-structure-v10"
 DEFAULT_CONFIG = {
     "pivot_legs": 3, "medium_pivot_legs": 8, "large_pivot_legs": 25,
     "min_reversal_atr": 0.5, "break_buffer_atr": 0.10,
@@ -24,6 +24,10 @@ DEFAULT_CONFIG = {
     "trend_min_net_change_atr": 1.5,
     "trend_min_slope_consistency": 0.60,
     "trend_max_retrace_atr": 4.0,
+    "trend_push_decay_ratio": 0.75,
+    "trend_mature_pullback_ratio": 0.45,
+    "trend_weakening_pullback_ratio": 0.618,
+    "trend_weakening_min_pushes": 3,
     "candidate_timeout_bars": 12,
     "range_breakout_candidate_timeout_bars": 3,
     "trend_max_anchor_bars": 48,
@@ -760,11 +764,92 @@ def _segments(rows: List[Dict], events: List[Dict], box: Optional[Dict],
     return merged
 
 
+def _trend_health(
+    rows: List[Dict], pivots: List[Dict], direction: str, atr: float,
+    config: Dict,
+) -> Tuple[str, Dict]:
+    """Classify whether a confirmed trend is strong, mature or weakening.
+
+    The direction itself still comes from the close-confirmed medium state
+    machine.  This is deliberately a second, non-repainting health layer: it
+    compares confirmed same-kind pivot pushes and the following pullbacks,
+    rather than treating one small pivot as a trend reversal.
+    """
+    direction = str(direction or "")
+    if direction not in {"up", "down"} or not rows:
+        return "undetermined", {"reason": "没有已确认的主趋势"}
+    atr = max(float(atr or 0), 1e-9)
+    ordered = sorted((item for item in (pivots or []) if item.get("kind") in {"high", "low"}),
+                     key=lambda item: int(item.get("index", 0)))
+    kind = "high" if direction == "up" else "low"
+    directional = [item for item in ordered if item.get("kind") == kind]
+    pushes = []
+    for previous, current in zip(directional, directional[1:]):
+        move = (float(current.get("price", 0)) - float(previous.get("price", 0)))
+        if direction == "down":
+            move = -move
+        if move > 0:
+            pushes.append(move / atr)
+    pushes = pushes[-4:]
+    decay_ratio = max(0.1, min(0.99, float(config.get("trend_push_decay_ratio", 0.75))))
+    decay_flags = [current < previous * decay_ratio for previous, current in zip(pushes, pushes[1:])]
+    decay_count = sum(decay_flags)
+
+    # Measure confirmed pullbacks from the directional pivot to the next
+    # opposite pivot.  Comparing the pullback to ATR makes this independent of
+    # GOLD/BTC/index price scales.
+    pullbacks = []
+    for previous, current in zip(ordered, ordered[1:]):
+        if direction == "up" and previous.get("kind") == "high" and current.get("kind") == "low":
+            pullbacks.append(abs(float(previous.get("price", 0)) - float(current.get("price", 0))) / atr)
+        elif direction == "down" and previous.get("kind") == "low" and current.get("kind") == "high":
+            pullbacks.append(abs(float(previous.get("price", 0)) - float(current.get("price", 0))) / atr)
+    pullbacks = pullbacks[-3:]
+    latest_pullback = pullbacks[-1] if pullbacks else 0.0
+    latest_push = pushes[-1] if pushes else 0.0
+    pullback_ratio = latest_pullback / max(latest_push, 1e-9) if latest_pullback else 0.0
+
+    protected = _protected_levels(ordered, direction)
+    protected_point = protected.get("protected_low" if direction == "up" else "protected_high") or {}
+    protected_price = float(protected_point.get("price") or 0)
+    close = _v(rows[-1], "close")
+    failed = bool(
+        protected_price > 0 and
+        ((direction == "up" and close < protected_price) or
+         (direction == "down" and close > protected_price))
+    )
+
+    if failed:
+        phase = "failed"
+    elif len(pushes) >= max(3, int(config.get("trend_weakening_min_pushes", 3))) and decay_count >= 2:
+        phase = "weakening"
+    elif pullback_ratio >= float(config.get("trend_weakening_pullback_ratio", 0.618)):
+        phase = "weakening"
+    elif decay_count >= 1 or pullback_ratio >= float(config.get("trend_mature_pullback_ratio", 0.45)):
+        phase = "mature"
+    else:
+        phase = "strong"
+    evidence = {
+        "direction": direction,
+        "phase": phase,
+        "pushes_atr": [round(value, 3) for value in pushes],
+        "push_decay_ratio": round(decay_ratio, 3),
+        "push_decay_count": decay_count,
+        "pullbacks_atr": [round(value, 3) for value in pullbacks],
+        "latest_pullback_ratio": round(pullback_ratio, 3),
+        "protected_price": round(protected_price, 8),
+        "close": round(close, 8),
+        "protected_level_broken": failed,
+    }
+    return phase, evidence
+
+
 def analyze(symbol: str, period: str, rows: List[Dict], config: Dict = None) -> Dict:
     rows, cfg = list(rows or []), {**DEFAULT_CONFIG, **(config or {})}
     if not rows:
         return {"symbol": symbol, "period": period, "engine_version": ENGINE_VERSION, "segments": [],
-                "events": [], "candidates": [], "current_state": "undetermined", "config": cfg}
+                "events": [], "candidates": [], "current_state": "undetermined",
+                "trend_phase": "undetermined", "trend_phase_evidence": {}, "config": cfg}
     atrs, minimum = _atr_series(rows), float(cfg["min_reversal_atr"])
     atr = atrs[-1]
     levels = {
@@ -799,6 +884,9 @@ def analyze(symbol: str, period: str, rows: List[Dict], config: Dict = None) -> 
         {"internal": internal_events, "swing": major_events, "external": external_events},
     )
     local_patterns = _local_patterns(rows, box, trendlines)
+    trend_phase, trend_phase_evidence = _trend_health(
+        rows, levels["medium"], major_state, atr, cfg,
+    )
     state_detail = (f"{major_state}_reversal_candidate" if active_candidate and active_candidate["direction"] != major_state
                     else f"{major_state}_pullback" if internal_state not in ("undetermined", major_state) and major_state != "undetermined"
                     else major_state)
@@ -820,6 +908,7 @@ def analyze(symbol: str, period: str, rows: List[Dict], config: Dict = None) -> 
             "structure_hierarchy": hierarchy, "local_patterns": local_patterns,
             "segment_history": segments[-50:], "current_state": current_state, "state_detail": state_detail,
             "internal_state": internal_state, "major_state": major_state, "external_state": external_state,
+            "trend_phase": trend_phase, "trend_phase_evidence": trend_phase_evidence,
             "active_candidate": active_candidate,
             "evidence": evidence,
             "structure_levels": {name: {"pivot_count": len(items), "latest": items[-1] if items else None}
