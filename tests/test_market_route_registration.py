@@ -41,7 +41,6 @@ def test_migrated_market_routes_are_registered_once():
     expected = {
         ("GET", "/market/structure/{symbol}"),
         ("GET", "/market/structure/{symbol}/trade-plans"),
-        ("GET", "/market/structure/{symbol}/signal-reviews"),
         ("GET", "/market/pivots/{symbol}"),
         ("GET", "/admin/market-structure/config"),
         ("PUT", "/admin/market-structure/config"),
@@ -62,7 +61,6 @@ def test_routes_market_has_no_migrated_legacy_handlers():
     migrated = {
         "get_market_structure",
         "get_structure_trade_plans",
-        "get_structure_signal_reviews",
         "get_market_structure_config",
         "put_market_structure_config",
         "get_pivots",

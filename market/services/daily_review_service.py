@@ -1,4 +1,4 @@
-"""Centralized daily reviews for structure signals and strategy executions."""
+"""Centralized daily reviews for strategy executions."""
 
 from __future__ import annotations
 
@@ -49,7 +49,6 @@ def _epoch(value) -> int:
 class DailyReviewCoordinator:
     """Run all review families once in one Beijing-time daily batch."""
 
-    STRUCTURE_ENTITY = "daily_structure_signal_review"
     STRATEGY_ENTITY = "daily_strategy_execution_review"
     BATCH_ENTITY = "daily_review_batch"
 
@@ -78,15 +77,10 @@ class DailyReviewCoordinator:
         result = {
             "batch_id": batch_id, "review_date": local_date,
             "scheduled_hour": 6, "started_at": now, "status": "running",
-            "structure": {"completed": 0, "skipped": 0, "failed": 0},
             "strategy": {"completed": 0, "skipped": 0, "failed": 0},
         }
         RuntimeStateRepository(0, 0, self.storage).upsert_entity(
             self.BATCH_ENTITY, batch_id, result, status="running",
-        )
-        self._run_family(
-            result, "structure", lambda: self._structure_scopes(now),
-            lambda scope: self._review_structure_scope(scope, local_date, now),
         )
         self._run_family(
             result, "strategy", self._strategy_scopes,

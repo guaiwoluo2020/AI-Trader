@@ -282,13 +282,6 @@ export const marketAPI = {
     const response = await api.get(`/market/structure/${encodeURIComponent(symbol)}/trade-plans`, { params: { period, _ts: Date.now() } })
     return response.data
   },
-  async getStructureSignalReviews(symbol, period = 'M5', limit = 30) {
-    const response = await api.get(
-      `/market/structure/${encodeURIComponent(symbol)}/signal-reviews`,
-      { params: { period, limit, _ts: Date.now() } },
-    )
-    return response.data
-  },
   async getMarketStructureConfig() {
     const response = await api.get('/admin/market-structure/config')
     return response.data

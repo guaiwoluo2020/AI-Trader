@@ -84,7 +84,9 @@ class DailyReviewCoordinatorTestCase(unittest.TestCase):
 
         self.assertEqual(first["status"], "completed")
         self.assertTrue(second["already_completed"])
-        self.assertEqual(coordinator.scope_calls, 1)
+        # Structure-signal daily reviews are retired; the shared daily batch
+        # now only reviews deployed strategy executions.
+        self.assertEqual(coordinator.scope_calls, 0)
         saved = json.loads(storage.entities[(coordinator.BATCH_ENTITY, "2026-08-30")])
         self.assertEqual(saved["status"], "completed")
 
