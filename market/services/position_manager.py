@@ -270,6 +270,22 @@ class PositionManager:
             (setup_context or {}).get("integer_level")
         ) and str((setup_context or {}).get("signal_source") or "").lower() == "key_level"
         dedicated_key_level = dedicated_key_level_19 or dedicated_integer_level
+        # Key-level setups own their invalidation boundary.  Do not trust a
+        # stale/generic signal SL here: a 19-level breakout at 4419 must use
+        # 4418 (and a sell/rejection must use 4420), regardless of the policy
+        # rule chain or an older signal snapshot.  This is intentionally done
+        # at the final plan boundary so Paper/MT5 share the same protection.
+        key_level = 0.0
+        try:
+            key_level = float((setup_context or {}).get("key_level") or 0)
+        except (TypeError, ValueError):
+            key_level = 0.0
+        dedicated_boundary_stop = None
+        if dedicated_key_level and key_level > 0:
+            dedicated_boundary_stop = (
+                key_level - 1.0 if direction == "buy" else key_level + 1.0
+            )
+
         if multi_level:
             stop, reference_take_profit, exit_levels = self._multi_level_exit_plan(
                 direction, entry_price, config,
@@ -291,7 +307,16 @@ class PositionManager:
                 ),
             }
         else:
-            if dedicated_key_level and float(signal_stop_loss or 0) > 0:
+            if dedicated_boundary_stop is not None:
+                stop = float(dedicated_boundary_stop)
+                stop_rule = {
+                    "type": "signal",
+                    "source": "key_level_integer_level",
+                    "reason": "整数点位专属止损（关键位边界）",
+                }
+            elif dedicated_key_level and float(signal_stop_loss or 0) > 0:
+                # Backward-compatible fallback for old callers that did not
+                # persist the key level in setup_context.
                 stop = float(signal_stop_loss)
                 stop_rule = {
                     "type": "signal",

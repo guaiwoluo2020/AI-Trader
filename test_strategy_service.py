@@ -481,6 +481,45 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(signal.suggested_sl, 4418.0)
         self.assertAlmostEqual(signal.suggested_tp, 4420.0 * 1.0032, places=6)
 
+    def test_key_level_19_breaks_below_lower_confirmation_and_enters_short(self):
+        from market.services.signal.key_level_signal import KeyLevelSignalGenerator
+        from market.models.trading_strategy import TradingStrategy
+        strategy = TradingStrategy(symbol="GOLD_", signal_sources=[{
+            "signal_source_id": "key-19-short", "source": "key_level",
+            "period": "M1", "params": {
+                "level_mode": "levels", "levels": [4419],
+                "setup_mode": "level_19", "cooldown_seconds": 0,
+            },
+        }])
+        generator = KeyLevelSignalGenerator()
+        generator.generate_signals_for_strategy("GOLD_", 4420.0, strategy)
+        signals = generator.generate_signals_for_strategy("GOLD_", 4418.0, strategy)
+        signal = next(item for item in signals if item.is_entry_trigger)
+        self.assertEqual(signal.action, "sell")
+        self.assertEqual(signal.setup_type, "key_level_19_breakout")
+        self.assertEqual(signal.suggested_sl, 4420.0)
+        self.assertAlmostEqual(signal.suggested_tp, 4418.0 * (1 - 0.0032), places=6)
+
+    def test_key_level_19_breakout_has_four_hour_directional_cooldown(self):
+        from market.services.signal.key_level_signal import KeyLevelSignalGenerator
+        from market.models.trading_strategy import TradingStrategy
+        strategy = TradingStrategy(symbol="GOLD_", signal_sources=[{
+            "signal_source_id": "key-19-cooldown", "source": "key_level",
+            "period": "M1", "params": {
+                "level_mode": "levels", "levels": [4419],
+                "setup_mode": "level_19",
+            },
+        }])
+        generator = KeyLevelSignalGenerator()
+        generator.generate_signals_for_strategy("GOLD_", 4418.5, strategy)
+        first = generator.generate_signals_for_strategy("GOLD_", 4420.0, strategy)
+        self.assertTrue(any(item.is_entry_trigger for item in first))
+        # Re-arm the state machine, then cross the same level in the same
+        # direction.  The second trigger is suppressed for two hours.
+        generator.generate_signals_for_strategy("GOLD_", 4417.0, strategy)
+        second = generator.generate_signals_for_strategy("GOLD_", 4420.0, strategy)
+        self.assertFalse(any(item.is_entry_trigger for item in second))
+
     def test_legacy_key_level_reversal_uses_latest_atr_tolerance(self):
         class _KlineStore:
             def get_all_klines(self, symbol, period):

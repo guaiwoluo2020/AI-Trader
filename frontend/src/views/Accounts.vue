@@ -586,7 +586,10 @@
           </v-alert>
           <v-text-field v-model.trim="accountForm.accountName" label="账户备注名" variant="outlined" />
           <v-switch v-model="accountForm.tradingEnabled" color="success" inset label="允许该账户产生新交易" />
-          <v-switch v-model="accountForm.autoTradingEnabled" color="success" inset label="允许策略自动确认并下单" />
+          <v-switch v-model="accountForm.autoTradingEnabled" color="success" inset label="允许策略自动执行交易" />
+          <p class="account-control-hint">
+            关闭后仍接收行情、持仓和成交数据，但不会自动创建新订单；已有持仓仍继续执行持仓管理。
+          </p>
           <div class="paper-setting-grid">
             <v-text-field v-model.number="accountForm.maxTotalPositions" label="最大总持仓" type="number" min="1" max="100" variant="outlined" />
             <v-text-field v-model.number="accountForm.maxSingleVolume" label="单笔最大手数" type="number" min="0.01" step="0.01" variant="outlined" />
@@ -1405,6 +1408,7 @@ onBeforeUnmount(() => {
 .paper-actions { display: flex; justify-content: flex-end; margin-top: 15px; padding-top: 13px; border-top: 1px solid #e7ece9; }
 .bound-strategies { margin-top: 14px; padding: 11px 13px; border-radius: 11px; background: #f5f8f6; }.bound-strategies>span { display:block; margin-bottom:7px; color:#7d8a84; font-size:.65rem; }.bound-strategies>div { display:flex; flex-wrap:wrap; gap:5px; }.bound-strategies>strong { color:#9aa39f; font-size:.7rem; font-weight:500; }.bound-strategy-list { display:flex; flex-direction:column; gap:6px; width:100%; }.bound-strategy-item { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 8px; border:1px solid #e0e8e3; border-radius:9px; background:#fff; }.bound-strategy-meta { color:#5f6e68; font-size:.66rem; }.bound-strategy-alert { padding:1px 7px; border-radius:6px; color:#c62828; background:#fdecea; font-size:.62rem; font-weight:600; }.paper-actions { gap:8px; flex-wrap:wrap; }
 .binding-dialog { border-radius:18px!important; background:#f5f7f3; }.binding-header { display:flex; align-items:center; justify-content:space-between; padding:22px 24px; }.binding-header h2 { margin:3px 0; }.binding-header span { color:#7d8983; font-size:.7rem; }.binding-form { display:grid; grid-template-columns:1fr auto; gap:9px; }.binding-list { display:grid; gap:8px; margin-top:14px; }.binding-list article { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border:1px solid #dbe5df; border-radius:11px; background:#fff; }.binding-list strong,.binding-list span { display:block; }.binding-list strong { color:#285044; font-size:.8rem; }.binding-list span { color:#89948f; font-size:.65rem; }.binding-controls { display:flex; align-items:center; gap:5px; }
+.account-control-hint { margin: -4px 0 12px 52px; color: #7d8983; font-size: .72rem; line-height: 1.5; }
 .runtime-dialog { border-radius: 20px !important; background: #f5f7f3; }
 .runtime-header { display: flex; align-items: center; justify-content: space-between; padding: 22px 26px; }
 .runtime-header h2 { margin: 3px 0; }

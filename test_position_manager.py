@@ -78,6 +78,28 @@ class PositionManagerTests(unittest.TestCase):
         self.assertEqual(plan.stop_loss, 4299)
         self.assertAlmostEqual(plan.take_profit, 4313.76, places=6)
 
+    def test_key_level_19_reanchors_stale_signal_stop_to_boundary(self):
+        """A stale upstream SL must not widen a 19-level stop."""
+        plan = PositionManager().create_plan(
+            policy({
+                "initial_stop_rules": [{"type": "fixed_percent", "value": 0.2}],
+                "initial_take_profit_rules": [{"type": "signal"}],
+                "management_rules": [], "min_risk_reward": 0,
+                "min_stop_percent": 0, "max_stop_percent": 0,
+            }),
+            "buy", 4422.0, signal_stop_loss=4413.8,
+            signal_take_profit=4436.0,
+            setup_context={
+                "signal_source": "key_level",
+                "setup_type": "key_level_19_breakout",
+                "setup_family": "breakout",
+                "key_level": 4419.0,
+                "integer_level": True,
+            },
+        )
+        self.assertEqual(plan.stop_loss, 4418.0)
+        self.assertEqual(plan.stop_rule["source"], "key_level_integer_level")
+
     def test_multi_level_policy_rejects_non_structure_signal(self):
         with self.assertRaisesRegex(ValueError, "仅支持结构交易信号"):
             PositionManager().create_plan(

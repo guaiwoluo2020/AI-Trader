@@ -67,10 +67,11 @@ class KeyLevelSignalGenerator:
         self.threshold = 0.0008  # 万分之八
 
         # 信号冷却时间（秒）
-        # Reversal attempts at the same round-number level are intentionally
-        # sparse.  Breakouts use a separate cooldown key and therefore are not
-        # blocked by this two-hour reversal lock.
+        # Integer/round-number attempts are intentionally sparse.  Reversal
+        # and breakout entries use separate directional keys, while each
+        # integer-level key is quiet for four hours by default.
         self.cooldown = 2 * 60 * 60
+        self.integer_level_cooldown = 4 * 60 * 60
 
         # 冷却记录
         self._signal_cooldowns: Dict[str, datetime] = {}
@@ -240,6 +241,7 @@ class KeyLevelSignalGenerator:
         phase = self._breakout_retest_states.get(key, "idle")
         previous = float(previous_price) if previous_price is not None else None
         confirmation = level + offset
+        downside_confirmation = level - offset
 
         # The GOLD 19-level pattern also treats the first approach from below
         # as a resistance rejection. It is deliberately emitted only for the
@@ -293,6 +295,32 @@ class KeyLevelSignalGenerator:
             )
             signal.trigger_reason = (
                 f"突破关键位 {level} 上方确认点 {confirmation}，生成买入"
+            )
+            phase = "triggered"
+        # The 19-level rule is symmetric: after falling from above, crossing
+        # the lower confirmation point (level - 1, normally 4418 for 4419)
+        # opens a sell with protection one unit above the level (4420).
+        elif (
+            is_level_19
+            and phase in {"idle", "rejected"}
+            and previous is not None
+            and previous > downside_confirmation >= current_price
+        ):
+            signal.action = "sell"
+            signal.market_direction = "down"
+            signal.is_entry_trigger = True
+            signal.setup_family = "breakout"
+            signal.setup_type = "key_level_19_breakout"
+            signal.entry_mode = "breakout"
+            signal.suggested_entry = current_price
+            signal.suggested_sl = level + 1.0
+            signal.suggested_tp = round(
+                current_price * (1.0 - float(
+                    params.get("take_profit_percent", 0.0032)
+                )), 8
+            )
+            signal.trigger_reason = (
+                f"跌破关键位 {level} 下方确认点 {downside_confirmation}，生成卖出"
             )
             phase = "triggered"
         elif current_price < level:
@@ -402,7 +430,14 @@ class KeyLevelSignalGenerator:
         if signal is None:
             return None
         setup_type = str(signal.setup_type or "")
-        cooldown = self.cooldown if setup_type == "key_level_reversal" else 0
+        is_integer_level = (
+            signal.key_level is not None
+            and abs(float(signal.key_level) - round(float(signal.key_level))) < 1e-9
+        )
+        cooldown = (
+            self.integer_level_cooldown
+            if is_integer_level else self.cooldown
+        ) if setup_type == "key_level_reversal" else 0
         if self._check_cooldown(
             symbol, signal.key_level, strategy_id,
             setup_type=setup_type, direction=signal.action,
@@ -507,21 +542,31 @@ class KeyLevelSignalGenerator:
                     if special.is_entry_trigger or special.market_direction == "up":
                         extra_level_19.append(special)
             setup_type = str(signal.setup_type or "")
+            integer_level = False
+            try:
+                integer_level = (
+                    signal.key_level is not None
+                    and abs(float(signal.key_level) - round(float(signal.key_level))) < 1e-9
+                )
+            except (TypeError, ValueError):
+                integer_level = False
             if setup_type == "key_level_reversal":
-                # Migrate old signal-source configs (often 180 seconds) to the
-                # new two-hour reversal protection.  A longer explicit value
-                # remains possible; a shorter one cannot weaken the guard.
+                # Integer levels use a four-hour quiet period.  Non-integer
+                # configured levels retain the two-hour reversal default.
                 configured_cooldown = max(
-                    self.cooldown,
+                    self.integer_level_cooldown if integer_level else self.cooldown,
                     int(params.get(
                         "reversal_cooldown_seconds",
                         params.get("cooldown_seconds", self.cooldown),
                     ) or 0),
                 )
             else:
-                # Breakout attempts have their own optional throttle and are
-                # never blocked by the reversal cooldown.
-                configured_cooldown = params.get("breakout_cooldown_seconds", 0)
+                # Integer breakouts also use the four-hour quiet period;
+                # non-integer breakouts keep their explicit throttle only.
+                configured_cooldown = max(
+                    self.integer_level_cooldown if integer_level else 0,
+                    int(params.get("breakout_cooldown_seconds", 0) or 0),
+                )
             cooldown = max(0, int(configured_cooldown))
             if signal.is_entry_trigger and self._check_cooldown(
                 symbol, signal.key_level, strategy.strategy_id, source_id,
@@ -543,8 +588,15 @@ class KeyLevelSignalGenerator:
             signals.append(signal)
             for special in extra_level_19:
                 special_setup = str(special.setup_type or "")
+                # Level-19 breakout/rejection is a discrete round-number
+                # setup.  Both directions use the same four-hour quiet period
+                # by default; an explicit longer configuration still wins.
+                level_19_breakout_cooldown = (
+                    self.integer_level_cooldown if "key_level_19" in special_setup else 0
+                )
                 special_cooldown = max(
-                    self.cooldown if "reversal" in special_setup else 0,
+                    self.integer_level_cooldown if "reversal" in special_setup else 0,
+                    level_19_breakout_cooldown,
                     int(params.get("breakout_cooldown_seconds", 0) or 0),
                 )
                 if special.is_entry_trigger and self._check_cooldown(
