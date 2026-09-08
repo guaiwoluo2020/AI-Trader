@@ -66,11 +66,16 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "trend_max_event_age_bars_m1": 5,
     "trend_max_event_age_bars_other": 3,
     "min_breakout_displacement_atr": 0.6,
+    # M1 趋势启动更早、噪声更大，允许较小的有效位移；M5/M15 继续
+    # 使用更严格的公共阈值。按周期拆分，避免放宽高周期追单风险。
+    "trend_min_breakout_displacement_atr_m1": 0.4,
+    "trend_min_breakout_displacement_atr_other": 0.6,
     "trend_retest_tolerance_atr": 0.25,
     "trend_min_retest_bars": 1,
     "trend_continuation_hold_bars": 2,
     "trend_require_healthy_phase": True,
     "trend_mature_retest_only": True,
+    "trend_mature_retest_only_m1": False,
     # Trend entries are tiered by the distance to the structural invalidation
     # point.  A moderately distant entry is kept as a retest opportunity;
     # an excessively distant stop is not made artificially tighter.
@@ -1493,7 +1498,11 @@ class StructurePlanBuilder:
             self._reject("趋势延续要求主结构、Swing 与突破方向一致")
             return []
         displacement = _number(latest.get("displacement_atr"))
-        minimum = max(0.0, _number(self._param("min_breakout_displacement_atr", 0.6)))
+        period_key = "trend_min_breakout_displacement_atr_m1" if str(period).upper() == "M1" else "trend_min_breakout_displacement_atr_other"
+        minimum = max(0.0, _number(self._param(
+            period_key,
+            self._param("min_breakout_displacement_atr", 0.6),
+        )))
         if displacement < minimum:
             self._reject(f"趋势突破位移 {displacement:.2f} ATR 低于最低要求 {minimum:.2f} ATR")
             return []
@@ -1508,11 +1517,12 @@ class StructurePlanBuilder:
         if not entry_mode or entry <= 0:
             self._reject("趋势延续尚未完成回踩确认或连续收盘站稳")
             return []
-        if (
-            trend_phase == "mature"
-            and self._param("trend_mature_retest_only", True)
-            and entry_mode != "breakout_retest"
-        ):
+        mature_retest_only = bool(self._param(
+            "trend_mature_retest_only_m1" if str(period).upper() == "M1"
+            else "trend_mature_retest_only",
+            False if str(period).upper() == "M1" else True,
+        ))
+        if trend_phase == "mature" and mature_retest_only and entry_mode != "breakout_retest":
             self._reject("趋势已进入成熟阶段，只允许回踩突破位确认，不追价延续")
             return []
         direction = "buy" if major == "up" else "sell"
