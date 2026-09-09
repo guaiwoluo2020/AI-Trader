@@ -97,6 +97,8 @@ const int POSITION_SYNC_INTERVAL_SECONDS = 10;
 bool g_positionsSyncPending = false;
 datetime g_lastHeartbeatTime = 0;
 const int HEARTBEAT_INTERVAL_SECONDS = 30;
+datetime g_lastInstrumentSpecReportTime = 0;
+const int INSTRUMENT_SPEC_REPORT_INTERVAL_SECONDS = 300;
 
 //+------------------------------------------------------------------+
 //| URL编码函数 - 处理特殊字符                                        |
@@ -311,6 +313,81 @@ bool ActivateEA(string activationCode)
   }
 
 //+------------------------------------------------------------------+
+//| 上报当前品种的经纪商交易数量规格                                  |
+//+------------------------------------------------------------------+
+int VolumeDigits(double step)
+  {
+   int digits = 0;
+   double value = step;
+   while(digits < 8 && MathAbs(value - MathRound(value)) > 0.00000001)
+     {
+      value *= 10.0;
+      digits++;
+     }
+   return digits;
+  }
+
+double NormalizeTradeVolume(string symbol, double requested, bool closing=false, double current=0.0)
+  {
+   double minimum = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double maximum = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(minimum <= 0) minimum = 0.01;
+   if(maximum <= 0) maximum = 100.0;
+   if(step <= 0) step = minimum;
+   requested = MathMax(0.0, requested);
+   if(closing && current > 0 && requested >= current - step * 0.5)
+      return current;
+   double normalized = MathFloor((requested + 0.0000000001) / step) * step;
+   if(!closing)
+      normalized = MathMax(minimum, normalized);
+   else if(normalized < minimum && current >= minimum)
+      normalized = current;
+   normalized = MathMin(maximum, normalized);
+   return NormalizeDouble(normalized, VolumeDigits(step));
+  }
+
+bool SendInstrumentSpec()
+  {
+   if(StringLen(g_eaToken) == 0 || StringLen(_Symbol) == 0)
+      return false;
+   double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+   if(minVolume <= 0) minVolume = 0.01;
+   if(stepVolume <= 0) stepVolume = minVolume;
+   if(maxVolume <= 0) maxVolume = 100.0;
+   if(contractSize <= 0) contractSize = 1.0;
+   string jsonBody = "{";
+   jsonBody += "\"symbol\":\"" + EscapeJsonString(_Symbol) + "\",";
+   jsonBody += "\"min_volume\":" + DoubleToString(minVolume, 8) + ",";
+   jsonBody += "\"volume_step\":" + DoubleToString(stepVolume, 8) + ",";
+   jsonBody += "\"max_volume\":" + DoubleToString(maxVolume, 8) + ",";
+   jsonBody += "\"volume_digits\":" + IntegerToString(VolumeDigits(stepVolume)) + ",";
+   jsonBody += "\"contract_size\":" + DoubleToString(contractSize, 8) + ",";
+   jsonBody += "\"source\":\"mt5\"}";
+   uchar postData[];
+   uchar responseData[];
+   string responseHeaders = "";
+   StringToCharArray(jsonBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(postData) > 0)
+      ArrayResize(postData, ArraySize(postData) - 1);
+   int responseCode = WebRequest(
+      "POST", g_pythonServer + "/ea/instrument_specs",
+      BuildAuthenticatedHeaders(), 5000, postData, responseData, responseHeaders
+   );
+   if(responseCode != 200)
+     {
+      Print("[品种规格上报] 失败 HTTP=", responseCode, " error=", GetLastError());
+      return false;
+     }
+   Print("[品种规格上报] ", _Symbol, " min=", DoubleToString(minVolume, 8),
+         " step=", DoubleToString(stepVolume, 8));
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -361,8 +438,10 @@ int OnInit()
 //--- 初始化随机数种子
    MathSrand((uint)TimeCurrent());
 
-//--- 设置定时器，每1秒触发一次
+   //--- 设置定时器，每1秒触发一次
    EventSetTimer(1);
+   SendInstrumentSpec();
+   g_lastInstrumentSpecReportTime = TimeCurrent();
 
 //--- 打印初始化信息
    Print("Expert initialized successfully");
@@ -771,6 +850,16 @@ void ParseAndExecuteTrades(string jsonData)
                double requestedPrice = positionType == POSITION_TYPE_BUY
                                        ? SymbolInfoDouble(positionSymbol, SYMBOL_BID)
                                        : SymbolInfoDouble(positionSymbol, SYMBOL_ASK);
+               volume = NormalizeTradeVolume(
+                  positionSymbol, volume, true,
+                  PositionGetDouble(POSITION_VOLUME)
+               );
+               if(volume <= 0)
+                 {
+                  Print("[分批止盈跳过] 数量低于品种最小手数: ", positionSymbol);
+                  cursor = objectEnd + 1;
+                  continue;
+                 }
                if(trade.PositionClosePartial(ticket, volume))
                  {
                   Print("[分批止盈成功] Ticket: ", ticket, " Volume: ", volume, " Level: ", levelId);
@@ -1053,12 +1142,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
      }
 
    // 标准化手数
-   double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-
-   volume = MathMax(minVolume, MathMin(volume, maxVolume));
-   volume = MathRound(volume / stepVolume) * stepVolume;
+   volume = NormalizeTradeVolume(_Symbol, volume, false, 0.0);
 
    // 执行订单
    bool succeeded = false;
@@ -1127,8 +1211,9 @@ void SendTradeExecutionReport(
    jsonBody += "\"success\":" + (success ? "true" : "false") + ",";
    jsonBody += "\"requested_price\":" + DoubleToString(requestedPrice, _Digits) + ",";
    jsonBody += "\"executed_price\":" + DoubleToString(executedPrice, _Digits) + ",";
-   jsonBody += "\"requested_volume\":" + DoubleToString(requestedVolume, 2) + ",";
-   jsonBody += "\"executed_volume\":" + DoubleToString(executedVolume, 2) + ",";
+   int volumeDigits = VolumeDigits(SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP));
+   jsonBody += "\"requested_volume\":" + DoubleToString(requestedVolume, volumeDigits) + ",";
+   jsonBody += "\"executed_volume\":" + DoubleToString(executedVolume, volumeDigits) + ",";
    jsonBody += "\"mt5_order\":" + IntegerToString(mt5Order) + ",";
    jsonBody += "\"mt5_deal\":" + IntegerToString(mt5Deal) + ",";
    jsonBody += "\"mt5_position_id\":" + IntegerToString(mt5PositionId) + ",";
@@ -1469,6 +1554,14 @@ void OnTimer()
       g_lastHeartbeatTime = now;
       g_lastStatisticTime = now;
       g_tickCount = 0;
+     }
+
+//--- 每5分钟刷新当前品种的交易数量规格
+   if(g_lastInstrumentSpecReportTime == 0 ||
+      (now - g_lastInstrumentSpecReportTime) >= INSTRUMENT_SPEC_REPORT_INTERVAL_SECONDS)
+     {
+      SendInstrumentSpec();
+      g_lastInstrumentSpecReportTime = now;
      }
   }
 //+------------------------------------------------------------------+

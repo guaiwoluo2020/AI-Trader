@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+from repositories.instrument_specs import InstrumentSpecRepository, normalize_volume
+
 
 def apply_action(action, state: Dict, position, ticket: int) -> Dict:
     """Apply one management action to state and return normalized instructions."""
@@ -24,7 +26,19 @@ def apply_action(action, state: Dict, position, ticket: int) -> Dict:
     level_ids = action.level_ids or [action.level_id]
     if all(level_id in done for level_id in level_ids):
         return result
-    close_volume = round(float(action.close_volume), 2)
+    account_id = int(state.get("account_id") or 0)
+    symbol = str(state.get("symbol") or getattr(position, "symbol", "") or "")
+    spec = InstrumentSpecRepository().get(account_id, symbol) if account_id and symbol else None
+    close_volume = normalize_volume(
+        float(action.close_volume), spec, opening=False,
+        current_volume=float(getattr(position, "volume", 0) or state.get("remaining_volume") or 0),
+    )
+    # A partial level smaller than the broker's minimum must consume the
+    # remaining position; leaving an untradeable residue would make the next
+    # MT5/IBKR close request invalid.
+    if close_volume <= 0:
+        current = float(getattr(position, "volume", 0) or state.get("remaining_volume") or 0)
+        close_volume = normalize_volume(current, spec, opening=False, current_volume=current) if current > 0 else 0.0
     if close_volume <= 0:
         return result
     done.update(level_ids)

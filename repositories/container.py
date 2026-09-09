@@ -19,6 +19,7 @@ from .trade_config import TradeConfigRepository
 from .trading import TradeExecutionRepository
 from .platform import PlatformInstrumentMappingRepository
 from .outbox import OutboxEventRepository
+from .key_level_cooldowns import KeyLevelCooldownRepository
 from market.services.outbox_dispatcher import OutboxDispatcher
 
 
@@ -45,3 +46,8 @@ class RepositoryContainer:
 
     def runtime(self, user_id: int, account_id: int) -> RuntimeStateRepository:
         return RuntimeStateRepository(user_id, account_id, self.storage)
+
+    def key_level_cooldowns(
+        self, user_id: int = 0, account_id: int = 0,
+    ) -> KeyLevelCooldownRepository:
+        return KeyLevelCooldownRepository(self.storage, user_id, account_id)

@@ -334,7 +334,18 @@ class TradingServer:
         )
 
         # 关键点位信号生成器
-        key_level_generator = KeyLevelSignalGenerator(self.kline_store)
+        key_level_generator = KeyLevelSignalGenerator(
+            self.kline_store,
+            cooldown_repository=(
+                self.repositories.key_level_cooldowns(
+                    self.user_id or 0, self.account_id or 0,
+                )
+                if self.user_id is not None and self.account_id is not None
+                else None
+            ),
+            user_id=self.user_id or 0,
+            account_id=self.account_id or 0,
+        )
         self._signal_service.register_generator("key_level", key_level_generator)
 
         # AI入场信号生成器
@@ -745,6 +756,8 @@ class TradingServer:
                     except (TypeError, ValueError):
                         attribution = {}
             state = self._managed_position_state.setdefault(ticket, {
+                "account_id": int(self.account_id or 0),
+                "symbol": str(getattr(position, "symbol", "") or ""),
                 "direction": position.direction,
                 "entry_price": float(position.price_open),
                 "stop_loss": float(position.sl),

@@ -7,6 +7,7 @@
 
 import ast
 import math
+import time
 from typing import Optional, List, Dict
 from datetime import datetime
 
@@ -58,20 +59,26 @@ def evaluate_key_level_expression(expression: str, price: float) -> List[float]:
 class KeyLevelSignalGenerator:
     """关键点位信号生成器"""
 
-    def __init__(self, kline_store=None):
+    def __init__(
+        self, kline_store=None, cooldown_repository=None,
+        user_id: int = 0, account_id: int = 0,
+    ):
         # 关键点位配置
         self._key_levels: Dict[str, List[float]] = {}
         self.kline_store = kline_store
+        self.cooldown_repository = cooldown_repository
+        self.user_id = int(user_id or 0)
+        self.account_id = int(account_id or 0)
 
         # 阈值（价格距离关键点位的百分比）
         self.threshold = 0.0008  # 万分之八
 
         # 信号冷却时间（秒）
-        # Integer/round-number attempts are intentionally sparse.  Reversal
-        # and breakout entries use separate directional keys, while each
-        # integer-level key is quiet for four hours by default.
+        # Integer/round-number attempts are intentionally sparse.  Every
+        # setup at the same integer level shares the directional quiet period
+        # so reversal/breakout variants cannot bypass the 48-hour guard.
         self.cooldown = 2 * 60 * 60
-        self.integer_level_cooldown = 4 * 60 * 60
+        self.integer_level_cooldown = 48 * 60 * 60
 
         # 冷却记录
         self._signal_cooldowns: Dict[str, datetime] = {}
@@ -153,20 +160,90 @@ class KeyLevelSignalGenerator:
         if key in self._signal_cooldowns:
             last_time = self._signal_cooldowns[key]
             elapsed = (datetime.now() - last_time).total_seconds()
-            return elapsed < (self.cooldown if cooldown is None else cooldown)
+            if elapsed < (self.cooldown if cooldown is None else cooldown):
+                return True
+        if self.cooldown_repository is not None:
+            try:
+                active_until = self.cooldown_repository.get_active_until(
+                    key, int(time.time())
+                )
+            except Exception as exc:
+                print(f"[KeyLevelSignalGenerator] 读取持久化冷却失败: {exc}")
+                active_until = None
+            if active_until:
+                self._signal_cooldowns[key] = datetime.fromtimestamp(active_until)
+                return True
         return False
 
     def _set_cooldown(
         self, symbol: str, key_level: float, strategy_id: str = "",
         signal_source_id: str = "", setup_type: str = "",
-        direction: str = "", period: str = "",
+        direction: str = "", period: str = "", cooldown: int = None,
     ) -> None:
         """设置冷却"""
         key = self._cooldown_key(
             symbol, key_level, strategy_id, signal_source_id,
             setup_type, direction, period,
         )
-        self._signal_cooldowns[key] = datetime.now()
+        now = datetime.now()
+        self._signal_cooldowns[key] = now
+        if self.cooldown_repository is not None:
+            duration = cooldown
+            if duration is None:
+                duration = (
+                    self.integer_level_cooldown
+                    if self._is_integer_level(key_level) else self.cooldown
+                )
+            try:
+                self.cooldown_repository.set_cooldown(
+                    key, int(now.timestamp()) + max(0, int(duration)),
+                    int(now.timestamp()),
+                )
+            except Exception as exc:
+                print(f"[KeyLevelSignalGenerator] 写入持久化冷却失败: {exc}")
+
+    def _claim_cooldown(
+        self, symbol: str, key_level: float, strategy_id: str = "",
+        signal_source_id: str = "", setup_type: str = "",
+        direction: str = "", period: str = "", cooldown: int = None,
+    ) -> bool:
+        """Claim a cooldown once, atomically when MySQL is available."""
+        duration = self.cooldown if cooldown is None else max(0, int(cooldown))
+        key = self._cooldown_key(
+            symbol, key_level, strategy_id, signal_source_id,
+            setup_type, direction, period,
+        )
+        if self._check_cooldown(
+            symbol, key_level, strategy_id, signal_source_id,
+            duration, setup_type, direction, period,
+        ):
+            return False
+        if self.cooldown_repository is not None:
+            try:
+                claimed = self.cooldown_repository.claim_cooldown(
+                    key, duration, int(time.time())
+                )
+                if not claimed:
+                    return False
+                self._signal_cooldowns[key] = datetime.now()
+                return True
+            except Exception as exc:
+                # Keep signal generation available during a transient database
+                # outage; the local cache still prevents duplicates in-process.
+                print(f"[KeyLevelSignalGenerator] 原子领取冷却失败，回退内存: {exc}")
+        self._set_cooldown(
+            symbol, key_level, strategy_id, signal_source_id,
+            setup_type, direction, period, duration,
+        )
+        return True
+
+    @staticmethod
+    def _is_integer_level(key_level: float) -> bool:
+        try:
+            value = float(key_level)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(value) and abs(value - round(value)) < 1e-9
 
     @staticmethod
     def _cooldown_key(
@@ -174,9 +251,21 @@ class KeyLevelSignalGenerator:
         signal_source_id: str, setup_type: str, direction: str,
         period: str,
     ) -> str:
+        # Integer levels are a single trading opportunity regardless of which
+        # key-level setup detected it.  Non-integer configured levels keep the
+        # setup dimension so their independent rules remain independent.
+        if KeyLevelSignalGenerator._is_integer_level(key_level):
+            try:
+                level_token = str(int(round(float(key_level))))
+            except (TypeError, ValueError):
+                level_token = str(key_level or "")
+            setup_token = ""
+        else:
+            level_token = str(key_level or "")
+            setup_token = str(setup_type or "")
         return "|".join(str(value or "") for value in (
-            strategy_id, signal_source_id, symbol, key_level,
-            setup_type, direction, period,
+            strategy_id, signal_source_id, symbol, level_token,
+            setup_token, direction, period,
         ))
 
     def _clear_setup_cooldown(
@@ -551,7 +640,7 @@ class KeyLevelSignalGenerator:
             except (TypeError, ValueError):
                 integer_level = False
             if setup_type == "key_level_reversal":
-                # Integer levels use a four-hour quiet period.  Non-integer
+                # Integer levels use a 48-hour quiet period.  Non-integer
                 # configured levels retain the two-hour reversal default.
                 configured_cooldown = max(
                     self.integer_level_cooldown if integer_level else self.cooldown,
@@ -561,35 +650,25 @@ class KeyLevelSignalGenerator:
                     ) or 0),
                 )
             else:
-                # Integer breakouts also use the four-hour quiet period;
+                # Integer breakouts also use the 48-hour quiet period;
                 # non-integer breakouts keep their explicit throttle only.
                 configured_cooldown = max(
                     self.integer_level_cooldown if integer_level else 0,
                     int(params.get("breakout_cooldown_seconds", 0) or 0),
                 )
             cooldown = max(0, int(configured_cooldown))
-            if signal.is_entry_trigger and self._check_cooldown(
+            if signal.is_entry_trigger and not self._claim_cooldown(
                 symbol, signal.key_level, strategy.strategy_id, source_id,
-                cooldown, setup_type, signal.action, config.get("period", ""),
+                setup_type, signal.action, config.get("period", ""), cooldown,
             ):
                 signal.is_entry_trigger = False
-            elif signal.is_entry_trigger:
-                self._set_cooldown(
-                    symbol, signal.key_level, strategy.strategy_id, source_id,
-                    setup_type, signal.action, config.get("period", ""),
-                )
-                if setup_type == "key_level_breakout":
-                    self._clear_setup_cooldown(
-                        symbol, signal.key_level, strategy.strategy_id, source_id,
-                        "key_level_reversal", config.get("period", ""),
-                    )
             signal.source_period = config["period"]
             signal.signal_source_id = source_id
             signals.append(signal)
             for special in extra_level_19:
                 special_setup = str(special.setup_type or "")
                 # Level-19 breakout/rejection is a discrete round-number
-                # setup.  Both directions use the same four-hour quiet period
+                # setup.  Both directions use the same 48-hour quiet period
                 # by default; an explicit longer configuration still wins.
                 level_19_breakout_cooldown = (
                     self.integer_level_cooldown if "key_level_19" in special_setup else 0
@@ -599,17 +678,13 @@ class KeyLevelSignalGenerator:
                     level_19_breakout_cooldown,
                     int(params.get("breakout_cooldown_seconds", 0) or 0),
                 )
-                if special.is_entry_trigger and self._check_cooldown(
-                    symbol, special.key_level, strategy.strategy_id, source_id,
-                    special_cooldown, special_setup, special.action,
-                    config.get("period", ""),
-                ):
-                    continue
                 if special.is_entry_trigger and special_cooldown > 0:
-                    self._set_cooldown(
+                    if not self._claim_cooldown(
                         symbol, special.key_level, strategy.strategy_id, source_id,
                         special_setup, special.action, config.get("period", ""),
-                    )
+                        special_cooldown,
+                    ):
+                        continue
                 special.source_period = config["period"]
                 special.signal_source_id = source_id
                 signals.append(special)

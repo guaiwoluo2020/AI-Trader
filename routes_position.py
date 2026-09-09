@@ -12,6 +12,7 @@ from ea_auth import EAIdentity, require_ea_auth
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
 from repositories.trading import PositionManagementEventRepository
+from repositories.instrument_specs import InstrumentSpecRepository
 
 
 def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -24,6 +25,26 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
     router = APIRouter()
     protected_router = APIRouter()
     repositories = engine_manager.repositories
+
+    @router.post("/ea/instrument_specs")
+    async def receive_instrument_specs(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
+        """Persist broker-provided volume rules for one account and symbol."""
+        try:
+            payload = await request.json()
+            symbol = str(payload.get("symbol") or "").strip()
+            if not symbol:
+                return {"status": "error", "message": "缺少品种"}
+            spec = InstrumentSpecRepository().upsert(
+                identity.account_id,
+                symbol,
+                payload,
+            )
+            return {"status": "ok", "account_id": identity.account_id, "spec": spec}
+        except (TypeError, ValueError) as exc:
+            return {"status": "error", "message": str(exc)}
 
     @router.post("/ea/positions")
     async def receive_positions(

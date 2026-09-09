@@ -500,7 +500,7 @@ class StrategyServiceTestCase(unittest.TestCase):
         self.assertEqual(signal.suggested_sl, 4420.0)
         self.assertAlmostEqual(signal.suggested_tp, 4418.0 * (1 - 0.0032), places=6)
 
-    def test_key_level_19_breakout_has_four_hour_directional_cooldown(self):
+    def test_key_level_19_breakout_has_48_hour_directional_cooldown(self):
         from market.services.signal.key_level_signal import KeyLevelSignalGenerator
         from market.models.trading_strategy import TradingStrategy
         strategy = TradingStrategy(symbol="GOLD_", signal_sources=[{
@@ -515,7 +515,7 @@ class StrategyServiceTestCase(unittest.TestCase):
         first = generator.generate_signals_for_strategy("GOLD_", 4420.0, strategy)
         self.assertTrue(any(item.is_entry_trigger for item in first))
         # Re-arm the state machine, then cross the same level in the same
-        # direction.  The second trigger is suppressed for two hours.
+        # direction.  The second trigger is suppressed for 48 hours.
         generator.generate_signals_for_strategy("GOLD_", 4417.0, strategy)
         second = generator.generate_signals_for_strategy("GOLD_", 4420.0, strategy)
         self.assertFalse(any(item.is_entry_trigger for item in second))
@@ -579,6 +579,59 @@ class StrategyServiceTestCase(unittest.TestCase):
             "GOLD#", 4300, "strategy", "source", 7200,
             "key_level_reversal", "sell", "M1",
         ))
+
+    def test_integer_level_cooldown_is_shared_across_same_direction_setups(self):
+        generator = KeyLevelSignalGenerator()
+        generator._set_cooldown(
+            "GOLD#", 4300, "strategy", "source",
+            "key_level_19_breakout", "buy", "M1",
+        )
+
+        # A different integer-level setup must not bypass the 48-hour
+        # quiet period when it points in the same direction.
+        self.assertTrue(generator._check_cooldown(
+            "GOLD#", 4300, "strategy", "source", 48 * 60 * 60,
+            "key_level_reversal", "buy", "M1",
+        ))
+
+        # The quiet period remains directional: an opposite-side setup may
+        # still be evaluated independently.
+        self.assertFalse(generator._check_cooldown(
+            "GOLD#", 4300, "strategy", "source", 48 * 60 * 60,
+            "key_level_reversal", "sell", "M1",
+        ))
+
+    def test_integer_level_cooldown_survives_generator_restart(self):
+        class _CooldownRepository:
+            def __init__(self):
+                self.rows = {}
+
+            def get_active_until(self, cooldown_id, now=None):
+                value = self.rows.get(cooldown_id)
+                if value and value > (now or 0):
+                    return value
+                return None
+
+            def set_cooldown(self, cooldown_id, cooldown_until, now=None):
+                self.rows[cooldown_id] = int(cooldown_until)
+
+        repository = _CooldownRepository()
+        first = KeyLevelSignalGenerator(
+            cooldown_repository=repository, user_id=7, account_id=11,
+        )
+        first._set_cooldown(
+            "GOLD#", 4300, "strategy", "source",
+            "key_level_19_breakout", "buy", "M1",
+        )
+
+        restarted = KeyLevelSignalGenerator(
+            cooldown_repository=repository, user_id=7, account_id=11,
+        )
+        self.assertTrue(restarted._check_cooldown(
+            "GOLD#", 4300, "strategy", "source", 48 * 60 * 60,
+            "key_level_reversal", "buy", "M1",
+        ))
+        self.assertEqual(restarted.integer_level_cooldown, 48 * 60 * 60)
 
     def test_signal_generation_assigns_each_signal_to_its_strategy(self):
         service = SignalService()

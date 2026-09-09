@@ -208,6 +208,15 @@
             <article><span>可用资金</span><strong>{{ money(paperDetail.account.free_margin, paperDetail.account.currency) }}</strong></article>
             <article><span>持仓 / 成交</span><strong>{{ paperDetail.positions.length }} / {{ paperDetail.trades.length }}</strong></article>
           </section>
+          <section class="today-trade-stats">
+            <div class="runtime-section-title"><h3>今日成交统计</h3><span>北京时间 {{ paperDetail.today_trade_stats?.date || '--' }} · 当日 00:00 起</span></div>
+            <div class="today-trade-grid">
+              <article><span>今日已成交</span><strong>{{ paperDetail.today_trade_stats?.filled_count || 0 }} 单</strong></article>
+              <article><span>盈利</span><strong class="positive">{{ paperDetail.today_trade_stats?.win_count || 0 }} 单 · {{ signedMoney(paperDetail.today_trade_stats?.win_amount) }} {{ paperDetail.account.currency }}</strong></article>
+              <article><span>亏损</span><strong class="negative">{{ paperDetail.today_trade_stats?.loss_count || 0 }} 单 · {{ signedMoney(paperDetail.today_trade_stats?.loss_amount) }} {{ paperDetail.account.currency }}</strong></article>
+              <article><span>今日净收益</span><strong :class="Number(paperDetail.today_trade_stats?.net_profit || 0) >= 0 ? 'positive' : 'negative'">{{ signedMoney(paperDetail.today_trade_stats?.net_profit) }} {{ paperDetail.account.currency }}</strong></article>
+            </div>
+          </section>
 
           <section class="deployment-workbench">
             <div>
@@ -478,6 +487,15 @@
             <article><span>净值</span><strong>{{ money(liveDetail.account.equity, liveDetail.account.currency) }}</strong></article>
             <article><span>可用资金</span><strong>{{ money(liveDetail.account.free_margin, liveDetail.account.currency) }}</strong></article>
             <article><span>持仓 / 最近成交</span><strong>{{ liveDetail.positions.length }} / {{ liveDetail.trades.length }}</strong></article>
+          </section>
+          <section class="today-trade-stats">
+            <div class="runtime-section-title"><h3>今日成交统计</h3><span>北京时间 {{ liveDetail.today_trade_stats?.date || '--' }} · 当日 00:00 起</span></div>
+            <div class="today-trade-grid">
+              <article><span>今日已成交</span><strong>{{ liveDetail.today_trade_stats?.filled_count || 0 }} 单</strong></article>
+              <article><span>盈利</span><strong class="positive">{{ liveDetail.today_trade_stats?.win_count || 0 }} 单 · {{ signedMoney(liveDetail.today_trade_stats?.win_amount) }} {{ liveDetail.account.currency }}</strong></article>
+              <article><span>亏损</span><strong class="negative">{{ liveDetail.today_trade_stats?.loss_count || 0 }} 单 · {{ signedMoney(liveDetail.today_trade_stats?.loss_amount) }} {{ liveDetail.account.currency }}</strong></article>
+              <article><span>今日净收益</span><strong :class="Number(liveDetail.today_trade_stats?.net_profit || 0) >= 0 ? 'positive' : 'negative'">{{ signedMoney(liveDetail.today_trade_stats?.net_profit) }} {{ liveDetail.account.currency }}</strong></article>
+            </div>
           </section>
 
           <section class="runtime-chart-card">
@@ -1418,6 +1436,10 @@ onBeforeUnmount(() => {
 .runtime-metrics article { padding: 15px; border: 1px solid #dce5df; border-radius: 12px; background: #fff; }
 .runtime-metrics span,.runtime-metrics strong { display: block; }
 .runtime-metrics span { color: #82908a; font-size: .68rem; }.runtime-metrics strong { margin-top: 4px; color: #295145; font-size: 1rem; }
+.today-trade-stats { margin-top: 13px; padding: 15px; border: 1px solid #dfe7e2; border-radius: 13px; background: #fff; }
+.today-trade-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.today-trade-grid article { padding: 10px 12px; border-radius: 10px; background: #f5f8f5; }
+.today-trade-grid span,.today-trade-grid strong { display: block; }.today-trade-grid span { color: #82908a; font-size: .65rem; }.today-trade-grid strong { margin-top: 4px; font-size: .78rem; }
 .deployment-workbench { display: grid; grid-template-columns: 1fr minmax(360px,520px); align-items: center; gap: 20px; margin-top: 14px; padding: 16px; border-radius: 13px; color: #f8f4e8; background: linear-gradient(120deg,#183b33,#2d6958); }
 .deployment-workbench h3 { margin: 3px 0; }.deployment-workbench p { margin: 0; color: rgba(255,255,255,.68); font-size: .7rem; }
 .deployment-form { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
@@ -1464,7 +1486,7 @@ onBeforeUnmount(() => {
 .runtime-empty { display: grid; place-items: center; min-height: 130px; color: #919c97; font-size: .72rem; }.runtime-empty.compact { min-height: 62px; }
 .empty-state { padding: 65px 20px; color: #85918b; text-align: center; }
 .empty-state h3 { margin: 12px 0 5px; color: #4a625b; }.empty-state p { margin: 0; }
-@media(max-width:1000px){.content-grid{grid-template-columns:1fr}.paper-card{position:static}.account-details{grid-template-columns:1fr 1fr}.deployment-workbench{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}.strategy-performance-grid{grid-template-columns:repeat(3,minmax(120px,1fr))}.report-metrics{grid-template-columns:repeat(3,1fr)}.report-breakdowns{grid-template-columns:1fr}.benchmark-grid{grid-template-columns:repeat(2,1fr)}.setup-direction-grid{grid-template-columns:1fr}}
-@media(max-width:650px){.accounts-page{padding:15px}.account-hero{align-items:flex-start;flex-direction:column;padding:25px}.metric-grid,.runtime-metrics{grid-template-columns:1fr 1fr}.account-topline{align-items:flex-start;flex-direction:column}.balance-row,.account-details,.paper-setting-grid{grid-template-columns:1fr}.account-chips{flex-wrap:wrap}.runtime-body{padding:14px!important}.deployment-form,.active-deployment-strip{grid-template-columns:1fr}.strategy-performance-grid{grid-template-columns:1fr 1fr}.order-row{grid-template-columns:1fr 45px 70px}.order-row>*:nth-child(n+4):not(:last-child){display:none}.trade-row{grid-template-columns:1fr auto}.trade-row>*:nth-child(2),.trade-row>*:nth-child(3){display:none}}
+@media(max-width:1000px){.content-grid{grid-template-columns:1fr}.paper-card{position:static}.account-details{grid-template-columns:1fr 1fr}.deployment-workbench{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}.strategy-performance-grid{grid-template-columns:repeat(3,minmax(120px,1fr))}.report-metrics{grid-template-columns:repeat(3,1fr)}.report-breakdowns{grid-template-columns:1fr}.benchmark-grid{grid-template-columns:repeat(2,1fr)}.setup-direction-grid{grid-template-columns:1fr}.today-trade-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:650px){.accounts-page{padding:15px}.account-hero{align-items:flex-start;flex-direction:column;padding:25px}.metric-grid,.runtime-metrics{grid-template-columns:1fr 1fr}.account-topline{align-items:flex-start;flex-direction:column}.balance-row,.account-details,.paper-setting-grid{grid-template-columns:1fr}.account-chips{flex-wrap:wrap}.runtime-body{padding:14px!important}.deployment-form,.active-deployment-strip{grid-template-columns:1fr}.strategy-performance-grid{grid-template-columns:1fr 1fr}.today-trade-grid{grid-template-columns:1fr}.order-row{grid-template-columns:1fr 45px 70px}.order-row>*:nth-child(n+4):not(:last-child){display:none}.trade-row{grid-template-columns:1fr auto}.trade-row>*:nth-child(2),.trade-row>*:nth-child(3){display:none}}
 .deployment-form :deep(.v-field__input),.deployment-form :deep(.v-field__input input),.deployment-form :deep(.v-label){color:#254b40!important}.deployment-form :deep(.v-field__input input::placeholder){color:#71817a!important;opacity:1}.strategy-select-value span{color:#254b40}.strategy-select-value small{color:#6b7b74}.strategy-select-item :deep(.v-list-item-title),.strategy-select-item :deep(.v-list-item-subtitle){color:#254b40!important}.strategy-select-item :deep(.v-list-item-subtitle){color:#6f7e77!important}.deployment-form :deep(.v-field){border-color:#d6e4dc!important}.deployment-form :deep(.v-field--focused){border-color:#80b59f!important}
 </style>

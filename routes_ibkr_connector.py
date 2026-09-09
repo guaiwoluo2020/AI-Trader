@@ -15,6 +15,7 @@ from auth import AuthUser, require_auth
 from system_event_log import SystemEventLogRepository
 from mysql_repositories import RuntimeStateRepository
 from repositories.accounts import TradingAccountRepository
+from repositories.instrument_specs import InstrumentSpecRepository
 from market.services.market_tick_ingress import MarketTickIngress
 from market.services.ibkr_kline_file_store import latest_cursors, load_recent, save_batch
 
@@ -226,6 +227,24 @@ def create_ibkr_connector_routes(engine_manager=None) -> APIRouter:
                                     free_margin=cache.get("AvailableFunds", account.free_margin),
                                     margin=cache.get("MaintMarginReq", account.margin),
                                 )
+                    if payload.get("event") == "instrument_specs":
+                        detail = payload.get("payload") or {}
+                        broker_account = str(detail.get("account") or "").strip().upper()
+                        symbol = str(detail.get("symbol") or "").strip()
+                        binding = _connectors.get(connector_id, {})
+                        user_id = int(binding.get("user_id") or hello.get("user_id") or 0)
+                        account_id = next((
+                            int(item.get("trading_account_id") or 0)
+                            for item in (binding.get("bound_accounts") or [])
+                            if str(item.get("ibkr_account") or "").strip().upper() == broker_account
+                        ), 0)
+                        if user_id > 0 and account_id > 0 and symbol:
+                            try:
+                                InstrumentSpecRepository().upsert(
+                                    account_id, symbol, {**detail, "source": "ibkr"}
+                                )
+                            except Exception:
+                                logger.exception("failed to store IBKR instrument specs: %s", symbol)
                     if payload.get("event") == "positions_snapshot" and engine_manager is not None:
                         detail = payload.get("payload") or {}
                         binding = _connectors.get(connector_id, {})

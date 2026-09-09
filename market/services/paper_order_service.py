@@ -5,6 +5,7 @@ import uuid
 from typing import Dict
 
 from market.services.position_attribution import build_position_attribution
+from repositories.instrument_specs import InstrumentSpecRepository, normalize_volume
 
 
 class PaperOrderService:
@@ -87,6 +88,12 @@ class PaperOrderService:
         policy_snapshot = management.get("policy_snapshot") or strategy.get(
             "position_management_policy_snapshot", {}
         )
+        instrument_spec = InstrumentSpecRepository(self.paper_service.storage).get(
+            account_id, str(decision.get("symbol") or "")
+        )
+        requested_volume = normalize_volume(
+            float(decision.get("volume", 0.01)), instrument_spec, opening=True
+        )
         attribution = build_position_attribution(
             summary,
             decision_id=str(decision.get("decision_id") or ""),
@@ -96,9 +103,8 @@ class PaperOrderService:
             entry_reason=str(decision.get("decision_reason") or ""),
             initial_stop_loss=sl,
             initial_take_profit=tp,
-            initial_volume=max(0.01, float(decision.get("volume", 0.01))),
+            initial_volume=requested_volume,
         )
-        requested_volume = max(0.01, float(decision.get("volume", 0.01)))
         if requested_volume > float(account_limits["max_single_volume"]):
             reason = "超过账户单笔最大手数"
         if not reason and not self.paper_service._valid_exits(decision["action"], entry, sl, tp):

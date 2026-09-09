@@ -37,6 +37,7 @@ from market.services.paper_matching_engine import PaperMatchingEngine
 from market.services.paper_order_service import PaperOrderService
 from market.services.paper_position_service import PaperPositionService
 from market.services.paper_accounting_service import PaperAccountingService
+from market.services.today_trade_stats import today_trade_stats
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
 
 
@@ -1167,6 +1168,9 @@ class PaperTradingService:
         return {
             "account": self._account_dict(account),
             "settings": settings,
+            "today_trade_stats": today_trade_stats(
+                self.storage, user_id, account_id, "paper",
+            ),
             "deployments": deployments,
             "orders": orders,
             "positions": positions,

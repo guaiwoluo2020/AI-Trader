@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from auth import AuthUser, require_auth
 from membership import MembershipService
 from market.services.account_strategy_performance import build_live_performance
+from market.services.today_trade_stats import today_trade_stats
 from market.models.trading_strategy import StrategyLifecycle
 from mysql_repositories import (
     TradingAccountRecord,
@@ -461,6 +462,9 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             "status": "ok",
             "detail": {
                 "account": _account_payload(account),
+                "today_trade_stats": today_trade_stats(
+                    repository.storage, user.user_id, account_id, account.account_type,
+                ),
                 "positions": positions,
                 "trades": trades,
                 "execution_reports": execution_reports,

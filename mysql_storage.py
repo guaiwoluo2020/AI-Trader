@@ -234,6 +234,24 @@ class MySQLStorage:
                 )
                 conn.execute(
                     """
+                CREATE TABLE IF NOT EXISTS account_instrument_specs (
+                    account_id BIGINT NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    min_volume DECIMAL(20,8) NOT NULL DEFAULT 0.01,
+                    volume_step DECIMAL(20,8) NOT NULL DEFAULT 0.01,
+                    max_volume DECIMAL(20,8) NOT NULL DEFAULT 100.0,
+                    volume_digits INT NOT NULL DEFAULT 2,
+                    contract_size DECIMAL(24,8) NOT NULL DEFAULT 1.0,
+                    source VARCHAR(32) NOT NULL DEFAULT 'default',
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (account_id, symbol),
+                    KEY idx_account_instrument_specs_updated (updated_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
                 CREATE TABLE IF NOT EXISTS ai_trade_suggestions (
                     suggestion_id VARCHAR(64) NOT NULL,
                     user_id BIGINT NOT NULL,
@@ -475,6 +493,22 @@ class MySQLStorage:
                   COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS key_level_signal_cooldowns (
+                    cooldown_id VARCHAR(512) NOT NULL,
+                    user_id BIGINT NOT NULL DEFAULT 0,
+                    account_id BIGINT NOT NULL DEFAULT 0,
+                    cooldown_until BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (cooldown_id),
+                    KEY idx_key_level_cooldowns_lookup (
+                        user_id, account_id, cooldown_until
+                    )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
                 try:
                     conn.execute(
                         "ALTER TABLE ai_signal_sources ADD COLUMN "
@@ -542,6 +576,14 @@ class MySQLStorage:
                             # would fail later with a less actionable SQL error.
                             if getattr(exc, "args", (None,))[0] != 1060:
                                 raise
+                try:
+                    conn.execute(
+                        "ALTER TABLE key_level_signal_cooldowns "
+                        "MODIFY COLUMN cooldown_id VARCHAR(512) NOT NULL"
+                    )
+                except Exception as exc:
+                    if getattr(exc, "args", (None,))[0] not in (1051, 1146):
+                        raise
                 compatibility_indexes = (
                     (
                         "historical_klines",

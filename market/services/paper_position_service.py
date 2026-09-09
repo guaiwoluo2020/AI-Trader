@@ -5,6 +5,7 @@ import uuid
 
 from market.services.position_attribution import close_position_attribution
 from market.services.tick_execution_core import TickExecutionCore, TickQuote
+from repositories.instrument_specs import InstrumentSpecRepository, normalize_volume
 
 
 class PaperPositionService:
@@ -154,7 +155,20 @@ class PaperPositionService:
                     remaining = float(
                         position["remaining_volume"] or position["volume"]
                     )
-                    close_volume = min(remaining, float(action.close_volume))
+                    spec = InstrumentSpecRepository(self.paper_service.storage).get(
+                        account_id, symbol
+                    )
+                    close_volume = normalize_volume(
+                        min(remaining, float(action.close_volume)), spec,
+                        opening=False, current_volume=remaining,
+                    )
+                    if close_volume <= 0 and remaining > 0:
+                        # A final partial level below the broker minimum closes
+                        # the remaining trade instead of leaving an invalid dust lot.
+                        close_volume = normalize_volume(
+                            remaining, spec, opening=False, current_volume=remaining
+                        )
+                    close_volume = min(remaining, close_volume)
                     if close_volume > 0:
                         multiplier = 1 if position["direction"] == "buy" else -1
                         gross = (
