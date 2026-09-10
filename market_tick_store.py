@@ -119,6 +119,44 @@ class LocalTickStore:
 
 _default_store: Optional[LocalTickStore] = None
 _default_lock = threading.Lock()
+_enabled_override: Optional[bool] = None
+
+
+def tick_persistence_enabled() -> bool:
+    """Return whether incoming EA ticks should be persisted for replay.
+
+    Persistence is intentionally disabled by default: live execution still
+    consumes every tick, but the optional local replay files are not written
+    unless the backend switch is enabled.  The in-process override is used by
+    the admin control endpoint; an environment value provides the startup
+    default and can be set to ``1/true/on``.
+    """
+    if _enabled_override is not None:
+        return bool(_enabled_override)
+    return os.getenv("AI_TRADER_TICK_PERSISTENCE_ENABLED", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def set_tick_persistence_enabled(enabled: bool) -> bool:
+    """Set the runtime switch and return its normalized value."""
+    global _enabled_override
+    _enabled_override = bool(enabled)
+    return _enabled_override
+
+
+def tick_persistence_config() -> Dict[str, object]:
+    return {
+        "enabled": tick_persistence_enabled(),
+        "default_enabled": os.getenv(
+            "AI_TRADER_TICK_PERSISTENCE_ENABLED", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"},
+        "data_dir": str(
+            Path(os.getenv("AI_TRADER_TICK_DATA_DIR", "data/ticks"))
+            .expanduser()
+            .resolve()
+        ),
+    }
 
 
 def get_local_tick_store() -> LocalTickStore:

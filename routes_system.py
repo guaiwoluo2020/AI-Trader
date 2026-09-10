@@ -4,9 +4,10 @@
 系统相关的接口路由
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Dict, Optional
-from auth import AuthUser, require_auth
+from auth import AuthUser, require_admin, require_auth
+from market_tick_store import set_tick_persistence_enabled, tick_persistence_config
 from status_payload import build_system_status_payload
 from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
@@ -99,6 +100,32 @@ def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
         if task is None:
             return {"status": "not_found", "task": None}
         return {"status": "ok", "task": task}
+
+    @protected_router.get("/admin/system/tick-persistence")
+    def get_tick_persistence(user: AuthUser = Depends(require_admin)) -> Dict:
+        """查看本地 Tick 回放文件写入开关。"""
+        return {"status": "ok", **tick_persistence_config()}
+
+    @protected_router.put("/admin/system/tick-persistence")
+    def update_tick_persistence(
+        payload: Dict,
+        user: AuthUser = Depends(require_admin),
+    ) -> Dict:
+        """运行时切换 Tick 落盘；默认关闭，实时行情/交易不受影响。"""
+        if "enabled" not in payload:
+            raise HTTPException(status_code=400, detail="缺少 enabled 配置")
+        raw_enabled = payload.get("enabled")
+        if isinstance(raw_enabled, str):
+            normalized = raw_enabled.strip().lower()
+            if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+                raise HTTPException(status_code=400, detail="enabled 必须是布尔值")
+            raw_enabled = normalized in {"1", "true", "yes", "on"}
+        enabled = set_tick_persistence_enabled(bool(raw_enabled))
+        return {
+            "status": "ok",
+            "message": "Tick 本地落盘已开启" if enabled else "Tick 本地落盘已关闭",
+            **tick_persistence_config(),
+        }
     
     router.include_router(protected_router)
     return router
