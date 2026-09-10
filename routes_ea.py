@@ -25,6 +25,7 @@ from routes_news import _normalize_calendar, _require_items, _validate_day
 from market_event_repository import MarketEventRepository
 from market.store.structure_plan_store import StructureTradePlanRepository
 from market.services.events import ApplicationEvent
+from repositories.instrument_specs import InstrumentSpecRepository
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,57 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             "is_admin": bool(user and user.role == "admin"),
             "market_source": market_notice,
         }
+
+    @router.post("/ea/instrument_specs")
+    async def receive_instrument_spec(
+        request: Request,
+        identity: EAIdentity = Depends(require_ea_auth),
+    ) -> Dict:
+        """Persist the broker's volume rules for the EA's current symbol.
+
+        The specification is scoped to the authenticated trading account, so
+        symbols with broker suffixes (for example ``GOLD#``) do not inherit a
+        different account's minimum volume or step.  Position-management and
+        partial-close code reads this record before creating an instruction.
+        """
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="品种交易规格必须是 JSON 对象",
+                )
+            symbol = str(payload.get("symbol") or "").strip()
+            if not symbol:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="品种不能为空",
+                )
+            spec = InstrumentSpecRepository().upsert(
+                identity.account_id,
+                symbol,
+                {
+                    "min_volume": payload.get("min_volume"),
+                    "volume_step": payload.get("volume_step"),
+                    "max_volume": payload.get("max_volume"),
+                    "volume_digits": payload.get("volume_digits"),
+                    "contract_size": payload.get("contract_size"),
+                    "source": payload.get("source") or "mt5",
+                },
+            )
+            logger.info(
+                "EA instrument spec received: user_id=%s account_id=%s symbol=%s min=%s step=%s",
+                identity.user_id, identity.account_id, symbol,
+                spec["min_volume"], spec["volume_step"],
+            )
+            return {"status": "ok", "account_id": identity.account_id, "spec": spec}
+        except HTTPException:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"品种交易规格无效: {exc}",
+            ) from exc
 
     @router.get("/get_trades")
     async def get_trades(
