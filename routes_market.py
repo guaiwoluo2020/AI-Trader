@@ -2807,11 +2807,13 @@ def create_market_routes(
         page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
         target_user_id: Optional[int] = Query(None),
         symbol: Optional[str] = Query(None), lifecycle_status: Optional[str] = Query(None),
+        search: Optional[str] = Query(None),
         user: AuthUser = Depends(require_admin),
     ) -> Dict:
         """管理员查看所有用户策略，便于人工推进验证状态。"""
         items, total = strategy_repo.list_admin_strategies_page(
-            page, page_size, target_user_id, symbol or "", lifecycle_status or ""
+            page, page_size, target_user_id, symbol or "", lifecycle_status or "",
+            search or "",
         )
         return {
             "status": "ok",

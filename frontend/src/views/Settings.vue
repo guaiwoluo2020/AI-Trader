@@ -682,8 +682,8 @@
               管理员只推进策略生命周期；进入“可用于实盘”后，用户侧可将策略部署到账户运行。共享引用策略允许推进到实盘。
             </v-alert>
             <div class="strategy-governance-toolbar">
-              <v-text-field v-model="adminStrategySearch" label="搜索用户/策略/品种" prepend-inner-icon="mdi-magnify" density="compact" variant="outlined" hide-details />
-              <v-select v-model="adminStrategyLifecycleFilter" :items="lifecycleFilterOptions" label="生命周期" density="compact" variant="outlined" hide-details />
+              <v-text-field v-model="adminStrategySearch" label="搜索用户/策略/品种" prepend-inner-icon="mdi-magnify" density="compact" variant="outlined" hide-details @update:model-value="scheduleAdminStrategiesReload" />
+              <v-select v-model="adminStrategyLifecycleFilter" :items="lifecycleFilterOptions" label="生命周期" density="compact" variant="outlined" hide-details @update:model-value="resetAdminStrategiesPage" />
             </div>
             <v-table density="comfortable" class="quota-table admin-strategy-table mt-4">
               <thead><tr><th>用户</th><th>策略</th><th>信号源</th><th>当前状态</th><th>推进到</th><th>备注</th><th></th></tr></thead>
@@ -731,6 +731,10 @@
                 </tr>
               </tbody>
             </v-table>
+            <div v-if="adminStrategyTotal > adminStrategyPageSize" class="d-flex align-center justify-space-between flex-wrap ga-2 py-4">
+              <span class="text-caption text-medium-emphasis">共 {{ adminStrategyTotal }} 条策略 · 第 {{ adminStrategyPage }} / {{ adminStrategyPageCount }} 页</span>
+              <v-pagination v-model="adminStrategyPage" :length="adminStrategyPageCount" :total-visible="7" :disabled="adminStrategiesLoading" @update:model-value="loadAdminStrategies" />
+            </div>
             <v-empty-state v-if="!adminStrategiesLoading && !filteredAdminStrategies.length" icon="mdi-shield-search" title="没有符合条件的策略" text="调整筛选条件后再试试。" />
           </v-card-text>
         </v-card>
@@ -1677,6 +1681,10 @@ export default {
     const adminStrategySaving = ref(null)
     const adminStrategySearch = ref('')
     const adminStrategyLifecycleFilter = ref('all')
+    const adminStrategyPage = ref(1)
+    const adminStrategyPageSize = 20
+    const adminStrategyTotal = ref(0)
+    const adminStrategyReloadTimer = ref(null)
     const adminDeploymentsDialog = ref(false)
     const adminDeploymentsLoading = ref(null)
     const adminDeploymentsDetail = ref(null)
@@ -2127,22 +2135,55 @@ export default {
       }
     }
 
-    const loadAdminStrategies = async () => {
+    const adminStrategyPageCount = computed(() => Math.max(1, Math.ceil(adminStrategyTotal.value / adminStrategyPageSize)))
+    const loadAdminStrategies = async (requestedPage = adminStrategyPage.value) => {
       if (!isAdmin.value) return
+      adminStrategyPage.value = Math.min(
+        Math.max(1, Number(requestedPage) || 1),
+        adminStrategyPageCount.value || 1,
+      )
       adminStrategiesLoading.value = true
       try {
-        const data = await marketAPI.getAdminStrategies()
+        const data = await marketAPI.getAdminStrategies(
+          adminStrategyPage.value,
+          adminStrategyPageSize,
+          {
+            search: adminStrategySearch.value.trim(),
+            lifecycle_status: adminStrategyLifecycleFilter.value === 'all'
+              ? '' : adminStrategyLifecycleFilter.value,
+          },
+        )
+        adminStrategyTotal.value = Number(data.total ?? data.count ?? 0)
         adminStrategies.value = (data.strategies || []).map(item => ({
           ...item,
           adminTargetStatus: item.lifecycle_status || 'draft',
           adminReason: ''
         }))
+        if (adminStrategyPage.value > adminStrategyPageCount.value) {
+          adminStrategyPage.value = adminStrategyPageCount.value
+          return await loadAdminStrategies(adminStrategyPage.value)
+        }
       } catch (err) {
         errorMessage.value = err.response?.data?.detail || '加载用户策略状态失败'
         showError.value = true
+        adminStrategies.value = []
+        adminStrategyTotal.value = 0
       } finally {
         adminStrategiesLoading.value = false
       }
+    }
+
+    const resetAdminStrategiesPage = () => {
+      adminStrategyPage.value = 1
+      loadAdminStrategies(1)
+    }
+
+    const scheduleAdminStrategiesReload = () => {
+      if (adminStrategyReloadTimer.value) clearTimeout(adminStrategyReloadTimer.value)
+      adminStrategyReloadTimer.value = setTimeout(() => {
+        adminStrategyPage.value = 1
+        loadAdminStrategies(1)
+      }, 250)
     }
 
     const adminPromoteStrategy = async (item) => {
@@ -3955,9 +3996,15 @@ export default {
       adminStrategySaving,
       adminStrategySearch,
       adminStrategyLifecycleFilter,
+      adminStrategyPage,
+      adminStrategyPageSize,
+      adminStrategyPageCount,
+      adminStrategyTotal,
       adminLifecycleOptions,
       filteredAdminStrategies,
       loadAdminStrategies,
+      resetAdminStrategiesPage,
+      scheduleAdminStrategiesReload,
       adminPromoteStrategy,
       saveTradeConfig,
       addSymbolConfig,

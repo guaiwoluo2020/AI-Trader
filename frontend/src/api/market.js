@@ -869,6 +869,7 @@ export const marketAPI = {
     if (filters.user_id) params.target_user_id = filters.user_id
     if (filters.symbol) params.symbol = filters.symbol
     if (filters.lifecycle_status) params.lifecycle_status = filters.lifecycle_status
+    if (filters.search) params.search = filters.search
     const response = await api.get('/admin/strategies', { params })
     return response.data
   },

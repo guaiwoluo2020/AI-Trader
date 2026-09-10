@@ -3487,19 +3487,34 @@ class StrategyConfigRepository:
 
     def list_admin_strategies_page(self, page: int = 1, page_size: int = 20,
                                    user_id: Optional[int] = None,
-                                   symbol: str = "", lifecycle_status: str = ""):
+                                   symbol: str = "", lifecycle_status: str = "",
+                                   search: str = ""):
         from market.models.trading_strategy import TradingStrategy
         page = max(1, int(page)); page_size = max(1, min(int(page_size), 100))
         clauses = []; params = []
         if user_id is not None: clauses.append("strategy.user_id = ?"); params.append(int(user_id))
         if symbol: clauses.append("JSON_UNQUOTE(JSON_EXTRACT(strategy.config_json, '$.symbol')) = ?"); params.append(str(symbol))
         if lifecycle_status: clauses.append("JSON_UNQUOTE(JSON_EXTRACT(strategy.config_json, '$.lifecycle_status')) = ?"); params.append(str(lifecycle_status))
+        if search:
+            term = f"%{str(search).strip()}%"
+            clauses.append(
+                "(users.username LIKE ? OR users.email LIKE ? OR "
+                "strategy.strategy_id LIKE ? OR strategy.symbol LIKE ? OR "
+                "JSON_UNQUOTE(JSON_EXTRACT(strategy.config_json, '$.strategy_name')) LIKE ?)"
+            )
+            params.extend([term] * 5)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        total = self.storage.fetchone("SELECT COUNT(*) AS total FROM user_strategy_configs AS strategy" + where, tuple(params))
+        total = self.storage.fetchone(
+            "SELECT COUNT(*) AS total FROM user_strategy_configs AS strategy "
+            "JOIN users ON users.id=strategy.user_id" + where,
+            tuple(params),
+        )
         rows = self.storage.fetchall(
             "SELECT strategy.user_id, users.username, users.email, users.role, users.membership_level, users.live_trading_enabled, strategy.strategy_id, strategy.symbol, strategy.config_json, strategy.created_at, strategy.updated_at "
             "FROM user_strategy_configs AS strategy JOIN users ON users.id=strategy.user_id" + where +
-            " ORDER BY strategy.updated_at DESC, strategy.created_at DESC, strategy.strategy_id DESC LIMIT ? OFFSET ?",
+            " ORDER BY CASE JSON_UNQUOTE(JSON_EXTRACT(strategy.config_json, '$.lifecycle_status')) "
+            "WHEN 'production' THEN 0 WHEN 'retired' THEN 2 ELSE 1 END, "
+            "strategy.updated_at DESC, strategy.created_at DESC, strategy.strategy_id DESC LIMIT ? OFFSET ?",
             tuple(params + [page_size, (page - 1) * page_size]),
         )
         items = []
