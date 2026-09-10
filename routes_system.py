@@ -21,7 +21,7 @@ def create_system_routes(engine_manager: TradingEngineManager) -> APIRouter:
     protected_router = APIRouter()
     
     @router.get("/health")
-    async def health_check() -> Dict:
+    def health_check() -> Dict:
         """
         服务健康检查
         

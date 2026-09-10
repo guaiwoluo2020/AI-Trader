@@ -118,7 +118,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         return warnings
 
     @router.get("/accounts")
-    async def list_accounts(
+    def list_accounts(
         user: AuthUser = Depends(require_auth),
     ) -> Dict:
         accounts = repository.list_for_user(user.user_id)

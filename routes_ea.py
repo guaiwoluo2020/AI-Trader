@@ -146,7 +146,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             ) from exc
 
     @router.get("/get_trades")
-    async def get_trades(
+    def get_trades(
         symbol: str = Query(..., description="交易品种"),
         price: Optional[float] = Query(None, description="当前中间价"),
         bid: Optional[float] = Query(None, description="买价（可选，优先于 price）"),

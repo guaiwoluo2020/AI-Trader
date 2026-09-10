@@ -206,7 +206,7 @@ def create_backtest_data_routes(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @router.get("/ea/backtest-data/tasks/next")
-    async def get_next_ea_task(
+    def get_next_ea_task(
         symbol: str = Query(..., min_length=1),
         identity: EAIdentity = Depends(require_ea_auth),
     ) -> Dict:
