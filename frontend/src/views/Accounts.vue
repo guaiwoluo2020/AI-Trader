@@ -301,10 +301,13 @@
               <span>按部署实例统计 · 分批平仓合并为一笔完整交易</span>
             </div>
             <div v-if="!paperDetail.strategy_performance?.length" class="runtime-empty compact">该账户暂无策略部署</div>
-            <article v-for="item in paperDetail.strategy_performance || []" :key="item.deployment_id" class="strategy-performance-row">
+            <article v-for="item in paperStrategyPerformance" :key="item.deployment_id" class="strategy-performance-row">
               <header>
                 <div><strong>{{ item.strategy_name }}</strong><span>{{ item.symbol }} · 部署于 {{ formatTime(item.deployed_at) }}</span></div>
-                <v-chip size="x-small" :color="deploymentStatusColor(item.status)" variant="tonal">{{ deploymentStatusLabel(item.status) }}</v-chip>
+                <div class="d-flex align-center ga-2">
+                  <v-chip size="x-small" :color="deploymentStatusColor(item.status)" variant="tonal">{{ deploymentStatusLabel(item.status) }}</v-chip>
+                  <v-btn size="small" variant="tonal" color="primary" prepend-icon="mdi-rocket-launch-outline" @click="openLivePromotion(item)">推送实盘</v-btn>
+                </div>
               </header>
               <div class="strategy-performance-grid">
                 <span>完整交易<b>{{ item.closed_position_count }}</b></span>
@@ -464,6 +467,51 @@
             </div>
           </section>
         </v-card-text>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="livePromotionDialog" max-width="900" scrollable persistent>
+      <v-card v-if="livePromotionStrategy" class="binding-dialog" elevation="0">
+        <v-card-title class="binding-header">
+          <div>
+            <div class="section-tag">PROMOTE & DEPLOY</div>
+            <h2>推送实盘并部署</h2>
+            <span>{{ livePromotionStrategy.strategy_name || livePromotionStrategy.strategy_id }} · {{ livePromotionStrategy.symbol }}</span>
+          </div>
+          <v-btn icon="mdi-close" variant="text" :disabled="livePromotionSubmitting" @click="closeLivePromotion" />
+        </v-card-title>
+        <v-divider />
+        <v-card-text>
+          <v-alert type="warning" variant="tonal" density="compact" class="mb-4">
+            这不是复制策略，而是将当前策略批准为可用于实盘，并把同一个策略 ID 绑定到你选择的实盘账户。已绑定该策略的账户不会出现在候选列表中。
+          </v-alert>
+          <v-alert v-if="livePromotionError" type="error" variant="tonal" density="compact" class="mb-4">{{ livePromotionError }}</v-alert>
+          <div v-if="livePromotionLoading" class="runtime-empty">正在查询同品种、可交易且尚未绑定的实盘账户…</div>
+          <template v-else>
+            <div v-if="!livePromotionCandidates.length" class="runtime-empty compact">没有可选择的同品种实盘账户。请确认账户已在线、允许自动交易，并已上报该品种行情。</div>
+            <v-list v-else lines="two" class="promotion-account-list">
+              <v-list-item v-for="account in livePromotionCandidates" :key="account.account_id">
+                <template #prepend>
+                  <v-checkbox-btn v-model="livePromotionSelectedAccountIds" :value="Number(account.account_id)" color="primary" />
+                </template>
+                <v-list-item-title>{{ account.account_name }} · #{{ account.account_id }}</v-list-item-title>
+                <v-list-item-subtitle>{{ account.account_type === 'ibkr' ? 'IBKR Gateway' : 'MT5 实盘' }} · {{ account.symbol }} · {{ account.market_source?.message || '行情已就绪' }}</v-list-item-subtitle>
+                <template #append><v-chip size="x-small" color="success" variant="tonal">在线可交易</v-chip></template>
+              </v-list-item>
+            </v-list>
+            <div v-if="livePromotionResult" class="mt-4">
+              <v-alert :type="livePromotionResult.status === 'ok' ? 'success' : 'error'" variant="tonal" density="compact" class="mb-2">{{ livePromotionResult.message }}</v-alert>
+              <div v-for="result in livePromotionResult.results || []" :key="result.account_id" class="runtime-row order-row">
+                <b>{{ result.account_name }}</b><span>{{ result.status === 'deployed' ? '已绑定' : `失败：${result.error}` }}</span>
+              </div>
+            </div>
+          </template>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" :disabled="livePromotionSubmitting" @click="closeLivePromotion">关闭</v-btn>
+          <v-btn color="primary" prepend-icon="mdi-rocket-launch-outline" :loading="livePromotionSubmitting" :disabled="livePromotionLoading || !livePromotionSelectedAccountIds.length || Boolean(livePromotionResult)" @click="submitLivePromotion">确认推送并部署</v-btn>
+        </v-card-actions>
       </v-card>
     </v-dialog>
 
@@ -693,6 +741,14 @@ const accountStrategyId = ref('')
 const bindingStrategy = ref(false)
 const paperDialog = ref(false)
 const paperDetail = ref(null)
+const livePromotionDialog = ref(false)
+const livePromotionLoading = ref(false)
+const livePromotionSubmitting = ref(false)
+const livePromotionStrategy = ref(null)
+const livePromotionCandidates = ref([])
+const livePromotionSelectedAccountIds = ref([])
+const livePromotionError = ref('')
+const livePromotionResult = ref(null)
 const liveDialog = ref(false)
 const liveDetail = ref(null)
 const paperContext = reactive({ strategies: [] })
@@ -718,6 +774,7 @@ const expandedLivePositions = ref(new Set())
 let equityChartInstance = null
 let liveEquityChartInstance = null
 let liveRefreshTimer = null
+let liveRefreshInFlight = false
 const message = ref('')
 const messageType = ref('success')
 const currencies = ['USD', 'CNY', 'EUR', 'GBP', 'JPY']
@@ -791,6 +848,17 @@ const reportStrategyOptions = computed(() => [
     value: item.strategy_id, label: item.strategy_name || item.strategy_id,
   })),
 ])
+// 模拟盘运行态优先展示实际净盈利更高的策略；同盈亏时用完整交易数和
+// 策略名称稳定排序，避免刷新后同一组策略在页面上来回跳动。
+const paperStrategyPerformance = computed(() => (
+  [...(paperDetail.value?.strategy_performance || [])].sort((left, right) => (
+    Number(right.net_profit || 0) - Number(left.net_profit || 0)
+    || Number(right.closed_position_count || 0) - Number(left.closed_position_count || 0)
+    || String(left.strategy_name || left.strategy_id || '').localeCompare(
+      String(right.strategy_name || right.strategy_id || ''), 'zh-CN'
+    )
+  ))
+))
 
 const typeMap = {
   mt5: { label: 'MT5 经纪商账户', icon: 'mdi-server-network' },
@@ -1201,7 +1269,8 @@ async function openLiveRuntime(account) {
 }
 
 async function refreshLiveDetail() {
-  if (!liveDetail.value) return
+  if (!liveDetail.value || liveRefreshInFlight) return
+  liveRefreshInFlight = true
   try {
     const data = await accountAPI.getLiveMonitoring(liveDetail.value.account.account_id, ...equityRangeParams(liveEquityRange.value))
     liveDetail.value = data.detail
@@ -1210,6 +1279,8 @@ async function refreshLiveDetail() {
   } catch (error) {
     messageType.value = 'error'
     message.value = error.response?.data?.detail || '刷新实盘运行数据失败'
+  } finally {
+    liveRefreshInFlight = false
   }
 }
 
@@ -1217,6 +1288,7 @@ function closeLiveRuntime() {
   liveDialog.value = false
   clearInterval(liveRefreshTimer)
   liveRefreshTimer = null
+  liveRefreshInFlight = false
   liveEquityChartInstance?.dispose()
   liveEquityChartInstance = null
   liveDetail.value = null
@@ -1280,6 +1352,63 @@ function closePaperRuntime() {
   equityChartInstance = null
   paperDetail.value = null
   expandedPaperPositions.value = new Set()
+}
+
+async function openLivePromotion(item) {
+  livePromotionStrategy.value = { ...item }
+  livePromotionDialog.value = true
+  livePromotionLoading.value = true
+  livePromotionSubmitting.value = false
+  livePromotionCandidates.value = []
+  livePromotionSelectedAccountIds.value = []
+  livePromotionError.value = ''
+  livePromotionResult.value = null
+  try {
+    const data = await accountAPI.getLivePromotionCandidates(
+      paperDetail.value.account.account_id, item.strategy_id,
+    )
+    livePromotionStrategy.value = { ...item, ...(data.strategy || {}) }
+    livePromotionCandidates.value = data.accounts || []
+  } catch (error) {
+    livePromotionError.value = error.response?.data?.detail || '加载实盘候选账户失败'
+  } finally {
+    livePromotionLoading.value = false
+  }
+}
+
+async function submitLivePromotion() {
+  if (!paperDetail.value || !livePromotionStrategy.value || !livePromotionSelectedAccountIds.value.length) return
+  livePromotionSubmitting.value = true
+  livePromotionError.value = ''
+  try {
+    const data = await accountAPI.promoteAndDeployLive(
+      paperDetail.value.account.account_id,
+      livePromotionStrategy.value.strategy_id,
+      livePromotionSelectedAccountIds.value,
+    )
+    livePromotionResult.value = data
+    if (data.status === 'error') {
+      livePromotionError.value = data.message || '没有账户部署成功'
+    } else {
+      messageType.value = 'success'
+      message.value = data.message
+      await refreshPaperDetail()
+    }
+  } catch (error) {
+    livePromotionError.value = error.response?.data?.detail || '推送实盘失败'
+  } finally {
+    livePromotionSubmitting.value = false
+  }
+}
+
+function closeLivePromotion() {
+  if (livePromotionSubmitting.value) return
+  livePromotionDialog.value = false
+  livePromotionStrategy.value = null
+  livePromotionCandidates.value = []
+  livePromotionSelectedAccountIds.value = []
+  livePromotionError.value = ''
+  livePromotionResult.value = null
 }
 
 async function refreshPaperDetail() {

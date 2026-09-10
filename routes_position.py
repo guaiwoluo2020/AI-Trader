@@ -6,6 +6,7 @@
 
 from fastapi import APIRouter, Depends, Query, Request
 from typing import Dict, Optional
+import logging
 
 from auth import AuthUser, require_auth
 from ea_auth import EAIdentity, require_ea_auth
@@ -13,6 +14,9 @@ from trading_engine_manager import TradingEngineManager
 from web_account_context import resolve_web_engine
 from repositories.trading import PositionManagementEventRepository
 from repositories.instrument_specs import InstrumentSpecRepository
+from market.store.structure_plan_store import StructureTradePlanRepository
+
+logger = logging.getLogger(__name__)
 
 
 def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -83,6 +87,12 @@ def create_position_routes(engine_manager: TradingEngineManager) -> APIRouter:
             # 使用新的持仓服务
             trading_server = engine_manager.get_engine_for_ea(identity)
             result = trading_server.position_service.update_positions(symbol, positions)
+            try:
+                StructureTradePlanRepository().confirm_protection_for_account(
+                    identity.user_id, identity.account_id, symbol, positions,
+                )
+            except Exception as exc:
+                logger.warning("结构计划保护止损确认失败: %s", exc)
 
             # 记录日志
             if positions:

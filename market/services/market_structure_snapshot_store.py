@@ -65,6 +65,14 @@ def _checkpoint_required(previous: Optional[Dict], result: Dict, now: Optional[f
     new_last = new_events[-1] if new_events else None
     if (old_last or {}).get("confirmed_at") != (new_last or {}).get("confirmed_at"):
         return True
+    old_pressure = previous.get("zone_pressure") or {}
+    new_pressure = result.get("zone_pressure") or {}
+    old_zone_ids = [str(item.get("zone_id") or "") for item in old_pressure.get("zones") or []]
+    new_zone_ids = [str(item.get("zone_id") or "") for item in new_pressure.get("zones") or []]
+    old_event_ids = [str(item.get("event_id") or "") for item in old_pressure.get("events") or []]
+    new_event_ids = [str(item.get("event_id") or "") for item in new_pressure.get("events") or []]
+    if old_zone_ids != new_zone_ids or old_event_ids != new_event_ids:
+        return True
     try:
         return float(now or time.time()) - float(previous.get("checkpoint_at") or 0) >= 30 * 60
     except (TypeError, ValueError):

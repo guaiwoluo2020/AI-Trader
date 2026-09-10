@@ -418,6 +418,12 @@ class StrategyService:
             "selected_trade_plan_group_id": str(
                 getattr(best_signal, "trade_plan_group_id", "") or ""
             ),
+            "selected_trade_opportunity_id": str(
+                getattr(best_signal, "trade_opportunity_id", "") or ""
+            ),
+            "selected_trade_opportunity_stage": str(
+                getattr(best_signal, "trade_opportunity_stage", "") or ""
+            ),
             "selected_trade_plan_valid_from": int(
                 getattr(best_signal, "trade_plan_valid_from", 0) or 0
             ),

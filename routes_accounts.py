@@ -12,6 +12,7 @@ from membership import MembershipService
 from market.services.account_strategy_performance import build_live_performance
 from market.services.today_trade_stats import today_trade_stats
 from market.models.trading_strategy import StrategyLifecycle
+from market.services.live_strategy_promotion import promotion_candidate_accounts
 from mysql_repositories import (
     TradingAccountRecord,
 )
@@ -24,6 +25,7 @@ from repositories.trading import (
 from trading_engine_manager import TradingEngineManager
 from market_data_source_policy import MarketDataSourcePolicy
 from system_event_log import SystemEventLogRepository
+from strategy_admission import StrategyAdmissionService
 
 
 def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
@@ -34,6 +36,57 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
     trade_config_repository = repositories.trade_config
     memberships = MembershipService()
     market_source_policy = MarketDataSourcePolicy()
+    admission_service = StrategyAdmissionService(engine_manager.paper_trading)
+
+    def promotion_candidates(user_id: int, strategy):
+        """Build the selectable live-account set for a paper strategy.
+
+        The strategy keeps its original id.  A policy row proves that the
+        account has reported/claimed the same canonical instrument; existing
+        deployments are removed before the response reaches the UI.
+        """
+        storage = repository.storage
+        deployed_rows = storage.fetchall(
+            "SELECT DISTINCT account_id FROM strategy_deployments "
+            "WHERE user_id = ? AND strategy_id = ? AND execution_mode = 'live' "
+            "AND status IN ('active', 'paused', 'pending')",
+            (int(user_id), str(strategy.strategy_id)),
+        )
+        deployed_ids = {int(row["account_id"]) for row in deployed_rows}
+        symbol = str(strategy.symbol or "").strip().upper()
+        symbol_keys = {symbol}
+        mapping_rows = storage.fetchall(
+            "SELECT mapping_group FROM platform_instrument_mappings "
+            "WHERE enabled = 1 AND UPPER(native_symbol) = ?",
+            (symbol,),
+        )
+        symbol_keys.update(
+            str(row["mapping_group"] or "").strip().upper()
+            for row in mapping_rows
+            if str(row["mapping_group"] or "").strip()
+        )
+        placeholders = ", ".join("?" for _ in symbol_keys)
+        policy_rows = storage.fetchall(
+            "SELECT account_id, canonical_symbol, mode, broker_name, "
+            "primary_account_id, message "
+            "FROM market_data_symbol_policies "
+            f"WHERE user_id = ? AND UPPER(canonical_symbol) IN ({placeholders}) "
+            "AND mode <> 'blocked'",
+            (int(user_id), *sorted(symbol_keys)),
+        )
+        policy_by_account = {int(row["account_id"]): dict(row) for row in policy_rows}
+        snapshots = []
+        for account in repository.list_for_user(user_id):
+            policy = policy_by_account.get(int(account.account_id))
+            if policy is None or account.account_type not in {"mt5", "ibkr"}:
+                continue
+            snapshot = _account_payload(account)
+            snapshot.update({
+                "symbol": symbol,
+                "market_source": MarketDataSourcePolicy._policy_payload(policy),
+            })
+            snapshots.append(snapshot)
+        return promotion_candidate_accounts(snapshots, symbol, deployed_ids), deployed_ids
 
     def deployment_warnings(user_id: int, account_id: int, strategy_id: str) -> List[str]:
         """Non-blocking preflight for a deployment's quote binding."""
@@ -391,10 +444,15 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
 
         engine = engine_manager.get_engine(user.user_id, account_id)
         positions = engine.position_service.get_positions()
-        events = repositories.position_events
+        events_by_position = repositories.position_events.list_for_positions(
+            user.user_id,
+            account_id,
+            [str(position.get("ticket", "")) for position in positions],
+            limit=100,
+        )
         for position in positions:
-            position["management_events"] = events.list_for_position(
-                user.user_id, account_id, str(position.get("ticket", "")),
+            position["management_events"] = events_by_position.get(
+                str(position.get("ticket", "")), []
             )
         execution_reports = repositories.trade_execution.list_for_account(
             user.user_id, account_id, 100,
@@ -472,7 +530,11 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     repository.storage, user.user_id, account_id, positions,
                 ),
                 "equity_curve": repository.list_live_equity_points(
-                    user.user_id, account_id, count=20000,
+                    # The runtime chart is a monitoring view, not a raw
+                    # history export.  Five thousand points preserve the
+                    # selectable range while keeping the first response and
+                    # browser chart rendering bounded.
+                    user.user_id, account_id, count=5000,
                     from_time=equity_from, to_time=equity_to,
                 ),
             },
@@ -512,11 +574,134 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 account_id,
                 str(payload.get("strategy_id", "")).strip(),
             )
+            engine_manager.refresh_user_strategies(user.user_id, account_id=account_id)
             return {
                 "status": "ok",
                 "message": "策略已绑定到交易账户",
                 "deployment": deployment,
                 "warnings": deployment_warnings(user.user_id, account_id, str(payload.get("strategy_id", "").strip())),
+            }
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/accounts/{account_id}/promotion-candidates")
+    async def list_promotion_candidates(
+        account_id: int,
+        strategy_id: str = Query(...),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """List same-symbol live accounts not already bound to the strategy."""
+        source = repository.get_by_id(user.user_id, account_id)
+        if source is None or source.account_type != "paper":
+            raise HTTPException(status_code=404, detail="Paper 模拟账户不存在")
+        strategy = strategy_repository.get_strategy_by_id(user.user_id, strategy_id.strip())
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="策略不存在")
+        if strategy.source_owner_user_id:
+            raise HTTPException(status_code=400, detail="共享策略不能从当前账户直接推送实盘")
+        source_deployment = repository.storage.fetchone(
+            "SELECT deployment_id FROM strategy_deployments "
+            "WHERE user_id = ? AND account_id = ? AND strategy_id = ? "
+            "AND execution_mode = 'paper' AND status IN ('active', 'paused') LIMIT 1",
+            (int(user.user_id), int(account_id), strategy.strategy_id),
+        )
+        if source_deployment is None:
+            raise HTTPException(status_code=400, detail="该策略尚未部署到当前模拟账户")
+        candidates, deployed_ids = promotion_candidates(user.user_id, strategy)
+        return {
+            "status": "ok",
+            "strategy": strategy.to_dict(),
+            "source_account_id": int(account_id),
+            "accounts": candidates,
+            "excluded_deployment_account_ids": sorted(deployed_ids),
+        }
+
+    @router.post("/accounts/{account_id}/promote-and-deploy")
+    async def promote_and_deploy(
+        account_id: int,
+        request: Request,
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Promote the existing strategy, then bind that same id to live accounts."""
+        source = repository.get_by_id(user.user_id, account_id)
+        if source is None or source.account_type != "paper":
+            raise HTTPException(status_code=404, detail="Paper 模拟账户不存在")
+        try:
+            payload = await request.json()
+            strategy_id = str(payload.get("strategy_id", "")).strip()
+            selected_ids = sorted({int(value) for value in (payload.get("account_ids") or [])})
+            if not strategy_id or not selected_ids:
+                raise ValueError("请选择至少一个实盘账户")
+            if not bool(payload.get("confirm_production")):
+                raise ValueError("请确认将策略批准为可用于实盘")
+            strategy = strategy_repository.get_strategy_by_id(user.user_id, strategy_id)
+            if strategy is None:
+                raise ValueError("策略不存在")
+            if strategy.source_owner_user_id:
+                raise ValueError("共享策略不能从当前账户直接推送实盘")
+            candidates, _ = promotion_candidates(user.user_id, strategy)
+            candidate_ids = {int(item["account_id"]) for item in candidates}
+            invalid_ids = [item for item in selected_ids if item not in candidate_ids]
+            if invalid_ids:
+                raise ValueError(
+                    "以下账户已部署、品种不匹配或当前不可交易：" + ", ".join(map(str, invalid_ids))
+                )
+            source_deployment = repository.storage.fetchone(
+                "SELECT deployment_id FROM strategy_deployments "
+                "WHERE user_id = ? AND account_id = ? AND strategy_id = ? "
+                "AND execution_mode = 'paper' AND status IN ('active', 'paused') LIMIT 1",
+                (int(user.user_id), int(account_id), strategy_id),
+            )
+            if source_deployment is None:
+                raise ValueError("该策略尚未部署到当前模拟账户")
+            if strategy.lifecycle_status == StrategyLifecycle.PAPER_TRADING:
+                admission_service.validate_transition(
+                    user.user_id, strategy, StrategyLifecycle.PRODUCTION,
+                )
+                strategy.transition_lifecycle(
+                    StrategyLifecycle.PRODUCTION, "模拟运行台一键推送实盘",
+                )
+                strategy_repository.save_strategy(user.user_id, strategy)
+                engine_manager.refresh_user_strategies(user.user_id)
+            elif strategy.lifecycle_status != StrategyLifecycle.PRODUCTION:
+                raise ValueError(
+                    f"策略当前处于“{StrategyLifecycle.LABELS.get(strategy.lifecycle_status, strategy.lifecycle_status)}”，"
+                    "只能从模拟盘验证状态推送实盘"
+                )
+            account_by_id = {int(item["account_id"]): item for item in candidates}
+            results = []
+            for target_id in selected_ids:
+                target = account_by_id[target_id]
+                try:
+                    deployment = engine_manager.paper_trading.deploy(
+                        user.user_id, target_id, strategy_id,
+                    )
+                    engine_manager.refresh_user_strategies(
+                        user.user_id, account_id=target_id
+                    )
+                    results.append({
+                        "account_id": target_id,
+                        "account_name": target.get("account_name") or str(target_id),
+                        "status": "deployed",
+                        "deployment": deployment,
+                        "warnings": deployment_warnings(user.user_id, target_id, strategy_id),
+                    })
+                except (TypeError, ValueError) as exc:
+                    results.append({
+                        "account_id": target_id,
+                        "account_name": target.get("account_name") or str(target_id),
+                        "status": "failed",
+                        "error": str(exc),
+                    })
+            deployed_count = sum(item["status"] == "deployed" for item in results)
+            failed_count = len(results) - deployed_count
+            return {
+                "status": "ok" if deployed_count else "error",
+                "message": f"已绑定 {deployed_count} 个实盘账户" + (f"，{failed_count} 个失败" if failed_count else ""),
+                "strategy": strategy.to_dict(),
+                "results": results,
+                "deployed_count": deployed_count,
+                "failed_count": failed_count,
             }
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -546,6 +731,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 str(payload.get("task_id", "")).strip(),
                 int(payload.get("duration_days", 30)),
             )
+            engine_manager.refresh_user_strategies(user.user_id, account_id=account_id)
             return {
                 "status": "ok",
                 "message": "回测报告已关联到模拟账户，策略开始模拟运行",
@@ -571,6 +757,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             )
             if deployment is None:
                 raise HTTPException(status_code=404, detail="策略部署不存在")
+            engine_manager.refresh_user_strategies(user.user_id, account_id=account_id)
             return {
                 "status": "ok",
                 "message": "策略运行状态已更新",
@@ -624,6 +811,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             ended = engine_manager.paper_trading.end_deployment(
                 user.user_id, account_id, deployment_id
             )
+            engine_manager.refresh_user_strategies(user.user_id, account_id=account_id)
             return {
                 "status": "ok",
                 "message": "策略部署已结束，历史订单和报告已保留",
@@ -649,6 +837,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             )
             if not removed:
                 raise HTTPException(status_code=404, detail="策略绑定不存在")
+            engine_manager.refresh_user_strategies(user.user_id, account_id=account_id)
             return {"status": "ok", "message": "策略已从该账户解绑"}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

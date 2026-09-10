@@ -96,6 +96,8 @@ class TradingSignal:
     # Generic structure/AI trade-plan identity
     trade_plan_id: str = ""
     trade_plan_group_id: str = ""
+    trade_opportunity_id: str = ""
+    trade_opportunity_stage: str = ""
     trade_plan_valid_from: int = 0
     trade_plan_expires_at: int = 0
 
@@ -215,6 +217,8 @@ class TradingSignal:
             "ai_plan_expires_at": self.ai_plan_expires_at,
             "trade_plan_id": self.trade_plan_id,
             "trade_plan_group_id": self.trade_plan_group_id,
+            "trade_opportunity_id": self.trade_opportunity_id,
+            "trade_opportunity_stage": self.trade_opportunity_stage,
             "trade_plan_valid_from": self.trade_plan_valid_from,
             "trade_plan_expires_at": self.trade_plan_expires_at,
             "fast_ma": self.fast_ma,
@@ -292,6 +296,8 @@ class TradingSignal:
             ai_plan_expires_at=int(data.get('ai_plan_expires_at', 0) or 0),
             trade_plan_id=str(data.get('trade_plan_id') or ''),
             trade_plan_group_id=str(data.get('trade_plan_group_id') or ''),
+            trade_opportunity_id=str(data.get('trade_opportunity_id') or ''),
+            trade_opportunity_stage=str(data.get('trade_opportunity_stage') or ''),
             trade_plan_valid_from=int(data.get('trade_plan_valid_from', 0) or 0),
             trade_plan_expires_at=int(data.get('trade_plan_expires_at', 0) or 0),
             fast_ma=data.get('fast_ma'),

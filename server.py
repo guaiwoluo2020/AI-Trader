@@ -42,6 +42,7 @@ from mysql_repositories import (
     TradingAccountRepository,
 )
 from repositories.platform import PlatformInstrumentMappingRepository
+from repositories.instrument_specs import InstrumentSpecRepository, normalize_volume
 from repositories.ai import AISignalSourceRepository, SharedAIRuntimeRepository
 from repositories.strategy import StrategyDeploymentRepository
 from repositories.trading import PositionManagementEventRepository, TradeExecutionRepository
@@ -619,9 +620,61 @@ class TradingServer:
         for decision in decisions:
             # 3. 自动执行决策
             if decision.action != "none" and decision.status != "rejected":
-                plan_context = self.structure_plan_execution_coordinator.claim_for_decision(
-                    int(self.user_id or 0), int(self.account_id or 0), decision,
+                current_positions = self.position_service.get_positions(decision.symbol)
+                stage_check = self.structure_plan_execution_coordinator.validate_stage(
+                    decision, current_positions
                 )
+                if stage_check.get("allowed", True):
+                    spec = InstrumentSpecRepository().get(
+                        int(self.account_id or 0), str(decision.symbol or "")
+                    )
+                    normalized_volume = normalize_volume(decision.volume, spec, opening=True)
+                    if normalized_volume <= 0:
+                        stage_check = {
+                            "allowed": False,
+                            "reason": "加仓手数按品种最小手数/步进修正后为 0",
+                        }
+                    else:
+                        decision.volume = normalized_volume
+                        decision.risk_points = round(abs(float(decision.entry_price or 0) - float(decision.sl or 0)), 2)
+                        decision.risk_check = self.strategy_service.risk_manager.check_risk(
+                            decision.symbol, normalized_volume, decision.risk_points
+                        )
+                        if not decision.risk_check.get("allowed", True):
+                            stage_check = {
+                                "allowed": False,
+                                "reason": "加仓后风险校验未通过: " + "；".join(
+                                    decision.risk_check.get("warnings") or []
+                                ),
+                            }
+                        if stage_check.get("allowed", True):
+                            aggregate = self.strategy_service.risk_manager.check_aggregate_position_risk(
+                                decision.symbol, current_positions, normalized_volume,
+                                decision.entry_price, decision.sl,
+                            )
+                            decision.risk_check = {
+                                **(decision.risk_check or {}),
+                                "aggregate_position_risk": aggregate,
+                            }
+                            if not aggregate.get("allowed", True):
+                                stage_check = {
+                                    "allowed": False,
+                                    "reason": "聚合持仓风险未通过: " + "；".join(
+                                        aggregate.get("warnings") or []
+                                    ),
+                                }
+                if not stage_check.get("allowed", True):
+                    decision.status = "rejected"
+                    decision.decision_reason = f"分阶段执行拦截: {stage_check['reason']}"
+                    decision.risk_check = {
+                        **(decision.risk_check or {}),
+                        "staged_execution": stage_check,
+                    }
+                plan_context = {"plan_id": "", "group_id": "", "deployment": None, "claimed": False}
+                if decision.status != "rejected":
+                    plan_context = self.structure_plan_execution_coordinator.claim_for_decision(
+                        int(self.user_id or 0), int(self.account_id or 0), decision,
+                    )
                 if plan_context.get("plan_id") and plan_context.get("deployment") \
                         and not plan_context.get("claimed"):
                     decision.status = "rejected"
@@ -917,7 +970,9 @@ class TradingServer:
         from market.services.market_structure_engine_v2 import (
             analyze_incremental as analyze_structure,
         )
-        result = analyze_structure(symbol, period, rows[-600:])
+        from market.services.signal.structure_plan_signal import resolve_structure_plan_config
+        structure_config = resolve_structure_plan_config(symbol, period, "")
+        result = analyze_structure(symbol, period, rows[-600:], structure_config)
         self._structure_context_cache[key] = (latest_time, result)
         return result
 

@@ -751,6 +751,14 @@ class PositionManager:
                         level_id=level_id,
                     )
             if kind == "pivot_trailing":
+                activation_r = float(rule.get("activation_r", 1.0) or 0)
+                if profit_r < activation_r:
+                    add_event(
+                        kind, "checked",
+                        f"浮盈 {profit_r:.2f}R，未达到转折点跟进止损启动 {activation_r:g}R",
+                        activation_r=activation_r,
+                    )
+                    continue
                 candidate = self._pivot_candidate(
                     direction, price, rule, pivots or [],
                     float(market.get("atr", 0)), True,

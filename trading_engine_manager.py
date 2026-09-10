@@ -210,12 +210,19 @@ class TradingEngineManager:
             ],
         }
 
-    def refresh_user_strategies(self, user_id: int) -> None:
-        """策略变更后同步刷新该用户所有已运行账户引擎。"""
+    def refresh_user_strategies(
+        self, user_id: int, account_id: Optional[int] = None,
+    ) -> None:
+        """策略或部署变更后刷新运行中的策略缓存。
+
+        ``account_id`` 用于部署生命周期变更后的定向刷新；省略时保持
+        原有行为，刷新该用户的全部运行引擎。
+        """
         with self._lock:
             engines = [
                 runtime.engine for key, runtime in self._engines.items()
                 if key.user_id == int(user_id)
+                and (account_id is None or key.account_id == int(account_id))
             ]
         for engine in engines:
             store = getattr(getattr(engine, "strategy_service", None), "strategy_store", None)

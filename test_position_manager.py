@@ -479,7 +479,7 @@ class PositionManagerTests(unittest.TestCase):
             event["status"] == "triggered" for event in no_change.events
         ))
 
-        update = manager.evaluate(config, position, {"price": 102}, pivots=[{
+        update = manager.evaluate(config, position, {"price": 105}, pivots=[{
             "period": "M5", "direction": "low", "price": 98,
         }])
         self.assertEqual(update.action, "modify_sl")
@@ -494,6 +494,60 @@ class PositionManagerTests(unittest.TestCase):
             and event["new_stop_loss"] == 98
             for event in update.events
         ))
+
+    def test_pivot_trailing_waits_for_activation_r_before_tightening(self):
+        manager = PositionManager()
+        config = {"management_rules": [{
+            "type": "pivot_trailing", "period": "M5", "activation_r": 1.0,
+        }]}
+        position = {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5,
+        }
+        before_activation = manager.evaluate(
+            config, position, {"price": 102, "atr": 1}, pivots=[{
+                "period": "M5", "direction": "low", "price": 98,
+            }]
+        )
+        self.assertEqual(before_activation.action, "none")
+        self.assertTrue(any(
+            event["rule_type"] == "pivot_trailing"
+            and event["status"] == "checked"
+            and "未达到转折点跟进止损启动" in event["message"]
+            for event in before_activation.events
+        ))
+
+        activated = manager.evaluate(
+            config, position, {"price": 105, "atr": 1}, pivots=[{
+                "period": "M5", "direction": "low", "price": 98,
+            }]
+        )
+        self.assertEqual(activated.action, "modify_sl")
+        self.assertEqual(activated.stop_loss, 98)
+
+    def test_pivot_trailing_activation_is_mirrored_for_short_positions(self):
+        manager = PositionManager()
+        config = {"management_rules": [{
+            "type": "pivot_trailing", "period": "M5", "activation_r": 1.0,
+        }]}
+        position = {
+            "direction": "sell", "entry_price": 100, "stop_loss": 105,
+            "initial_risk": 5,
+        }
+        before_activation = manager.evaluate(
+            config, position, {"price": 98, "atr": 1}, pivots=[{
+                "period": "M5", "direction": "high", "price": 102,
+            }]
+        )
+        self.assertEqual(before_activation.action, "none")
+
+        activated = manager.evaluate(
+            config, position, {"price": 95, "atr": 1}, pivots=[{
+                "period": "M5", "direction": "high", "price": 102,
+            }]
+        )
+        self.assertEqual(activated.action, "modify_sl")
+        self.assertEqual(activated.stop_loss, 102)
 
     def test_no_fixed_take_profit_can_use_trailing_stop(self):
         manager = PositionManager()

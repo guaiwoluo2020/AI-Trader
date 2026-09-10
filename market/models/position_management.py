@@ -66,7 +66,8 @@ def default_position_management_config() -> Dict:
         "management_rules": [
             {"type": "break_even", "activation_r": 1.0, "offset_r": 0.0},
             {"type": "pivot_trailing", "period": "M5",
-             "buffer": {"type": "fixed_points", "value": 0}},
+             "buffer": {"type": "fixed_points", "value": 0},
+             "activation_r": 1.0},
             {"type": "structure_trailing", "structure_layer": "swing",
              "buffer_type": "atr", "buffer_value": 0.15,
              "min_improvement_atr": 0.10, "confirm_bars": 1,
@@ -208,6 +209,9 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
             if period not in PERIODS:
                 raise ValueError(f"转折点周期无效: {period}")
             rule["period"] = period
+            rule["activation_r"] = _positive(
+                rule.get("activation_r", 1.0), "转折点跟进止损启动R"
+            )
         elif rule_type == "structure_trailing":
             rule["structure_layer"] = str(rule.get("structure_layer") or "swing").lower()
             if rule["structure_layer"] not in {"internal", "swing", "external"}:

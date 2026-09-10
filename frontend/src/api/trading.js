@@ -312,6 +312,24 @@ export const accountAPI = {
     )
     return response.data
   },
+  async getLivePromotionCandidates(paperAccountId, strategyId) {
+    const response = await api.get(
+      `/accounts/${encodeURIComponent(paperAccountId)}/promotion-candidates`,
+      { params: { strategy_id: strategyId } },
+    )
+    return response.data
+  },
+  async promoteAndDeployLive(paperAccountId, strategyId, accountIds) {
+    const response = await api.post(
+      `/accounts/${encodeURIComponent(paperAccountId)}/promote-and-deploy`,
+      {
+        strategy_id: strategyId,
+        account_ids: accountIds,
+        confirm_production: true,
+      },
+    )
+    return response.data
+  },
   async getAccountDeployments(accountId, page = 1, pageSize = 20) {
     const response = await api.get(
       `/accounts/${encodeURIComponent(accountId)}/deployments`,

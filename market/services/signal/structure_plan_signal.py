@@ -73,6 +73,10 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "trend_retest_tolerance_atr": 0.25,
     "trend_min_retest_bars": 1,
     "trend_continuation_hold_bars": 2,
+    "enable_zone_pressure": True,
+    "pressure_plan_valid_bars": 6,
+    "pressure_breakout_target_multiple": 2.0,
+    "pressure_min_event_confidence": 65,
     "trend_require_healthy_phase": True,
     "trend_mature_retest_only": True,
     "trend_mature_retest_only_m1": False,
@@ -472,8 +476,19 @@ class StructurePlanBuilder:
         price_discovery: bool = False,
         validation_evidence: Optional[Dict] = None,
     ) -> Dict:
-        group = _hash(source_id, symbol, period, anchor, "group")
-        plan_id = _hash(source_id, symbol, period, anchor, setup_type, direction)
+        snapshot = structure_snapshot or {}
+        evidence = validation_evidence or {}
+        zone_revision = str(evidence.get("zone_revision") or "")
+        # Pressure reversal and the later zone-breakout are two stages of one
+        # opportunity.  They share ``opportunity_id`` but must have separate
+        # execution scopes; otherwise a same-bar event would let the initial
+        # claim suppress the breakout-stage claim.
+        group_scope = setup_type if str(setup_type).startswith("pressure_") else "group"
+        group = _hash(source_id, symbol, period, anchor, group_scope)
+        plan_id = _hash(
+            source_id, symbol, period, anchor, setup_type, direction,
+            zone_revision if str(setup_type).startswith("pressure_") else "",
+        )
         risk = abs(entry - stop_loss) if entry and stop_loss else 0.0
         reward = abs(take_profit - entry) if entry and take_profit else 0.0
         generated_at = int(time.time())
@@ -504,9 +519,29 @@ class StructurePlanBuilder:
             "structure_anchor_time": int(anchor),
             "structure_snapshot": structure_snapshot or {},
             "price_discovery": bool(price_discovery),
-            "validation_evidence": validation_evidence or {},
+            "validation_evidence": evidence,
         }
-        snapshot = structure_snapshot or {}
+        setup_family = self._setup_family(setup_type)
+        # A trade opportunity belongs to one structural segment, one zone,
+        # one direction and one setup family.  The event's old zone-only ID is
+        # deliberately ignored here: the same density bucket can reappear in
+        # a later segment and must then be treated as a fresh opportunity.
+        opportunity_segment = str(snapshot.get("structure_segment_id") or "")
+        opportunity_zone = str(evidence.get("zone_id") or "")
+        if opportunity_segment and opportunity_zone and setup_type.startswith("pressure_"):
+            payload["opportunity_id"] = _hash(
+                "opportunity", opportunity_segment, opportunity_zone,
+                direction, setup_family,
+            )
+        else:
+            payload["opportunity_id"] = str(
+                evidence.get("opportunity_id")
+                or _hash(source_id, symbol, period, anchor, setup_type, direction)
+            )
+        payload["opportunity_stage"] = (
+            "breakout" if setup_type == "pressure_zone_breakout" else
+            "initial" if setup_type == "pressure_reversal" else "single"
+        )
         box = snapshot.get("range") or {}
         pattern_type = box.get("pattern") or snapshot.get("current_pattern") or ""
         segment_id = snapshot.get("structure_segment_id") or _hash(
@@ -545,7 +580,8 @@ class StructurePlanBuilder:
         payload["invalidation_rules"] = self._invalidation_rules(setup_type)
         payload["tick_invalidation_rules"] = [
             rule for rule in payload["invalidation_rules"]
-            if rule in {"protected_level_break", "range_returned_inside"}
+            if rule in {"protected_level_break", "range_returned_inside",
+                        "pressure_zone_return_inside", "pressure_protected_level_break"}
         ]
         payload["close_invalidation_rules"] = [
             rule for rule in payload["invalidation_rules"]
@@ -593,6 +629,8 @@ class StructurePlanBuilder:
 
     @staticmethod
     def _setup_family(setup_type: str) -> str:
+        if str(setup_type).startswith("pressure_"):
+            return "zone_pressure"
         if setup_type.startswith("range_"):
             return "range"
         if "triangle" in setup_type:
@@ -614,13 +652,25 @@ class StructurePlanBuilder:
             rules.append("triangle_pattern_break")
         if setup_type.startswith("range_"):
             rules.append("range_structure_break")
+        if setup_type == "pressure_reversal":
+            rules.append("pressure_protected_level_break")
+        elif setup_type == "pressure_zone_breakout":
+            rules.extend(["pressure_zone_return_inside", "pressure_protected_level_break"])
         if setup_type in {"structure_location_pullback", "trend_continuation", "structure_reversal"}:
             rules.append("protected_level_break")
         return rules
 
     @staticmethod
     def _price_sources(setup_type, direction, entry, stop, target, box) -> Dict:
-        if setup_type in {"range_lower_reversal", "range_upper_reversal", "range_false_breakout"}:
+        if setup_type == "pressure_reversal":
+            entry_source = "density_zone_reclaim"
+            stop_source = "density_zone_opposite_boundary_atr_buffer"
+            target_source = "density_zone_opposite_edge"
+        elif setup_type == "pressure_zone_breakout":
+            entry_source = "density_zone_boundary_breakout"
+            stop_source = "density_zone_inside_boundary_atr_buffer"
+            target_source = "density_zone_width_projection"
+        elif setup_type in {"range_lower_reversal", "range_upper_reversal", "range_false_breakout"}:
             entry_source = "range_lower_boundary" if direction == "buy" else "range_upper_boundary"
             stop_source = "range_boundary_atr_buffer"
             target_source = "opposite_range_boundary"
@@ -754,7 +804,17 @@ class StructurePlanBuilder:
                 "breakout_direction",
             )},
             "structure_levels": self._hierarchy_snapshot(hierarchy),
+            "zone_pressure": structure.get("zone_pressure") or {},
+            "structure_segment_id": structure.get("structure_segment_id") or "",
+            "structure_revision": structure.get("structure_revision") or "",
+            "active_segment": structure.get("active_segment") or {},
         }
+        pressure_plans = self._pressure_plans(
+            source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
+        )
+        pressure_plans = self._filter_allowed(pressure_plans)
+        if pressure_plans:
+            return pressure_plans
         plans = self._range_plans(
             source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
         )
@@ -862,6 +922,94 @@ class StructurePlanBuilder:
             if key not in unique or item["confidence"] > unique[key]["confidence"]:
                 unique[key] = item
         return list(unique.values())
+
+    def _pressure_plans(
+        self, source_id, symbol, period, rows, structure, snapshot,
+        bar_time, seconds,
+    ) -> List[Dict]:
+        """Turn the latest confirmed zone-pressure event into one plan.
+
+        Reversal and breakout are intentionally separate setup types.  They
+        share a stable opportunity id in their evidence, while each stage has
+        its own plan id and execution scope.
+        """
+        if not self._param("enable_zone_pressure", True):
+            return []
+        pressure = structure.get("zone_pressure") or {}
+        events = [item for item in (pressure.get("events") or []) if item.get("direction") in {"buy", "sell"}]
+        if not events:
+            return []
+        event = max(events, key=lambda item: int(item.get("confirmed_at") or 0))
+        direction = str(event.get("direction") or "")
+        event_type = str(event.get("type") or "")
+        setup_type = (
+            "pressure_reversal"
+            if event_type == "pressure_reversal_confirmed"
+            else "pressure_zone_breakout"
+            if event_type == "zone_breakout_confirmed"
+            else ""
+        )
+        if not setup_type:
+            return []
+        self._activate_setup(setup_type)
+        zones = pressure.get("zones") or []
+        zone = next((item for item in zones if str(item.get("zone_id")) == str(event.get("zone_id"))), {})
+        lower, upper = _number(zone.get("lower")), _number(zone.get("upper"))
+        atr = max(1e-9, _number(structure.get("atr")))
+        buffer = atr * max(0.05, _number(self._param("stop_buffer_atr", 0.25)))
+        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+        event_level = _number(event.get("level"))
+        if setup_type == "pressure_reversal":
+            # The event is confirmed on the latest closed bar.  Use that
+            # close as the first-trial reference; using the earlier rejection
+            # price would often leave the newly-created plan behind price and
+            # make ``touch_and_reclaim`` impossible to trigger.
+            entry = _number(rows[-1].get("close") or rows[-1].get("close_price")) or event_level
+            stop = upper + buffer if direction == "sell" else lower - buffer
+            target = lower if direction == "sell" else upper
+            entry_mode = "touch_or_near"
+            reason = str(event.get("reason") or "密集区多次受阻后动量反转确认")
+        else:
+            entry = event_level
+            width = max(atr * 0.25, upper - lower)
+            stop = upper - buffer if direction == "buy" else lower + buffer
+            target = (
+                entry + width * max(1.0, _number(self._param("pressure_breakout_target_multiple", 2.0)))
+                if direction == "buy" else
+                entry - width * max(1.0, _number(self._param("pressure_breakout_target_multiple", 2.0)))
+            )
+            entry_mode = "breakout_retest"
+            reason = str(event.get("reason") or "密集区收盘突破确认")
+        evidence = {
+            **event,
+            "event_id": str(event.get("event_id") or ""),
+            "opportunity_id": str(event.get("opportunity_id") or _hash(
+                symbol, period, zone.get("zone_id"), direction, "pressure"
+            )),
+            "zone_lower": lower,
+            "zone_upper": upper,
+            "zone_id": str(zone.get("zone_id") or ""),
+            "zone_revision": str(zone.get("zone_revision") or ""),
+            "zone_invalidation_buffer": round(buffer, 8),
+        }
+        valid_bars = max(1, int(self._param("pressure_plan_valid_bars", 6)))
+        plan = self._tradable_plan(
+            source_id=source_id, symbol=symbol, period=period,
+            anchor=int(event.get("confirmed_at") or bar_time),
+            setup_type=setup_type, direction=direction,
+            entry_mode=entry_mode, status="active", entry=entry,
+            zone_lower=entry - entry_buffer, zone_upper=entry + entry_buffer,
+            stop_loss=stop, take_profit=target,
+            confidence=max(
+                int(self._param("pressure_min_event_confidence", 65)),
+                int(_number(event.get("confidence"), 70)),
+            ),
+            reason=f"{period} {reason}", valid_from=bar_time,
+            expires_at=bar_time + seconds * valid_bars,
+            invalidation_price=stop, structure_snapshot=snapshot,
+            validation_evidence=evidence,
+        )
+        return [plan] if plan else []
 
     def _location_plans(
         self, source_id, symbol, period, rows, structure, snapshot,
@@ -1627,12 +1775,12 @@ class StructurePlanSignalGenerator:
             if self._last_bar.get(key) == bar_time:
                 all_plans.extend(self._cache.get(key, []))
                 continue
-            result = structure or analyze(symbol, period, rows[-600:])
             # Structure plans are generated from the canonical market-layer
             # config, not duplicated strategy parameters.  Strategy config is
             # only used later for execution filtering and risk management.
             resolved_config = resolve_structure_plan_config(symbol, period, "__builder__")
             setup_profiles = resolved_config.pop("_setup_profiles", []) if isinstance(resolved_config, dict) else []
+            result = structure or analyze(symbol, period, rows[-600:], resolved_config)
             plans = StructurePlanBuilder(
                 resolved_config, setup_profiles=setup_profiles
             ).build(
@@ -1865,6 +2013,8 @@ class StructurePlanSignalGenerator:
                 trigger_reason=str(plan.get("reason") or "结构交易计划触发"),
                 trade_plan_id=str(plan.get("plan_id") or ""),
                 trade_plan_group_id=str(plan.get("plan_group_id") or ""),
+                trade_opportunity_id=str(plan.get("opportunity_id") or ""),
+                trade_opportunity_stage=str(plan.get("opportunity_stage") or ""),
                 trade_plan_valid_from=valid_from,
                 trade_plan_expires_at=expires_at,
                 created_at=datetime.now(),

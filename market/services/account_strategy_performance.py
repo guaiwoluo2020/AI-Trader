@@ -183,12 +183,21 @@ def build_live_performance(
     deployments = _deployment_rows(storage, user_id, account_id, "live")
     if not deployments:
         return []
-    rows = [dict(row) for row in storage.fetchall(
-        "SELECT ticket, mt5_position_id, entry_type, profit, swap, commission, "
-        "deal_timestamp, position_attribution_json FROM live_trade_deals "
-        "WHERE user_id = ? AND account_id = ? ORDER BY deal_timestamp, id",
-        (int(user_id), int(account_id)),
-    )]
+    strategy_ids = [str(item.get("strategy_id") or "") for item in deployments]
+    strategy_ids = [value for value in dict.fromkeys(strategy_ids) if value]
+    if strategy_ids:
+        strategy_placeholders = ", ".join("?" for _ in strategy_ids)
+        rows = [dict(row) for row in storage.fetchall(
+            "SELECT ticket, mt5_position_id, entry_type, profit, swap, commission, "
+            "deal_timestamp, position_attribution_json FROM live_trade_deals "
+            "WHERE user_id = ? AND account_id = ? "
+            "AND position_attribution_json IS NOT NULL "
+            "AND json_extract(position_attribution_json, '$.strategy_id') IN ("
+            + strategy_placeholders + ") ORDER BY deal_timestamp, id",
+            (int(user_id), int(account_id), *strategy_ids),
+        )]
+    else:
+        rows = []
     by_position: Dict[str, List[Dict]] = {}
     for row in rows:
         attribution = _as_dict(row.get("position_attribution_json"))
@@ -223,11 +232,17 @@ def build_live_performance(
             "closed_at": max(int(item.get("deal_timestamp") or 0) for item in items),
         })
 
-    reports = [dict(row) for row in storage.fetchall(
-        "SELECT success, mt5_position_id, position_attribution_json "
-        "FROM trade_execution_reports WHERE user_id = ? AND account_id = ?",
-        (int(user_id), int(account_id)),
-    )]
+    if strategy_ids:
+        reports = [dict(row) for row in storage.fetchall(
+            "SELECT success, mt5_position_id, position_attribution_json "
+            "FROM trade_execution_reports WHERE user_id = ? AND account_id = ? "
+            "AND position_attribution_json IS NOT NULL "
+            "AND json_extract(position_attribution_json, '$.strategy_id') IN ("
+            + strategy_placeholders + ")",
+            (int(user_id), int(account_id), *strategy_ids),
+        )]
+    else:
+        reports = []
     order_counts: Dict[str, int] = {}
     position_strategies: Dict[str, str] = {}
     for report in reports:

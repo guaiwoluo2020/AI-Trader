@@ -692,12 +692,20 @@ class TradingAccountRepository:
             sql += " AND point_time >= ?"; params.append(int(from_time))
         if to_time is not None:
             sql += " AND point_time <= ?"; params.append(int(to_time))
-        sql += " ORDER BY point_time DESC LIMIT ?"
-        # 账户净值按分钟/上报时刻保存，7 天就可能超过 5,000 个点；
-        # 这里的上限只用于防止异常请求，不应截断正常的“全部/最近 7 天”曲线。
-        params.append(max(1, min(int(count), 100000)))
-        rows = self.storage.fetchall(sql, tuple(params))
-        return [dict(row) for row in rows][::-1]
+        sql += " ORDER BY point_time ASC LIMIT ?"
+        # 先取一个有界的时间序列，再在内存中均匀抽样。这样“全部/7天”
+        # 仍覆盖完整选择区间，不会因为首屏上限只显示最近一段曲线。
+        max_rows = 100000
+        params.append(max_rows)
+        points = [dict(row) for row in self.storage.fetchall(sql, tuple(params))]
+        max_points = max(1, min(int(count), 100000))
+        if len(points) <= max_points:
+            return points
+        if max_points == 1:
+            return [points[-1]]
+        step = (len(points) - 1) / float(max_points - 1)
+        indexes = [round(index * step) for index in range(max_points)]
+        return [points[index] for index in indexes]
 
     @staticmethod
     def infer_mt5_environment(server: str) -> str:
@@ -3247,6 +3255,48 @@ class PositionManagementEventRepository:
             (int(user_id), int(account_id), str(position_key), int(limit), max(0, int(offset))),
         )
         return [self._row_to_dict(row) for row in rows]
+
+    def list_for_positions(
+        self, user_id: int, account_id: int, position_keys: List[str],
+        limit: int = 100,
+    ) -> Dict[str, List[Dict]]:
+        """Batch-load recent events for the currently open positions.
+
+        The account runtime page used to issue one query per position.  A
+        live account with several positions therefore turned a single page
+        load into an N+1 query burst.  MySQL 8's window function keeps the
+        same per-position limit while doing one indexed account query.
+        """
+        keys = list(dict.fromkeys(str(value) for value in position_keys if str(value)))
+        if not keys:
+            return {}
+        per_position_limit = max(1, min(int(limit), 500))
+        placeholders = ", ".join("?" for _ in keys)
+        rows = self.storage.fetchall(
+            f"""
+            SELECT event_id, user_id, account_id, position_key, position_id,
+                   ticket, symbol, event_time, event_type, rule_type, status,
+                   message, price, stop_loss, take_profit, volume, payload_json,
+                   created_at
+            FROM (
+                SELECT e.*, ROW_NUMBER() OVER (
+                    PARTITION BY position_key
+                    ORDER BY event_time DESC, created_at DESC
+                ) AS event_rank
+                FROM position_management_events e
+                WHERE user_id = ? AND account_id = ?
+                  AND position_key IN ({placeholders})
+            ) recent
+            WHERE event_rank <= ?
+            ORDER BY position_key, event_time, created_at
+            """,
+            (int(user_id), int(account_id), *keys, per_position_limit),
+        )
+        grouped: Dict[str, List[Dict]] = {key: [] for key in keys}
+        for row in rows:
+            event = self._row_to_dict(row)
+            grouped.setdefault(str(event.get("position_key") or ""), []).append(event)
+        return grouped
 
     def list_for_account(
         self, user_id: int, account_id: int, symbol: str = "", limit: int = 200,

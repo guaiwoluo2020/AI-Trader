@@ -54,6 +54,8 @@ def build_position_attribution(
         ),
         "trade_plan_id": trade_plan_id,
         "trade_plan_group_id": str(summary.get("selected_trade_plan_group_id") or ""),
+        "trade_opportunity_id": str(summary.get("selected_trade_opportunity_id") or ""),
+        "trade_opportunity_stage": str(summary.get("selected_trade_opportunity_stage") or ""),
         "trade_plan_valid_from": trade_plan_valid_from,
         "trade_plan_expires_at": int(summary.get("selected_trade_plan_expires_at") or 0),
         "trade_plan_instance_id": (

@@ -37,6 +37,15 @@ _calendar_publisher_seen_at: float = 0.0
 CALENDAR_PUBLISHER_LEASE_SECONDS = 90
 
 
+def _paper_pivots_for_symbol(server, symbol: str) -> List[Dict]:
+    """Use the same confirmed Pivot source as live position management."""
+    return [
+        item.to_dict()
+        for period in server.pivot_store.get_all_periods(symbol)
+        for item in server.pivot_store.get_pivot_objects(symbol, period)
+    ]
+
+
 def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
     """
     创建 EA 相关路由
@@ -236,9 +245,10 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     structure = server.get_structure_context(symbol, structure_period)
                     if structure:
                         structures[structure_period] = structure
+                pivots = _paper_pivots_for_symbol(server, symbol)
                 paper_execution = engine_manager.paper_trading.process_tick(
                     identity.user_id, symbol, float(price), float(price),
-                    structures=structures,
+                    pivots=pivots, structures=structures,
                 )
             except Exception as exc:
                 # 模拟账户故障不能阻断 EA 获取真实交易指令。

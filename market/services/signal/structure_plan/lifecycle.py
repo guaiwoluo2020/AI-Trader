@@ -12,6 +12,17 @@ def invalidate_reason(plan: Dict, price: float) -> str:
     bottom = float(metadata.get("range_bottom") or 0)
     setup = str(plan.get("setup_type") or "")
     direction = str(plan.get("direction") or "")
+    evidence = plan.get("validation_evidence") or {}
+    zone_lower = float(evidence.get("zone_lower") or 0)
+    zone_upper = float(evidence.get("zone_upper") or 0)
+    zone_buffer = float(evidence.get("zone_invalidation_buffer") or 0)
+    if "pressure_zone_return_inside" in rules and zone_upper > zone_lower > 0:
+        if zone_lower < price < zone_upper:
+            return "pressure_zone_returned_inside"
+    if "pressure_protected_level_break" in rules and zone_upper > zone_lower > 0:
+        invalid = (zone_lower - zone_buffer) if direction == "buy" else (zone_upper + zone_buffer)
+        if (direction == "buy" and price <= invalid) or (direction == "sell" and price >= invalid):
+            return "pressure_protected_zone_broken"
     if "close_return_to_invalid_boundary" in rules and top > bottom > 0:
         if bottom < price < top:
             return "range_returned_inside"

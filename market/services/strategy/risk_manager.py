@@ -269,6 +269,46 @@ class RiskManager:
             "account_initialized": account_initialized,
         }
 
+    def check_aggregate_position_risk(self, symbol: str, positions,
+                                      new_volume: float, new_entry: float,
+                                      new_stop: float) -> Dict:
+        """Check open stop risk plus the proposed order risk."""
+        with self._lock:
+            self._refresh_account_info()
+            balance = float(self._account_balance or 0)
+            limit = float(self._daily_risk_limit or 0)
+        config = self.get_symbol_config(symbol)
+        point_value = float(config.get("point_value", 1.0) or 1.0)
+        existing_amount = 0.0
+        for position in positions or []:
+            item = position if isinstance(position, dict) else position.to_dict()
+            try:
+                volume = float(item.get("volume") or 0)
+                entry = float(item.get("price_open") or item.get("priceOpen") or 0)
+                stop = float(item.get("sl") or item.get("stop_loss") or 0)
+            except (TypeError, ValueError):
+                continue
+            if volume > 0 and entry > 0 and stop > 0:
+                existing_amount += abs(entry - stop) * volume * point_value
+        proposed_amount = abs(float(new_entry or 0) - float(new_stop or 0)) * float(new_volume or 0) * point_value
+        total_amount = existing_amount + proposed_amount
+        total_percent = total_amount / balance * 100 if balance > 0 else 0.0
+        allowed = bool(balance > 0 and (not limit or total_percent <= limit))
+        warnings = []
+        if balance <= 0:
+            warnings.append("账户余额未初始化，无法计算聚合持仓风险")
+        elif limit and total_percent > limit:
+            warnings.append(f"持仓总止损风险 {total_percent:.2f}% 超过上限 {limit:.2f}%")
+        return {
+            "allowed": allowed,
+            "existing_risk_amount": round(existing_amount, 8),
+            "proposed_risk_amount": round(proposed_amount, 8),
+            "total_risk_amount": round(total_amount, 8),
+            "total_risk_percent": round(total_percent, 4),
+            "risk_limit_percent": round(limit, 4),
+            "warnings": warnings,
+        }
+
     # ==================== 持仓检查 ====================
 
     def check_position_limit(self, symbol: str, strategy: TradingStrategy,
