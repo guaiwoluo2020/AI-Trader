@@ -60,7 +60,27 @@
       <v-col cols="12"><v-card class="user-settings-card admin-service-card" elevation="0">
         <v-card-title class="settings-card-title"><div><v-icon>mdi-connection</v-icon><span>IBKR Gateway 行情 Connector</span></div><small>配置精确合约并复用现有行情与结构分析链</small></v-card-title>
         <v-card-text>
-          <v-alert type="info" variant="tonal" density="compact" class="mb-4">这里只配置关注的行情合约，不保存 IBKR 逐笔 Tick。建议填写 con_id，避免同名合约订阅错误。</v-alert>
+          <div class="d-flex align-center justify-space-between flex-wrap ga-3 pa-3 mb-4 rounded border">
+            <div>
+              <div class="text-subtitle-2">保存 Tick 回放数据</div>
+              <div class="text-caption text-medium-emphasis">关闭时不写入本地文件，但不影响实时行情、结构分析和交易。</div>
+              <div class="text-caption text-medium-emphasis">
+                默认状态：{{ tickPersistenceConfig.default_enabled ? '开启' : '关闭' }}
+                <span v-if="tickPersistenceConfig.data_dir"> · 数据目录：{{ tickPersistenceConfig.data_dir }}</span>
+              </div>
+            </div>
+            <v-switch
+              :model-value="tickPersistenceConfig.enabled"
+              :loading="tickPersistenceLoading || tickPersistenceSaving"
+              :disabled="tickPersistenceLoading || tickPersistenceSaving"
+              color="primary"
+              hide-details
+              inset
+              @update:model-value="updateTickPersistence"
+            />
+          </div>
+          <v-alert v-if="tickPersistenceError" type="error" variant="tonal" density="compact" class="mb-4">{{ tickPersistenceError }}</v-alert>
+          <v-alert type="info" variant="tonal" density="compact" class="mb-4">这里只配置关注的行情合约；逐笔 Tick 默认不落盘，如需回放可在上方开启。建议填写 con_id，避免同名合约订阅错误。</v-alert>
           <div class="d-flex align-center justify-space-between flex-wrap ga-2 mb-3">
             <div class="text-subtitle-2">关注合约 <span class="text-caption text-medium-emphasis">{{ ibkrContracts.length }} 个</span></div>
             <div class="d-flex ga-2">
@@ -1547,6 +1567,39 @@ export default {
     const ibkrConnectorCount = ref(0)
     const ibkrSaving = ref(false)
     const ibkrError = ref('')
+    const tickPersistenceConfig = ref({ enabled: false, default_enabled: false, data_dir: '' })
+    const tickPersistenceLoading = ref(false)
+    const tickPersistenceSaving = ref(false)
+    const tickPersistenceError = ref('')
+    const loadTickPersistenceConfig = async () => {
+      tickPersistenceLoading.value = true
+      try {
+        tickPersistenceConfig.value = await marketAPI.getTickPersistenceConfig()
+        tickPersistenceError.value = ''
+      } catch (err) {
+        tickPersistenceError.value = err.response?.data?.detail || '加载 Tick 落盘配置失败'
+      } finally {
+        tickPersistenceLoading.value = false
+      }
+    }
+    const updateTickPersistence = async (enabled) => {
+      const previous = tickPersistenceConfig.value.enabled
+      tickPersistenceConfig.value = { ...tickPersistenceConfig.value, enabled: Boolean(enabled) }
+      tickPersistenceSaving.value = true
+      try {
+        tickPersistenceConfig.value = await marketAPI.setTickPersistenceEnabled(Boolean(enabled))
+        successMessage.value = enabled ? 'Tick 回放数据保存已开启' : 'Tick 回放数据保存已关闭'
+        showSuccess.value = true
+        tickPersistenceError.value = ''
+      } catch (err) {
+        tickPersistenceConfig.value = { ...tickPersistenceConfig.value, enabled: previous }
+        tickPersistenceError.value = err.response?.data?.detail || '更新 Tick 落盘配置失败'
+        errorMessage.value = tickPersistenceError.value
+        showError.value = true
+      } finally {
+        tickPersistenceSaving.value = false
+      }
+    }
     const loadIBKRConfig = async () => {
       try {
         const [config, connectors] = await Promise.all([marketAPI.getIBKRMarketConfig(), marketAPI.getIBKRConnectors()])
@@ -1875,6 +1928,7 @@ export default {
         structureConfigScope.value = 'default'
         structureSetupProfiles.value = Array.isArray(engineData.setup_profiles) ? engineData.setup_profiles : []
         await loadIBKRConfig()
+        await loadTickPersistenceConfig()
         if (settingsTab.value === 'quota') await loadUserQuotas()
         successMessage.value = '管理员运营数据已刷新'
         showSuccess.value = true
@@ -3888,7 +3942,10 @@ export default {
       if (tab === 'quota' && isAdmin.value && !quotaUsers.value.length && !quotaLoading.value) {
         loadUserQuotas()
       }
-      if (tab === 'ibkr' && isAdmin.value) loadIBKRConfig()
+      if (tab === 'ibkr' && isAdmin.value) {
+        loadIBKRConfig()
+        loadTickPersistenceConfig()
+      }
     })
 
     return {
@@ -3987,6 +4044,12 @@ export default {
       ibkrError,
       loadIBKRConfig,
       saveIBKRConfig,
+      tickPersistenceConfig,
+      tickPersistenceLoading,
+      tickPersistenceSaving,
+      tickPersistenceError,
+      loadTickPersistenceConfig,
+      updateTickPersistence,
       addIBKRContract,
       removeIBKRContract,
       duplicateIBKRContract,

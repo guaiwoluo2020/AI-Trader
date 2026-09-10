@@ -316,6 +316,14 @@ export const marketAPI = {
     const response = await api.get('/admin/ibkr/connectors')
     return response.data
   },
+  async getTickPersistenceConfig() {
+    const response = await api.get('/admin/system/tick-persistence')
+    return response.data
+  },
+  async setTickPersistenceEnabled(enabled) {
+    const response = await api.put('/admin/system/tick-persistence', { enabled })
+    return response.data
+  },
 
   // 获取转折点数据
   async getPivots(symbol, period = null, direction = null, count = 50) {
