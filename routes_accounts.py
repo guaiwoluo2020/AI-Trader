@@ -233,7 +233,10 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 max_total_positions=payload.get("max_total_positions"),
                 max_single_volume=payload.get("max_single_volume"),
                 daily_loss_limit=payload.get("daily_loss_limit"),
+                daily_risk_limit=payload.get("daily_risk_limit"),
                 daily_order_limit=payload.get("daily_order_limit"),
+                auto_flatten_enabled=payload.get("auto_flatten_enabled"),
+                auto_flatten_time=payload.get("auto_flatten_time"),
             )
             return {
                 "status": "ok",
@@ -894,7 +897,10 @@ def _account_payload(
         "max_total_positions": account.max_total_positions,
         "max_single_volume": account.max_single_volume,
         "daily_loss_limit": account.daily_loss_limit,
+        "daily_risk_limit": account.daily_risk_limit,
         "daily_order_limit": account.daily_order_limit,
+        "auto_flatten_enabled": account.auto_flatten_enabled,
+        "auto_flatten_time": account.auto_flatten_time,
         "archived_at": account.archived_at,
         "is_default": (
             account.account_key == TradingAccountRepository.DEFAULT_ACCOUNT_KEY

@@ -82,6 +82,7 @@ class TradingAccountRecord:
     max_total_positions: int
     max_single_volume: float
     daily_loss_limit: float
+    daily_risk_limit: float
     daily_order_limit: int
     archived_at: Optional[int]
     last_seen_at: Optional[int]
@@ -91,6 +92,8 @@ class TradingAccountRecord:
     activated_at: Optional[int]
     created_at: int
     updated_at: int
+    auto_flatten_enabled: bool = False
+    auto_flatten_time: Optional[str] = None
 
 
 _STORAGE: Optional[MySQLStorage] = None
@@ -123,7 +126,10 @@ class TradingAccountRepository:
                a.margin, a.status, a.financial_updated_at, a.enabled,
                a.trading_enabled, a.auto_trading_enabled,
                a.max_total_positions, a.max_single_volume,
-               a.daily_loss_limit, a.daily_order_limit, a.archived_at,
+               a.daily_loss_limit, COALESCE(a.daily_risk_limit, 5.0) AS daily_risk_limit,
+               a.daily_order_limit, a.archived_at,
+               COALESCE(a.auto_flatten_enabled, 0) AS auto_flatten_enabled,
+               a.auto_flatten_time,
                COALESCE(c.last_seen_at, a.last_seen_at) AS last_seen_at,
                COALESCE(c.mt5_login, a.mt5_login) AS mt5_login,
                COALESCE(c.mt5_server, a.mt5_server) AS mt5_server,
@@ -257,7 +263,10 @@ class TradingAccountRepository:
         max_total_positions: Optional[int] = None,
         max_single_volume: Optional[float] = None,
         daily_loss_limit: Optional[float] = None,
+        daily_risk_limit: Optional[float] = None,
         daily_order_limit: Optional[int] = None,
+        auto_flatten_enabled: Optional[bool] = None,
+        auto_flatten_time: Optional[str] = None,
     ) -> TradingAccountRecord:
         account = self.get_by_id(user_id, account_id)
         if account is None:
@@ -269,7 +278,10 @@ class TradingAccountRepository:
             "max_total_positions": account.max_total_positions,
             "max_single_volume": account.max_single_volume,
             "daily_loss_limit": account.daily_loss_limit,
+            "daily_risk_limit": account.daily_risk_limit,
             "daily_order_limit": account.daily_order_limit,
+            "auto_flatten_enabled": account.auto_flatten_enabled,
+            "auto_flatten_time": account.auto_flatten_time,
         }
         if account_name is not None:
             name = str(account_name).strip()
@@ -286,14 +298,27 @@ class TradingAccountRepository:
             values["max_single_volume"] = float(max_single_volume)
         if daily_loss_limit is not None:
             values["daily_loss_limit"] = float(daily_loss_limit)
+        if daily_risk_limit is not None:
+            values["daily_risk_limit"] = float(daily_risk_limit)
         if daily_order_limit is not None:
             values["daily_order_limit"] = int(daily_order_limit)
+        if auto_flatten_enabled is not None:
+            values["auto_flatten_enabled"] = bool(auto_flatten_enabled)
+        if auto_flatten_time is not None:
+            value = str(auto_flatten_time).strip()
+            if value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+                raise ValueError("自动清仓时间必须是北京时间 HH:mm")
+            values["auto_flatten_time"] = value or None
+        if values["auto_flatten_enabled"] and not values["auto_flatten_time"]:
+            raise ValueError("开启自动清仓后必须填写北京时间")
         if not 1 <= values["max_total_positions"] <= 100:
             raise ValueError("最大持仓数必须在 1 到 100 之间")
         if not 0.01 <= values["max_single_volume"] <= 1000:
             raise ValueError("单笔最大手数必须在 0.01 到 1000 之间")
         if not 0.1 <= values["daily_loss_limit"] <= 100:
             raise ValueError("每日最大亏损必须在 0.1% 到 100% 之间")
+        if not 0.1 <= values["daily_risk_limit"] <= 100:
+            raise ValueError("每日风险占用上限必须在 0.1% 到 100% 之间")
         if not 1 <= values["daily_order_limit"] <= 10000:
             raise ValueError("每日订单上限必须在 1 到 10000 之间")
         now = _now_ts()
@@ -303,15 +328,17 @@ class TradingAccountRepository:
                 UPDATE trading_accounts
                 SET account_name = ?, trading_enabled = ?,
                     auto_trading_enabled = ?, max_total_positions = ?,
-                    max_single_volume = ?, daily_loss_limit = ?,
-                    daily_order_limit = ?, updated_at = ?
+                    max_single_volume = ?, daily_loss_limit = ?, daily_risk_limit = ?,
+                    daily_order_limit = ?, auto_flatten_enabled = ?,
+                    auto_flatten_time = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
                 """,
                 (
                     values["account_name"], int(values["trading_enabled"]),
                     int(values["auto_trading_enabled"]),
                     values["max_total_positions"], values["max_single_volume"],
-                    values["daily_loss_limit"], values["daily_order_limit"],
+                    values["daily_loss_limit"], values["daily_risk_limit"], values["daily_order_limit"],
+                    int(values["auto_flatten_enabled"]), values["auto_flatten_time"],
                     now, account_id, user_id,
                 ),
             )
@@ -743,7 +770,10 @@ class TradingAccountRepository:
             max_total_positions=int(row["max_total_positions"]),
             max_single_volume=float(row["max_single_volume"]),
             daily_loss_limit=float(row["daily_loss_limit"]),
+            daily_risk_limit=float(row.get("daily_risk_limit", 5.0) or 5.0),
             daily_order_limit=int(row["daily_order_limit"]),
+            auto_flatten_enabled=bool(row.get("auto_flatten_enabled", 0)),
+            auto_flatten_time=row.get("auto_flatten_time"),
             archived_at=(
                 int(row["archived_at"])
                 if row["archived_at"] is not None else None

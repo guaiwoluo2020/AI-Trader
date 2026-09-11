@@ -24,6 +24,7 @@ from repositories.outbox import OutboxEventRepository
 from market.services.outbox_dispatcher import OutboxDispatcher
 from market.store.structure_plan_store import StructureTradePlanRepository
 from repositories.container import RepositoryContainer
+from account_auto_flatten_service import AccountAutoFlattenService
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,9 @@ class TradingEngineManager:
         self.repositories = RepositoryContainer(get_storage())
         self._account_repo = TradingAccountRepository()
         self.paper_trading = PaperTradingService()
+        self.account_auto_flatten = AccountAutoFlattenService(
+            self._account_repo, self.paper_trading, self, get_storage()
+        )
         self.data_retention = DataRetentionService()
         self.adaptive_signal_tuner = AdaptiveSignalTuner(
             refresh_callback=self.refresh_user_strategies,
@@ -95,6 +99,7 @@ class TradingEngineManager:
         self._next_adaptive_tuning_at = time.monotonic() + 120
         self._next_outbox_dispatch_at = time.monotonic() + 2
         self._next_structure_plan_cleanup_at = time.monotonic() + 30
+        self._next_account_auto_flatten_at = time.monotonic() + 5
         self._last_data_retention_date = ""
         self._last_major_us_calendar_date = ""
         self._last_ibkr_kline_maintenance_date = ""
@@ -337,6 +342,13 @@ class TradingEngineManager:
             scheduler.submit(
                 ("system", "structure_plan_expiry"),
                 self.structure_plan_repository.expire_due_plans,
+                max_retries=1,
+            )
+        if now >= self._next_account_auto_flatten_at:
+            self._next_account_auto_flatten_at = now + 5
+            scheduler.submit(
+                ("system", "account_auto_flatten"),
+                self.account_auto_flatten.run_due_accounts,
                 max_retries=1,
             )
 

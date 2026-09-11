@@ -460,6 +460,7 @@ def _account_payload(account):
         "max_total_positions": account.max_total_positions,
         "max_single_volume": account.max_single_volume,
         "daily_loss_limit": account.daily_loss_limit,
+        "daily_risk_limit": account.daily_risk_limit,
         "daily_order_limit": account.daily_order_limit,
         "archived_at": account.archived_at,
         "last_seen_at": account.last_seen_at,

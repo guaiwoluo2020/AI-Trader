@@ -103,6 +103,7 @@ class TradingAccountRepositoryTests(unittest.TestCase):
         self.assertEqual(paper.balance, 50000)
         self.assertEqual(paper.free_margin, 50000)
         self.assertEqual(paper.daily_order_limit, 100)
+        self.assertEqual(paper.daily_risk_limit, 5.0)
         self.assertIsNone(connection)
         self.assertIsNone(self.repository.authenticate(self.user.user_id, "invalid"))
 
@@ -153,6 +154,7 @@ class TradingAccountRepositoryTests(unittest.TestCase):
             max_single_volume=0.5,
             daily_loss_limit=3,
             daily_order_limit=8,
+            daily_risk_limit=12.5,
         )
 
         self.assertEqual(updated.account_name, "黄金主账户")
@@ -162,6 +164,7 @@ class TradingAccountRepositoryTests(unittest.TestCase):
         self.assertEqual(updated.max_single_volume, 0.5)
         self.assertEqual(updated.daily_loss_limit, 3)
         self.assertEqual(updated.daily_order_limit, 8)
+        self.assertEqual(updated.daily_risk_limit, 12.5)
         self.assertIsNotNone(self.repository.authenticate(self.user.user_id, token))
 
     def test_online_mt5_cannot_be_archived_and_offline_account_can_restore(self):

@@ -509,6 +509,30 @@ class MySQLStorage:
                   COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS account_flatten_runs (
+                    run_id VARCHAR(64) NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    business_date DATE NOT NULL,
+                    scheduled_time VARCHAR(5) NOT NULL,
+                    window_started_at BIGINT NOT NULL,
+                    window_ended_at BIGINT NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    position_count INT NOT NULL DEFAULT 0,
+                    closed_count INT NOT NULL DEFAULT 0,
+                    failed_count INT NOT NULL DEFAULT 0,
+                    error_message TEXT NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (run_id),
+                    UNIQUE KEY uq_account_flatten_day (account_id, business_date),
+                    KEY idx_account_flatten_status (status, window_started_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
                 try:
                     conn.execute(
                         "ALTER TABLE ai_signal_sources ADD COLUMN "
@@ -561,6 +585,11 @@ class MySQLStorage:
                     ),
                     "backtest_trades": (
                         ("position_attribution_json", "JSON NULL"),
+                    ),
+                    "trading_accounts": (
+                        ("auto_flatten_enabled", "TINYINT NOT NULL DEFAULT 0"),
+                        ("auto_flatten_time", "VARCHAR(5) NULL"),
+                        ("daily_risk_limit", "DOUBLE NOT NULL DEFAULT 5.0"),
                     ),
                 }
                 for table, columns in compatibility_columns.items():

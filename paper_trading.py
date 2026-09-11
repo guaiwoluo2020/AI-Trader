@@ -516,6 +516,67 @@ class PaperTradingService:
             return None
         return {"bid": float(quote[0]), "ask": float(quote[1])}
 
+    def flatten_account_positions(self, user_id: int, account_id: int,
+                                  reason: str = "scheduled_flatten") -> Dict:
+        """Settle all open Paper positions without changing account/deployments."""
+        account = self._paper_account(user_id, account_id)
+        now = int(time.time())
+        errors = []
+        with self._lock, self.storage._lock, self.storage._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT symbol FROM paper_positions "
+                "WHERE account_id = ? AND status = 'open'", (int(account_id),)
+            ).fetchall()
+            settings = self._settings(account_id)
+            result = {"filled": 0, "closed": 0, "rejected": 0}
+            balance = float(account.balance or 0)
+            for row in rows:
+                symbol = str(row["symbol"] or "").strip()
+                try:
+                    quote = self._quotes.get((int(user_id), symbol))
+                    if quote is None:
+                        historical = conn.execute(
+                            "SELECT close_price FROM historical_klines "
+                            "WHERE user_id = ? AND account_id = 0 AND symbol = ? "
+                            "ORDER BY COALESCE(timestamp_utc, timestamp) DESC LIMIT 1",
+                            (int(user_id), symbol),
+                        ).fetchone()
+                        if historical and float(historical["close_price"] or 0) > 0:
+                            price = float(historical["close_price"])
+                            quote = (price, price)
+                    if quote is None:
+                        raise ValueError("没有可用最后报价")
+                    conn.execute(
+                        "UPDATE paper_positions SET close_reason = ?, updated_at = ? "
+                        "WHERE account_id = ? AND symbol = ? AND status = 'open'",
+                        (str(reason or "scheduled_flatten"), now, int(account_id), symbol),
+                    )
+                    point_size, contract_size = market_spec(symbol)
+                    balance = self.position_service.manage(
+                        conn, int(user_id), int(account_id), symbol,
+                        float(quote[0]), float(quote[1]), now, settings, [], {},
+                        result, balance, contract_size,
+                        settings["slippage_points"] * point_size,
+                    )
+                except Exception as exc:
+                    errors.append(f"{symbol}: {exc}")
+            equity, margin, open_positions = self.accounting_service.mark_positions(
+                conn, int(user_id), int(account_id), balance,
+                settings["leverage"], now,
+            )
+            conn.execute(
+                "UPDATE trading_accounts SET balance = ?, equity = ?, free_margin = ?, "
+                "margin = ?, financial_updated_at = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                (balance, equity, equity - margin, margin, now, now, int(account_id), int(user_id)),
+            )
+            conn.commit()
+        return {
+            "position_count": len(rows),
+            "closed_count": int(result.get("closed", 0)),
+            "failed_count": len(errors) + int(open_positions or 0),
+            "errors": errors + (["仍有未平仓持仓"] if open_positions else []),
+        }
+
     def end_deployment(
         self, user_id: int, account_id: int, deployment_id: str,
     ) -> Optional[Dict]:
@@ -897,7 +958,7 @@ class PaperTradingService:
                     )
                 ),
                 risk_checker=lambda s, volume, risk, st, aid=account_id, px=current_price: (
-                    self._paper_risk_check(aid, s, volume, px)
+                    self._paper_risk_check(aid, s, volume, px, risk)
                 ),
                 entry_guard=lambda s, st, action, signal, aid=account_id, dep=deployment: (
                     EntryGuardService.check_paper(
@@ -1601,14 +1662,26 @@ class PaperTradingService:
             warnings.append("策略配置为存在持仓时阻止开仓")
         return {"allowed": not warnings, "warnings": warnings}
 
-    def _paper_risk_check(self, account_id, symbol, volume, current_price) -> Dict:
+    def _paper_risk_check(
+        self, account_id, symbol, volume, current_price, risk_points=0.0
+    ) -> Dict:
+        """Apply the same account-level daily risk budget used by live trading.
+
+        Paper orders do not use the in-memory ``RiskManager`` state, so rebuild
+        today's theoretical stop risk from persisted orders.  This keeps the
+        limit effective after a process restart and makes Paper/live behavior
+        consistent without adding another accounting table.
+        """
         account = self.storage.fetchone(
             """SELECT balance, free_margin, status, enabled, trading_enabled,
-                      max_single_volume, daily_loss_limit, daily_order_limit
+                      max_single_volume, daily_loss_limit, daily_order_limit,
+                      COALESCE(daily_risk_limit, 5.0) AS daily_risk_limit
                FROM trading_accounts WHERE id = ?""",
             (account_id,),
         )
         warnings = []
+        existing_risk_pct = 0.0
+        current_risk_pct = 0.0
         if (
             not account or account["status"] != "active"
             or not account["enabled"] or not account["trading_enabled"]
@@ -1642,11 +1715,54 @@ class PaperTradingService:
                 loss_pct = abs(float(daily["net_profit"])) / balance * 100
                 if loss_pct >= float(account["daily_loss_limit"]):
                     warnings.append("已达到账户每日亏损限制")
+            # Reconstruct the risk already reserved by today's pending/filled
+            # orders from their original stop loss.  Rejected/canceled orders
+            # do not consume the budget.
+            risk_rows = self.storage.fetchall(
+                """
+                SELECT requested_volume, requested_price, stop_loss, symbol
+                FROM paper_orders
+                WHERE account_id = ? AND requested_at >= ?
+                  AND status IN ('pending', 'filled')
+                  AND stop_loss IS NOT NULL AND stop_loss > 0
+                """,
+                (account_id, today_start),
+            )
+            _, new_contract_size = market_spec(symbol)
+            existing_risk_pct = 0.0
+            for row in risk_rows or []:
+                entry = float(row.get("requested_price") or 0)
+                stop = float(row.get("stop_loss") or 0)
+                if entry <= 0 or stop <= 0:
+                    continue
+                _, contract_size = market_spec(row.get("symbol") or symbol)
+                existing_risk_pct += (
+                    abs(entry - stop) * float(row.get("requested_volume") or 0)
+                    * contract_size / balance * 100
+                    if balance > 0 else 0.0
+                )
+            current_risk_pct = (
+                abs(float(risk_points or 0)) * float(volume) * new_contract_size
+                / balance * 100
+                if balance > 0 else 0.0
+            )
+            daily_risk_limit = float(account["daily_risk_limit"] or 5.0)
+            if existing_risk_pct + current_risk_pct > daily_risk_limit:
+                warnings.append(
+                    f"将超过每日风险占用上限 {daily_risk_limit:.2f}%"
+                )
             _, contract_size = market_spec(symbol)
             leverage = self._settings(account_id)["leverage"]
             if current_price * volume * contract_size / leverage > float(account["free_margin"]):
                 warnings.append("模拟账户可用保证金不足")
-        return {"allowed": not warnings, "warnings": warnings}
+        return {
+            "allowed": not warnings,
+            "warnings": warnings,
+            "daily_risk_used": round(existing_risk_pct, 4),
+            "daily_risk_limit": float(account["daily_risk_limit"] or 5.0)
+            if account else 5.0,
+            "risk_percent": round(current_risk_pct, 4) if account else 0.0,
+        }
 
     def reconcile_decision_statuses(self, user_id: int, account_id: int) -> None:
         """Backfill execution status for paper decisions created before a fill."""

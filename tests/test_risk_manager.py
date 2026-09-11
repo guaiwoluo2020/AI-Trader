@@ -22,6 +22,23 @@ class RiskManagerVolumeTest(unittest.TestCase):
             0.01,
         )
 
+    def test_account_daily_risk_limit_overrides_default(self):
+        manager = RiskManager()
+        manager.set_account_limits(
+            max_positions=10,
+            max_single_volume=10,
+            daily_loss_limit=5,
+            daily_order_limit=100,
+            daily_risk_limit=12.5,
+        )
+        manager.update_account_info(1000, 1000, 1000)
+        result = manager.check_risk("X", 1, 100)
+        self.assertEqual(result["daily_risk_limit"], 12.5)
+
+    def test_daily_risk_limit_defaults_to_five_percent(self):
+        manager = RiskManager()
+        self.assertEqual(manager.get_status()["daily_risk_limit"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

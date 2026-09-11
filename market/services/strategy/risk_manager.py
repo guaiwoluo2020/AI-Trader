@@ -74,12 +74,14 @@ class RiskManager:
         max_single_volume: float,
         daily_loss_limit: float,
         daily_order_limit: int,
+        daily_risk_limit: float = 5.0,
     ) -> None:
         """应用当前交易账户自己的风控阈值。"""
         with self._lock:
             self._account_max_positions = max(1, int(max_positions))
             self._account_max_single_volume = max(0.01, float(max_single_volume))
             self._daily_loss_limit = max(0.1, float(daily_loss_limit))
+            self._daily_risk_limit = max(0.1, float(daily_risk_limit))
             self._daily_order_limit = max(1, int(daily_order_limit))
 
     def _refresh_account_info(self) -> None:
