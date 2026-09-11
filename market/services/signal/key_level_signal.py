@@ -208,7 +208,15 @@ class KeyLevelSignalGenerator:
         direction: str = "", period: str = "", cooldown: int = None,
     ) -> bool:
         """Claim a cooldown once, atomically when MySQL is available."""
-        duration = self.cooldown if cooldown is None else max(0, int(cooldown))
+        requested_duration = self.cooldown if cooldown is None else max(0, int(cooldown))
+        # Integer/round-number opportunities are intentionally sparse.  The
+        # durable guard must not be shortened by a per-strategy value (older
+        # configurations still contain the former two-hour default).
+        duration = max(
+            self.integer_level_cooldown
+            if self._is_integer_level(key_level) else 0,
+            requested_duration,
+        )
         key = self._cooldown_key(
             symbol, key_level, strategy_id, signal_source_id,
             setup_type, direction, period,
@@ -228,8 +236,11 @@ class KeyLevelSignalGenerator:
                 self._signal_cooldowns[key] = datetime.now()
                 return True
             except Exception as exc:
-                # Keep signal generation available during a transient database
-                # outage; the local cache still prevents duplicates in-process.
+                # Integer-level protection is a risk control, so do not fall
+                # back to process-local state when its durable claim fails.
+                if self._is_integer_level(key_level):
+                    print(f"[KeyLevelSignalGenerator] 整数点持久化冷却失败，拒绝信号: {exc}")
+                    return False
                 print(f"[KeyLevelSignalGenerator] 原子领取冷却失败，回退内存: {exc}")
         self._set_cooldown(
             symbol, key_level, strategy_id, signal_source_id,
@@ -263,9 +274,13 @@ class KeyLevelSignalGenerator:
         else:
             level_token = str(key_level or "")
             setup_token = str(setup_type or "")
+        # Round-number levels represent one opportunity regardless of setup
+        # variant or direction.  A sell after a buy (or a level-19 reversal
+        # after a breakout) must not bypass the same quiet period.
+        direction_token = "" if KeyLevelSignalGenerator._is_integer_level(key_level) else direction
         return "|".join(str(value or "") for value in (
             strategy_id, signal_source_id, symbol, level_token,
-            setup_token, direction, period,
+            setup_token, direction_token, period,
         ))
 
     def _clear_setup_cooldown(
