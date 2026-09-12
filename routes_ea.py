@@ -218,7 +218,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     identity.user_id, market_policy.get("broker_name", ""),
                     symbol,
                 ),
-                symbol, float(price),
+                symbol, float(price), source_account_id=identity.account_id,
             )
         result = server.get_trades_by_symbol(
             symbol, price, evaluate_price=False,
@@ -230,10 +230,12 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             server.pending_order_service.clear_all()
             result["trades"] = []
             result["pending_orders"] = []
-        signal_snapshots = (
-            server.get_tick_signal_snapshots(symbol, price)
+        tick_context = (
+            engine_manager.get_tick_execution_context(
+                identity.user_id, identity.account_id, symbol,
+            )
             if price is not None and float(price) > 0
-            and market_policy.get("is_market_primary") else {}
+            and market_policy.get("is_market_primary") else None
         )
         paper_execution = {"filled": 0, "closed": 0, "rejected": 0}
         if price is not None and float(price) > 0 and market_policy.get("is_market_primary"):
@@ -260,7 +262,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             paper_orders_created = engine_manager.paper_trading.process_strategy_signals(
                 identity.user_id, symbol, price, server.strategy_service,
                 quote_account_id=identity.account_id,
-                signal_snapshots=signal_snapshots,
+                execution_context=tick_context,
             )
         except Exception as exc:
             # 模拟账户故障不能阻断 EA 获取真实交易指令。
@@ -356,6 +358,38 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             report = server.execution_report_service.record(
                 identity.user_id, identity.account_id, payload
             )
+            # Scheduled account flattening is correlated by deterministic
+            # instruction_id (flatten-{run_id}-{ticket}). Update item and run
+            # state from the EA receipt instead of marking queued requests done.
+            instruction_id = str(payload.get("instruction_id") or report.get("instruction_id") or "")
+            if instruction_id.startswith("flatten-"):
+                now_ts = int(__import__("time").time())
+                item = StructureTradePlanRepository().storage.fetchone(
+                    "SELECT run_id FROM account_flatten_items WHERE instruction_id=? AND account_id=?",
+                    (instruction_id, identity.account_id),
+                )
+                if item:
+                    ok = bool(report.get("success"))
+                    new_status = "filled" if ok else "rejected"
+                    storage = StructureTradePlanRepository().storage
+                    storage.execute(
+                        "UPDATE account_flatten_items SET status=?,reported_at=?,mt5_order=?,mt5_deal=?,retcode=?,reason=? WHERE instruction_id=?",
+                        (new_status, now_ts, int(report.get("order_id") or 0), int(report.get("mt5_deal") or 0),
+                         int(report.get("retcode") or 0), str(report.get("error_message") or ""), instruction_id),
+                    )
+                    counts = storage.fetchone(
+                        "SELECT COUNT(*) total, SUM(status='filled') filled, SUM(status IN ('rejected','timeout')) failed FROM account_flatten_items WHERE run_id=?",
+                        (item["run_id"],),
+                    )
+                    total, filled, failed = int(counts["total"] or 0), int(counts["filled"] or 0), int(counts["failed"] or 0)
+                    run_status = "completed" if filled == total else ("partial_failed" if failed else "waiting_execution")
+                    storage.execute("UPDATE account_flatten_runs SET status=?,closed_count=?,failed_count=?,updated_at=? WHERE run_id=?",
+                                    (run_status, filled, failed, now_ts, item["run_id"]))
+                    from system_event_log import SystemEventLogRepository
+                    SystemEventLogRepository(storage).add({"user_id": identity.user_id, "account_id": identity.account_id,
+                        "symbol": report.get("symbol") or "", "category": "trading", "event_type": "position_close_filled" if ok else "position_close_rejected",
+                        "event_name": "定时清仓平仓回执", "entity_type": "account_flatten", "entity_id": instruction_id,
+                        "correlation_id": item["run_id"], "status": new_status, "message": report.get("error_message") or "MT5平仓回执", "detail": report})
             attribution = report.get("position_attribution") or {}
             trade_plan_id = str(attribution.get("trade_plan_id") or "")
             strategy_id = str(attribution.get("strategy_id") or "")

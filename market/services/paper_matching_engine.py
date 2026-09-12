@@ -300,6 +300,15 @@ class PaperMatchingEngine:
                 str(outcome["status"]), order_id=str(order["order_id"]),
                 reason=str(outcome["rejection_reason"] or ""),
                 payload=attribution,
+                plan_stage=str(
+                    attribution.get("plan_stage")
+                    or attribution.get("trade_opportunity_stage") or "default"
+                ),
+                direction=str(
+                    attribution.get("direction") or order.get("direction") or "none"
+                ),
+                execution_mode="paper",
+                reason_code=str(outcome["status"]),
             )
         if any(result.values()):
             parts = [
@@ -354,7 +363,13 @@ class PaperMatchingEngine:
                 service.structure_plans.record_execution(
                     int(user_id), int(order["account_id"]),
                     str(order["deployment_id"]), str(order["strategy_id"]), plan_id,
-                    str(attribution.get("trade_plan_group_id") or ""), "expired",
+                    str(attribution.get("trade_plan_group_id") or ""), "timeout",
                     order_id=str(order["order_id"]), reason=reason, payload=attribution,
+                    plan_stage=str(
+                        attribution.get("plan_stage")
+                        or attribution.get("trade_opportunity_stage") or "default"
+                    ),
+                    direction=str(attribution.get("direction") or "none"),
+                    execution_mode="paper", reason_code="timeout",
                 )
         return len(orders)

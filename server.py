@@ -64,10 +64,17 @@ from market.services.setup_circuit_breaker import SetupCircuitBreaker
 from market.services.plan_replay_guard import PlanReplayGuard
 from market.services.structure_plan_execution_coordinator import StructurePlanExecutionCoordinator
 from market.services.decision_audit_service import DecisionAuditService
+from market.services.tick_execution_context import TickExecutionContext
+from market.services.execution_eligibility import (
+    ExecutionEligibilityEvaluator,
+    classify_execution_outcome,
+    record_preflight_audits,
+)
 from market.services.runtime_status_query_service import RuntimeStatusQueryService
 from market.services.strategy_runtime_coordinator import StrategyRuntimeCoordinator
 from market.services.entry_guard_service import EntryGuardService
 from instrument_price_store import get_instrument_price_store
+from account_notification_service import AccountNotificationService
 
 
 class TradingServer:
@@ -108,6 +115,7 @@ class TradingServer:
         )
         self.decision_audit_service = DecisionAuditService()
         self.runtime_status_query_service = RuntimeStatusQueryService()
+        self.account_notifications = AccountNotificationService(self.repositories.storage)
 
         # 线程锁
         self.lock = threading.RLock()
@@ -254,7 +262,7 @@ class TradingServer:
         if self._runtime_repository:
             for item in self._runtime_repository.list_entities(
                 "close_instruction",
-                statuses=["pending"],
+                statuses=["pending", "sent", "delivered"],
             ):
                 self._close_position_instructions[item["symbol"]].append(
                     int(item["ticket"])
@@ -282,6 +290,10 @@ class TradingServer:
         # 策略服务使用持仓服务进行风险管理
         self.strategy_service.set_position_service(self.position_service)
         self.strategy_service.set_pivot_service(self.pivot_service)
+        self.strategy_service.set_cooldown_repository(
+            self.repositories.strategy_decision_cooldowns,
+            user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
+        )
 
         # 风险管理器使用统计服务获取账户信息
         self._risk_manager.set_statistics_service(self.statistics_service)
@@ -489,7 +501,97 @@ class TradingServer:
 
     # ==================== 价格处理与决策 ====================
 
-    def process_price(self, symbol: str, current_price: float) -> Dict:
+    def create_tick_execution_context(
+        self, symbol: str, current_price: float, strategies,
+        *, source_account_id: int = 0,
+    ) -> TickExecutionContext:
+        captured_at = time.time()
+        snapshots = {}
+        for strategy in strategies or []:
+            strategy_id = str(strategy.strategy_id)
+            if strategy_id in snapshots:
+                continue
+            snapshots[strategy_id] = self._signal_service.generate_signals_for_strategy(
+                symbol, current_price, strategy
+            )
+        context = TickExecutionContext.create(
+            user_id=int(self.user_id or 0),
+            source_account_id=int(source_account_id or 0),
+            symbol=symbol, price=current_price, captured_at=captured_at,
+            signals_by_strategy=snapshots,
+        )
+        with self.lock:
+            self._tick_signal_snapshots[str(symbol or "").upper()] = context
+        return context
+
+    def _record_snapshot_missing(self, strategy, symbol: str, context,
+                                 deployment_id: str = "") -> None:
+        result = ExecutionEligibilityEvaluator.snapshot_missing(
+            str(strategy.strategy_id), str(getattr(context, "tick_id", "")),
+        )
+        payload = {
+            **result.details,
+            "reason_code": result.reason_code,
+            "gate_trace": result.gate_trace,
+            "strategy_id": str(strategy.strategy_id),
+            "strategy_name": str(strategy.strategy_name),
+            "symbol": str(symbol),
+        }
+        self.system_log.add_log(
+            "execution_gate_blocked", payload, symbol=symbol,
+            message=result.message, level="warning", category="trading",
+            status="skipped", entity_type="execution_gate",
+            entity_id=f"{result.details.get('tick_id')}:{strategy.strategy_id}",
+            correlation_id=str(result.details.get("tick_id") or ""),
+        )
+        if self._runtime_repository:
+            entity_id = f"{result.details.get('tick_id')}:{strategy.strategy_id}"
+            self._runtime_repository.upsert_entity(
+                "execution_gate", entity_id, payload,
+                symbol=symbol, status="skipped",
+            )
+        self.repositories.execution_gate_audits.record(
+            user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
+            deployment_id=str(deployment_id or ""),
+            strategy_id=str(strategy.strategy_id),
+            tick_id=str(result.details.get("tick_id") or ""),
+            execution_mode="live", symbol=str(symbol), status="blocked",
+            reason_code=result.reason_code, message=result.message,
+            gate_trace=result.gate_trace,
+        )
+
+    def _record_live_execution_audit(self, decision, execution_context,
+                                     deployment_id: str, order_id: str = "") -> None:
+        summary = decision.signal_summary or {}
+        action = str(decision.action or "none").lower()
+        outcome = classify_execution_outcome(decision, order_id=order_id)
+        trace = [{
+            "allowed": outcome.status == "ordered",
+            "reason_code": outcome.reason_code,
+            "message": outcome.message,
+            "details": {},
+        }]
+        self.repositories.execution_gate_audits.record(
+            user_id=int(self.user_id or 0), account_id=int(self.account_id or 0),
+            deployment_id=str(deployment_id or ""),
+            strategy_id=str(decision.strategy_id),
+            tick_id=str(execution_context.tick_id), execution_mode="live",
+            symbol=str(decision.symbol or ""),
+            plan_id=str(summary.get("selected_trade_plan_id") or ""),
+            plan_stage=str(summary.get("selected_trade_opportunity_stage") or "default"),
+            direction=action, status=outcome.status,
+            reason_code=outcome.reason_code,
+            message=outcome.message, gate_trace=trace,
+            account_snapshot={
+                "risk_check": decision.risk_check or {},
+                "position_check": decision.position_check or {},
+            },
+        )
+
+    def process_price(
+        self, symbol: str, current_price: float,
+        execution_context: Optional[TickExecutionContext] = None,
+    ) -> Dict:
         """
         处理价格变动，生成决策
 
@@ -519,27 +621,75 @@ class TradingServer:
         ))
 
         snapshot_key = str(symbol or "").upper()
-        with self.lock:
-            self._tick_signal_snapshots[snapshot_key] = {
-                "price": float(current_price or 0),
-                "captured_at": time.monotonic(),
-                "strategies": {},
-            }
+        matched_strategies = self.strategy_runtime_coordinator.strategies_for_quote(
+            self.user_id, self.account_id, symbol,
+        )
+        if execution_context is None:
+            execution_context = self.create_tick_execution_context(
+                symbol, current_price, matched_strategies,
+                source_account_id=int(self.account_id or 0),
+            )
+        else:
+            with self.lock:
+                self._tick_signal_snapshots[snapshot_key] = execution_context
 
-        if not self.trade_config.enabled:
-            return result
+        live_deployments = {
+            str(row["strategy_id"]): str(row["deployment_id"])
+            for row in self.repositories.storage.fetchall(
+                "SELECT deployment_id,strategy_id FROM strategy_deployments "
+                "WHERE user_id=? AND account_id=? AND execution_mode='live' "
+                "AND status='active'",
+                (int(self.user_id or 0), int(self.account_id or 0)),
+            )
+        }
 
         account = (
             self.account_repository.get_by_id(self.user_id, self.account_id)
             if self.user_id is not None and self.account_id
             else None
         )
+        authorization_allowed = True
+        authorization_message = ""
+        try:
+            self.memberships.assert_live_trading(self.user_id, self.account_id)
+        except Exception as exc:
+            authorization_allowed = False
+            authorization_message = str(exc)
+        preflight = ExecutionEligibilityEvaluator.preflight(
+            automation_enabled=bool(self.trade_config.enabled),
+            account_status=str(getattr(account, "status", "active") or "active"),
+            account_enabled=bool(getattr(account, "enabled", True)),
+            trading_enabled=bool(getattr(account, "trading_enabled", True)),
+            auto_trading_enabled=bool(
+                getattr(account, "auto_trading_enabled", True)
+            ),
+            authorization_allowed=authorization_allowed,
+            authorization_message=authorization_message,
+        )
+        if not preflight.allowed:
+            for strategy in matched_strategies:
+                strategy_id = str(strategy.strategy_id)
+                if strategy_id not in live_deployments:
+                    continue
+                signals = (
+                    execution_context.signals_for(strategy_id)
+                    if execution_context.has_strategy(strategy_id) else []
+                )
+                record_preflight_audits(
+                    self.repositories.execution_gate_audits,
+                    user_id=int(self.user_id or 0),
+                    account_id=int(self.account_id or 0),
+                    deployment_id=live_deployments[strategy_id],
+                    strategy_id=strategy_id,
+                    tick_id=str(execution_context.tick_id),
+                    execution_mode="live", symbol=str(symbol),
+                    signals=signals, result=preflight,
+                )
+
         if account is not None:
-            if (
-                account.status != "active"
-                or not account.trading_enabled
-                or not account.auto_trading_enabled
-            ):
+            if preflight.reason_code in {
+                "automation_disabled", "account_inactive", "trading_disabled",
+            }:
                 return result
             self._risk_manager.set_account_limits(
                 max_positions=account.max_total_positions,
@@ -549,13 +699,12 @@ class TradingServer:
                 daily_order_limit=account.daily_order_limit,
             )
 
-        allow_new_orders = self._live_entries_allowed()
+        elif preflight.reason_code == "automation_disabled":
+            return result
+
+        allow_new_orders = preflight.allowed
         if not allow_new_orders:
-            try:
-                self.memberships.assert_live_trading(self.user_id, self.account_id)
-                gate_reason = "实盘授权校验通过，但当前入口未允许新单"
-            except Exception as exc:
-                gate_reason = str(exc)
+            gate_reason = preflight.message
             print(
                 f"[TradingServer] 实盘决策门禁阻止新单 user={self.user_id} "
                 f"account={self.account_id} symbol={symbol}: {gate_reason}"
@@ -566,9 +715,6 @@ class TradingServer:
         self.strategy_service.set_allowed_strategy_ids(strategy_ids)
         allowed_ids = set(strategy_ids)
         decisions = []
-        matched_strategies = self.strategy_runtime_coordinator.strategies_for_quote(
-            self.user_id, self.account_id, symbol,
-        )
         if not matched_strategies:
             print(
                 f"[TradingServer] 未匹配到策略 user={self.user_id} "
@@ -577,13 +723,13 @@ class TradingServer:
         for strategy in matched_strategies:
             if strategy.strategy_id not in allowed_ids:
                 continue
-            signals = self._signal_service.generate_signals_for_strategy(
-                symbol, current_price, strategy
-            )
-            with self.lock:
-                self._tick_signal_snapshots[snapshot_key]["strategies"][
-                    strategy.strategy_id
-                ] = copy.deepcopy(list(signals or []))
+            if not execution_context.has_strategy(strategy.strategy_id):
+                self._record_snapshot_missing(
+                    strategy, symbol, execution_context,
+                    live_deployments.get(str(strategy.strategy_id), ""),
+                )
+                continue
+            signals = execution_context.signals_for(strategy.strategy_id)
             self._manage_strategy_positions(
                 strategy, symbol, current_price, signals
             )
@@ -601,6 +747,13 @@ class TradingServer:
                 continue
             decision = self.strategy_service.make_decision(
                 symbol, current_price, force_signals=signals, strategy=strategy,
+                execution_mode="live",
+                cooldown_identity={
+                    "execution_mode": "live",
+                    "user_id": int(self.user_id or 0),
+                    "account_id": int(self.account_id or 0),
+                    "deployment_id": live_deployments.get(str(strategy.strategy_id), ""),
+                },
                 entry_guard=lambda symbol, strategy, action, signal: self.entry_guard_service.check_live(
                     int(self.user_id or 0), int(self.account_id or 0), strategy, signal,
                     enabled=bool(self.user_id and self.account_id and self._runtime_repository),
@@ -671,10 +824,42 @@ class TradingServer:
                         **(decision.risk_check or {}),
                         "staged_execution": stage_check,
                     }
+                    try:
+                        account = self.account_repository.get_by_id(
+                            int(self.user_id or 0), int(self.account_id or 0)
+                        )
+                        self.account_notifications.notify_risk_block(
+                            int(self.user_id or 0), int(self.account_id or 0),
+                            str(getattr(account, "account_name", self.account_id) or self.account_id),
+                            str(decision.symbol or ""), str(decision.action or ""),
+                            float(decision.volume or 0), str(stage_check.get("reason") or ""),
+                            strategy=str(getattr(decision, "strategy_name", "") or ""),
+                        )
+                    except Exception as exc:
+                        print(f"[TradingServer] 风控邮件通知失败 account={self.account_id}: {exc}")
                 plan_context = {"plan_id": "", "group_id": "", "deployment": None, "claimed": False}
                 if decision.status != "rejected":
+                    account_snapshot = {
+                        "open_positions": len(current_positions),
+                        "requested_volume": float(decision.volume or 0),
+                        "entry_price": float(decision.entry_price or 0),
+                        "stop_loss": float(decision.sl or 0),
+                        "take_profit": float(decision.tp or 0),
+                        "stage_check": stage_check,
+                        "risk_check": decision.risk_check or {},
+                    }
                     plan_context = self.structure_plan_execution_coordinator.claim_for_decision(
                         int(self.user_id or 0), int(self.account_id or 0), decision,
+                        deployment_id=live_deployments.get(str(decision.strategy_id), ""),
+                        execution_mode="live",
+                        tick_id=str(execution_context.tick_id),
+                        gate_trace=[{
+                            "allowed": True,
+                            "reason_code": "eligible",
+                            "message": "实盘账户订单创建门禁通过",
+                            "details": {},
+                        }],
+                        account_snapshot=account_snapshot,
                     )
                 if plan_context.get("plan_id") and plan_context.get("deployment") \
                         and not plan_context.get("claimed"):
@@ -685,6 +870,7 @@ class TradingServer:
                     if decision.status != "rejected" else None
                 )
                 if order_id:
+                    self.strategy_service.activate_decision_cooldown(decision)
                     self.structure_plan_execution_coordinator.record_order(
                         int(self.user_id or 0), int(self.account_id or 0),
                         decision, plan_context, order_id,
@@ -712,6 +898,26 @@ class TradingServer:
                         int(self.user_id or 0), int(self.account_id or 0),
                         plan_context, "实盘待确认订单创建失败",
                     )
+
+                self._record_live_execution_audit(
+                    decision, execution_context,
+                    live_deployments.get(str(decision.strategy_id), ""),
+                    str(order_id or ""),
+                )
+            elif decision.action == "none":
+                self._record_live_execution_audit(
+                    decision, execution_context,
+                    live_deployments.get(str(decision.strategy_id), ""),
+                )
+            elif decision.status == "rejected":
+                # StrategyService may reject before the order-creation block
+                # (for example position/risk/RR gates).  Persist that outcome
+                # too, otherwise Live appears to have silently skipped a
+                # shared plan while Paper has a complete gate record.
+                self._record_live_execution_audit(
+                    decision, execution_context,
+                    live_deployments.get(str(decision.strategy_id), ""),
+                )
 
             self._record_decision(decision)
 
@@ -741,9 +947,20 @@ class TradingServer:
         """Return the immutable signal snapshot from the immediately prior Tick."""
         key = str(symbol or "").upper()
         with self.lock:
-            snapshot = self._tick_signal_snapshots.get(key) or {}
+            snapshot = self._tick_signal_snapshots.get(key)
             if not snapshot:
                 return {}
+            if isinstance(snapshot, TickExecutionContext):
+                if current_price is not None:
+                    tolerance = max(1e-9, abs(float(current_price)) * 1e-12)
+                    if abs(snapshot.price - float(current_price)) > tolerance:
+                        return {}
+                if time.time() - snapshot.captured_at > 5:
+                    return {}
+                return {
+                    strategy_id: snapshot.signals_for(strategy_id)
+                    for strategy_id in snapshot.strategy_ids()
+                }
             if current_price is not None:
                 expected = float(current_price)
                 actual = float(snapshot.get("price", 0) or 0)
@@ -1083,7 +1300,8 @@ class TradingServer:
         return {
             "trades": trades,
             "pending_orders": pending_orders,
-            "close_tickets": close_tickets,
+            "close_tickets": [int(item.get("ticket")) for item in close_tickets],
+            "close_instructions": close_tickets,
             "position_updates": position_updates,
             "position_partials": position_partials,
             "process_result": process_result
@@ -1133,36 +1351,47 @@ class TradingServer:
         else:
             return self.trading_instruction_service.clear_by_symbol(symbol)
 
-    def add_close_position_instruction(self, symbol: str, ticket: int) -> None:
+    def add_close_position_instruction(self, symbol: str, ticket: int, instruction_id: str = "", run_id: str = "") -> str:
         """添加平仓指令"""
         with self.lock:
             ticket = int(ticket)
-            if ticket not in self._close_position_instructions[symbol]:
-                self._close_position_instructions[symbol].append(ticket)
+            instruction_id = str(instruction_id or f"position-close-{ticket}")
+            item = {"symbol": symbol, "ticket": ticket, "instruction_id": instruction_id, "run_id": str(run_id or "")}
+            if not any(int(x.get("ticket", 0)) == ticket for x in self._close_position_instructions[symbol]):
+                self._close_position_instructions[symbol].append(item)
             if self._runtime_repository:
                 self._runtime_repository.upsert_entity(
                     "close_instruction",
-                    str(ticket),
-                    {"symbol": symbol, "ticket": ticket, "status": "pending"},
+                    instruction_id,
+                    item | {"status": "pending"},
                     symbol=symbol,
                     status="pending",
                 )
             print(f"[TradingServer] 添加平仓指令: {symbol} ticket={ticket}")
+            return instruction_id
 
-    def get_close_position_instructions(self, symbol: str) -> List[int]:
+    def get_close_position_instructions(self, symbol: str) -> List[Dict]:
         """获取并清空平仓指令"""
         with self.lock:
             tickets = self._close_position_instructions.get(symbol, [])
             self._close_position_instructions[symbol] = []
             if self._runtime_repository:
-                for ticket in tickets:
+                now_ts = int(__import__("time").time())
+                for item in tickets:
                     self._runtime_repository.upsert_entity(
                         "close_instruction",
-                        str(ticket),
-                        {"symbol": symbol, "ticket": ticket, "status": "sent"},
+                    str(item.get("instruction_id") or f"position-close-{item['ticket']}"),
+                    dict(item, status="sent"),
                         symbol=symbol,
                         status="sent",
                     )
+                    instruction_id = str(item.get("instruction_id") or "")
+                    if instruction_id.startswith("flatten-"):
+                        self._runtime_repository.storage.execute(
+                            "UPDATE account_flatten_items SET status='delivered',delivered_at=? "
+                            "WHERE instruction_id=? AND status IN ('pending','delivered')",
+                            (now_ts, instruction_id),
+                        )
             if tickets:
                 print(f"[TradingServer] 返回平仓指令: {symbol} tickets={tickets}")
             return tickets

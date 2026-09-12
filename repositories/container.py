@@ -20,6 +20,8 @@ from .trading import TradeExecutionRepository
 from .platform import PlatformInstrumentMappingRepository
 from .outbox import OutboxEventRepository
 from .key_level_cooldowns import KeyLevelCooldownRepository
+from .strategy_decision_cooldowns import StrategyDecisionCooldownRepository
+from .execution_gate_audits import ExecutionGateAuditRepository
 from market.services.outbox_dispatcher import OutboxDispatcher
 
 
@@ -43,6 +45,8 @@ class RepositoryContainer:
         self.position_policies = PositionManagementPolicyRepository(self.storage)
         self.outbox = OutboxEventRepository(self.storage)
         self.outbox_dispatcher = OutboxDispatcher(self.outbox)
+        self.strategy_decision_cooldowns = StrategyDecisionCooldownRepository(self.storage)
+        self.execution_gate_audits = ExecutionGateAuditRepository(self.storage)
 
     def runtime(self, user_id: int, account_id: int) -> RuntimeStateRepository:
         return RuntimeStateRepository(user_id, account_id, self.storage)

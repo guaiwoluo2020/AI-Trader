@@ -371,18 +371,78 @@ class MySQLStorage:
                     strategy_id VARCHAR(64) NOT NULL,
                     plan_id VARCHAR(64) NOT NULL,
                     plan_group_id VARCHAR(64) NOT NULL,
+                    plan_stage VARCHAR(32) NOT NULL DEFAULT 'default',
+                    direction VARCHAR(16) NOT NULL DEFAULT 'none',
+                    tick_id VARCHAR(64) NOT NULL DEFAULT '',
+                    execution_mode VARCHAR(16) NOT NULL DEFAULT '',
                     status VARCHAR(24) NOT NULL,
                     order_id VARCHAR(64) NOT NULL DEFAULT '',
+                    reason_code VARCHAR(64) NOT NULL DEFAULT '',
                     reason VARCHAR(512) NOT NULL DEFAULT '',
                     payload_json LONGTEXT NOT NULL,
+                    gate_trace_json LONGTEXT NULL,
+                    account_snapshot_json LONGTEXT NULL,
                     created_at BIGINT NOT NULL,
                     updated_at BIGINT NOT NULL,
                     PRIMARY KEY (execution_id),
-                    UNIQUE KEY uq_structure_plan_deployment (
-                        user_id, account_id, deployment_id, plan_id
+                    UNIQUE KEY uq_structure_plan_deployment_stage_direction (
+                        user_id, account_id, deployment_id, plan_id,
+                        plan_stage, direction
                     ),
                     KEY idx_structure_plan_execution_group (
                         user_id, account_id, deployment_id, plan_group_id, status
+                    )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS strategy_decision_cooldowns (
+                    cooldown_key VARCHAR(512) NOT NULL,
+                    user_id BIGINT NOT NULL DEFAULT 0,
+                    account_id BIGINT NOT NULL DEFAULT 0,
+                    deployment_id VARCHAR(64) NOT NULL DEFAULT '',
+                    strategy_id VARCHAR(64) NOT NULL DEFAULT '',
+                    plan_id VARCHAR(64) NOT NULL DEFAULT '',
+                    plan_stage VARCHAR(32) NOT NULL DEFAULT '',
+                    direction VARCHAR(16) NOT NULL DEFAULT '',
+                    cooldown_until BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (cooldown_key),
+                    KEY idx_strategy_cooldown_account (
+                        user_id,account_id,cooldown_until
+                    )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                  COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS execution_gate_audits (
+                    audit_id VARCHAR(64) NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    deployment_id VARCHAR(64) NOT NULL,
+                    strategy_id VARCHAR(64) NOT NULL,
+                    tick_id VARCHAR(64) NOT NULL,
+                    execution_mode VARCHAR(16) NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    plan_id VARCHAR(64) NOT NULL DEFAULT '',
+                    plan_stage VARCHAR(32) NOT NULL DEFAULT 'default',
+                    direction VARCHAR(16) NOT NULL DEFAULT 'none',
+                    status VARCHAR(24) NOT NULL,
+                    reason_code VARCHAR(64) NOT NULL,
+                    message VARCHAR(512) NOT NULL DEFAULT '',
+                    gate_trace_json LONGTEXT NOT NULL,
+                    account_snapshot_json LONGTEXT NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (audit_id),
+                    KEY idx_execution_gate_plan (user_id,plan_id,updated_at),
+                    KEY idx_execution_gate_tick (user_id,tick_id,updated_at),
+                    KEY idx_execution_gate_deployment (
+                        user_id,account_id,deployment_id,updated_at
                     )
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                   COLLATE=utf8mb4_unicode_ci
@@ -533,6 +593,53 @@ class MySQLStorage:
                   COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS account_flatten_items (
+                    instruction_id VARCHAR(128) NOT NULL,
+                    run_id VARCHAR(64) NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    ticket BIGINT NOT NULL,
+                    status VARCHAR(24) NOT NULL DEFAULT 'pending',
+                    requested_at BIGINT NOT NULL,
+                    delivered_at BIGINT NULL,
+                    reported_at BIGINT NULL,
+                    mt5_order BIGINT NOT NULL DEFAULT 0,
+                    mt5_deal BIGINT NOT NULL DEFAULT 0,
+                    retcode BIGINT NOT NULL DEFAULT 0,
+                    reason TEXT NOT NULL,
+                    PRIMARY KEY (instruction_id),
+                    UNIQUE KEY uq_flatten_item_ticket (run_id, ticket),
+                    KEY idx_flatten_item_delivery (account_id, status, symbol),
+                    CONSTRAINT fk_flatten_item_run FOREIGN KEY (run_id)
+                        REFERENCES account_flatten_runs(run_id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS account_notification_deliveries (
+                    id BIGINT NOT NULL AUTO_INCREMENT,
+                    user_id BIGINT NOT NULL,
+                    account_id BIGINT NOT NULL,
+                    business_date DATE NOT NULL,
+                    notification_type VARCHAR(32) NOT NULL,
+                    reason_key VARCHAR(64) NOT NULL,
+                    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                    subject VARCHAR(255) NOT NULL,
+                    message TEXT NOT NULL,
+                    error_message TEXT NULL,
+                    sent_at BIGINT NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uq_account_notification (account_id, business_date, notification_type, reason_key),
+                    KEY idx_account_notification_user (user_id, business_date, notification_type)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
                 try:
                     conn.execute(
                         "ALTER TABLE ai_signal_sources ADD COLUMN "
@@ -591,6 +698,15 @@ class MySQLStorage:
                         ("auto_flatten_time", "VARCHAR(5) NULL"),
                         ("daily_risk_limit", "DOUBLE NOT NULL DEFAULT 5.0"),
                     ),
+                    "structure_plan_executions": (
+                        ("plan_stage", "VARCHAR(32) NOT NULL DEFAULT 'default'"),
+                        ("direction", "VARCHAR(16) NOT NULL DEFAULT 'none'"),
+                        ("tick_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
+                        ("execution_mode", "VARCHAR(16) NOT NULL DEFAULT ''"),
+                        ("reason_code", "VARCHAR(64) NOT NULL DEFAULT ''"),
+                        ("gate_trace_json", "LONGTEXT NULL"),
+                        ("account_snapshot_json", "LONGTEXT NULL"),
+                    ),
                 }
                 for table, columns in compatibility_columns.items():
                     for column, column_type in columns:
@@ -612,6 +728,27 @@ class MySQLStorage:
                     )
                 except Exception as exc:
                     if getattr(exc, "args", (None,))[0] not in (1051, 1146):
+                        raise
+                # The original key consumed the whole plan after the first
+                # stage. Replace it with the true execution identity so an
+                # initial entry and its later breakout add-on can each execute
+                # exactly once without allowing duplicate Tick consumption.
+                try:
+                    conn.execute(
+                        "ALTER TABLE structure_plan_executions "
+                        "DROP INDEX uq_structure_plan_deployment"
+                    )
+                except Exception as exc:
+                    if getattr(exc, "args", (None,))[0] not in (1091, 1146):
+                        raise
+                try:
+                    conn.execute(
+                        "ALTER TABLE structure_plan_executions ADD UNIQUE INDEX "
+                        "uq_structure_plan_deployment_stage_direction "
+                        "(user_id,account_id,deployment_id,plan_id,plan_stage,direction)"
+                    )
+                except Exception as exc:
+                    if getattr(exc, "args", (None,))[0] != 1061:
                         raise
                 compatibility_indexes = (
                     (

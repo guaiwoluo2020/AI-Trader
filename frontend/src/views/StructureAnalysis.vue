@@ -32,6 +32,9 @@
               <v-chip size="x-small" color="success" variant="tonal">已消费 {{ plan.subscription_summary?.consumed_count || 0 }}</v-chip>
               <v-chip size="x-small" color="warning" variant="tonal">待消费 {{ plan.subscription_summary?.unconsumed_count || 0 }}</v-chip>
             </div>
+            <v-alert v-if="plan.execution_divergence?.diverged" type="error" variant="tonal" density="compact" class="mt-2">
+              检测到执行链路分叉：{{ plan.execution_divergence.findings?.map(item => item.message).join('；') }}
+            </v-alert>
             <v-expansion-panels v-if="plan.subscriptions?.length" variant="accordion" class="subscription-panel">
               <v-expansion-panel>
                 <v-expansion-panel-title>查看 {{ plan.subscriptions.length }} 个部署的消费明细</v-expansion-panel-title>
@@ -39,6 +42,24 @@
                   <div v-for="item in plan.subscriptions" :key="item.deployment_id" class="subscription-row">
                     <div><strong>{{ item.strategy_name }}</strong><small>{{ item.account_name }} · {{ modeLabel(item.execution_mode) }}</small></div>
                     <div class="subscription-status"><v-chip size="x-small" :color="executionColor(item.execution_status)" variant="tonal">{{ executionLabel(item.execution_status) }}</v-chip><small v-if="item.order_id">订单 {{ item.order_id }}</small><small v-if="item.execution_reason">{{ item.execution_reason }}</small></div>
+                  </div>
+                </v-expansion-panel-text>
+              </v-expansion-panel>
+              <v-expansion-panel v-if="plan.execution_matrix?.length">
+                <v-expansion-panel-title>查看账户执行门禁</v-expansion-panel-title>
+                <v-expansion-panel-text>
+                  <div v-for="item in plan.execution_matrix" :key="`gate-${item.deployment_id}`" class="subscription-row">
+                    <div>
+                      <strong>{{ item.account_name }} · {{ modeLabel(item.execution_mode) }}</strong>
+                      <small>{{ item.strategy_name }} · Tick {{ item.tick_id || '--' }}</small>
+                    </div>
+                    <div class="subscription-status">
+                      <v-chip size="x-small" :color="gateColor(item.gate_reason_code || item.reason_code)" variant="tonal">{{ gateLabel(item.gate_reason_code || item.reason_code) }}</v-chip>
+                      <v-chip v-if="item.execution_status && item.execution_status !== 'unconsumed'" size="x-small" :color="executionColor(item.execution_status)" variant="tonal">执行 {{ executionLabel(item.execution_status) }}</v-chip>
+                      <small v-if="item.order_id">订单 {{ item.order_id }}</small>
+                      <small>{{ item.message || item.execution_reason || '尚未评估到该计划' }}</small>
+                      <small v-if="item.gate_trace?.length">门禁：{{ item.gate_trace.map(gate => gateLabel(gate.reason_code)).join(' → ') }}</small>
+                    </div>
                   </div>
                 </v-expansion-panel-text>
               </v-expansion-panel>
@@ -105,6 +126,8 @@ const formatPlanTime=value=>value?new Date(Number(value)*1000).toLocaleString('z
 const modeLabel=value=>value==='live'?'实盘':'模拟盘'
 const executionLabel=value=>({unconsumed:'待消费',claimed:'已领取',triggered:'已触发',ordered:'已下单',filled:'已成交',rejected:'已拒绝',expired:'已过期',canceled:'已取消',released:'已释放'}[value]||value||'待消费')
 const executionColor=value=>({unconsumed:'warning',claimed:'info',triggered:'info',ordered:'primary',filled:'success',rejected:'error',expired:'grey',canceled:'grey',released:'secondary'}[value]||'grey')
+const gateLabel=value=>({eligible:'允许执行',snapshot_missing:'共享快照缺失',no_direction:'未形成方向',no_new_trigger:'没有新触发',decision_cooldown:'决策冷却中',entry_guard:'入场门禁拦截',position_policy:'持仓规则拦截',invalid_volume:'手数无效',position_limit:'持仓上限',risk_limit:'风险上限',claim_conflict:'计划已消费',technical_failure:'技术失败',missing_audit:'尚未评估'}[value]||value||'尚未评估')
+const gateColor=value=>value==='eligible'?'success':(['snapshot_missing','claim_conflict','technical_failure'].includes(value)?'error':(value==='missing_audit'?'grey':'warning'))
 const hierarchyLabels={internal:'Internal 内部结构',swing:'Swing 主结构',external:'External 外部结构'}
 const phaseLabel=(value,bias)=>{if(value==='reversal_confirmed')return bias==='down'?'反转确认后的下跌延续':bias==='up'?'反转确认后的上涨延续':'反转已确认';return {forming:'形成中',continuation:'延续',pullback:'回撤中',reversal_candidate:'反转候选'}[value]||value||'--'}
 const patternLabel=value=>({range:'箱体震荡',converging_triangle:'收敛三角形',diverging_triangle:'扩散三角形',ascending_triangle:'上升三角形',descending_triangle:'下降三角形',trendline:'趋势线'}[value]||value||'局部形态')

@@ -580,23 +580,23 @@ class StrategyServiceTestCase(unittest.TestCase):
             "key_level_reversal", "sell", "M1",
         ))
 
-    def test_integer_level_cooldown_is_shared_across_same_direction_setups(self):
+    def test_integer_level_cooldown_is_shared_across_setups_and_directions(self):
         generator = KeyLevelSignalGenerator()
         generator._set_cooldown(
             "GOLD#", 4300, "strategy", "source",
             "key_level_19_breakout", "buy", "M1",
         )
 
-        # A different integer-level setup must not bypass the 48-hour
-        # quiet period when it points in the same direction.
+        # A different integer-level setup must not bypass the 48-hour quiet
+        # period, even when it points in the same direction.
         self.assertTrue(generator._check_cooldown(
             "GOLD#", 4300, "strategy", "source", 48 * 60 * 60,
             "key_level_reversal", "buy", "M1",
         ))
 
-        # The quiet period remains directional: an opposite-side setup may
-        # still be evaluated independently.
-        self.assertFalse(generator._check_cooldown(
+        # An opposite-side setup belongs to the same integer-level opportunity
+        # and therefore cannot bypass the same quiet period either.
+        self.assertTrue(generator._check_cooldown(
             "GOLD#", 4300, "strategy", "source", 48 * 60 * 60,
             "key_level_reversal", "sell", "M1",
         ))

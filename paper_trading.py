@@ -31,6 +31,7 @@ from repositories.platform import PlatformInstrumentMappingRepository
 from repositories.strategy_config import StrategyConfigRepository
 from repositories.trading import PositionManagementEventRepository
 from repositories.trading import TradeExecutionRepository
+from repositories.execution_gate_audits import ExecutionGateAuditRepository
 from market.services.entry_guard_service import EntryGuardService
 from market.services.paper_execution_reporter import PaperExecutionReporter
 from market.services.paper_matching_engine import PaperMatchingEngine
@@ -39,6 +40,17 @@ from market.services.paper_position_service import PaperPositionService
 from market.services.paper_accounting_service import PaperAccountingService
 from market.services.today_trade_stats import today_trade_stats
 from strategy_admission import StrategyAdmissionService, strategy_fingerprint
+from account_notification_service import AccountNotificationService
+from market.services.tick_execution_context import TickExecutionContext
+from market.services.execution_eligibility import (
+    ExecutionEligibilityEvaluator,
+    classify_execution_outcome,
+    record_preflight_audits,
+)
+from market.services.plan_execution_service import PlanExecutionService
+from market.services.structure_plan_execution_coordinator import (
+    StructurePlanExecutionCoordinator,
+)
 
 
 def market_spec(symbol: str) -> Tuple[float, float]:
@@ -73,13 +85,19 @@ class PaperTradingService:
         self.position_manager = PositionManager()
         self.position_events = PositionManagementEventRepository(self.storage)
         self.structure_plans = StructureTradePlanRepository(self.storage)
+        self.plan_execution_service = PlanExecutionService(self.structure_plans)
+        self.structure_plan_execution_coordinator = StructurePlanExecutionCoordinator(
+            self.structure_plans, self.plan_execution_service,
+        )
         self.execution_reports = TradeExecutionRepository(self.storage)
+        self.execution_gate_audits = ExecutionGateAuditRepository(self.storage)
         self.execution_reporter = PaperExecutionReporter(self.execution_reports)
         self.matching_engine = PaperMatchingEngine(self)
         self.order_service = PaperOrderService(self)
         self.position_service = PaperPositionService(self)
         self.accounting_service = PaperAccountingService(self)
         self.memberships = MembershipService(self.storage)
+        self.notifications = AccountNotificationService(self.storage)
         self._lock = threading.RLock()
         self._quotes: Dict[Tuple[int, str], Tuple[float, float]] = {}
 
@@ -862,6 +880,7 @@ class PaperTradingService:
         self, user_id: int, symbol: str, current_price: float, strategy_service,
         quote_account_id: Optional[int] = None,
         signal_snapshots: Optional[Dict[str, List]] = None,
+        execution_context: Optional[TickExecutionContext] = None,
     ) -> int:
         """Use one signal snapshot per strategy, then apply account-level checks."""
         self._expire_deployments(user_id)
@@ -870,12 +889,14 @@ class PaperTradingService:
         )
         deployments = self.storage.fetchall(
             """
-            SELECT d.* FROM strategy_deployments d
+            SELECT d.*, a.status AS account_status,
+                   a.enabled AS account_enabled,
+                   a.trading_enabled AS account_trading_enabled,
+                   a.auto_trading_enabled AS account_auto_trading_enabled
+            FROM strategy_deployments d
             JOIN trading_accounts a ON a.id = d.account_id
             WHERE d.user_id = ? AND d.status = 'active'
               AND d.execution_mode = 'paper' AND a.account_type = 'paper'
-              AND a.status = 'active' AND a.enabled = 1
-              AND a.trading_enabled = 1 AND a.auto_trading_enabled = 1
             """,
             (user_id,),
         )
@@ -883,10 +904,17 @@ class PaperTradingService:
             return 0
         created = 0
         now = int(time.time())
-        tick_signals = {
-            str(strategy_id): copy.deepcopy(list(signals or []))
-            for strategy_id, signals in (signal_snapshots or {}).items()
-        }
+        # ``signal_snapshots`` remains a test/adapter boundary only. Runtime
+        # callers pass the immutable TickExecutionContext created by the
+        # user-level market engine. Missing snapshots are auditable failures;
+        # Paper must never rerun a stateful generator.
+        if execution_context is None and signal_snapshots is not None:
+            execution_context = TickExecutionContext.create(
+                user_id=int(user_id),
+                source_account_id=int(quote_account_id or 0),
+                symbol=symbol, price=current_price, captured_at=time.time(),
+                signals_by_strategy=signal_snapshots,
+            )
         for deployment in deployments:
             try:
                 runtime_strategy = self._deployment_strategy(user_id, deployment)
@@ -898,27 +926,64 @@ class PaperTradingService:
             ):
                 continue
             strategy_key = str(strategy.strategy_id)
-            if strategy_key not in tick_signals:
-                generator = getattr(
-                    strategy_service.signal_service,
-                    "generate_signals_for_strategy",
-                    None,
-                )
-                generated = (
-                    generator(symbol, current_price, strategy)
-                    if generator is not None else None
-                )
-                if generated is None:
-                    generated = [
-                        signal for signal in
-                        strategy_service.signal_service.get_active_signals(symbol)
-                        if getattr(signal, "strategy_id", "") == strategy.strategy_id
-                    ]
-                # Multiple paper accounts deploying the same strategy must use
-                # the same source result for this Tick as well.
-                tick_signals[strategy_key] = copy.deepcopy(list(generated or []))
-            signals = copy.deepcopy(tick_signals[strategy_key])
             account_id = int(deployment["account_id"])
+            if execution_context is None or not execution_context.has_strategy(strategy_key):
+                missing = ExecutionEligibilityEvaluator.snapshot_missing(
+                    strategy_key,
+                    str(getattr(execution_context, "tick_id", "")),
+                )
+                runtime = RuntimeStateRepository(user_id, account_id, self.storage)
+                entity_id = (
+                    f"{getattr(execution_context, 'tick_id', 'missing')}:"
+                    f"{deployment['deployment_id']}:{strategy_key}"
+                )
+                runtime.upsert_entity(
+                    "execution_gate", entity_id,
+                    {
+                        **missing.details,
+                        "reason_code": missing.reason_code,
+                        "message": missing.message,
+                        "gate_trace": missing.gate_trace,
+                        "deployment_id": str(deployment["deployment_id"]),
+                        "strategy_id": strategy_key,
+                        "execution_mode": "paper",
+                        "symbol": str(symbol),
+                    },
+                    symbol=symbol, status="skipped",
+                )
+                self.execution_gate_audits.record(
+                    user_id=int(user_id), account_id=account_id,
+                    deployment_id=str(deployment["deployment_id"]),
+                    strategy_id=strategy_key,
+                    tick_id=str(getattr(execution_context, "tick_id", "")),
+                    execution_mode="paper", symbol=str(symbol),
+                    status="blocked", reason_code=missing.reason_code,
+                    message=missing.message, gate_trace=missing.gate_trace,
+                )
+                continue
+            signals = execution_context.signals_for(strategy_key)
+            preflight = ExecutionEligibilityEvaluator.preflight(
+                automation_enabled=True,
+                account_status=str(deployment.get("account_status") or ""),
+                account_enabled=bool(deployment.get("account_enabled")),
+                trading_enabled=bool(
+                    deployment.get("account_trading_enabled")
+                ),
+                auto_trading_enabled=bool(
+                    deployment.get("account_auto_trading_enabled")
+                ),
+            )
+            if not preflight.allowed:
+                record_preflight_audits(
+                    self.execution_gate_audits,
+                    user_id=int(user_id), account_id=account_id,
+                    deployment_id=str(deployment["deployment_id"]),
+                    strategy_id=strategy_key,
+                    tick_id=str(execution_context.tick_id),
+                    execution_mode="paper", symbol=str(symbol),
+                    signals=signals, result=preflight,
+                )
+                continue
             policy_snapshot = runtime_strategy["position_management_policy_snapshot"]
             reverse_enabled = any(
                 rule.get("type") == "reverse_signal"
@@ -949,6 +1014,12 @@ class PaperTradingService:
                 strategy=strategy,
                 execution_mode="paper",
                 cooldown_scope=f"paper:{account_id}:{deployment['deployment_id']}",
+                cooldown_identity={
+                    "execution_mode": "paper",
+                    "user_id": int(user_id),
+                    "account_id": int(account_id),
+                    "deployment_id": str(deployment["deployment_id"]),
+                },
                 volume_calculator=lambda s, risk, st, aid=account_id: (
                     self._paper_volume(aid, s, risk, st)
                 ),
@@ -993,10 +1064,42 @@ class PaperTradingService:
                         "strategy_decision", decision.decision_id, decision_payload,
                         symbol=decision.symbol, status=decision.status,
                     )
-            if decision and decision_payload.get("action") != "none" and self.order_service.create(
-                user_id, deployment, decision_payload, now
-            ):
-                created += 1
+            order_result = None
+            if decision and decision_payload.get("action") != "none":
+                order_result = self.order_service.create(
+                    user_id, deployment, decision_payload, now,
+                    execution_context=execution_context,
+                )
+                if order_result.created:
+                    strategy_service.activate_decision_cooldown(decision)
+                    created += 1
+            if decision is not None:
+                summary = decision.signal_summary or {}
+                action = str(decision.action or "none").lower()
+                outcome = classify_execution_outcome(
+                    decision, creation_result=order_result,
+                )
+                self.execution_gate_audits.record(
+                    user_id=int(user_id), account_id=account_id,
+                    deployment_id=str(deployment["deployment_id"]),
+                    strategy_id=strategy_key,
+                    tick_id=str(execution_context.tick_id), execution_mode="paper",
+                    symbol=str(symbol),
+                    plan_id=str(summary.get("selected_trade_plan_id") or ""),
+                    plan_stage=str(summary.get("selected_trade_opportunity_stage") or "default"),
+                    direction=action, status=outcome.status,
+                    reason_code=outcome.reason_code,
+                    message=outcome.message,
+                    gate_trace=[{
+                        "allowed": outcome.status == "ordered",
+                        "reason_code": outcome.reason_code,
+                        "message": outcome.message, "details": {},
+                    }],
+                    account_snapshot={
+                        "risk_check": decision.risk_check or {},
+                        "position_check": decision.position_check or {},
+                    },
+                )
         return created
 
     def _strategy_matches_quote(
@@ -1673,7 +1776,7 @@ class PaperTradingService:
         consistent without adding another accounting table.
         """
         account = self.storage.fetchone(
-            """SELECT balance, free_margin, status, enabled, trading_enabled,
+            """SELECT user_id, account_name, balance, free_margin, status, enabled, trading_enabled,
                       max_single_volume, daily_loss_limit, daily_order_limit,
                       COALESCE(daily_risk_limit, 5.0) AS daily_risk_limit
                FROM trading_accounts WHERE id = ?""",
@@ -1755,6 +1858,16 @@ class PaperTradingService:
             leverage = self._settings(account_id)["leverage"]
             if current_price * volume * contract_size / leverage > float(account["free_margin"]):
                 warnings.append("模拟账户可用保证金不足")
+        if warnings and account:
+            try:
+                self.notifications.notify_risk_block(
+                    int(account.get("user_id") or 0), int(account_id),
+                    str(account.get("account_name") or account_id),
+                    str(symbol), "", float(volume), "；".join(warnings),
+                    strategy="Paper 风控",
+                )
+            except Exception as exc:
+                print(f"[PaperTrading] 风控邮件通知失败 account={account_id}: {exc}")
         return {
             "allowed": not warnings,
             "warnings": warnings,

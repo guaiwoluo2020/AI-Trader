@@ -52,6 +52,8 @@ class StrategyService:
         self._allowed_strategy_ids: Optional[set] = None
         self._consensus_directions: Dict[str, str] = {}
         self._no_action_audit_at: Dict[str, datetime] = {}
+        self._cooldown_repository = None
+        self._cooldown_identity = {"user_id": 0, "account_id": 0}
 
         print("[StrategyService] 策略决策服务已初始化")
 
@@ -65,6 +67,14 @@ class StrategyService:
 
     def set_pivot_service(self, service) -> None:
         self._pivot_service = service
+
+    def set_cooldown_repository(
+        self, repository, *, user_id: int = 0, account_id: int = 0,
+    ) -> None:
+        self._cooldown_repository = repository
+        self._cooldown_identity = {
+            "user_id": int(user_id or 0), "account_id": int(account_id or 0),
+        }
 
     def set_allowed_strategy_ids(self, strategy_ids: List[str]) -> None:
         """限制当前账户可参与实盘决策的策略。"""
@@ -305,6 +315,7 @@ class StrategyService:
                      strategy: TradingStrategy = None,
                      execution_mode: str = "live",
                      cooldown_scope: str = "live",
+                     cooldown_identity: Optional[Dict] = None,
                      decision_time: datetime = None,
                      volume_calculator: Callable = None,
                      position_checker: Callable = None,
@@ -330,7 +341,7 @@ class StrategyService:
             return None
 
         # 同一品种的多个策略独立冷却，互不阻塞。
-        cooldown_key = f"{cooldown_scope}:{strategy.strategy_id}"
+        consensus_key = f"{cooldown_scope}:{strategy.strategy_id}"
 
         # 获取信号
         signals = (
@@ -350,28 +361,30 @@ class StrategyService:
         analysis = self.analyze_signals(symbol, signals, strategy)
 
         if analysis["action"] == "none":
-            self._consensus_directions[cooldown_key] = "none"
+            self._consensus_directions[consensus_key] = "none"
             return self._no_action_decision(
                 symbol, strategy, signals, analysis, execution_mode,
                 "未形成可执行方向：" + self._no_action_reason(analysis, strategy),
-                audit_no_action, cooldown_key, decision_time,
+                audit_no_action, consensus_key, decision_time,
             )
 
         action = analysis["action"]
-        previous_direction = self._consensus_directions.get(cooldown_key, "none")
+        previous_direction = self._consensus_directions.get(consensus_key, "none")
         consensus_changed = previous_direction != action
         analysis["consensus_changed"] = consensus_changed
-        if not analysis["triggered"] and not consensus_changed:
+        # Remember the observed direction before any later risk rejection so a
+        # rejected first evaluation cannot masquerade as a fresh transition on
+        # every following Tick. Quote-driven Live/Paper paths request an audit
+        # row for every evaluation and must never turn a direction transition
+        # alone into an entry when the signal explicitly says it did not fire.
+        self._consensus_directions[consensus_key] = action
+        if not analysis["triggered"] and (
+            not consensus_changed or audit_no_action
+        ):
             return self._no_action_decision(
                 symbol, strategy, signals, analysis, execution_mode,
                 "方向一致但没有新的入场触发，继续等待价格或信号变化",
-                audit_no_action, cooldown_key, decision_time,
-            )
-        if self._is_in_cooldown(cooldown_key, decision_time):
-            return self._no_action_decision(
-                symbol, strategy, signals, analysis, execution_mode,
-                "策略决策冷却中，避免重复下单",
-                audit_no_action, cooldown_key, decision_time,
+                audit_no_action, consensus_key, decision_time,
             )
 
         enabled_signals = [
@@ -390,7 +403,7 @@ class StrategyService:
             return self._no_action_decision(
                 symbol, strategy, signals, analysis, execution_mode,
                 "没有满足策略启用条件的方向信号",
-                audit_no_action, cooldown_key, decision_time,
+                audit_no_action, consensus_key, decision_time,
             )
         market_direction = "up" if action == "buy" else "down"
         directional_signals = [
@@ -441,6 +454,32 @@ class StrategyService:
             ),
             "contributing_sources": sorted({s.source for s in directional_signals}),
         }
+        identity = dict(cooldown_identity or {})
+        identity.setdefault("execution_mode", execution_mode)
+        identity.setdefault("user_id", self._cooldown_identity["user_id"])
+        identity.setdefault("account_id", self._cooldown_identity["account_id"])
+        identity.setdefault("deployment_id", "")
+        plan_id = str(analysis.get("selected_trade_plan_id") or best_signal.signal_id)
+        plan_stage = str(analysis.get("selected_trade_opportunity_stage") or "entry")
+        cooldown_key = (
+            f"{identity['execution_mode']}:{int(identity['user_id'] or 0)}:"
+            f"{int(identity['account_id'] or 0)}:{identity['deployment_id']}:"
+            f"{strategy.strategy_id}:{plan_id}:{plan_stage}:{action}"
+        )
+        analysis["decision_cooldown"] = {
+            **identity,
+            "cooldown_key": cooldown_key,
+            "strategy_id": str(strategy.strategy_id),
+            "plan_id": plan_id,
+            "plan_stage": plan_stage,
+            "direction": action,
+        }
+        if self._is_in_cooldown(cooldown_key, decision_time):
+            return self._no_action_decision(
+                symbol, strategy, signals, analysis, execution_mode,
+                "当前账户、部署和计划阶段仍在决策冷却中，避免重复下单",
+                audit_no_action, consensus_key, decision_time,
+            )
 
         if entry_guard is not None:
             try:
@@ -453,7 +492,7 @@ class StrategyService:
                 return self._no_action_decision(
                     symbol, strategy, signals, analysis, execution_mode,
                     str(guard.get("reason") or "连续亏损保护已阻止本次入场"),
-                    audit_no_action, cooldown_key, decision_time,
+                    audit_no_action, consensus_key, decision_time,
                 )
 
         # 持仓管理器先生成初始保护方案，后续仓位管理继续使用同一快照。
@@ -630,9 +669,8 @@ class StrategyService:
 
         # 如果检查不通过，返回拒绝的决策
         if not position_check.get("allowed", True) or not risk_check.get("allowed", True):
-            # 即使被拒绝也要设置冷却，避免频繁推送
-            self._set_cooldown(cooldown_key, decision_time)
-            self._consensus_directions[cooldown_key] = action
+            # 风控拒绝不是一次成功消费，不启动下单冷却；否则另一个账户
+            # 即使随后满足门禁也会被错误阻断。
             warnings = (
                 position_check.get("warnings", [])
                 + risk_check.get("warnings", [])
@@ -667,9 +705,7 @@ class StrategyService:
             )
             return decision
 
-        # 设置决策冷却
-        self._set_cooldown(cooldown_key, decision_time)
-        self._consensus_directions[cooldown_key] = action
+        self._consensus_directions[consensus_key] = action
 
         # 生成决策理由
         decision_reason = self._generate_decision_reason(analysis, best_signal)
@@ -893,6 +929,13 @@ class StrategyService:
     ) -> bool:
         """检查是否在冷却期"""
         current_time = current_time or datetime.now()
+        epoch = int(current_time.timestamp())
+        if self._cooldown_repository is not None:
+            try:
+                if self._cooldown_repository.get_active_until(cooldown_key, epoch) > epoch:
+                    return True
+            except Exception as exc:
+                print(f"[StrategyService] 读取持久化决策冷却失败: {exc}")
         with self._cooldown_lock:
             if cooldown_key in self._decision_cooldowns:
                 last_time = self._decision_cooldowns[cooldown_key]
@@ -901,11 +944,39 @@ class StrategyService:
             return False
 
     def _set_cooldown(
-        self, cooldown_key: str, current_time: datetime = None
+        self, cooldown_key: str, current_time: datetime = None,
+        metadata: Optional[Dict] = None,
     ) -> None:
         """设置冷却"""
+        current_time = current_time or datetime.now()
         with self._cooldown_lock:
-            self._decision_cooldowns[cooldown_key] = current_time or datetime.now()
+            self._decision_cooldowns[cooldown_key] = current_time
+        if self._cooldown_repository is not None:
+            try:
+                metadata = dict(metadata or {})
+                self._cooldown_repository.set_cooldown(
+                    cooldown_key,
+                    int(current_time.timestamp()) + int(self.decision_cooldown),
+                    user_id=int(metadata.get("user_id") or self._cooldown_identity["user_id"]),
+                    account_id=int(metadata.get("account_id") or self._cooldown_identity["account_id"]),
+                    deployment_id=str(metadata.get("deployment_id") or ""),
+                    strategy_id=str(metadata.get("strategy_id") or ""),
+                    plan_id=str(metadata.get("plan_id") or ""),
+                    plan_stage=str(metadata.get("plan_stage") or ""),
+                    direction=str(metadata.get("direction") or ""),
+                    now=int(current_time.timestamp()),
+                )
+            except Exception as exc:
+                print(f"[StrategyService] 写入持久化决策冷却失败: {exc}")
+
+    def activate_decision_cooldown(
+        self, decision: TradingDecision, current_time: datetime = None,
+    ) -> None:
+        """Start cooldown only after an order was successfully created."""
+        metadata = dict((decision.signal_summary or {}).get("decision_cooldown") or {})
+        cooldown_key = str(metadata.get("cooldown_key") or "")
+        if cooldown_key:
+            self._set_cooldown(cooldown_key, current_time or decision.created_at, metadata)
 
     # ==================== 执行决策 ====================
 

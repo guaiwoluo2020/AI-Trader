@@ -9,6 +9,94 @@ from mysql_repositories import get_storage
 from market.store.structure_plan_store import StructureTradePlanRepository
 from market.services.signal.structure_plan_signal import StructurePlanBuilder, MARKET_STRUCTURE_PLAN_SOURCE_ID, resolve_structure_plan_config
 from market.services.market_structure_engine_v2 import analyze_incremental
+from repositories.execution_gate_audits import ExecutionGateAuditRepository
+from market.services.execution_divergence_monitor import ExecutionDivergenceMonitor
+
+
+def assemble_structure_plan_execution(
+    items, strategies, deployments, executions, gate_audits, symbol: str,
+):
+    """Attach subscriptions and execution outcomes without hiding gated accounts."""
+    by_strategy = {str(item["strategy_id"]): item for item in strategies}
+    subscribed = []
+    for source in deployments or []:
+        row = dict(source)
+        item = by_strategy.get(str(row.get("strategy_id") or ""))
+        if not item or str(row.get("symbol") or "").upper() != symbol.upper():
+            continue
+        deployment_active = str(row.get("status") or "") == "active"
+        account_execution_enabled = bool(
+            row.get("enabled")
+            and row.get("trading_enabled")
+            and row.get("auto_trading_enabled")
+        )
+        deployment = {
+            "deployment_id": str(row.get("deployment_id") or ""),
+            "strategy_id": str(row.get("strategy_id") or ""),
+            "strategy_name": str(item.get("strategy_name") or ""),
+            "account_id": int(row.get("account_id") or 0),
+            "account_name": str(row.get("account_name") or ""),
+            "account_type": str(row.get("account_type") or ""),
+            "execution_mode": str(row.get("execution_mode") or ""),
+            "deployment_status": str(row.get("status") or ""),
+            "active": deployment_active,
+            "account_execution_enabled": account_execution_enabled,
+        }
+        item["deployments"].append(deployment)
+        if deployment_active:
+            subscribed.append(deployment)
+
+    by_plan = {}
+    executions_by_plan = {}
+    for execution in executions or []:
+        plan_id = str(execution.get("plan_id") or "")
+        executions_by_plan.setdefault(plan_id, []).append(execution)
+        # Repository order is newest first; do not let an older lifecycle row
+        # overwrite the current status for a deployment.
+        by_plan.setdefault(plan_id, {}).setdefault(
+            str(execution.get("deployment_id") or ""), execution
+        )
+    audits_by_plan = {}
+    for audit in gate_audits or []:
+        audits_by_plan.setdefault(str(audit.get("plan_id") or ""), []).append(audit)
+
+    divergence_monitor = ExecutionDivergenceMonitor()
+    consumed = {
+        "claimed", "triggered", "ordered", "filled", "rejected",
+        "expired", "canceled",
+    }
+    for plan in items or []:
+        plan_id = str(plan.get("plan_id") or "")
+        rows_out, counts = [], {}
+        for deployment in subscribed:
+            execution = by_plan.get(plan_id, {}).get(deployment["deployment_id"])
+            status = str(execution.get("status") or "") if execution else "unconsumed"
+            counts[status] = counts.get(status, 0) + 1
+            rows_out.append({
+                **deployment,
+                "execution_status": status,
+                "order_id": str(execution.get("order_id") or "") if execution else "",
+                "execution_reason": str(execution.get("reason") or "") if execution else "",
+                "consumed_at": int(execution.get("updated_at") or 0) if execution else 0,
+            })
+        consumed_count = sum(value for key, value in counts.items() if key in consumed)
+        plan["subscriptions"] = rows_out
+        plan["subscription_summary"] = {
+            "strategy_count": len(strategies),
+            "deployment_count": len(subscribed),
+            "consumed_count": consumed_count,
+            "unconsumed_count": max(0, len(subscribed) - consumed_count),
+            "status_counts": counts,
+        }
+        matrix = divergence_monitor.build_matrix(
+            rows_out, audits_by_plan.get(plan_id, []),
+            executions_by_plan.get(plan_id, []),
+        )
+        plan["execution_matrix"] = matrix["rows"]
+        plan["execution_divergence"] = {
+            "diverged": matrix["diverged"], "findings": matrix["findings"],
+        }
+    return items
 
 
 def create_structure_plan_routes(engine_manager, strategy_repo, structure_defaults: Dict) -> APIRouter:
@@ -35,27 +123,14 @@ def create_structure_plan_routes(engine_manager, strategy_repo, structure_defaul
             if str(strategy.symbol).upper() != symbol.upper(): continue
             if not any(str(s.get("period") or "M5").upper() == period for s in strategy.get_signal_sources("structure_plan", enabled_only=True)): continue
             strategies.append({"strategy_id": strategy.strategy_id, "strategy_name": strategy.strategy_name, "period": period, "deployments": []})
-        by_strategy = {x["strategy_id"]: x for x in strategies}
         deployments = storage.fetchall("SELECT d.deployment_id,d.strategy_id,d.account_id,d.execution_mode,d.status,d.symbol,a.account_name,a.account_type,a.enabled,a.trading_enabled,a.auto_trading_enabled FROM strategy_deployments d JOIN trading_accounts a ON a.id=d.account_id WHERE d.user_id=?", (user.user_id,))
-        active = []
-        for row in deployments:
-            item = by_strategy.get(str(row["strategy_id"]))
-            if not item or str(row["symbol"]).upper() != symbol.upper(): continue
-            deployment = {"deployment_id": str(row["deployment_id"]), "strategy_id": str(row["strategy_id"]), "strategy_name": item["strategy_name"], "account_id": int(row["account_id"]), "account_name": str(row["account_name"] or ""), "account_type": str(row["account_type"] or ""), "execution_mode": str(row["execution_mode"] or ""), "deployment_status": str(row["status"] or ""), "active": bool(row["status"] == "active" and row["enabled"] and row["trading_enabled"] and row["auto_trading_enabled"])}
-            item["deployments"].append(deployment)
-            if deployment["active"]: active.append(deployment)
         executions = repo.list_executions(user.user_id, [str(x.get("plan_id") or "") for x in items])
-        by_plan = {}
-        for execution in executions: by_plan.setdefault(str(execution["plan_id"]), {})[str(execution["deployment_id"])] = execution
-        consumed = {"claimed", "triggered", "ordered", "filled", "rejected", "expired", "canceled"}
-        for plan in items:
-            rows_out=[]; counts={}
-            for deployment in active:
-                execution = by_plan.get(str(plan.get("plan_id") or ""), {}).get(deployment["deployment_id"])
-                status = str(execution.get("status") or "") if execution else "unconsumed"; counts[status] = counts.get(status, 0)+1
-                rows_out.append({**deployment, "execution_status": status, "order_id": str(execution.get("order_id") or "") if execution else "", "execution_reason": str(execution.get("reason") or "") if execution else "", "consumed_at": int(execution.get("updated_at") or 0) if execution else 0})
-            plan["subscriptions"] = rows_out
-            plan["subscription_summary"] = {"strategy_count": len(strategies), "deployment_count": len(active), "consumed_count": sum(v for k,v in counts.items() if k in consumed), "unconsumed_count": max(0, len(active)-sum(v for k,v in counts.items() if k in consumed)), "status_counts": counts}
+        gate_audits = ExecutionGateAuditRepository(storage).list_for_plans(
+            user.user_id, [str(x.get("plan_id") or "") for x in items]
+        )
+        assemble_structure_plan_execution(
+            items, strategies, deployments, executions, gate_audits, symbol,
+        )
         return {"status": "ok", "symbol": symbol, "period": period, "plans": items}
 
     return router

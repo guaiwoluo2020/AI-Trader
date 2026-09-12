@@ -351,25 +351,31 @@ class StructureTradePlanRepository:
 
     def is_consumed(
         self, user_id: int, account_id: int, deployment_id: str, plan_id: str,
+        plan_stage: str = "", direction: str = "",
     ) -> bool:
         return self.storage.fetchone(
             "SELECT execution_id FROM structure_plan_executions "
             "WHERE user_id=? AND account_id=? AND deployment_id=? AND plan_id=? "
+            "AND plan_stage=? AND direction=? "
             "AND status<>'released' LIMIT 1",
-            (user_id, account_id, deployment_id, plan_id),
+            (user_id, account_id, deployment_id, plan_id,
+             str(plan_stage or "default"), str(direction or "none")),
         ) is not None
 
     @staticmethod
     def _execution_id(
         user_id: int, account_id: int, deployment_id: str,
-        plan_id: str, plan_group_id: str = "",
+        plan_id: str, plan_group_id: str = "", plan_stage: str = "",
+        direction: str = "",
     ) -> str:
-        # Plans in one group are mutually exclusive alternatives.  Using the
-        # group as the deterministic primary-key scope makes concurrent Tick
-        # workers race on one database key, so only one direction can win for
-        # a deployment even when both become triggerable at nearly the same
-        # instant.
-        claim_scope = str(plan_group_id or plan_id)
+        # Group alternatives intentionally share one claim id within a stage,
+        # while initial/breakout remain independent opportunities.
+        stage = str(plan_stage or "default")
+        claim_scope = (
+            f"group:{plan_group_id}:{stage}"
+            if plan_group_id else
+            f"plan:{plan_id}:{stage}:{str(direction or 'none')}"
+        )
         return uuid.uuid5(
             uuid.NAMESPACE_URL,
             f"{user_id}:{account_id}:{deployment_id}:{claim_scope}",
@@ -378,7 +384,11 @@ class StructureTradePlanRepository:
     def claim_execution(
         self, user_id: int, account_id: int, deployment_id: str,
         strategy_id: str, plan_id: str, plan_group_id: str = "",
+        plan_stage: str = "", direction: str = "", tick_id: str = "",
+        execution_mode: str = "", reason_code: str = "claimed",
         reason: str = "", payload: Optional[Dict] = None,
+        gate_trace: Optional[List[Dict]] = None,
+        account_snapshot: Optional[Dict] = None,
     ) -> bool:
         """Atomically claim one public plan for one deployment.
 
@@ -391,8 +401,12 @@ class StructureTradePlanRepository:
         claim_token = uuid.uuid4().hex
         claim_payload = dict(payload or {})
         claim_payload["claim_token"] = claim_token
+        plan_stage = str(plan_stage or claim_payload.get("plan_stage")
+                         or claim_payload.get("trade_opportunity_stage") or "default")
+        direction = str(direction or claim_payload.get("direction") or "none").lower()
         execution_id = self._execution_id(
             user_id, account_id, deployment_id, plan_id, plan_group_id,
+            plan_stage, direction,
         )
         claimed_sibling = self.storage.fetchone(
             "SELECT plan_id FROM structure_plan_executions "
@@ -405,15 +419,19 @@ class StructureTradePlanRepository:
             """
             INSERT INTO structure_plan_executions(
                 execution_id,user_id,account_id,deployment_id,strategy_id,
-                plan_id,plan_group_id,status,order_id,reason,payload_json,
-                created_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                plan_id,plan_group_id,plan_stage,direction,tick_id,execution_mode,
+                status,order_id,reason_code,reason,payload_json,gate_trace_json,
+                account_snapshot_json,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT DO NOTHING
             """,
             (
                 execution_id, user_id, account_id, deployment_id, strategy_id,
-                plan_id, plan_group_id, "claimed", "", reason,
-                json.dumps(claim_payload, ensure_ascii=False), now, now,
+                plan_id, plan_group_id, plan_stage, direction, str(tick_id or ""),
+                str(execution_mode or ""), "claimed", "", str(reason_code or "claimed"),
+                reason, json.dumps(claim_payload, ensure_ascii=False),
+                json.dumps(gate_trace or [], ensure_ascii=False),
+                json.dumps(account_snapshot or {}, ensure_ascii=False), now, now,
             ),
         )
         row = self.storage.fetchone(
@@ -431,6 +449,7 @@ class StructureTradePlanRepository:
 
     def release_claim(
         self, user_id: int, account_id: int, deployment_id: str, plan_id: str,
+        plan_stage: str = "", direction: str = "",
         reason: str = "技术失败，允许重新领取",
     ) -> None:
         # Only a claim that has not produced an order may be released. Delete
@@ -438,18 +457,29 @@ class StructureTradePlanRepository:
         self.storage.execute(
             "DELETE FROM structure_plan_executions "
             "WHERE user_id=? AND account_id=? AND deployment_id=? AND plan_id=? "
+            "AND plan_stage=? AND direction=? "
             "AND status='claimed'",
-            (user_id, account_id, deployment_id, plan_id),
+            (user_id, account_id, deployment_id, plan_id,
+             str(plan_stage or "default"), str(direction or "none").lower()),
         )
 
     def record_execution(
         self, user_id: int, account_id: int, deployment_id: str,
         strategy_id: str, plan_id: str, plan_group_id: str, status: str,
         order_id: str = "", reason: str = "", payload: Optional[Dict] = None,
+        plan_stage: str = "", direction: str = "", tick_id: str = "",
+        execution_mode: str = "", reason_code: str = "",
+        gate_trace: Optional[List[Dict]] = None,
+        account_snapshot: Optional[Dict] = None,
     ) -> None:
         now = int(time.time())
+        execution_payload = dict(payload or {})
+        plan_stage = str(plan_stage or execution_payload.get("plan_stage")
+                         or execution_payload.get("trade_opportunity_stage") or "default")
+        direction = str(direction or execution_payload.get("direction") or "none").lower()
         execution_id = self._execution_id(
             user_id, account_id, deployment_id, plan_id, plan_group_id,
+            plan_stage, direction,
         )
         claimed_sibling = self.storage.fetchone(
             "SELECT plan_id FROM structure_plan_executions "
@@ -464,21 +494,29 @@ class StructureTradePlanRepository:
             """
             INSERT INTO structure_plan_executions(
                 execution_id,user_id,account_id,deployment_id,strategy_id,
-                plan_id,plan_group_id,status,order_id,reason,payload_json,
-                created_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(user_id,account_id,deployment_id,plan_id) DO UPDATE SET
+                plan_id,plan_group_id,plan_stage,direction,tick_id,execution_mode,
+                status,order_id,reason_code,reason,payload_json,gate_trace_json,
+                account_snapshot_json,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(user_id,account_id,deployment_id,plan_id,plan_stage,direction) DO UPDATE SET
                 status=excluded.status,order_id=excluded.order_id,
-                reason=excluded.reason,payload_json=excluded.payload_json,
+                reason_code=excluded.reason_code,reason=excluded.reason,
+                payload_json=excluded.payload_json,
+                gate_trace_json=excluded.gate_trace_json,
+                account_snapshot_json=excluded.account_snapshot_json,
                 updated_at=excluded.updated_at
             """,
             (
                 execution_id,user_id,account_id,deployment_id,strategy_id,
-                plan_id,plan_group_id,status,order_id,reason,
-                json.dumps(payload or {}, ensure_ascii=False),now,now,
+                plan_id,plan_group_id,plan_stage,direction,str(tick_id or ""),
+                str(execution_mode or ""),status,order_id,
+                str(reason_code or status),reason,
+                json.dumps(execution_payload, ensure_ascii=False),
+                json.dumps(gate_trace or [], ensure_ascii=False),
+                json.dumps(account_snapshot or {}, ensure_ascii=False),now,now,
             ),
         )
-        self._update_opportunity_state(plan_id, status, payload)
+        self._update_opportunity_state(plan_id, status, execution_payload)
 
     def _update_opportunity_state(self, plan_id: str, execution_status: str,
                                   execution_payload: Optional[Dict] = None) -> None:
@@ -575,7 +613,8 @@ class StructureTradePlanRepository:
     def update_execution_status(
         self, user_id: int, account_id: int, deployment_id: str,
         plan_id: str, status: str, *, order_id: str = "", reason: str = "",
-        payload: Optional[Dict] = None,
+        payload: Optional[Dict] = None, plan_stage: str = "",
+        direction: str = "", reason_code: str = "",
     ) -> bool:
         allowed = {"claimed", "ordered", "accepted", "pending", "filled",
                    "partially_filled", "rejected", "failed", "timeout",
@@ -590,17 +629,24 @@ class StructureTradePlanRepository:
             changes.append("order_id=?"); params.append(str(order_id))
         if payload is not None:
             changes.append("payload_json=?"); params.append(json.dumps(payload, ensure_ascii=False))
-        params.extend([int(user_id), int(account_id), str(deployment_id), str(plan_id)])
+        plan_stage = str(plan_stage or (payload or {}).get("trade_opportunity_stage") or "default")
+        direction = str(direction or (payload or {}).get("direction") or "none").lower()
+        if reason_code:
+            changes.append("reason_code=?"); params.append(str(reason_code))
+        params.extend([int(user_id), int(account_id), str(deployment_id), str(plan_id),
+                       plan_stage, direction])
         self.storage.execute(
             "UPDATE structure_plan_executions SET " + ",".join(changes) +
-            " WHERE user_id=? AND account_id=? AND deployment_id=? AND plan_id=?",
+            " WHERE user_id=? AND account_id=? AND deployment_id=? AND plan_id=? "
+            "AND plan_stage=? AND direction=?",
             tuple(params),
         )
         self._update_opportunity_state(plan_id, status, payload)
         return self.storage.fetchone(
             "SELECT execution_id FROM structure_plan_executions WHERE user_id=? AND account_id=? "
-            "AND deployment_id=? AND plan_id=? LIMIT 1",
-            (int(user_id), int(account_id), str(deployment_id), str(plan_id)),
+            "AND deployment_id=? AND plan_id=? AND plan_stage=? AND direction=? LIMIT 1",
+            (int(user_id), int(account_id), str(deployment_id), str(plan_id),
+             plan_stage, direction),
         ) is not None
 
     def list_executions(self, user_id: int, plan_ids: List[str]) -> List[Dict]:
@@ -610,7 +656,9 @@ class StructureTradePlanRepository:
         placeholders = ",".join("?" for _ in ids)
         rows = self.storage.fetchall(
             "SELECT execution_id,user_id,account_id,deployment_id,strategy_id,"
-            "plan_id,plan_group_id,status,order_id,reason,created_at,updated_at "
+            "plan_id,plan_group_id,plan_stage,direction,tick_id,execution_mode,"
+            "status,order_id,reason_code,reason,gate_trace_json,"
+            "account_snapshot_json,created_at,updated_at "
             f"FROM structure_plan_executions WHERE user_id=? AND plan_id IN ({placeholders}) "
             "ORDER BY updated_at DESC",
             (int(user_id), *ids),

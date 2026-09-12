@@ -25,6 +25,7 @@ from market.services.outbox_dispatcher import OutboxDispatcher
 from market.store.structure_plan_store import StructureTradePlanRepository
 from repositories.container import RepositoryContainer
 from account_auto_flatten_service import AccountAutoFlattenService
+from market.services.tick_execution_context import TickExecutionContext
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class TradingEngineManager:
         self._engines: Dict[EngineKey, EngineRuntime] = {}
         self._lock = threading.RLock()
         self._event_loop = None
+        self._tick_contexts: Dict[Tuple[int, int, str], TickExecutionContext] = {}
         # Shared repository registry used by route factories and services.
         # Keeping one container also guarantees one MySQL pool per process.
         self.repositories = RepositoryContainer(get_storage())
@@ -158,13 +160,54 @@ class TradingEngineManager:
 
     def process_user_market_tick(
         self, user_id: int, account_ids, symbol: str, price: float,
+        source_account_id: Optional[int] = None,
     ) -> Dict[int, Dict]:
-        """Drive every eligible live account once from one authoritative Tick."""
+        """Drive all live accounts from one immutable user-level signal snapshot."""
+        user_id = int(user_id)
+        execution_ids = tuple(dict.fromkeys(int(value) for value in account_ids))
+        source_account_id = int(source_account_id or (execution_ids[0] if execution_ids else 0))
+
+        # Include Paper-only deployments when building the public signal
+        # snapshot.  They must not invoke a stateful generator on their own.
+        deployment_rows = self.repositories.storage.fetchall(
+            "SELECT DISTINCT d.account_id FROM strategy_deployments d "
+            "JOIN trading_accounts a ON a.id=d.account_id "
+            "WHERE d.user_id=? AND d.status='active' AND a.status='active' "
+            "AND a.enabled=1 AND a.trading_enabled=1 AND a.auto_trading_enabled=1",
+            (user_id,),
+        )
+        strategy_by_id = {}
+        for account_id in dict.fromkeys(
+            [*execution_ids, *(int(row["account_id"]) for row in deployment_rows)]
+        ):
+            engine = self.get_engine(user_id, account_id)
+            for strategy in engine.strategy_runtime_coordinator.strategies_for_quote(
+                user_id, account_id, symbol,
+            ):
+                strategy_by_id[str(strategy.strategy_id)] = strategy
+
+        market_engine = self.get_market_engine(user_id)
+        context = market_engine.create_tick_execution_context(
+            symbol, float(price), list(strategy_by_id.values()),
+            source_account_id=source_account_id,
+        )
+        with self._lock:
+            self._tick_contexts[(user_id, source_account_id, str(symbol or "").upper())] = context
         results = {}
-        for account_id in dict.fromkeys(int(value) for value in account_ids):
-            engine = self.get_engine(int(user_id), account_id)
-            results[account_id] = engine.process_price(symbol, float(price))
+        for account_id in execution_ids:
+            engine = self.get_engine(user_id, account_id)
+            results[account_id] = engine.process_price(
+                symbol, float(price), execution_context=context,
+            )
         return results
+
+    def get_tick_execution_context(
+        self, user_id: int, source_account_id: int, symbol: str,
+    ) -> Optional[TickExecutionContext]:
+        with self._lock:
+            return self._tick_contexts.get(
+                (int(user_id), int(source_account_id), str(symbol or "").upper())
+            )
 
     def get_engine_for_user(self, user_id: int) -> TradingServer:
         account = self._account_repo.get_primary_mt5(user_id)

@@ -746,9 +746,35 @@ void ParseAndExecuteTrades(string jsonData)
         }
      }
 
-   // 提取close_tickets数组并执行平仓
+   // 新版持久化平仓指令携带服务端 instruction_id，EA 回执必须原样返回，
+   // 才能把定时清仓请求与真实成交关联起来。
+   int closeInstructionsPos = StringFind(jsonData, "\"close_instructions\":");
+   if(closeInstructionsPos != -1)
+     {
+      int instructionsStart = StringFind(jsonData, "[", closeInstructionsPos);
+      int instructionsEnd = StringFind(jsonData, "]", instructionsStart);
+      if(instructionsStart != -1 && instructionsEnd > instructionsStart + 1)
+        {
+         string instructionsJson = StringSubstr(jsonData, instructionsStart + 1, instructionsEnd - instructionsStart - 1);
+         int instructionCursor = 0;
+         while(instructionCursor < StringLen(instructionsJson))
+           {
+            int objectStart = StringFind(instructionsJson, "{", instructionCursor);
+            int objectEnd = StringFind(instructionsJson, "}", objectStart);
+            if(objectStart == -1 || objectEnd == -1) break;
+            string closeInstruction = StringSubstr(instructionsJson, objectStart, objectEnd - objectStart + 1);
+            long ticket = (long)ExtractJsonDouble(closeInstruction, "ticket");
+            string instructionId = ExtractJsonString(closeInstruction, "instruction_id");
+            if(ticket > 0) ClosePositionByTicket(ticket, instructionId);
+            instructionCursor = objectEnd + 1;
+           }
+         hasCloseTickets = true;
+        }
+     }
+
+   // 旧版 close_tickets 仅在没有新版指令时兼容，避免同一持仓执行两次。
    int closePos = StringFind(jsonData, "\"close_tickets\":");
-   if(closePos != -1)
+   if(closeInstructionsPos == -1 && closePos != -1)
      {
       int closeStart = StringFind(jsonData, "[", closePos);
       int closeEnd = StringFind(jsonData, "]", closeStart);
@@ -941,7 +967,7 @@ void ParseAndExecuteClose(string jsonData)
 //+------------------------------------------------------------------+
 //| 根据订单号平仓                                                    |
 //+------------------------------------------------------------------+
-bool ClosePositionByTicket(long ticket)
+bool ClosePositionByTicket(long ticket, string instructionId = "")
   {
    Print("[EA] ClosePositionByTicket 尝试平仓: ticket=", ticket);
 
@@ -963,8 +989,11 @@ bool ClosePositionByTicket(long ticket)
      {
       Print("[平仓成功] Ticket: ", ticket);
       long resultPositionId = ResolvePositionId((long)trade.ResultDeal(), positionSymbol);
+      string reportInstructionId = instructionId;
+      if(StringLen(reportInstructionId) == 0)
+         reportInstructionId = "position-close-" + IntegerToString(ticket) + "-" + IntegerToString(trade.ResultDeal());
       SendTradeExecutionReport(
-         "position-close-" + IntegerToString(ticket) + "-" + IntegerToString(trade.ResultDeal()),
+         reportInstructionId,
          "position-" + IntegerToString(ticket), positionSymbol, "close",
          true, requestedPrice, trade.ResultPrice(), volume, trade.ResultVolume(),
          (long)trade.ResultOrder(), (long)trade.ResultDeal(),
@@ -976,8 +1005,11 @@ bool ClosePositionByTicket(long ticket)
    else
      {
       Print("[平仓失败] Ticket: ", ticket, " Error: ", GetLastError(), " Retcode: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+      string failedInstructionId = instructionId;
+      if(StringLen(failedInstructionId) == 0)
+         failedInstructionId = "position-close-failed-" + IntegerToString(ticket) + "-" + IntegerToString((long)TimeCurrent());
       SendTradeExecutionReport(
-         "position-close-failed-" + IntegerToString(ticket) + "-" + IntegerToString((long)TimeCurrent()),
+         failedInstructionId,
          "position-" + IntegerToString(ticket), positionSymbol, "close",
          false, requestedPrice, 0, volume, 0,
          (long)trade.ResultOrder(), (long)trade.ResultDeal(), positionId,
