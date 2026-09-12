@@ -1289,7 +1289,8 @@ class TradingServer:
             pending_orders = []
 
         # 获取平仓指令
-        close_tickets = self.get_close_position_instructions(symbol)
+        close_details = self.get_close_position_instruction_details(symbol)
+        close_tickets = [int(item.get("ticket")) for item in close_details]
         position_updates = list(
             self._position_update_instructions.pop(symbol, {}).values()
         )
@@ -1301,7 +1302,7 @@ class TradingServer:
             "trades": trades,
             "pending_orders": pending_orders,
             "close_tickets": [int(item.get("ticket")) for item in close_tickets],
-            "close_instructions": close_tickets,
+            "close_instructions": close_details,
             "position_updates": position_updates,
             "position_partials": position_partials,
             "process_result": process_result
@@ -1371,7 +1372,11 @@ class TradingServer:
             return instruction_id
 
     def get_close_position_instructions(self, symbol: str) -> List[Dict]:
-        """获取并清空平仓指令"""
+        """兼容旧调用方：获取并清空 ticket 列表。"""
+        return [int(item.get("ticket")) for item in self.get_close_position_instruction_details(symbol)]
+
+    def get_close_position_instruction_details(self, symbol: str) -> List[Dict]:
+        """获取并清空带关联 ID 的平仓指令。"""
         with self.lock:
             tickets = self._close_position_instructions.get(symbol, [])
             self._close_position_instructions[symbol] = []
