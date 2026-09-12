@@ -11,6 +11,20 @@ from mysql_repositories import get_storage
 from system_event_log import SystemEventLogRepository
 
 
+def opportunity_status_for_execution(stage: str, execution_status: str) -> str:
+    """Normalize broker/Paper receipts into a stage-scoped opportunity state."""
+    stage_prefix = "initial" if str(stage or "") == "initial" else (
+        "breakout" if str(stage or "") == "breakout" else "single"
+    )
+    normalized = {
+        "filled": "filled", "partially_filled": "partially_filled",
+        "accepted": "ordered", "pending": "ordered", "ordered": "ordered",
+        "rejected": "failed", "failed": "failed", "timeout": "failed",
+        "canceled": "failed", "released": "failed",
+    }.get(str(execution_status or "").lower())
+    return f"{stage_prefix}_{normalized}" if normalized else ""
+
+
 class StructureTradePlanRepository:
     def __init__(self, storage=None):
         self.storage = storage or get_storage()
@@ -183,6 +197,37 @@ class StructureTradePlanRepository:
         for row in rows:
             payload = json.loads(row["payload_json"] or "{}")
             payload["status"] = row["status"]
+            result.append(payload)
+        return result
+
+    def list_opportunity(
+        self, user_id: int, opportunity_id: str,
+        symbol: str = "", period: str = "",
+    ) -> List[Dict]:
+        """Load all public plan stages belonging to one opportunity."""
+        clauses = ["user_id=?"]
+        params: List[object] = [int(user_id)]
+        if symbol:
+            clauses.append("symbol=?"); params.append(str(symbol))
+        if period:
+            clauses.append("period=?"); params.append(str(period).upper())
+        rows = self.storage.fetchall(
+            "SELECT plan_id,status,symbol,period,payload_json,created_at,updated_at "
+            "FROM structure_trade_plans WHERE " + " AND ".join(clauses) +
+            " ORDER BY updated_at DESC",
+            tuple(params),
+        )
+        result = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            if str(payload.get("opportunity_id") or "") != str(opportunity_id):
+                continue
+            payload["status"] = row["status"]
+            payload["created_at"] = int(row.get("created_at") or 0)
+            payload["updated_at"] = int(row.get("updated_at") or 0)
             result.append(payload)
         return result
 
@@ -522,7 +567,8 @@ class StructureTradePlanRepository:
                                   execution_payload: Optional[Dict] = None) -> None:
         """Mirror execution receipt status into the public plan payload."""
         row = self.storage.fetchone(
-            "SELECT payload_json FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
+            "SELECT user_id,account_id,symbol,period,payload_json "
+            "FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
             (str(plan_id),),
         )
         if not row:
@@ -537,23 +583,100 @@ class StructureTradePlanRepository:
         if not opportunity_id or not stage:
             return
         status = str(execution_status or "").lower()
-        if status in {"filled", "partially_filled"}:
-            opportunity_status = "initial_filled" if stage == "initial" else "managed" if stage == "breakout" else "filled"
-        elif status in {"accepted", "pending", "ordered"}:
-            opportunity_status = "initial_ordered" if stage == "initial" else "breakout_ordered" if stage == "breakout" else "ordered"
-        elif status in {"rejected", "failed", "timeout", "canceled", "released"}:
-            opportunity_status = f"{stage}_failed"
-        else:
+        opportunity_status = opportunity_status_for_execution(stage, status)
+        if not opportunity_status:
             return
+        prefix = opportunity_status.split("_", 1)[0]
+        normalized = opportunity_status.split("_", 1)[1]
+        plan[f"{prefix}_execution_status"] = normalized
+        plan[f"{prefix}_execution_status_updated_at"] = int(time.time())
+        if execution_payload and execution_payload.get("order_id"):
+            plan[f"{prefix}_order_id"] = str(execution_payload["order_id"])
+        plan["opportunity_status"] = opportunity_status
+        plan["opportunity_execution_status"] = status
+        plan["opportunity_status_updated_at"] = int(time.time())
+        if prefix == "initial" and normalized == "filled":
+            plan["breakout_eligible"] = False
+        if prefix == "breakout" and normalized == "filled":
+            plan["breakout_eligible"] = False
         plan.update({
-            "opportunity_status": opportunity_status,
-            "opportunity_execution_status": status,
-            "opportunity_status_updated_at": int(time.time()),
+            "last_execution_status": status,
         })
         self.storage.execute(
             "UPDATE structure_trade_plans SET payload_json=?, updated_at=? WHERE plan_id=?",
             (json.dumps(plan, ensure_ascii=False), int(time.time()), str(plan_id)),
         )
+        self._sync_related_opportunity_plans(
+            row, opportunity_id, plan,
+            exclude_plan_id=str(plan_id),
+        )
+
+    @staticmethod
+    def _aggregate_opportunity_status(payload: Dict) -> str:
+        """Return the public status shared by all plans in one opportunity."""
+        breakout = str(payload.get("breakout_execution_status") or "").lower()
+        initial = str(payload.get("initial_execution_status") or "").lower()
+        protected = bool(payload.get("initial_protection_confirmed"))
+        if breakout == "filled":
+            return "breakout_filled"
+        if breakout == "partially_filled":
+            return "breakout_partially_filled"
+        if breakout == "ordered":
+            return "breakout_ordered"
+        if breakout == "failed":
+            return "breakout_failed"
+        if protected:
+            return "breakout_eligible"
+        if initial == "filled":
+            return "protection_pending"
+        if initial == "partially_filled":
+            return "initial_partially_filled"
+        if initial == "ordered":
+            return "initial_ordered"
+        if initial == "failed":
+            return "initial_failed"
+        return str(payload.get("opportunity_status") or "pending")
+
+    def _sync_related_opportunity_plans(
+        self, source_row: Dict, opportunity_id: str, source_plan: Dict,
+        *, exclude_plan_id: str = "",
+    ) -> int:
+        """Propagate stage state to the initial/breakout sibling plans."""
+        if not opportunity_id:
+            return 0
+        rows = self.storage.fetchall(
+            "SELECT plan_id,payload_json FROM structure_trade_plans "
+            "WHERE user_id=? AND account_id=? AND symbol=? AND period=?",
+            (int(source_row.get("user_id") or 0), int(source_row.get("account_id") or 0),
+             str(source_row.get("symbol") or ""), str(source_row.get("period") or "")),
+        )
+        aggregate = self._aggregate_opportunity_status(source_plan)
+        changed = 0
+        for row in rows:
+            sibling_id = str(row.get("plan_id") or "")
+            if sibling_id == str(exclude_plan_id):
+                continue
+            try:
+                sibling = json.loads(row.get("payload_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                sibling = {}
+            if str(sibling.get("opportunity_id") or "") != str(opportunity_id):
+                continue
+            sibling.update({
+                "opportunity_status": aggregate,
+                "opportunity_status_updated_at": int(time.time()),
+                "breakout_eligible": aggregate == "breakout_eligible",
+            })
+            if source_plan.get("initial_protection_confirmed"):
+                sibling["initial_protection_confirmed"] = True
+                sibling["initial_protection_status"] = "confirmed"
+                sibling["protection_confirmed_at"] = source_plan.get("protection_confirmed_at")
+            self.storage.execute(
+                "UPDATE structure_trade_plans SET payload_json=?, updated_at=? WHERE plan_id=?",
+                (json.dumps(sibling, ensure_ascii=False), int(time.time()), sibling_id),
+            )
+            changed += 1
+        return changed
 
     def confirm_protection_for_account(self, user_id: int, account_id: int,
                                        symbol: str, positions: List[Dict]) -> int:
@@ -587,7 +710,8 @@ class StructureTradePlanRepository:
             if str(payload.get("direction") or "").lower() not in protected:
                 continue
             plan_row = self.storage.fetchone(
-                "SELECT payload_json FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
+                "SELECT user_id,account_id,symbol,period,payload_json "
+                "FROM structure_trade_plans WHERE plan_id=? LIMIT 1",
                 (str(row["plan_id"]),),
             )
             if not plan_row:
@@ -600,12 +724,19 @@ class StructureTradePlanRepository:
                 continue
             plan.update({
                 "opportunity_status": "protection_confirmed",
+                "initial_protection_status": "confirmed",
+                "initial_protection_confirmed": True,
+                "breakout_eligible": True,
                 "protection_confirmed_at": int(time.time()),
                 "protection_confirmation_source": "account_position_snapshot",
             })
             self.storage.execute(
                 "UPDATE structure_trade_plans SET payload_json=?, updated_at=? WHERE plan_id=?",
                 (json.dumps(plan, ensure_ascii=False), int(time.time()), str(row["plan_id"])),
+            )
+            self._sync_related_opportunity_plans(
+                plan_row, str(plan.get("opportunity_id") or ""), plan,
+                exclude_plan_id=str(row["plan_id"]),
             )
             changed += 1
         return changed
@@ -641,7 +772,10 @@ class StructureTradePlanRepository:
             "AND plan_stage=? AND direction=?",
             tuple(params),
         )
-        self._update_opportunity_state(plan_id, status, payload)
+        status_payload = dict(payload or {})
+        if order_id:
+            status_payload.setdefault("order_id", str(order_id))
+        self._update_opportunity_state(plan_id, status, status_payload)
         return self.storage.fetchone(
             "SELECT execution_id FROM structure_plan_executions WHERE user_id=? AND account_id=? "
             "AND deployment_id=? AND plan_id=? AND plan_stage=? AND direction=? LIMIT 1",

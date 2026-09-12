@@ -2,7 +2,9 @@ import json
 import threading
 import unittest
 
-from market.store.structure_plan_store import StructureTradePlanRepository
+from market.store.structure_plan_store import (
+    StructureTradePlanRepository, opportunity_status_for_execution,
+)
 
 
 class _ExecutionStorage:
@@ -136,6 +138,43 @@ class StructurePlanExecutionIdentityTests(unittest.TestCase):
         self.assertEqual(initial["status"], "filled")
         self.assertEqual(initial["order_id"], "order-initial")
         self.assertEqual(breakout["status"], "claimed")
+
+    def test_execution_receipts_map_to_stage_scoped_opportunity_states(self):
+        self.assertEqual(
+            opportunity_status_for_execution("initial", "filled"),
+            "initial_filled",
+        )
+        self.assertEqual(
+            opportunity_status_for_execution("breakout", "pending"),
+            "breakout_ordered",
+        )
+        self.assertEqual(
+            opportunity_status_for_execution("breakout", "timeout"),
+            "breakout_failed",
+        )
+        self.assertEqual(opportunity_status_for_execution("initial", "unknown"), "")
+
+    def test_opportunity_aggregate_prefers_protection_then_breakout(self):
+        self.assertEqual(
+            self.repository._aggregate_opportunity_status({
+                "initial_execution_status": "filled",
+            }),
+            "protection_pending",
+        )
+        self.assertEqual(
+            self.repository._aggregate_opportunity_status({
+                "initial_execution_status": "filled",
+                "initial_protection_confirmed": True,
+            }),
+            "breakout_eligible",
+        )
+        self.assertEqual(
+            self.repository._aggregate_opportunity_status({
+                "initial_protection_confirmed": True,
+                "breakout_execution_status": "filled",
+            }),
+            "breakout_filled",
+        )
 
 
 if __name__ == "__main__":

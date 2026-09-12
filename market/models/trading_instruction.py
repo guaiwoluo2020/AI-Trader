@@ -34,10 +34,15 @@ class TradingInstruction:
 
     # 自动生成字段
     instruction_id: str = ""
-    status: str = "pending"  # pending/sent/executed/cancelled
+    # pending -> delivered -> filled/rejected/timeout/canceled.
+    # `delivered` is deliberately non-terminal: the EA may receive the HTTP
+    # response but fail before it can send its execution receipt.
+    status: str = "pending"
     created_at: Optional[datetime] = None
     sent_at: Optional[datetime] = None  # 发送给EA的时间
     executed_at: Optional[datetime] = None
+    delivery_attempts: int = 0
+    last_delivery_at: Optional[datetime] = None
 
     def __post_init__(self):
         if not self.instruction_id:
@@ -84,6 +89,10 @@ class TradingInstruction:
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "sent_at": self.sent_at.isoformat() if self.sent_at else None,
             "executed_at": self.executed_at.isoformat() if self.executed_at else None,
+            "delivery_attempts": int(self.delivery_attempts or 0),
+            "last_delivery_at": (
+                self.last_delivery_at.isoformat() if self.last_delivery_at else None
+            ),
         }
 
     @classmethod
@@ -102,6 +111,10 @@ class TradingInstruction:
         executed_at = data.get('executed_at')
         if isinstance(executed_at, str):
             executed_at = datetime.fromisoformat(executed_at)
+
+        last_delivery_at = data.get('last_delivery_at')
+        if isinstance(last_delivery_at, str):
+            last_delivery_at = datetime.fromisoformat(last_delivery_at)
 
         return cls(
             symbol=data.get('symbol', ''),
@@ -122,6 +135,8 @@ class TradingInstruction:
             created_at=created_at,
             sent_at=sent_at,
             executed_at=executed_at,
+            delivery_attempts=int(data.get('delivery_attempts', 0) or 0),
+            last_delivery_at=last_delivery_at,
         )
 
     @classmethod

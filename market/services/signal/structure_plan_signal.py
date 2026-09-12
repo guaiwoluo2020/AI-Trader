@@ -954,6 +954,12 @@ class StructurePlanBuilder:
         self._activate_setup(setup_type)
         zones = pressure.get("zones") or []
         zone = next((item for item in zones if str(item.get("zone_id")) == str(event.get("zone_id"))), {})
+        # A confirmed event remains in the bounded snapshot for audit/replay,
+        # but a zone that has returned inside after breakout must not recreate
+        # the stale plan on the next bar.
+        if str(zone.get("status") or "").lower() == "invalidated":
+            self._reject("成交密集区事件已失效，价格已回到区域内部")
+            return []
         lower, upper = _number(zone.get("lower")), _number(zone.get("upper"))
         atr = max(1e-9, _number(structure.get("atr")))
         buffer = atr * max(0.05, _number(self._param("stop_buffer_atr", 0.25)))
@@ -1009,6 +1015,17 @@ class StructurePlanBuilder:
             invalidation_price=stop, structure_snapshot=snapshot,
             validation_evidence=evidence,
         )
+        if plan:
+            plan["lifecycle_stage"] = "active" if setup_type == "pressure_reversal" else "confirmed"
+            plan["event_status"] = str(evidence.get("event_status") or "confirmed")
+            plan["event_stage"] = str(evidence.get("event_stage") or (
+                "initial" if setup_type == "pressure_reversal" else "breakout"
+            ))
+            plan["opportunity_status"] = (
+                "initial_pending" if setup_type == "pressure_reversal"
+                else "breakout_waiting_initial"
+            )
+            plan["opportunity_status_updated_at"] = int(bar_time)
         return [plan] if plan else []
 
     def _location_plans(

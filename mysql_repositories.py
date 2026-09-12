@@ -1100,6 +1100,19 @@ class TradeExecutionRepository:
         instruction_id = str(payload.get("instruction_id", "")).strip()
         if not instruction_id:
             raise ValueError("执行回报缺少 instruction_id")
+        # MT5 retries a receipt when its HTTP response is lost. The original
+        # receipt is authoritative, so a duplicate must be a no-op instead of
+        # re-emitting a filled event or changing the recorded deal.
+        existing = self.storage.fetchone(
+            "SELECT * FROM trade_execution_reports "
+            "WHERE account_id = ? AND instruction_id = ? LIMIT 1",
+            (int(account_id), instruction_id),
+        )
+        if existing:
+            result = self._deserialize(existing)
+            if result is not None:
+                result["duplicate"] = True
+            return result
         action = str(payload.get("action", "")).strip().lower()
         requested_price = float(payload.get("requested_price", 0) or 0)
         executed_price = float(payload.get("executed_price", 0) or 0)
@@ -1176,6 +1189,7 @@ class TradeExecutionRepository:
             result["status"] = normalized.status
             result["transport"] = normalized.transport
             result["accepted"] = normalized.accepted
+            result["duplicate"] = False
         return result
 
     @staticmethod

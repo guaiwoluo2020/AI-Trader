@@ -123,6 +123,10 @@ class TradingInstructionService:
         """
         return self.store.fetch_and_remove_by_symbol(symbol, current_price)
 
+    def mark_execution_report(self, instruction_id: str, success: bool) -> bool:
+        """Stop delivery after an authoritative EA execution receipt."""
+        return self.store.mark_execution_report(instruction_id, success)
+
     # ==================== 清理指令 ====================
 
     def remove_instruction(self, instruction_id: str) -> Optional[TradingInstruction]:

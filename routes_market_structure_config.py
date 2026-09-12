@@ -24,7 +24,7 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
         "trend_max_event_age_bars_other", "trend_min_retest_bars",
         "trend_continuation_hold_bars",
         "pressure_plan_valid_bars", "pressure_min_event_confidence",
-        "zone_lookback_bars", "zone_min_visits",
+        "zone_lookback_bars", "zone_min_visits", "zone_identity_max_gap_bars",
         "event_risk_min_importance", "event_risk_calendar_before_minutes",
         "event_risk_calendar_after_minutes", "event_risk_major_before_minutes",
         "event_risk_major_after_minutes", "event_risk_resume_confirmation_bars",

@@ -5,9 +5,9 @@
 """
 
 from typing import List, Dict, Optional
-from datetime import datetime
 import threading
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 from ..models import TradingInstruction
 from repositories.runtime import RuntimeStateRepository
@@ -17,6 +17,12 @@ class TradingInstructionStore:
     """交易指令存储（只负责数据CRUD）"""
 
     ENTITY_TYPE = "trading_instruction"
+    DELIVERY_RETRY_DELAY = timedelta(seconds=15)
+    MAX_DELIVERY_ATTEMPTS = 3
+    # `sent` is retained temporarily for instructions created by the previous
+    # implementation. Loading one converts it to the reliable `delivered`
+    # state rather than silently stranding it after a deployment.
+    ACTIVE_STATUSES = ("pending", "delivered", "sent")
 
     def __init__(self, user_id: int = None, account_id: int = None):
         # 按品种分类的指令: {symbol: [TradingInstruction, ...]}
@@ -35,7 +41,7 @@ class TradingInstructionStore:
         if self._repository:
             for data in self._repository.list_entities(
                 self.ENTITY_TYPE,
-                statuses=["pending"],
+                statuses=list(self.ACTIVE_STATUSES),
             ):
                 instruction = TradingInstruction.from_dict(data)
                 symbol = instruction.symbol.upper()
@@ -122,7 +128,11 @@ class TradingInstructionStore:
 
     def fetch_and_remove_by_symbol(self, symbol: str, current_price: float = None) -> List[Dict]:
         """
-        获取满足条件的指令并移除（EA轮询时调用）
+        获取满足条件的指令并标记已投递（EA轮询时调用）。
+
+        指令不会在第一次 GET 时删除。只有 EA 的执行回执才能让它进入
+        最终状态；否则网络响应丢失会把真实交易指令永久吞掉。投递超时后
+        只重投递同一 instruction_id，EA 可据此安全去重。
 
         价格过滤逻辑：
         - 买入指令：指令价格 <= 当前价格 → 发送
@@ -143,13 +153,39 @@ class TradingInstructionStore:
                 return []
 
             result = []
-            remaining = []
+            now = datetime.now()
 
             for inst in instructions:
-                should_send = True
+                if inst.status not in self.ACTIVE_STATUSES:
+                    continue
+
+                if inst.status == "sent":
+                    inst.status = "delivered"
+                    inst.last_delivery_at = inst.sent_at
+                    inst.delivery_attempts = max(1, int(inst.delivery_attempts or 0))
+                    self._persist(inst)
+
+                should_send = inst.status == "pending"
+
+                if inst.status == "delivered":
+                    last_delivery = inst.last_delivery_at or inst.sent_at
+                    if last_delivery and now - last_delivery < self.DELIVERY_RETRY_DELAY:
+                        continue
+                    if int(inst.delivery_attempts or 0) >= self.MAX_DELIVERY_ATTEMPTS:
+                        inst.status = "timeout"
+                        self._persist(inst)
+                        print(
+                            "[TradingInstructionStore] 指令投递超时: "
+                            f"{inst.instruction_id} {symbol}"
+                        )
+                        continue
+                    # A previous response may have been lost. Re-send exactly
+                    # the same instruction even if price has moved; the EA's
+                    # idempotency key prevents a second market order.
+                    should_send = True
 
                 # 价格条件过滤
-                if current_price is not None:
+                if should_send and inst.status == "pending" and current_price is not None:
                     if inst.action.lower() == 'b':
                         # 买入：指令价格需要 <= 当前价格
                         if inst.price > current_price:
@@ -160,23 +196,37 @@ class TradingInstructionStore:
                             should_send = False
 
                 if should_send:
-                    inst.status = "sent"
-                    inst.sent_at = datetime.now()
+                    inst.status = "delivered"
+                    inst.sent_at = now
+                    inst.last_delivery_at = now
+                    inst.delivery_attempts = int(inst.delivery_attempts or 0) + 1
                     result.append(inst.to_dict())  # 返回给EA的格式
                     self._persist(inst)
-                    del self._instructions_by_id[inst.instruction_id]
-                else:
-                    remaining.append(inst)
-
-            # 更新存储
-            self._instructions_by_symbol[symbol] = remaining
 
             if result:
-                print(f"[TradingInstructionStore] 发送指令给EA: {symbol} {len(result)}条 (当前价格: {current_price})")
-            if remaining:
-                print(f"[TradingInstructionStore] 缓存指令等待条件: {symbol} {len(remaining)}条")
+                print(
+                    f"[TradingInstructionStore] 投递指令给EA: {symbol} {len(result)}条 "
+                    f"(当前价格: {current_price})"
+                )
 
             return result
+
+    def mark_execution_report(self, instruction_id: str, success: bool) -> bool:
+        """Apply the EA's terminal receipt and stop future delivery."""
+        with self._lock:
+            inst = self._instructions_by_id.get(str(instruction_id or ""))
+            if not inst:
+                return False
+            inst.status = "filled" if success else "rejected"
+            inst.executed_at = datetime.now()
+            self._persist(inst)
+            symbol = inst.symbol.upper()
+            self._instructions_by_symbol[symbol] = [
+                item for item in self._instructions_by_symbol[symbol]
+                if item.instruction_id != inst.instruction_id
+            ]
+            del self._instructions_by_id[inst.instruction_id]
+            return True
 
     # ==================== 移除指令 ====================
 

@@ -133,4 +133,63 @@ def create_structure_plan_routes(engine_manager, strategy_repo, structure_defaul
         )
         return {"status": "ok", "symbol": symbol, "period": period, "plans": items}
 
+    @router.get("/market/structure/{symbol}/opportunities/{opportunity_id}", dependencies=[Depends(require_auth)])
+    async def get_structure_opportunity(
+        symbol: str, opportunity_id: str, period: str = Query("M5"),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        """Return one opportunity with its event, stages and execution receipts."""
+        period = period.upper(); storage = get_storage()
+        repo = StructureTradePlanRepository(storage)
+        plans = repo.list_opportunity(user.user_id, opportunity_id, symbol, period)
+        if not plans:
+            return {"status": "ok", "symbol": symbol, "period": period,
+                    "opportunity_id": opportunity_id, "found": False,
+                    "plans": [], "stages": {}}
+        executions = repo.list_executions(
+            user.user_id, [str(item.get("plan_id") or "") for item in plans]
+        )
+        audits = ExecutionGateAuditRepository(storage).list_for_plans(
+            user.user_id, [str(item.get("plan_id") or "") for item in plans]
+        )
+        execution_by_plan: Dict[str, list] = {}
+        for item in executions:
+            execution_by_plan.setdefault(str(item.get("plan_id") or ""), []).append(item)
+        audit_by_plan: Dict[str, list] = {}
+        for item in audits:
+            audit_by_plan.setdefault(str(item.get("plan_id") or ""), []).append(item)
+        stages = {}
+        for plan in plans:
+            stage = str(plan.get("opportunity_stage") or plan.get("event_stage") or "single")
+            stages[stage] = {
+                "plan": plan,
+                "executions": execution_by_plan.get(str(plan.get("plan_id") or ""), []),
+                "gate_audits": audit_by_plan.get(str(plan.get("plan_id") or ""), []),
+            }
+        first = plans[0]
+        evidence = first.get("validation_evidence") or {}
+        return {
+            "status": "ok", "found": True, "symbol": symbol, "period": period,
+            "opportunity_id": opportunity_id,
+            "structure_segment_id": first.get("structure_segment_id"),
+            "structure_revision": (first.get("structure_metadata") or {}).get("revision"),
+            "zone_id": evidence.get("zone_id"),
+            "zone_revision": evidence.get("zone_revision"),
+            "direction": first.get("direction"),
+            "setup_family": first.get("setup_family"),
+            "event": {
+                "event_id": evidence.get("event_id"),
+                "event_type": evidence.get("type"),
+                "event_status": evidence.get("event_status", "confirmed"),
+                "event_stage": evidence.get("event_stage"),
+                "confirmed_at": evidence.get("confirmed_at"),
+                "invalidated_at": evidence.get("invalidated_at"),
+                "invalidation_reason": evidence.get("invalidation_reason"),
+            },
+            "opportunity_status": first.get("opportunity_status"),
+            "breakout_eligible": bool(first.get("breakout_eligible")),
+            "initial_protection_confirmed": bool(first.get("initial_protection_confirmed")),
+            "stages": stages,
+        }
+
     return router

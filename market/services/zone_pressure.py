@@ -19,6 +19,11 @@ DEFAULT_CONFIG = {
     "zone_min_visits": 3,
     "zone_leave_atr": 0.5,
     "zone_max_width_atr": 2.0,
+    # A density bucket is a presentation detail, not the identity of a
+    # market area.  When ATR or the bin origin moves slightly, match the new
+    # band to the previous snapshot and keep its zone_id.
+    "zone_identity_match_atr": 0.75,
+    "zone_identity_max_gap_bars": 2,
     "pressure_touch_atr": 0.35,
     "pressure_min_rejections": 3,
     "pressure_reclaim_ratio": 0.50,
@@ -139,6 +144,81 @@ def _dense_zones(symbol: str, period: str, rows: List[Dict], atr: float, cfg: Di
             zones[-1]["zone_id"], zones[-1]["lower"], zones[-1]["upper"]
         )
     return sorted(zones, key=lambda item: (-item["close_count"], item["center"]))[:3]
+
+
+def _zone_overlap(left: Dict, right: Dict) -> float:
+    """Return intersection over the smaller band width."""
+    left_lower, left_upper = _number(left.get("lower")), _number(left.get("upper"))
+    right_lower, right_upper = _number(right.get("lower")), _number(right.get("upper"))
+    intersection = max(0.0, min(left_upper, right_upper) - max(left_lower, right_lower))
+    width = min(max(0.0, left_upper - left_lower), max(0.0, right_upper - right_lower))
+    return intersection / width if width > 0 else 0.0
+
+
+def _inherit_zone_identity(
+    zones: List[Dict], previous: Optional[Dict], atr: float, cfg: Dict,
+    period: str = "", current_last_time: int = 0,
+) -> None:
+    """Carry a density zone identity across a small ATR/bin recalculation.
+
+    ``zone_id`` identifies the market area, while ``zone_revision`` identifies
+    its current boundaries.  Matching is intentionally one-to-one and only
+    uses the previous bounded snapshot, so it cannot merge two live zones or
+    introduce look-ahead data.
+    """
+    if not zones or not previous:
+        return
+    previous_pressure = previous.get("zone_pressure") or previous
+    previous_last_time = _number(previous_pressure.get("last_bar_time"))
+    if current_last_time and previous_last_time:
+        period_seconds = {
+            "M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400,
+        }.get(str(period).upper(), 300)
+        max_gap = period_seconds * max(
+            1, int(cfg.get("zone_identity_max_gap_bars", 2) or 2)
+        )
+        # A stale prefix snapshot must not rewrite the identity of a fresh
+        # full replay; only a contiguous/near-contiguous stream may inherit.
+        if abs(float(current_last_time) - previous_last_time) > max_gap:
+            return
+    old_zones = [
+        item for item in (previous_pressure.get("zones") or [])
+        if item.get("kind") == "density" and item.get("zone_id")
+    ]
+    if not old_zones:
+        return
+    tolerance = max(1e-9, atr * max(.05, _number(cfg.get("zone_identity_match_atr", .75))))
+    candidates = []
+    for new_index, current in enumerate(zones):
+        for old_index, old in enumerate(old_zones):
+            center_distance = abs(_number(current.get("center")) - _number(old.get("center")))
+            overlap = _zone_overlap(current, old)
+            if overlap < 0.25 and center_distance > tolerance:
+                continue
+            score = (overlap, -center_distance, _number(old.get("last_density_at")))
+            candidates.append((score, new_index, old_index))
+    used_new, used_old = set(), set()
+    for _, new_index, old_index in sorted(candidates, reverse=True):
+        if new_index in used_new or old_index in used_old:
+            continue
+        current, old = zones[new_index], old_zones[old_index]
+        if (
+            str(current.get("zone_id")) == str(old.get("zone_id"))
+            and _number(current.get("lower")) == _number(old.get("lower"))
+            and _number(current.get("upper")) == _number(old.get("upper"))
+        ):
+            used_new.add(new_index)
+            used_old.add(old_index)
+            continue
+        current["zone_id"] = str(old["zone_id"])
+        current["identity_source"] = "previous_snapshot"
+        current["previous_zone_revision"] = str(old.get("zone_revision") or "")
+        current["zone_revision"] = _id(
+            current["zone_id"], current["lower"], current["upper"],
+            current.get("last_density_at"), current.get("close_count"),
+        )
+        used_new.add(new_index)
+        used_old.add(old_index)
 
 
 def _pivot_zones(symbol: str, period: str, pivot_levels: Optional[Dict], atr: float, cfg: Dict) -> List[Dict]:
@@ -266,6 +346,68 @@ def _pressure(zones: List[Dict], rows: List[Dict], atr: float, cfg: Dict) -> Lis
     return events
 
 
+def _update_zone_states(
+    zones: List[Dict], events: List[Dict], rows: List[Dict], atr: float, cfg: Dict,
+) -> None:
+    """Assign a deterministic lifecycle state to each density zone.
+
+    The state is derived from the bounded closed-bar window, not process
+    memory.  This keeps restart/replay identical while making invalidation
+    explicit for plan consumers.
+    """
+    latest_close = _value(rows[-1], "close") if rows else 0.0
+    leave_margin = max(0.0, _number(cfg.get("zone_leave_atr", .5))) * max(atr, 1e-9)
+    by_zone: Dict[str, List[Dict]] = {}
+    for event in events:
+        by_zone.setdefault(str(event.get("zone_id") or ""), []).append(event)
+    for zone in zones:
+        zone_id = str(zone.get("zone_id") or "")
+        lower, upper = _number(zone.get("lower")), _number(zone.get("upper"))
+        visits = list(zone.get("visits") or [])
+        current_visit = zone.get("current_visit")
+        zone_events = sorted(
+            by_zone.get(zone_id, []),
+            key=lambda item: int(item.get("confirmed_at") or 0),
+        )
+        latest_event = zone_events[-1] if zone_events else None
+        for event in zone_events:
+            event["event_status"] = "confirmed"
+            event["event_stage"] = (
+                "initial" if event.get("type") == "pressure_reversal_confirmed"
+                else "breakout" if event.get("type") == "zone_breakout_confirmed"
+                else "single"
+            )
+        state, reason = "candidate", "尚无完整离开记录"
+        if visits or current_visit:
+            state, reason = "tested", "已发生至少一次区域访问"
+        if latest_event and latest_event.get("type") == "pressure_reversal_confirmed":
+            state, reason = "rejected", "区域多次测试后出现方向性拒绝"
+        elif latest_event and latest_event.get("type") == "zone_breakout_confirmed":
+            direction = str(latest_event.get("direction") or "")
+            outside = (
+                direction == "buy" and latest_close > upper + leave_margin
+            ) or (
+                direction == "sell" and latest_close < lower - leave_margin
+            )
+            if outside:
+                state, reason = "breakout_watch", "收盘突破区域边界，等待突破后续确认"
+            else:
+                state, reason = "invalidated", "突破确认后价格重新回到区域内部"
+                latest_event["event_status"] = "invalidated"
+                latest_event["invalidated_at"] = _time(rows[-1]) if rows else 0
+                latest_event["invalidation_reason"] = "zone_return_inside"
+        elif latest_close and (
+            latest_close < lower - leave_margin or latest_close > upper + leave_margin
+        ):
+            state, reason = "broken", "价格离开区域但尚未形成有效方向事件"
+        zone["status"] = state
+        zone["status_reason"] = reason
+        zone["last_event_id"] = str((latest_event or {}).get("event_id") or "")
+        zone["last_event_type"] = str((latest_event or {}).get("type") or "")
+        zone["last_event_at"] = int((latest_event or {}).get("confirmed_at") or 0)
+        zone["invalidated"] = state == "invalidated"
+
+
 def advance(symbol: str, period: str, rows: List[Dict], config: Optional[Dict] = None,
             previous: Optional[Dict] = None, pivot_levels: Optional[Dict] = None) -> Dict:
     """Produce the canonical closed-bar zone-pressure snapshot.
@@ -283,14 +425,15 @@ def advance(symbol: str, period: str, rows: List[Dict], config: Optional[Dict] =
     window = closed[-max(20, int(cfg.get("zone_lookback_bars") or 80)):]
     atr = _atr(window)
     zones = _dense_zones(symbol, period, window, atr, cfg)
+    _inherit_zone_identity(zones, previous, atr, cfg, period, _time(closed[-1]))
     pivot_zones = _pivot_zones(symbol, period, pivot_levels, atr, cfg)
     _annotate_overlaps(zones, pivot_zones, atr)
     for zone in zones:
         for row in window:
             visit(zone, row, _number(cfg.get("zone_leave_atr")))
         zone["visit_count"] = len(zone.get("visits") or [])
-        zone["status"] = "active"
     events = _pressure(zones, window, atr, cfg)
+    _update_zone_states(zones, events, window, atr, cfg)
     return {"enabled": True, "atr": round(atr, 8), "zones": zones,
             "pivot_zones": pivot_zones, "events": events,
             "last_bar_time": _time(closed[-1]), "config": cfg}

@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from market.services.zone_pressure import advance, visit, momentum
+from market.services.zone_pressure import advance, visit, momentum, _update_zone_states
 from market.services.signal.structure_plan_signal import StructurePlanBuilder
 from market.services.signal.structure_plan.lifecycle import invalidate_reason
 
@@ -48,6 +48,9 @@ class ZonePressureTests(unittest.TestCase):
         self.assertEqual(plans[0]["setup_type"], "pressure_reversal")
         self.assertEqual(plans[0]["direction"], "sell")
         self.assertEqual(plans[0]["validation_evidence"]["event_id"], "e1")
+        self.assertEqual(plans[0]["lifecycle_stage"], "active")
+        self.assertEqual(plans[0]["event_status"], "confirmed")
+        self.assertEqual(plans[0]["opportunity_status"], "initial_pending")
         first_opportunity = plans[0]["opportunity_id"]
         structure["structure_segment_id"] = "segment-b"
         second = StructurePlanBuilder({"min_real_risk_reward": 1.0}).build(
@@ -96,6 +99,57 @@ class ZonePressureTests(unittest.TestCase):
         self.assertTrue(result["zones"])
         self.assertTrue(result["zones"][0].get("zone_revision"))
 
+    def test_density_zone_keeps_identity_when_atr_bin_moves(self):
+        rows = [bar(60*i, 100.1) for i in range(40)]
+        first = advance("X", "M1", rows, config={"zone_bin_atr": 0.5})
+        second = advance(
+            "X", "M1", rows, config={"zone_bin_atr": 0.55}, previous=first,
+        )
+        self.assertTrue(first["zones"])
+        self.assertTrue(second["zones"])
+        self.assertEqual(first["zones"][0]["zone_id"], second["zones"][0]["zone_id"])
+        self.assertEqual(second["zones"][0]["identity_source"], "previous_snapshot")
+
+    def test_density_zone_revision_changes_when_inherited_band_moves(self):
+        rows = [bar(60*i, 100.1) for i in range(40)]
+        first = advance("X", "M1", rows, config={"zone_bin_atr": 0.5})
+        moved_rows = rows[:-1] + [bar(60*39, 100.25)]
+        second = advance(
+            "X", "M1", moved_rows, config={"zone_bin_atr": 0.55}, previous=first,
+        )
+        self.assertTrue(second["zones"])
+        self.assertEqual(first["zones"][0]["zone_id"], second["zones"][0]["zone_id"])
+        self.assertNotEqual(first["zones"][0]["zone_revision"], second["zones"][0]["zone_revision"])
+
+    def test_zone_lifecycle_states_are_deterministic(self):
+        rows = [bar(1, 100.0), bar(2, 100.0), bar(3, 100.0)]
+        zone = {"zone_id": "z1", "lower": 99.0, "upper": 101.0,
+                "visits": [], "current_visit": None}
+        _update_zone_states([zone], [], rows, 1.0, {"zone_leave_atr": .5})
+        self.assertEqual(zone["status"], "candidate")
+
+        zone["visits"] = [{"left_direction": "up", "left_price": 102.0}]
+        _update_zone_states([zone], [], rows, 1.0, {"zone_leave_atr": .5})
+        self.assertEqual(zone["status"], "tested")
+
+        reversal = [{"event_id": "e1", "zone_id": "z1",
+                     "type": "pressure_reversal_confirmed", "confirmed_at": 3}]
+        _update_zone_states([zone], reversal, rows, 1.0, {"zone_leave_atr": .5})
+        self.assertEqual(zone["status"], "rejected")
+
+        breakout = [{"event_id": "e2", "zone_id": "z1",
+                     "type": "zone_breakout_confirmed", "direction": "buy",
+                     "confirmed_at": 3}]
+        outside = [bar(1, 100.0), bar(2, 100.0), bar(3, 102.0)]
+        _update_zone_states([zone], breakout, outside, 1.0, {"zone_leave_atr": .5})
+        self.assertEqual(zone["status"], "breakout_watch")
+        self.assertEqual(breakout[0]["event_status"], "confirmed")
+        inside = [bar(1, 100.0), bar(2, 100.0), bar(3, 100.5)]
+        _update_zone_states([zone], breakout, inside, 1.0, {"zone_leave_atr": .5})
+        self.assertEqual(zone["status"], "invalidated")
+        self.assertTrue(zone["invalidated"])
+        self.assertEqual(breakout[0]["event_status"], "invalidated")
+
     def test_confirmed_pivots_form_support_resistance_zones(self):
         result = advance(
             "X", "M1", [bar(60*i, 100 + (i % 3) * .1) for i in range(40)],
@@ -128,10 +182,31 @@ class ZonePressureTests(unittest.TestCase):
         )
         self.assertEqual(plans[0]["setup_type"], "pressure_zone_breakout")
         self.assertEqual(plans[0]["opportunity_stage"], "breakout")
+        self.assertEqual(plans[0]["lifecycle_stage"], "confirmed")
+        self.assertEqual(plans[0]["event_stage"], "breakout")
         self.assertEqual(plans[0]["structure_segment_id"], "seg-1")
         self.assertEqual(
             invalidate_reason(plans[0], 100.0), "pressure_zone_returned_inside"
         )
+
+    def test_invalidated_zone_does_not_recreate_breakout_plan(self):
+        structure = {
+            "atr": 1.0, "major_state": "up", "internal_state": "up",
+            "external_state": "up", "structure_segment_id": "seg-1",
+            "zone_pressure": {
+                "zones": [{"zone_id": "z1", "lower": 99.0, "upper": 101.0,
+                            "status": "invalidated"}],
+                "events": [{"event_id": "e1", "zone_id": "z1",
+                    "type": "zone_breakout_confirmed", "direction": "buy",
+                    "level": 101.0, "boundary": 101.0, "confirmed_at": 120}],
+            },
+        }
+        rows = [bar(i * 60, 100.5) for i in range(3)]
+        plans = StructurePlanBuilder({"min_real_risk_reward": 1.0}).build(
+            "market-structure", "X", "M1", rows, structure,
+        )
+        self.assertTrue(plans)
+        self.assertTrue(all(item.get("setup_type") == "no_trade" for item in plans))
 
 
 if __name__ == '__main__':

@@ -358,10 +358,21 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             report = server.execution_report_service.record(
                 identity.user_id, identity.account_id, payload
             )
+            instruction_id = str(
+                payload.get("instruction_id") or report.get("instruction_id") or ""
+            )
+            # Opening instructions remain deliverable until this receipt is
+            # durably recorded. Apply the terminal state before side effects;
+            # a retried receipt then becomes an idempotent acknowledgement.
+            if instruction_id:
+                server.trading_instruction_service.mark_execution_report(
+                    instruction_id, bool(report.get("success"))
+                )
+            if report.get("duplicate"):
+                return {"status": "ok", "duplicate": True, "report": report}
             # Scheduled account flattening is correlated by deterministic
             # instruction_id (flatten-{run_id}-{ticket}). Update item and run
             # state from the EA receipt instead of marking queued requests done.
-            instruction_id = str(payload.get("instruction_id") or report.get("instruction_id") or "")
             if instruction_id.startswith("flatten-"):
                 now_ts = int(__import__("time").time())
                 item = StructureTradePlanRepository().storage.fetchone(

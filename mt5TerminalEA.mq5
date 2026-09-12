@@ -167,6 +167,59 @@ string BuildAuthenticatedHeaders()
   }
 
 //+------------------------------------------------------------------+
+//| Stable local idempotency record for server-issued instructions   |
+//| Global Variables survive EA and terminal restarts. A successful  |
+//| market order is therefore never submitted twice when the server  |
+//| re-delivers the same instruction after a lost HTTP response.     |
+//+------------------------------------------------------------------+
+string InstructionExecutionKey(string instructionId)
+  {
+   return "AITRADE.exec." + IntegerToString(g_webUserId) + "." + instructionId;
+  }
+
+bool GetExecutedInstructionDeal(string instructionId, long &dealTicket)
+  {
+   dealTicket = 0;
+   if(instructionId == "")
+      return false;
+   string key = InstructionExecutionKey(instructionId);
+   if(!GlobalVariableCheck(key))
+      return false;
+   dealTicket = (long)GlobalVariableGet(key);
+   return true;
+  }
+
+void MarkInstructionExecuted(string instructionId, long dealTicket)
+  {
+   if(instructionId == "")
+      return;
+   // Store the deal ticket when available so a later duplicate delivery can
+   // reconstruct and retry the execution receipt without placing another order.
+   GlobalVariableSet(InstructionExecutionKey(instructionId), (double)MathMax(1, dealTicket));
+  }
+
+void ResendExecutedInstructionReport(string instructionId, string orderId, string symbol,
+                                     string action, double requestedPrice, double requestedVolume,
+                                     long dealTicket)
+  {
+   double executedPrice = 0;
+   double executedVolume = requestedVolume;
+   long mt5Order = 0;
+   long positionId = 0;
+   if(dealTicket > 1 && HistorySelect(TimeCurrent() - 7 * 86400, TimeCurrent() + 60))
+     {
+      executedPrice = HistoryDealGetDouble((ulong)dealTicket, DEAL_PRICE);
+      executedVolume = HistoryDealGetDouble((ulong)dealTicket, DEAL_VOLUME);
+      mt5Order = HistoryDealGetInteger((ulong)dealTicket, DEAL_ORDER);
+      positionId = HistoryDealGetInteger((ulong)dealTicket, DEAL_POSITION_ID);
+     }
+   SendTradeExecutionReport(
+      instructionId, orderId, symbol, action, true, requestedPrice, executedPrice,
+      requestedVolume, executedVolume, mt5Order, dealTicket, positionId, 0, ""
+   );
+  }
+
+//+------------------------------------------------------------------+
 //| 从运行文件名读取一次性激活码                                     |
 //+------------------------------------------------------------------+
 string GetActivationCodeFromProgramName()
@@ -665,9 +718,19 @@ void RequestTradesFromPython()
    string encodedSymbol = URLEncode(_Symbol);
    string url = g_pythonServer + "/get_trades?symbol=" + encodedSymbol + "&price=" + currentPrice;
    
-   // 建立HTTP请求到Python服务
+   // 建立HTTP请求到Python服务。网络瞬断或服务端刚好繁忙时，不能把
+   // 本次机会直接丢掉；服务端会保留同一个 instruction_id 供后续拉取。
    uchar emptyData[];
-   responseCode = WebRequest("GET", url, headers, 5000, emptyData, responseData, outheaders);  // timeout设为5秒
+   for(int attempt = 0; attempt < 3; attempt++)
+     {
+      ArrayFree(responseData);
+      outheaders = "";
+      responseCode = WebRequest("GET", url, headers, 3000, emptyData, responseData, outheaders);
+      if(responseCode == 200)
+         break;
+      if(attempt < 2)
+         Sleep(500 * (attempt + 1));
+     }
 
    if(responseCode == 200)
      {
@@ -1069,6 +1132,16 @@ void ExecuteTradeFromJson(string tradeJson)
    string exitMode = ExtractJsonString(tradeJson, "exit_mode");
    string description = ExtractJsonString(tradeJson, "description");
 
+   long previousDeal = 0;
+   if(GetExecutedInstructionDeal(instructionId, previousDeal))
+     {
+      Print("[EA] 重复交易指令，跳过再次下单并补发回执: ", instructionId);
+      ResendExecutedInstructionReport(
+         instructionId, orderId, symbol, action, requestedPrice, volume, previousDeal
+      );
+      return;
+     }
+
    Print("[EA] 收到交易指令: symbol=", symbol, " action=", action, " volume=", volume, " sl=", sl, " tp=", tp, " description=", description);
 
    if(symbol == "" || action == "" || volume <= 0)
@@ -1185,6 +1258,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
         {
          Print("Buy order executed: Volume=", volume, " SL=", sl, " TP=", tp, " Description=", description);
          RecordTrade("BUY", _Symbol, volume, sl, tp, trade.ResultPrice());
+         MarkInstructionExecuted(instructionId, (long)trade.ResultDeal());
         }
       else
         {
@@ -1198,6 +1272,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
         {
          Print("Sell order executed: Volume=", volume, " SL=", sl, " TP=", tp, " Description=", description);
          RecordTrade("SELL", _Symbol, volume, sl, tp, trade.ResultPrice());
+         MarkInstructionExecuted(instructionId, (long)trade.ResultDeal());
         }
       else
         {
@@ -1262,15 +1337,25 @@ void SendTradeExecutionReport(
    string outheaders = "";
    StringToCharArray(jsonBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
    ArrayResize(postData, ArraySize(postData) - 1);
-   int responseCode = WebRequest(
-      "POST",
-      g_pythonServer + "/ea/trade_execution",
-      BuildAuthenticatedHeaders(),
-      5000,
-      postData,
-      responseData,
-      outheaders
-   );
+   int responseCode = 0;
+   for(int attempt = 0; attempt < 3; attempt++)
+     {
+      ArrayFree(responseData);
+      outheaders = "";
+      responseCode = WebRequest(
+         "POST",
+         g_pythonServer + "/ea/trade_execution",
+         BuildAuthenticatedHeaders(),
+         3000,
+         postData,
+         responseData,
+         outheaders
+      );
+      if(responseCode == 200)
+         break;
+      if(attempt < 2)
+         Sleep(500 * (attempt + 1));
+     }
    if(responseCode != 200)
       Print("[EA] 交易执行回报失败: HTTP ", responseCode);
   }
