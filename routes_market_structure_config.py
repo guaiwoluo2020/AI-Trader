@@ -25,6 +25,7 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
         "trend_continuation_hold_bars",
         "pressure_plan_valid_bars", "pressure_min_event_confidence",
         "zone_lookback_bars", "zone_min_visits", "zone_identity_max_gap_bars",
+        "pressure_min_rejections", "pivot_zone_min_points",
         "event_risk_min_importance", "event_risk_calendar_before_minutes",
         "event_risk_calendar_after_minutes", "event_risk_major_before_minutes",
         "event_risk_major_after_minutes", "event_risk_resume_confirmation_bars",
@@ -32,9 +33,12 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
     list_keys = {"allowed_setups", "allowed_directions", "blocked_hours", "event_risk_rules"}
     bool_keys = {
         "enabled", "require_reclaim", "event_risk_enabled", "enable_zone_pressure",
-        "zone_pressure_enabled",
+        "zone_pressure_enabled", "pivot_zone_enabled", "require_retest",
+        "invalidate_on_zone_return",
     }
     string_keys = {"entry_mode"}
+
+    ratio_keys = {"zone_min_close_ratio", "pressure_reclaim_ratio", "pressure_min_efficiency"}
 
     def as_bool(value, default=False):
         if isinstance(value, str):
@@ -84,7 +88,10 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
                 if key in item:
                     try:
                         value = float(item[key])
-                        result[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
+                        if key in ratio_keys:
+                            result[key] = min(1.0, max(0.0, value))
+                        else:
+                            result[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
                     except (TypeError, ValueError):
                         pass
             return result
@@ -105,7 +112,10 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
             if key in payload:
                 try:
                     value = float(payload[key])
-                    cfg[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
+                    if key in ratio_keys:
+                        cfg[key] = min(1.0, max(0.0, value))
+                    else:
+                        cfg[key] = max(1, int(value)) if key in integer_keys else max(0.0, value)
                 except (TypeError, ValueError):
                     pass
         profiles = [x for x in (normalize(item) for item in (payload.get("profiles") or []) if isinstance(item, dict)) if x]

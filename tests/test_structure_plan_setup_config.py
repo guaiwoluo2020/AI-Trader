@@ -70,3 +70,34 @@ def test_disabled_setup_and_direction_are_filtered():
         {"setup_type": "trend_continuation", "direction": "buy"},
     ])
     assert plans == [{"setup_type": "range_breakout", "direction": "buy"}]
+
+
+def test_zone_pressure_defaults_are_market_layer_configured():
+    expected = {
+        "zone_pressure_enabled", "zone_lookback_bars", "zone_bin_atr",
+        "zone_min_close_ratio", "zone_min_visits", "zone_leave_atr",
+        "zone_max_width_atr", "zone_identity_match_atr",
+        "zone_identity_max_gap_bars", "pressure_touch_atr",
+        "pressure_min_rejections", "pressure_reclaim_ratio",
+        "pressure_min_displacement_atr", "pressure_min_efficiency",
+        "pivot_zone_enabled", "pivot_zone_merge_atr", "pivot_zone_min_points",
+    }
+    assert expected.issubset(STRUCTURE_PLAN_DEFAULT_CONFIG)
+
+
+def test_pressure_setup_profile_overrides_target_and_gates():
+    builder = StructurePlanBuilder(
+        STRUCTURE_PLAN_DEFAULT_CONFIG,
+        setup_profiles=[{
+            "setup_type": "pressure_zone_breakout",
+            "target_multiple": 3.0,
+            "min_body_atr": 0.6,
+            "min_displacement_atr": 1.1,
+            "require_reclaim": True,
+        }],
+    )
+    builder._activate_setup("pressure_zone_breakout")
+    assert builder.params["pressure_breakout_target_multiple"] == 3.0
+    assert builder.params["min_body_atr"] == 0.6
+    assert builder.params["min_breakout_displacement_atr"] == 1.1
+    assert builder.params["require_location_reclaim"] is True

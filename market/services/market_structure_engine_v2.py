@@ -898,8 +898,11 @@ def analyze(symbol: str, period: str, rows: List[Dict], config: Dict = None) -> 
     # Public plan configuration calls this switch ``enable_zone_pressure``;
     # the pure market service uses ``zone_pressure_enabled``.  Normalize once
     # here so symbol/period overrides actually affect analysis.
-    if "enable_zone_pressure" in cfg:
-        pressure_config["zone_pressure_enabled"] = bool(cfg["enable_zone_pressure"])
+    if "enable_zone_pressure" in cfg or "zone_pressure_enabled" in cfg:
+        pressure_config["zone_pressure_enabled"] = (
+            bool(cfg.get("enable_zone_pressure", True))
+            and bool(cfg.get("zone_pressure_enabled", True))
+        )
     zone_pressure = advance_zone_pressure(
         symbol, period, rows, pressure_config, pivot_levels=levels
     )

@@ -74,9 +74,38 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "trend_min_retest_bars": 1,
     "trend_continuation_hold_bars": 2,
     "enable_zone_pressure": True,
+    # 成交密集区识别（市场层公共默认，可被品种/周期及 Setup 覆盖）
+    "zone_pressure_enabled": True,
+    "zone_lookback_bars": 80,
+    "zone_bin_atr": 0.5,
+    "zone_min_close_ratio": 0.20,
+    "zone_min_visits": 3,
+    "zone_leave_atr": 0.5,
+    "zone_max_width_atr": 2.0,
+    "zone_identity_match_atr": 0.75,
+    "zone_identity_max_gap_bars": 2,
+    "pressure_touch_atr": 0.35,
+    "pressure_min_rejections": 3,
+    "pressure_reclaim_ratio": 0.50,
+    "pressure_min_displacement_atr": 0.8,
+    "pressure_min_efficiency": 0.55,
+    # Pivot 支撑/阻力区域融合
+    "pivot_zone_enabled": True,
+    "pivot_zone_merge_atr": 0.45,
+    "pivot_zone_min_points": 1,
     "pressure_plan_valid_bars": 6,
     "pressure_breakout_target_multiple": 2.0,
     "pressure_min_event_confidence": 65,
+    # Setup 覆盖字段（默认值为空/继承公共值）
+    "pressure_min_rejections": 3,
+    "pressure_min_displacement_atr": 0.8,
+    "pressure_min_efficiency": 0.55,
+    "target_multiple": 2.0,
+    "max_entries_per_opportunity": 1,
+    "cooldown_minutes": 0,
+    "require_retest": True,
+    "retest_tolerance_atr": 0.35,
+    "invalidate_on_zone_return": True,
     "trend_require_healthy_phase": True,
     "trend_mature_retest_only": True,
     "trend_mature_retest_only_m1": False,
@@ -154,6 +183,7 @@ class StructurePlanBuilder:
         self.setup_profiles = setup_profiles or []
         self._base_params = dict(self.params)
         self._active_setup = ""
+        self._active_profile = {}
         self._rejections: List[str] = []
 
     def _param(self, name, default):
@@ -198,10 +228,12 @@ class StructurePlanBuilder:
         """Apply the most specific setup override before deriving a plan."""
         self._active_setup = str(setup_type or "").strip().lower()
         self.params = dict(self._base_params)
+        self._active_profile = {}
         if not self._active_setup:
             return
         for profile in self.setup_profiles:
             if str(profile.get("setup_type") or "").strip().lower() == self._active_setup:
+                self._active_profile = dict(profile)
                 self.params.update({k: v for k, v in profile.items() if k in STRUCTURE_PLAN_DEFAULT_CONFIG})
                 # Map the optimizer's common controls onto the existing
                 # setup-specific gates so recommendations affect generation.
@@ -215,6 +247,12 @@ class StructurePlanBuilder:
                 if "require_reclaim" in profile:
                     self.params["require_location_reclaim"] = profile["require_reclaim"]
                     self.params["require_range_boundary_reclaim"] = profile["require_reclaim"]
+                # 密集区 Setup 的专属参数使用同名配置；兼容旧版优化器的
+                # target_multiple / min_body_atr 命名，避免保存后实际不生效。
+                if "target_multiple" in profile:
+                    self.params["pressure_breakout_target_multiple"] = profile["target_multiple"]
+                if "pressure_breakout_target_multiple" in profile:
+                    self.params["pressure_breakout_target_multiple"] = profile["pressure_breakout_target_multiple"]
                 break
 
     def _reject(self, reason: str) -> None:
@@ -933,7 +971,9 @@ class StructurePlanBuilder:
         share a stable opportunity id in their evidence, while each stage has
         its own plan id and execution scope.
         """
-        if not self._param("enable_zone_pressure", True):
+        # 两个名称并存以兼容早期配置：任一显式关闭都关闭密集区计划。
+        if (not bool(self._param("enable_zone_pressure", True))
+                or not bool(self._param("zone_pressure_enabled", True))):
             return []
         pressure = structure.get("zone_pressure") or {}
         events = [item for item in (pressure.get("events") or []) if item.get("direction") in {"buy", "sell"}]
@@ -962,10 +1002,22 @@ class StructurePlanBuilder:
             return []
         lower, upper = _number(zone.get("lower")), _number(zone.get("upper"))
         atr = max(1e-9, _number(structure.get("atr")))
-        buffer = atr * max(0.05, _number(self._param("stop_buffer_atr", 0.25)))
+        # 密集区 Setup 可独立控制止损缓冲、触碰容差及目标倍数。
+        buffer = atr * max(0.05, _number(self._param(
+            "stop_buffer_atr", 0.25)))
         entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
         event_level = _number(event.get("level"))
         if setup_type == "pressure_reversal":
+            min_rejections = max(1, int(_number(self._param("pressure_min_rejections", 3))))
+            actual_rejections = int(_number(event.get("rejections") or event.get("rejection_count") or zone.get("rejections") or 0))
+            if actual_rejections and actual_rejections < min_rejections:
+                self._reject(f"密集区拒绝次数 {actual_rejections} 少于最低要求 {min_rejections}")
+                return []
+            event_displacement = _number(event.get("displacement_atr") or event.get("displacement"))
+            min_displacement = max(0.0, _number(self._param("pressure_min_displacement_atr", 0.8)))
+            if event_displacement and event_displacement < min_displacement:
+                self._reject(f"密集区位移 {event_displacement:.2f} ATR 低于最低要求 {min_displacement:.2f} ATR")
+                return []
             # The event is confirmed on the latest closed bar.  Use that
             # close as the first-trial reference; using the earlier rejection
             # price would often leave the newly-created plan behind price and
@@ -976,13 +1028,32 @@ class StructurePlanBuilder:
             entry_mode = "touch_or_near"
             reason = str(event.get("reason") or "密集区多次受阻后动量反转确认")
         else:
+            # 突破 Setup 可覆盖实体/位移/目标倍数；结构引擎已完成基础事件确认，
+            # 这里保留证据供审计，同时在计划层再次执行可配置门槛。
+            min_body = max(0.0, _number(self._param("min_body_atr", self._param("triangle_breakout_min_body_atr", 0.0))))
+            min_extension = max(0.0, _number(self._param("min_close_extension_atr", self._param("triangle_breakout_min_close_extension_atr", 0.0))))
+            min_displacement = max(0.0, _number(self._param("min_displacement_atr", self._param("pressure_min_displacement_atr", 0.0))))
+            body_atr = _number(event.get("body_atr"))
+            extension_atr = _number(event.get("close_extension_atr") or event.get("extension_atr"))
+            displacement_atr = _number(event.get("displacement_atr") or event.get("displacement"))
+            if body_atr and body_atr < min_body:
+                self._reject(f"密集区突破实体 {body_atr:.2f} ATR 低于最低要求 {min_body:.2f} ATR")
+                return []
+            if extension_atr and extension_atr < min_extension:
+                self._reject(f"密集区突破收盘越界 {extension_atr:.2f} ATR 低于最低要求 {min_extension:.2f} ATR")
+                return []
+            if displacement_atr and displacement_atr < min_displacement:
+                self._reject(f"密集区突破位移 {displacement_atr:.2f} ATR 低于最低要求 {min_displacement:.2f} ATR")
+                return []
             entry = event_level
             width = max(atr * 0.25, upper - lower)
+            target_multiple = max(1.0, _number(self._param(
+                "target_multiple", self._param("pressure_breakout_target_multiple", 2.0))))
             stop = upper - buffer if direction == "buy" else lower + buffer
             target = (
-                entry + width * max(1.0, _number(self._param("pressure_breakout_target_multiple", 2.0)))
+                entry + width * target_multiple
                 if direction == "buy" else
-                entry - width * max(1.0, _number(self._param("pressure_breakout_target_multiple", 2.0)))
+                entry - width * target_multiple
             )
             entry_mode = "breakout_retest"
             reason = str(event.get("reason") or "密集区收盘突破确认")
@@ -997,8 +1068,22 @@ class StructurePlanBuilder:
             "zone_id": str(zone.get("zone_id") or ""),
             "zone_revision": str(zone.get("zone_revision") or ""),
             "zone_invalidation_buffer": round(buffer, 8),
+            "config": {
+                "setup_type": setup_type,
+                "pressure_min_rejections": self._param("pressure_min_rejections", 3),
+                "pressure_min_displacement_atr": self._param("pressure_min_displacement_atr", 0.8),
+                "pressure_min_efficiency": self._param("pressure_min_efficiency", 0.55),
+                "target_multiple": self._param("target_multiple", self._param("pressure_breakout_target_multiple", 2.0)),
+                "require_retest": self._param("require_retest", True),
+                "retest_tolerance_atr": self._param("retest_tolerance_atr", self._param("entry_zone_atr", 0.35)),
+                "invalidate_on_zone_return": self._param("invalidate_on_zone_return", True),
+                "max_plan_lifetime_bars": self._param("max_plan_lifetime_bars", 100),
+            },
         }
         valid_bars = max(1, int(self._param("pressure_plan_valid_bars", 6)))
+        # Setup 的安全兜底优先于公共密集区有效期；未配置时仍沿用公共值。
+        if self._active_profile.get("max_plan_lifetime_bars") not in (None, ""):
+            valid_bars = max(1, int(_number(self._active_profile["max_plan_lifetime_bars"])))
         plan = self._tradable_plan(
             source_id=source_id, symbol=symbol, period=period,
             anchor=int(event.get("confirmed_at") or bar_time),

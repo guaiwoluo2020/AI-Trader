@@ -156,6 +156,24 @@
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_retest_stop_atr" type="number" min="1" max="15" step="0.1" label="趋势回踩止损上限（ATR）" hint="超过正常上限后必须回踩，默认 4.0" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.trend_max_stop_atr" type="number" min="1" max="20" step="0.1" label="趋势最大止损上限（ATR）" hint="超过后取消计划，默认 6.0" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.choch_max_stop_atr" type="number" min="0.5" max="10" step="0.1" label="CHOCH 最大止损（ATR）" hint="超过后等待新的结构回踩，默认 3.0" persistent-hint density="compact" variant="outlined" /></v-col>
+              <v-col cols="12"><div class="text-subtitle-2 mt-2">成交密集区识别与 Pivot 融合</div></v-col>
+              <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.zone_pressure_enabled" color="primary" inset hide-details label="启用成交密集区识别" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.zone_lookback_bars" type="number" min="1" label="密集区回看K线数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.zone_bin_atr" type="number" min="0" step="0.05" label="价格桶宽度（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.zone_min_close_ratio" type="number" min="0" max="1" step="0.05" label="最低收盘占比" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.zone_min_visits" type="number" min="1" label="最少访问次数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.zone_leave_atr" type="number" min="0" step="0.05" label="离开距离（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.zone_max_width_atr" type="number" min="0" step="0.1" label="最大宽度（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.zone_identity_match_atr" type="number" min="0" step="0.05" label="身份匹配距离（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.zone_identity_max_gap_bars" type="number" min="1" label="身份最大间隔K线" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pressure_touch_atr" type="number" min="0" step="0.05" label="密集区触碰容差（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pressure_min_rejections" type="number" min="1" label="最少拒绝次数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pressure_reclaim_ratio" type="number" min="0" max="1" step="0.05" label="回收确认比例" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pressure_min_displacement_atr" type="number" min="0" step="0.1" label="最小位移（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pressure_min_efficiency" type="number" min="0" max="1" step="0.05" label="最小方向效率" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.pivot_zone_enabled" color="primary" inset hide-details label="启用 Pivot 支撑阻力融合" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pivot_zone_merge_atr" type="number" min="0" step="0.05" label="Pivot 合并距离（ATR）" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pivot_zone_min_points" type="number" min="1" label="Pivot 区域最少点数" density="compact" variant="outlined" /></v-col>
             </v-row>
             <div class="llm-section-head compact mt-4"><div><h3>结构交易计划参数</h3><p>行情层统一生成计划；按品种/周期专属配置覆盖默认值，策略仅负责引用和执行筛选。</p></div></div>
             <v-row class="mt-2">
@@ -174,6 +192,10 @@
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.max_plan_lifetime_bars" type="number" min="10" max="1000" label="计划安全兜底（K线）" hint="结构事件未发生时的最长保留上限，默认 100 根" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.breakout_target_atr" type="number" min="1" max="10" step="0.5" label="突破目标（ATR）" density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.breakout_retest_valid_bars" type="number" min="1" max="50" label="突破回踩有效K线数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.enable_zone_pressure" color="primary" inset hide-details label="生成密集区交易计划" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pressure_plan_valid_bars" type="number" min="1" label="密集区计划有效K线数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pressure_breakout_target_multiple" type="number" min="1" step="0.1" label="密集区突破目标倍数" density="compact" variant="outlined" /></v-col>
+              <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.pressure_min_event_confidence" type="number" min="0" max="100" label="最低事件置信度" density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.triangle_breakout_min_body_atr" type="number" min="0.1" max="5" step="0.1" label="三角形突破最小实体（ATR）" hint="默认 0.5；实体过小视为无效突破" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field v-model.number="structureEngineConfig.triangle_breakout_min_close_extension_atr" type="number" min="0" max="2" step="0.05" label="三角形收盘越界（ATR）" hint="默认 0.1；收盘需明确位于边界外" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-switch v-model="structureEngineConfig.triangle_breakout_require_swing_external_alignment" color="primary" inset hide-details label="三角形突破要求 Swing/External 同向" /></v-col>
@@ -210,7 +232,7 @@
             <div class="d-flex flex-wrap ga-2 align-center">
               <v-select v-model="structureSetupProfileDraft.symbol" :items="symbols" label="品种" density="compact" variant="outlined" hide-details style="max-width:200px" />
               <v-select v-model="structureSetupProfileDraft.period" :items="['M1','M5','M15','H1','H4']" label="周期" density="compact" variant="outlined" hide-details style="max-width:130px" />
-              <v-select v-model="structureSetupProfileDraft.setup_type" :items="structureSetupTypes" label="Setup" density="compact" variant="outlined" hide-details style="max-width:250px" />
+              <v-select v-model="structureSetupProfileDraft.setup_type" :items="structureSetupTypes" item-title="label" item-value="value" label="Setup" density="compact" variant="outlined" hide-details style="max-width:250px" />
               <v-switch v-model="structureSetupProfileDraft.enabled" color="primary" inset hide-details label="允许交易" />
               <v-select v-model="structureSetupProfileDraft.allowed_directions" :items="['buy','sell']" label="方向" multiple chips density="compact" variant="outlined" hide-details style="max-width:180px" />
               <v-select v-model="structureSetupProfileDraft.entry_mode" :items="['touch_or_near','touch_and_reclaim','breakout_retest','close_breakout']" label="入场方式" density="compact" variant="outlined" hide-details style="max-width:190px" />
@@ -221,10 +243,21 @@
               <v-text-field v-model.number="structureSetupProfileDraft.entry_zone_atr" type="number" min="0" step="0.05" label="入场 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
               <v-text-field v-model.number="structureSetupProfileDraft.stop_buffer_atr" type="number" min="0" step="0.05" label="止损 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
               <v-text-field v-model.number="structureSetupProfileDraft.target_buffer_atr" type="number" min="0" step="0.05" label="止盈 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
+              <template v-if="structureSetupProfileDraft.setup_type === 'pressure_reversal' || structureSetupProfileDraft.setup_type === 'pressure_zone_breakout'">
+                <v-text-field v-model.number="structureSetupProfileDraft.pressure_min_rejections" type="number" min="1" label="密集区最少拒绝次数" density="compact" variant="outlined" hide-details style="max-width:150px" />
+                <v-text-field v-model.number="structureSetupProfileDraft.pressure_min_displacement_atr" type="number" min="0" step="0.1" label="密集区最小位移 ATR" density="compact" variant="outlined" hide-details style="max-width:160px" />
+                <v-text-field v-model.number="structureSetupProfileDraft.pressure_min_efficiency" type="number" min="0" max="1" step="0.05" label="密集区最小效率" density="compact" variant="outlined" hide-details style="max-width:140px" />
+                <v-text-field v-model.number="structureSetupProfileDraft.target_multiple" type="number" min="1" step="0.1" label="目标倍数" density="compact" variant="outlined" hide-details style="max-width:110px" />
+                <v-text-field v-model.number="structureSetupProfileDraft.max_entries_per_opportunity" type="number" min="1" label="机会最大入场次数" density="compact" variant="outlined" hide-details style="max-width:150px" />
+                <v-text-field v-model.number="structureSetupProfileDraft.cooldown_minutes" type="number" min="0" label="冷却分钟" density="compact" variant="outlined" hide-details style="max-width:110px" />
+                <v-switch v-model="structureSetupProfileDraft.require_retest" color="primary" inset hide-details label="要求回踩" />
+                <v-switch v-model="structureSetupProfileDraft.invalidate_on_zone_return" color="primary" inset hide-details label="回到区域即失效" />
+                <v-text-field v-model.number="structureSetupProfileDraft.retest_tolerance_atr" type="number" min="0" step="0.05" label="回踩容差 ATR" density="compact" variant="outlined" hide-details style="max-width:130px" />
+              </template>
               <v-btn color="secondary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureSetupProfile">保存当前 SETUP 配置</v-btn>
             </div>
             <div v-if="structureSetupProfiles.length" class="mt-3 text-caption text-medium-emphasis">已配置的 SETUP（点击查看和编辑，带颜色表示当前选中）：</div>
-            <v-chip v-for="item in structureSetupProfiles" :key="`${item.symbol}-${item.period}-${item.setup_type}`" closable size="small" class="mr-2 mt-2" :color="structureSetupScope === `${item.symbol}::${item.period}::${item.setup_type}` ? 'primary' : undefined" :variant="structureSetupScope === `${item.symbol}::${item.period}::${item.setup_type}` ? 'flat' : 'outlined'" @click="selectStructureSetupProfile(item)" @click:close.stop="removeStructureSetupProfile(item)">{{ item.symbol }} · {{ item.period }} · {{ item.setup_type }}</v-chip>
+            <v-chip v-for="item in structureSetupProfiles" :key="`${item.symbol}-${item.period}-${item.setup_type}`" closable size="small" class="mr-2 mt-2" :color="structureSetupScope === `${item.symbol}::${item.period}::${item.setup_type}` ? 'primary' : undefined" :variant="structureSetupScope === `${item.symbol}::${item.period}::${item.setup_type}` ? 'flat' : 'outlined'" @click="selectStructureSetupProfile(item)" @click:close.stop="removeStructureSetupProfile(item)">{{ item.symbol }} · {{ item.period }} · {{ setupTypeLabel(item.setup_type) }}</v-chip>
             <v-dialog v-model="structureOptimizerPreviewOpen" max-width="1100">
               <v-card>
                 <v-card-title>结构 SETUP 优化建议预览</v-card-title>
@@ -1499,7 +1532,7 @@ export default {
     const pageTitle = computed(() => isStrategyPage.value ? '策略管理' : '用户配置')
     const settingsTab = ref('account')
     const llmWorkspaceTab = ref('providers')
-    const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_buffer_atr: 0.1, break_confirm_bars: 2, retest_bars: 2, displacement_atr: 0.8, range_touch_tolerance: 0.003, range_touch_atr: 0.45, range_min_touches: 2, range_min_inside_ratio: 0.65, range_min_bars: 24, range_max_atr: 8, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18, trend_min_direction_ratio: 0.62, trend_relaxed_direction_ratio: 0.55, trend_min_efficiency: 0.30, trend_min_net_change_atr: 1.5, trend_push_decay_ratio: 0.75, trend_mature_pullback_ratio: 0.45, trend_weakening_pullback_ratio: 0.618, trend_require_healthy_phase: true, trend_mature_retest_only: true, trend_normal_stop_atr: 2.5, trend_retest_stop_atr: 4, trend_max_stop_atr: 6, choch_max_stop_atr: 3, entry_zone_atr: 0.35, stop_buffer_atr: 0.25, min_real_risk_reward: 1.2, trend_min_real_risk_reward: 0.5, location_reclaim_min_body_atr: 0.3, location_reclaim_min_close_extension_atr: 0.1, location_require_swing_external_alignment: true, location_require_internal_confirmation: true, min_breakout_displacement_atr: 0.6, trend_max_event_age_bars_m1: 5, trend_max_event_age_bars_other: 3, trend_continuation_hold_bars: 2, breakout_target_atr: 3, breakout_retest_valid_bars: 6, triangle_breakout_min_body_atr: 0.5, triangle_breakout_min_close_extension_atr: 0.1, triangle_breakout_require_swing_external_alignment: true, enable_triangle_prebreakout: true, require_location_reclaim: true, event_risk_enabled: true, event_risk_rules: [], event_risk_min_importance: 3, event_risk_calendar_before_minutes: 30, event_risk_calendar_after_minutes: 45, event_risk_major_before_minutes: 45, event_risk_resume_confirmation_bars: 1 })
+    const structureEngineConfig = ref({ pivot_legs: 3, medium_pivot_legs: 8, large_pivot_legs: 25, min_reversal_atr: 0.5, break_buffer_atr: 0.1, break_confirm_bars: 2, retest_bars: 2, displacement_atr: 0.8, range_touch_tolerance: 0.003, range_touch_atr: 0.45, range_min_touches: 2, range_min_inside_ratio: 0.65, range_min_bars: 24, range_max_atr: 8, min_segment_bars: 12, trendline_touch_atr: 0.5, trendline_min_touches: 2, trendline_min_bars: 18, trend_min_direction_ratio: 0.62, trend_relaxed_direction_ratio: 0.55, trend_min_efficiency: 0.30, trend_min_net_change_atr: 1.5, trend_push_decay_ratio: 0.75, trend_mature_pullback_ratio: 0.45, trend_weakening_pullback_ratio: 0.618, trend_require_healthy_phase: true, trend_mature_retest_only: true, trend_normal_stop_atr: 2.5, trend_retest_stop_atr: 4, trend_max_stop_atr: 6, choch_max_stop_atr: 3, entry_zone_atr: 0.35, stop_buffer_atr: 0.25, min_real_risk_reward: 1.2, trend_min_real_risk_reward: 0.5, location_reclaim_min_body_atr: 0.3, location_reclaim_min_close_extension_atr: 0.1, location_require_swing_external_alignment: true, location_require_internal_confirmation: true, min_breakout_displacement_atr: 0.6, trend_max_event_age_bars_m1: 5, trend_max_event_age_bars_other: 3, trend_continuation_hold_bars: 2, breakout_target_atr: 3, breakout_retest_valid_bars: 6, triangle_breakout_min_body_atr: 0.5, triangle_breakout_min_close_extension_atr: 0.1, triangle_breakout_require_swing_external_alignment: true, enable_triangle_prebreakout: true, require_location_reclaim: true, event_risk_enabled: true, event_risk_rules: [], event_risk_min_importance: 3, event_risk_calendar_before_minutes: 30, event_risk_calendar_after_minutes: 45, event_risk_major_before_minutes: 45, event_risk_resume_confirmation_bars: 1, enable_zone_pressure: true, zone_pressure_enabled: true, zone_lookback_bars: 80, zone_bin_atr: 0.5, zone_min_close_ratio: 0.2, zone_min_visits: 3, zone_leave_atr: 0.5, zone_max_width_atr: 2, zone_identity_match_atr: 0.75, zone_identity_max_gap_bars: 2, pressure_touch_atr: 0.35, pressure_min_rejections: 3, pressure_reclaim_ratio: 0.5, pressure_min_displacement_atr: 0.8, pressure_min_efficiency: 0.55, pivot_zone_enabled: true, pivot_zone_merge_atr: 0.45, pivot_zone_min_points: 1, pressure_plan_valid_bars: 6, pressure_breakout_target_multiple: 2, pressure_min_event_confidence: 65 })
     const structureGlobalConfig = ref({ ...structureEngineConfig.value })
     const structureEngineSaving = ref(false)
     const structureProfiles = ref([])
@@ -1542,8 +1575,10 @@ export default {
     const structureOptimizerLLMReview = ref(null)
     const structureOptimizerSelected = ref([])
     const structureOptimizerAllSelected = computed(() => structureOptimizerPreview.value.length > 0 && structureOptimizerSelected.value.length === structureOptimizerPreview.value.length)
-    const structureSetupProfileDraft = ref({ symbol: '', period: 'M5', setup_type: 'structure_location_pullback', enabled: true, allowed_directions: ['buy', 'sell'], entry_mode: '', confirmation_bars: null, min_displacement_atr: null, require_reclaim: null, min_real_risk_reward: null, entry_zone_atr: null, stop_buffer_atr: null, target_buffer_atr: null })
-    const structureSetupTypes = ['structure_location_pullback', 'range_lower_reversal', 'range_upper_reversal', 'range_breakout', 'range_false_breakout', 'triangle_breakout', 'triangle_breakout_watch', 'triangle_prebreakout_pullback', 'choch_reversal', 'liquidity_sweep_reclaim', 'trend_continuation', 'structure_reversal']
+    const structureSetupProfileDraft = ref({ symbol: '', period: 'M5', setup_type: 'structure_location_pullback', enabled: true, allowed_directions: ['buy', 'sell'], entry_mode: '', confirmation_bars: null, min_displacement_atr: null, require_reclaim: null, min_real_risk_reward: null, entry_zone_atr: null, stop_buffer_atr: null, target_buffer_atr: null, pressure_min_rejections: null, pressure_min_displacement_atr: null, pressure_min_efficiency: null, target_multiple: null, max_entries_per_opportunity: null, cooldown_minutes: null, require_retest: null, retest_tolerance_atr: null, invalidate_on_zone_return: null })
+    const setupTypeNames = { pressure_reversal: '密集区反转', pressure_zone_breakout: '密集区突破', structure_location_pullback: '结构位置回撤', range_lower_reversal: '箱体下沿反转', range_upper_reversal: '箱体上沿反转', range_breakout: '箱体突破', range_false_breakout: '箱体假突破', triangle_breakout: '三角形突破', triangle_breakout_watch: '三角形突破观察', triangle_prebreakout_pullback: '三角形提前回撤', choch_reversal: 'CHOCH反转', liquidity_sweep_reclaim: '流动性扫单回收', trend_continuation: '趋势延续', structure_reversal: '结构反转' }
+    const setupTypeLabel = type => setupTypeNames[type] || type
+    const structureSetupTypes = Object.keys(setupTypeNames).map(value => ({ value, label: setupTypeNames[value] }))
 
     // 交易配置
     const tradeConfig = ref({
@@ -1981,13 +2016,15 @@ export default {
       if (!draft.symbol || !draft.period || !draft.setup_type) return
       structureSetupScope.value = `${draft.symbol}::${draft.period}::${draft.setup_type}`
       const item = { symbol: draft.symbol, period: draft.period, setup_type: draft.setup_type }
-      for (const key of ['min_real_risk_reward', 'entry_zone_atr', 'stop_buffer_atr', 'target_buffer_atr', 'confirmation_bars', 'min_displacement_atr']) {
+      for (const key of ['min_real_risk_reward', 'entry_zone_atr', 'stop_buffer_atr', 'target_buffer_atr', 'confirmation_bars', 'min_displacement_atr', 'pressure_min_rejections', 'pressure_min_displacement_atr', 'pressure_min_efficiency', 'target_multiple', 'pressure_breakout_target_multiple', 'max_entries_per_opportunity', 'cooldown_minutes', 'retest_tolerance_atr', 'max_plan_lifetime_bars']) {
         if (draft[key] !== null && draft[key] !== '' && Number.isFinite(Number(draft[key]))) item[key] = Number(draft[key])
       }
       item.enabled = draft.enabled !== false
       item.allowed_directions = draft.allowed_directions || ['buy', 'sell']
       if (draft.entry_mode) item.entry_mode = draft.entry_mode
       if (draft.require_reclaim !== null) item.require_reclaim = Boolean(draft.require_reclaim)
+      if (draft.require_retest !== null) item.require_retest = Boolean(draft.require_retest)
+      if (draft.invalidate_on_zone_return !== null) item.invalidate_on_zone_return = Boolean(draft.invalidate_on_zone_return)
       const index = structureSetupProfiles.value.findIndex(x => x.symbol === item.symbol && x.period === item.period && x.setup_type === item.setup_type)
       if (index >= 0) structureSetupProfiles.value.splice(index, 1, item); else structureSetupProfiles.value.push(item)
       await saveStructureEngineConfig()
@@ -2006,6 +2043,15 @@ export default {
         entry_zone_atr: item.entry_zone_atr ?? null,
         stop_buffer_atr: item.stop_buffer_atr ?? null,
         target_buffer_atr: item.target_buffer_atr ?? null,
+        pressure_min_rejections: item.pressure_min_rejections ?? null,
+        pressure_min_displacement_atr: item.pressure_min_displacement_atr ?? null,
+        pressure_min_efficiency: item.pressure_min_efficiency ?? null,
+        target_multiple: item.target_multiple ?? item.pressure_breakout_target_multiple ?? null,
+        max_entries_per_opportunity: item.max_entries_per_opportunity ?? null,
+        cooldown_minutes: item.cooldown_minutes ?? null,
+        require_retest: item.require_retest ?? null,
+        retest_tolerance_atr: item.retest_tolerance_atr ?? null,
+        invalidate_on_zone_return: item.invalidate_on_zone_return ?? null,
       }
     }
     const optimizeStructureSetups = async () => {
@@ -3974,6 +4020,7 @@ export default {
       structureOptimizerAllSelected,
       structureSetupProfileDraft,
       structureSetupTypes,
+      setupTypeLabel,
       saveStructureProfile,
       removeStructureProfile,
       saveStructureSetupProfile,
