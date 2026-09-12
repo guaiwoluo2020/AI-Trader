@@ -436,6 +436,10 @@ class MySQLStorage:
                     message VARCHAR(512) NOT NULL DEFAULT '',
                     gate_trace_json LONGTEXT NOT NULL,
                     account_snapshot_json LONGTEXT NOT NULL,
+                    first_seen_at BIGINT NOT NULL,
+                    last_seen_at BIGINT NOT NULL,
+                    occurrence_count BIGINT NOT NULL DEFAULT 1,
+                    last_tick_id VARCHAR(64) NOT NULL DEFAULT '',
                     created_at BIGINT NOT NULL,
                     updated_at BIGINT NOT NULL,
                     PRIMARY KEY (audit_id),
@@ -707,6 +711,12 @@ class MySQLStorage:
                         ("gate_trace_json", "LONGTEXT NULL"),
                         ("account_snapshot_json", "LONGTEXT NULL"),
                     ),
+                    "execution_gate_audits": (
+                        ("first_seen_at", "BIGINT NOT NULL DEFAULT 0"),
+                        ("last_seen_at", "BIGINT NOT NULL DEFAULT 0"),
+                        ("occurrence_count", "BIGINT NOT NULL DEFAULT 1"),
+                        ("last_tick_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
+                    ),
                 }
                 for table, columns in compatibility_columns.items():
                     for column, column_type in columns:
@@ -721,6 +731,15 @@ class MySQLStorage:
                             # would fail later with a less actionable SQL error.
                             if getattr(exc, "args", (None,))[0] != 1060:
                                 raise
+                conn.execute(
+                    """
+                    UPDATE execution_gate_audits
+                    SET first_seen_at = CASE WHEN first_seen_at = 0 THEN created_at ELSE first_seen_at END,
+                        last_seen_at = CASE WHEN last_seen_at = 0 THEN updated_at ELSE last_seen_at END,
+                        last_tick_id = CASE WHEN last_tick_id = '' THEN tick_id ELSE last_tick_id END
+                    WHERE first_seen_at = 0 OR last_seen_at = 0 OR last_tick_id = ''
+                    """
+                )
                 try:
                     conn.execute(
                         "ALTER TABLE key_level_signal_cooldowns "
