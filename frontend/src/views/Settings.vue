@@ -1283,7 +1283,7 @@
                 <v-switch v-model="newSignalSource.params.level_19_enabled" label="启用 19 阻力/突破回踩 SETUP" color="success" density="compact" hide-details></v-switch>
               </v-col>
               <v-col cols="12" sm="6">
-                <v-text-field v-model="newSignalSource.params.level_19_levels_text" label="19 专用关键位（可选）" placeholder="4419" hint="留空时自动使用已配置且价格尾数为 19 的关键位" persistent-hint></v-text-field>
+                <v-text-field v-model="newSignalSource.params.level_19_levels_text" label="19 专用关键位（可选）" placeholder="4419" hint="只有启用开关后才会使用；留空时仅使用普通关键位中明确配置的 x19 点位" persistent-hint></v-text-field>
               </v-col>
               <v-col cols="12" sm="6">
                 <v-text-field v-model.number="newSignalSource.params.breakout_retest_tolerance_atr" label="19 接近/回踩距离（ATR）" type="number" min="0" max="10" step="0.1" hint="默认 0.9 ATR；ATR 不可用时回退到绝对距离" persistent-hint></v-text-field>
@@ -3536,7 +3536,7 @@ export default {
       params: source === 'key_level'
           ? {
               setup_mode: 'both',
-              level_19_enabled: true,
+              level_19_enabled: false,
               level_19_levels: [],
               level_19_levels_text: '',
               breakout_retest_tolerance_atr: 0.9,
@@ -4224,7 +4224,7 @@ export default {
           source.period = 'M1'
           source.params.order_distance ??= source.params.proximity_threshold ?? 0.0008
           source.params.setup_mode ??= 'both'
-          source.params.level_19_enabled ??= true
+          source.params.level_19_enabled ??= String(strategy.symbol || '').toUpperCase().startsWith('GOLD')
           source.params.level_19_levels ??= []
           source.params.breakout_retest_tolerance_atr ??= 0.9
           source.params.reversal_entry_tolerance_atr ??= 0.9

@@ -74,9 +74,9 @@ class KeyLevelSignalGenerator:
         self.threshold = 0.0008  # 万分之八
 
         # 信号冷却时间（秒）
-        # Integer/round-number attempts are intentionally sparse.  Every
-        # setup at the same integer level shares the directional quiet period
-        # so reversal/breakout variants cannot bypass the 8-hour guard.
+        # Integer/round-number attempts are intentionally sparse.  Each
+        # integer-level SETUP + direction gets its own quiet period, so one
+        # setup cannot suppress an independent reversal/breakout variant.
         self.cooldown = 2 * 60 * 60
         self.integer_level_cooldown = 8 * 60 * 60
 
@@ -209,8 +209,8 @@ class KeyLevelSignalGenerator:
     ) -> bool:
         """Claim a cooldown once, atomically when MySQL is available."""
         requested_duration = self.cooldown if cooldown is None else max(0, int(cooldown))
-        # Integer/round-number opportunities share one quiet period.  Strategy
-        # cooldown_seconds must not shorten or stretch that dedicated window.
+        # Strategy cooldown_seconds must not shorten or stretch the dedicated
+        # integer-level quiet window for this SETUP + direction.
         duration = (
             self.integer_level_cooldown
             if self._is_integer_level(key_level) else requested_duration
@@ -260,22 +260,19 @@ class KeyLevelSignalGenerator:
         signal_source_id: str, setup_type: str, direction: str,
         period: str,
     ) -> str:
-        # Integer levels are a single trading opportunity regardless of which
-        # key-level setup detected it.  Non-integer configured levels keep the
-        # setup dimension so their independent rules remain independent.
+        # Integer levels still keep the SETUP and direction dimensions.  A
+        # reversal, breakout, or level-19 variant is an independent signal
+        # stream and must not suppress another stream at the same price.
         if KeyLevelSignalGenerator._is_integer_level(key_level):
             try:
                 level_token = str(int(round(float(key_level))))
             except (TypeError, ValueError):
                 level_token = str(key_level or "")
-            setup_token = ""
+            setup_token = str(setup_type or "")
         else:
             level_token = str(key_level or "")
             setup_token = str(setup_type or "")
-        # Round-number levels represent one opportunity regardless of setup
-        # variant or direction.  A sell after a buy (or a level-19 reversal
-        # after a breakout) must not bypass the same quiet period.
-        direction_token = "" if KeyLevelSignalGenerator._is_integer_level(key_level) else direction
+        direction_token = str(direction or "")
         return "|".join(str(value or "") for value in (
             strategy_id, signal_source_id, symbol, level_token,
             setup_token, direction_token, period,
@@ -598,10 +595,11 @@ class KeyLevelSignalGenerator:
         levels: List[float], params: Dict, symbol: str = "",
         current_price: Optional[float] = None,
     ) -> List[float]:
-        """Return explicitly configured 19-levels, or levels ending in 19.
+        """Return only explicitly configured 19-level candidates.
 
-        We never infer a special level from the current quote alone: this
-        prevents enabling the GOLD 4419 rule on unrelated symbols.
+        A normal integer level (for example GOLD 4400) must not silently
+        create a second 19-level signal stream.  The optional ``levels``
+        fallback is retained only for an explicitly listed x19 level.
         """
         explicit = params.get("level_19_levels") or []
         if explicit:
@@ -610,20 +608,7 @@ class KeyLevelSignalGenerator:
             float(level) for level in levels
             if int(round(float(level))) % 100 == 19
         })
-        if candidates or "gold" not in str(symbol).lower():
-            return candidates
-        # GOLD integer-level configurations commonly store 4400/4500 while
-        # the actionable resistance is 4419/4519. Derive the nearest such
-        # level automatically so existing KEY LEVEL sources get the setup
-        # without a database rewrite.
-        derived = sorted({
-            float(int(float(level) // 100) * 100 + 19)
-            for level in levels if float(level) > 0
-        })
-        if current_price and derived:
-            nearest = min(derived, key=lambda level: abs(level - current_price))
-            return [nearest]
-        return derived
+        return candidates
 
     def generate_signal(
         self, symbol: str, current_price: float, strategy_id: str = "",
@@ -737,7 +722,8 @@ class KeyLevelSignalGenerator:
                 )
             self._last_prices[state_key] = current_price
             extra_level_19 = []
-            if params.get("level_19_enabled", True):
+            level_19_enabled = bool(params.get("level_19_enabled", False))
+            if level_19_enabled or str(params.get("setup_mode") or "").lower() == "level_19":
                 for level_19 in self._level_19_candidates(
                     levels, params, symbol, current_price
                 ):
@@ -800,7 +786,8 @@ class KeyLevelSignalGenerator:
             for special in extra_level_19:
                 special_setup = str(special.setup_type or "")
                 # Level-19 breakout/rejection is a discrete round-number
-                # setup.  Both directions use the same 8-hour quiet period.
+                # setup.  Each setup and direction gets its own 8-hour quiet
+                # period through the cooldown key.
                 special_cooldown = (
                     self.integer_level_cooldown
                     if "key_level_19" in special_setup or "reversal" in special_setup

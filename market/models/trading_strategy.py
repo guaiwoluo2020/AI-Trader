@@ -121,7 +121,9 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
             # A single key-level source can now be explicitly limited to one
             # setup family. ``both`` keeps existing strategies unchanged.
             "setup_mode": "both",
-            "level_19_enabled": True,
+            # 19-level setups are opt-in.  Ordinary key levels must not
+            # silently create a second 19-level signal stream.
+            "level_19_enabled": False,
             "level_19_levels": [],
             "breakout_retest_confirmation_offset": 3.0,
             # GOLD 19-level setup uses the integer-level rule: one point
@@ -215,6 +217,7 @@ def signal_source_defaults(source: str, period: str = "M5") -> Dict:
 
 def migrate_signal_config(
     signal_config: Dict, strategy_id: str = "legacy", min_confidence: int = 70,
+    symbol: str = "",
 ) -> List[Dict]:
     """将旧版多周期配置拆成单周期信号源实例。"""
     migrated = []
@@ -227,6 +230,8 @@ def migrate_signal_config(
                     "signal_source_id": f"{strategy_id}-key-level-m1",
                     "weight": int(config.get("weight", 40)),
                 })
+                if "level_19_enabled" not in config:
+                    item["params"]["level_19_enabled"] = str(symbol or "").upper().startswith("GOLD")
                 migrated.append(item)
             continue
         for period, period_config in (config.get("periods") or {}).items():
@@ -247,7 +252,7 @@ def migrate_signal_config(
 
 
 def normalize_signal_sources(
-    items: Optional[List[Dict]], enforce_mutex: bool = False,
+    items: Optional[List[Dict]], enforce_mutex: bool = False, symbol: str = "",
 ) -> Optional[List[Dict]]:
     """校验实例唯一性并补全类型专属默认值。"""
     if items is None:
@@ -307,6 +312,8 @@ def normalize_signal_sources(
         item["params"].update(raw.get("params") or {})
         params = item["params"]
         if source == "key_level":
+            if "level_19_enabled" not in raw_params:
+                params["level_19_enabled"] = str(symbol or "").upper().startswith("GOLD")
             params["setup_mode"] = str(params.get("setup_mode") or "both").lower()
             if params["setup_mode"] not in {"reversal", "breakout", "breakout_retest", "level_19", "both"}:
                 raise ValueError("关键点位 SETUP 类型无效")
@@ -328,7 +335,7 @@ def normalize_signal_sources(
             params["breakout_retest_tolerance_atr"] = _legacy_key_level_atr(
                 params.get("breakout_retest_tolerance_atr"), 0.9
             )
-            params["level_19_enabled"] = bool(params.get("level_19_enabled", True))
+            params["level_19_enabled"] = bool(params.get("level_19_enabled", False))
             raw_19_levels = params.get("level_19_levels") or []
             if isinstance(raw_19_levels, str):
                 raw_19_levels = raw_19_levels.replace("，", ",").split(",")
@@ -698,10 +705,13 @@ class TradingStrategy:
         self.enabled = True
         if not self.strategy_name:
             self.strategy_name = f"Strategy_{self.symbol}"
-        self.signal_sources = normalize_signal_sources(self.signal_sources)
+        self.signal_sources = normalize_signal_sources(
+            self.signal_sources, symbol=self.symbol,
+        )
         if self.signal_sources is None:
             self.signal_sources = migrate_signal_config(
-                self.signal_config, self.strategy_id, self.min_confidence
+                self.signal_config, self.strategy_id, self.min_confidence,
+                self.symbol,
             )
 
     def is_runnable(self) -> bool:
@@ -792,7 +802,7 @@ class TradingStrategy:
                 )
         if "signal_sources" in data:
             self.signal_sources = normalize_signal_sources(
-                data["signal_sources"], enforce_mutex=True
+                data["signal_sources"], enforce_mutex=True, symbol=self.symbol,
             )
         if "signal_weights" in data:
             self.signal_weights = data["signal_weights"]
