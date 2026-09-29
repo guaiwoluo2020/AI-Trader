@@ -1,0 +1,7 @@
+{
+  "name": "feishu-trade-docs-mcp",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "@modelcontextprotocol/sdk": "^1.30.1" }
+}
