@@ -164,6 +164,7 @@ class TradingEngineManager:
     def process_user_market_tick(
         self, user_id: int, account_ids, symbol: str, price: float,
         source_account_id: Optional[int] = None,
+        bid: Optional[float] = None, ask: Optional[float] = None,
     ) -> Dict[int, Dict]:
         """Drive all live accounts from one immutable user-level signal snapshot."""
         user_id = int(user_id)
@@ -188,6 +189,7 @@ class TradingEngineManager:
             engine = self.get_engine(user_id, account_id)
             results[account_id] = engine.process_price(
                 symbol, float(price), execution_context=context,
+                bid=bid, ask=ask,
             )
         return results
 

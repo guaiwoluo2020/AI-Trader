@@ -293,6 +293,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                         symbol,
                     ),
                     symbol, float(price), source_account_id=identity.account_id,
+                    bid=tick_price, ask=tick_ask,
                 )
                 paper_tick_context = engine_manager.get_tick_execution_context(
                     identity.user_id, identity.account_id, symbol,

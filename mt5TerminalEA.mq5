@@ -901,11 +901,13 @@ void ParseAndExecuteTrades(string jsonData)
                   double askPrice = SymbolInfoDouble(updateSymbol, SYMBOL_ASK);
                   double pointSize = SymbolInfoDouble(updateSymbol, SYMBOL_POINT);
                   long stopsLevel = SymbolInfoInteger(updateSymbol, SYMBOL_TRADE_STOPS_LEVEL);
-                  double minimumDistance = MathMax(0.0, (double)stopsLevel * pointSize);
+                  long freezeLevel = SymbolInfoInteger(updateSymbol, SYMBOL_TRADE_FREEZE_LEVEL);
+                  double brokerDistance = MathMax((double)stopsLevel, (double)freezeLevel) * pointSize;
+                  double minimumDistance = MathMax(0.0, brokerDistance + pointSize);
                   bool stopIsValid = sl <= 0 || (
                      positionType == POSITION_TYPE_BUY ?
-                        sl < bidPrice - minimumDistance + pointSize * 0.1 :
-                        sl > askPrice + minimumDistance - pointSize * 0.1
+                        sl < bidPrice - minimumDistance :
+                        sl > askPrice + minimumDistance
                   );
                   bool modifyOk = false;
                   long modifyRetcode = TRADE_RETCODE_INVALID_STOPS;
@@ -1299,11 +1301,13 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
       double askPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double pointSize = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
       long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-      double minimumDistance = MathMax(0.0, (double)stopsLevel * pointSize);
+      long freezeLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+      double brokerDistance = MathMax((double)stopsLevel, (double)freezeLevel) * pointSize;
+      double minimumDistance = MathMax(0.0, brokerDistance + pointSize);
       bool stopIsValid = sl <= 0 || (
          orderType == ORDER_TYPE_BUY ?
-            sl < bidPrice - minimumDistance + pointSize * 0.1 :
-            sl > askPrice + minimumDistance - pointSize * 0.1
+            sl < bidPrice - minimumDistance :
+            sl > askPrice + minimumDistance
       );
       if(!stopIsValid)
         {

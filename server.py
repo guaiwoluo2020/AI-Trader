@@ -620,6 +620,7 @@ class TradingServer:
     def process_price(
         self, symbol: str, current_price: float,
         execution_context: Optional[TickExecutionContext] = None,
+        bid: Optional[float] = None, ask: Optional[float] = None,
     ) -> Dict:
         """
         处理价格变动，生成决策
@@ -781,7 +782,7 @@ class TradingServer:
             signals = execution_context.signals_for(strategy.strategy_id)
             try:
                 self._manage_strategy_positions(
-                    strategy, symbol, current_price, signals
+                    strategy, symbol, current_price, signals, bid=bid, ask=ask
                 )
             except Exception as exc:
                 print(
@@ -1052,6 +1053,7 @@ class TradingServer:
 
     def _manage_strategy_positions(
         self, strategy, symbol: str, current_price: float, signals: List[TradingSignal],
+        bid: Optional[float] = None, ask: Optional[float] = None,
     ) -> None:
         """Evaluate EA positions with the strategy's independent manager."""
         from market.services import PositionManager
@@ -1076,6 +1078,9 @@ class TradingServer:
             for signal in signals
         )
         manager = PositionManager()
+        spec = self.instrument_specs.get(int(self.account_id or 0), symbol) or {}
+        quote_bid = float(bid or current_price or 0)
+        quote_ask = float(ask or current_price or 0)
         for position in self.position_service.get_position_objects(symbol):
             parts = str(position.comment or "").split("|")
             if len(parts) != 3 or parts[0] != "AIT":
@@ -1231,6 +1236,12 @@ class TradingServer:
             action = manager.evaluate(
                 active_config, state,
                 {"price": current_price, "time": int(datetime.now().timestamp()),
+                 "bid": quote_bid, "ask": quote_ask,
+                 "spread": max(0.0, quote_ask - quote_bid),
+                 "point_size": float(spec.get("point_size") or 0),
+                 "stops_level": float(spec.get("stops_level") or 0),
+                 "freeze_level": float(spec.get("freeze_level") or 0),
+                 "stop_safety_points": 1,
                  "atr": float(structure.get("atr") or 0),
                  "structure_hierarchy": structure.get("structure_hierarchy") or {}},
                 pivots=pivots,
@@ -1535,6 +1546,8 @@ class TradingServer:
             last_delivered_at = int(item.get("last_delivered_at") or 0)
             if last_delivered_at and now_ts - last_delivered_at < retry_seconds:
                 continue
+            if now_ts < int(item.get("retry_after") or 0):
+                continue
             item["status"] = "delivered"
             item["attempts"] = int(item.get("attempts") or 0) + 1
             item["last_delivered_at"] = now_ts
@@ -1591,7 +1604,14 @@ class TradingServer:
             "error_message": str(report.get("error_message") or ""),
         })
         if status == "pending":
-            item["last_delivered_at"] = 0
+            attempts = int(item.get("attempts") or 0)
+            item["last_delivered_at"] = now_ts
+            # Broker freeze/stops windows can persist for several ticks. Use
+            # bounded backoff so an invalid instruction is not retried every
+            # poll while still allowing it to recover as price moves.
+            item["retry_after"] = now_ts + min(60, max(5, 2 ** min(attempts, 5)))
+        else:
+            item["retry_after"] = 0
         self._runtime_repository.upsert_entity(
             "position_update_instruction", instruction_id, item,
             symbol=str(item.get("symbol") or report.get("symbol") or ""),

@@ -48,6 +48,9 @@ class PaperPositionService:
             account_control["currency"] if account_control else "USD"
         )
         quote = TickQuote.create(bid, ask, now)
+        instrument_spec = InstrumentSpecRepository(self.paper_service.storage).get(
+            account_id, symbol
+        ) or {}
         for position in positions:
             mark = quote.close_price(position["direction"])
             reason = str(position["close_reason"] or "")
@@ -196,6 +199,12 @@ class PaperPositionService:
                 action = self.paper_service.position_manager.evaluate(
                     policy_snapshot.get("config", {}), position_state,
                     {"price": mark, "time": now,
+                     "bid": float(bid), "ask": float(ask),
+                     "spread": max(0.0, float(ask) - float(bid)),
+                     "point_size": float(instrument_spec.get("point_size") or 0),
+                     "stops_level": float(instrument_spec.get("stops_level") or 0),
+                     "freeze_level": float(instrument_spec.get("freeze_level") or 0),
+                     "stop_safety_points": 1,
                      "atr": float(structure.get("atr") or 0),
                      "structure_hierarchy": structure.get("structure_hierarchy") or {}}, pivots=pivots,
                 )

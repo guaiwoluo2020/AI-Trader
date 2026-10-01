@@ -502,9 +502,58 @@ class PositionManager:
         current_sl = float(position["stop_loss"])
         risk = float(position.get("initial_risk") or abs(entry - current_sl))
         price = float(market.get("price", market.get("close", 0)))
+        bid = float(market.get("bid") or 0)
+        ask = float(market.get("ask") or 0)
+        spread = max(0.0, float(market.get("spread") or 0))
+        if bid <= 0 and ask <= 0 and price > 0:
+            bid, ask = price - spread / 2.0, price + spread / 2.0
+        elif bid <= 0:
+            bid = price
+        elif ask <= 0:
+            ask = price
+        point_size = max(0.0, float(market.get("point_size") or 0))
+        stops_level = max(0.0, float(market.get("stops_level") or 0))
+        freeze_level = max(0.0, float(market.get("freeze_level") or 0))
+        safety_points = max(0.0, float(market.get("stop_safety_points", 1) or 0))
+        broker_distance = max(stops_level, freeze_level) * point_size
+        safety_distance = safety_points * point_size if point_size > 0 else 0.0
+        required_distance = broker_distance + safety_distance
+        # A position closes at Bid when long and Ask when short.  Apply the
+        # same side and distance rules before creating a server instruction;
+        # EA validation remains the final broker-specific safety net.
+        execution_price = bid if direction == "buy" else ask
+        price = execution_price
+
+        def valid_broker_stop(candidate: float) -> bool:
+            if candidate <= 0:
+                return False
+            if direction == "buy":
+                return candidate < bid - required_distance
+            return candidate > ask + required_distance
+
+        def reject_candidate_events(candidate: float) -> None:
+            tolerance = max(abs(candidate) * 1e-9, 1e-10)
+            for event in events:
+                if (
+                    event.get("status") == "triggered"
+                    and abs(float(event.get("candidate_stop_loss") or 0) - candidate)
+                    <= tolerance
+                ):
+                    event["status"] = "checked"
+                    event["message"] = (
+                        "候选止损距离当前 Bid/Ask 不足，等待价格移动后再提交"
+                    )
+                    event.update({
+                        "broker_execution_price": execution_price,
+                        "bid": bid, "ask": ask, "spread": max(spread, ask - bid),
+                        "stops_level": stops_level,
+                        "freeze_level": freeze_level,
+                        "required_distance": required_distance,
+                        "rejected_candidate_stop_loss": candidate,
+                    })
         volume = float(position.get("remaining_volume") or position.get("volume") or 0)
         favorable = float(position.get("favorable_price") or entry)
-        favorable = max(favorable, price) if direction == "buy" else min(favorable, price)
+        favorable = max(favorable, execution_price) if direction == "buy" else min(favorable, execution_price)
         candidates = []
         events = []
         profit = favorable - entry if direction == "buy" else entry - favorable
@@ -883,6 +932,9 @@ class PositionManager:
                                 favorable - distance
                                 if direction == "buy" else favorable + distance
                             )
+                        if partial_stop is not None and not valid_broker_stop(partial_stop):
+                            reject_candidate_events(partial_stop)
+                            partial_stop = None
                         if partial_stop is not None:
                             can_tighten = (
                                 current_sl < partial_stop < price if direction == "buy"
@@ -958,10 +1010,16 @@ class PositionManager:
                         add_event(kind, "checked", "结构保护点未产生足够改善的止损", protected_level=level, candidate_stop_loss=candidate, minimum_improvement=minimum_improvement)
                 else:
                     add_event(kind, "checked", "暂无可用结构保护点")
-        valid = [candidate for candidate in candidates if (
-            current_sl < candidate < price if direction == "buy"
-            else price < candidate < current_sl
-        )]
+        valid = []
+        for candidate in candidates:
+            can_tighten = (
+                current_sl < candidate < price if direction == "buy"
+                else price < candidate < current_sl
+            )
+            if can_tighten and valid_broker_stop(candidate):
+                valid.append(candidate)
+            elif can_tighten:
+                reject_candidate_events(candidate)
         if not valid:
             return PositionAction(events=events)
         new_stop = max(valid) if direction == "buy" else min(valid)
