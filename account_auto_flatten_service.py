@@ -76,11 +76,12 @@ class AccountAutoFlattenService:
         self._record_missed_windows(now)
         return summary
 
-    def _check_recent_kline(self, row, max_age_seconds: int = 180) -> Dict:
-        """Safety gate: require a recent M1 K line for every held symbol.
+    def _check_recent_kline(self, row, max_age_seconds: int = 600) -> Dict:
+        """Safety gate: require a recent persisted M1 K line for every held symbol.
 
-        This deliberately reads the latest K line already held by the engine; it does
-        not create or persist a separate account heartbeat.
+        The flatten worker runs independently from the EA upload loop.  Reading
+        ``historical_klines`` avoids a race where a bar has already been persisted
+        but has not yet been restored into the in-memory engine store.
         """
         try:
             user_id, account_id = int(row["user_id"]), int(row["id"])
@@ -91,32 +92,36 @@ class AccountAutoFlattenService:
                     "WHERE account_id = ? AND status = 'open'",
                     (account_id,),
                 )
-                # Paper positions are stored centrally; their market data is
-                # driven by the user's account-independent market engine.
-                kline_engine = self.engine_manager.get_market_engine(user_id)
             else:
-                kline_engine = self.engine_manager.get_engine(user_id, account_id)
-                positions = list(kline_engine.position_service.get_positions() or [])
+                engine = self.engine_manager.get_engine(user_id, account_id)
+                positions = list(engine.position_service.get_positions() or [])
             symbols = sorted({str(p.get("symbol") or "").strip() for p in positions if p.get("symbol")})
             if not symbols:
                 return {"ok": True, "position_count": 0}
             stale = []
             for symbol in symbols:
-                status = kline_engine.kline_service.check_m1_exists_within(symbol, max_age_seconds)
-                if status.get("is_stale") or status.get("latest_time") is None:
+                latest = self.storage.fetchone(
+                    "SELECT COALESCE(NULLIF(timestamp_utc, 0), timestamp) AS latest_ts "
+                    "FROM historical_klines "
+                    "WHERE user_id = ? AND account_id = 0 AND symbol = ? AND period = 'M1' "
+                    "ORDER BY COALESCE(NULLIF(timestamp_utc, 0), timestamp) DESC LIMIT 1",
+                    (user_id, symbol),
+                )
+                latest_ts = int((latest or {}).get("latest_ts") or 0)
+                if latest_ts <= 0 or int(datetime.now(timezone.utc).timestamp()) - latest_ts > max_age_seconds:
                     stale.append(symbol)
             if stale:
                 return {
                     "ok": False,
                     "position_count": len(positions),
-                    "reason": f"最近3分钟无K线上报，跳过定时清仓（品种：{', '.join(stale)}）",
+                    "reason": f"最近10分钟无K线上报，跳过定时清仓（品种：{', '.join(stale)}）",
                 }
             return {"ok": True, "position_count": len(positions)}
         except Exception as exc:
             return {
                 "ok": False,
                 "position_count": 0,
-                "reason": f"无法确认最近3分钟K线上报，跳过定时清仓：{exc}",
+                "reason": f"无法确认最近10分钟K线上报，跳过定时清仓：{exc}",
             }
 
     def _claim(self, row, window):
