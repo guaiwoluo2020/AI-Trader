@@ -62,6 +62,7 @@ from market.services.plan_execution_service import PlanExecutionService
 from market.services.outbox_dispatcher import OutboxDispatcher
 from market.services.plan_lifecycle_service import PlanLifecycleService
 from market.services.execution_report_service import ExecutionReportService
+from market.services.execution_quality_service import MarketExecutionQualityService
 from market.services.setup_circuit_breaker import SetupCircuitBreaker
 from market.services.plan_replay_guard import PlanReplayGuard
 from market.services.structure_plan_execution_coordinator import StructurePlanExecutionCoordinator
@@ -135,6 +136,9 @@ class TradingServer:
         self.outbox_dispatcher.start()
         self.execution_report_service = ExecutionReportService(
             self.repositories.trade_execution, self.event_bus,
+        )
+        self.execution_quality_service = MarketExecutionQualityService(
+            self.repositories.storage
         )
 
         # ==================== 行情模块（内部） ====================
@@ -644,6 +648,15 @@ class TradingServer:
             "pending_order": None,
             "pending_orders": [],
         }
+        quality_spec = self.instrument_specs.get(
+            int(self.account_id or 0), str(symbol or "")
+        )
+        quality_bid = float(bid or current_price or 0)
+        quality_ask = float(ask or current_price or 0)
+        quality_gate = self.execution_quality_service.record_tick(
+            int(self.account_id or 0), str(symbol or ""), quality_bid,
+            quality_ask, float(quality_spec.get("point_size") or 0),
+        )
         self.event_bus.publish(ApplicationEvent(
             MARKET_TICK_RECEIVED,
             {"price": float(current_price or 0)},
@@ -811,10 +824,13 @@ class TradingServer:
                     "account_id": int(self.account_id or 0),
                     "deployment_id": live_deployments.get(str(strategy.strategy_id), ""),
                 },
-                entry_guard=lambda symbol, strategy, action, signal: self.entry_guard_service.check_live(
-                    int(self.user_id or 0), int(self.account_id or 0), strategy, signal,
-                    enabled=bool(self.user_id and self.account_id and self._runtime_repository),
-                    action=action,
+                entry_guard=lambda symbol, strategy, action, signal: (
+                    quality_gate if not quality_gate.get("allowed", True)
+                    else self.entry_guard_service.check_live(
+                        int(self.user_id or 0), int(self.account_id or 0), strategy, signal,
+                        enabled=bool(self.user_id and self.account_id and self._runtime_repository),
+                        action=action,
+                    )
                 ),
                 audit_no_action=True,
             )

@@ -55,6 +55,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
 
     def process_paper_tick_after_response(
         identity: EAIdentity, symbol: str, price: float,
+        bid: float, ask: float,
         execution_context=None,
     ) -> None:
         """Run Paper matching after the live EA response has been assembled.
@@ -79,7 +80,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     structures[structure_period] = structure
             pivots = _paper_pivots_for_symbol(server, symbol)
             engine_manager.paper_trading.process_tick(
-                identity.user_id, symbol, float(price), float(price),
+                identity.user_id, symbol, float(bid), float(ask),
                 pivots=pivots, structures=structures,
             )
             created = engine_manager.paper_trading.process_strategy_signals(
@@ -93,7 +94,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             # same quote immediately after creation.
             if created:
                 engine_manager.paper_trading.process_tick(
-                    identity.user_id, symbol, float(price), float(price),
+                    identity.user_id, symbol, float(bid), float(ask),
                     pivots=pivots, structures=structures,
                 )
         except Exception as exc:
@@ -314,7 +315,8 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         if should_process_tick:
             background_tasks.add_task(
                 process_paper_tick_after_response,
-                identity, symbol, float(price), paper_tick_context,
+                identity, symbol, float(price), tick_price, tick_ask,
+                paper_tick_context,
             )
         result["paper_orders_created"] = 0
         result["paper_execution"] = {"filled": 0, "closed": 0, "rejected": 0}
@@ -406,6 +408,21 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
             report = server.execution_report_service.record(
                 identity.user_id, identity.account_id, payload
             )
+            if (
+                bool(report.get("success"))
+                and str(report.get("action") or "").lower() in {"b", "s"}
+            ):
+                quality_spec = server.instrument_specs.get(
+                    identity.account_id, str(report.get("symbol") or "")
+                )
+                server.execution_quality_service.record_execution(
+                    identity.account_id, str(report.get("symbol") or ""),
+                    "buy" if str(report.get("action") or "").lower() == "b" else "sell",
+                    float(report.get("requested_price") or 0),
+                    float(report.get("executed_price") or 0),
+                    float(quality_spec.get("point_size") or 0),
+                    success=True,
+                )
             instruction_id = str(
                 payload.get("instruction_id") or report.get("instruction_id") or ""
             )

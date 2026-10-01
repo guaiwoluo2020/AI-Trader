@@ -31,7 +31,9 @@ from repositories.strategy_config import StrategyConfigRepository
 from repositories.trading import PositionManagementEventRepository
 from repositories.trading import TradeExecutionRepository
 from repositories.execution_gate_audits import ExecutionGateAuditRepository
+from repositories.instrument_specs import InstrumentSpecRepository
 from market.services.entry_guard_service import EntryGuardService
+from market.services.execution_quality_service import MarketExecutionQualityService
 from market.services.same_setup_repeat_guard import SameSetupRepeatGuard
 from market.services.paper_execution_reporter import PaperExecutionReporter
 from market.services.paper_matching_engine import PaperMatchingEngine
@@ -196,6 +198,7 @@ class PaperTradingService:
         self.execution_reports = TradeExecutionRepository(self.storage)
         self.execution_gate_audits = ExecutionGateAuditRepository(self.storage)
         self.execution_reporter = PaperExecutionReporter(self.execution_reports)
+        self.execution_quality_service = MarketExecutionQualityService(self.storage)
         self.matching_engine = PaperMatchingEngine(self)
         self.order_service = PaperOrderService(self)
         self.position_service = PaperPositionService(self)
@@ -211,6 +214,17 @@ class PaperTradingService:
                                   executed_volume: float = 0.0) -> None:
         """将 Paper 撮合结果写入与 MT5 相同的执行回执表。"""
         try:
+            if status == "filled" and executed_price and order.get("requested_price"):
+                point_size, _ = market_spec(
+                    str(order.get("symbol") or ""), account_id=account_id,
+                    storage=self.storage,
+                )
+                self.execution_quality_service.record_execution(
+                    account_id, str(order.get("symbol") or ""),
+                    "buy" if str(order.get("direction") or "").lower() in {"buy", "b"} else "sell",
+                    float(order.get("requested_price") or 0), float(executed_price),
+                    point_size, success=True,
+                )
             self.execution_reporter.record(
                 user_id, account_id, order, status, reason,
                 executed_price, executed_volume,
@@ -1186,6 +1200,9 @@ class PaperTradingService:
                 )
                 continue
             policy_snapshot = runtime_strategy["position_management_policy_snapshot"]
+            quality_gate = self.execution_quality_service.check_entry(
+                account_id, symbol
+            )
             reverse_enabled = any(
                 rule.get("type") == "reverse_signal"
                 for rule in policy_snapshot["config"].get("management_rules", [])
@@ -1233,7 +1250,8 @@ class PaperTradingService:
                     self._paper_risk_check(aid, s, volume, px, risk)
                 ),
                 entry_guard=lambda s, st, action, signal, aid=account_id, dep=deployment: (
-                    EntryGuardService.check_paper(
+                    quality_gate if not quality_gate.get("allowed", True)
+                    else EntryGuardService.check_paper(
                         self._paper_loss_streak_guard,
                         user_id, aid, dep, s, st, action, signal,
                         policy_snapshot.get("config") or {},
@@ -1412,8 +1430,14 @@ class PaperTradingService:
             )
             summary = {"filled": 0, "closed": 0, "rejected": 0}
             for row in account_rows:
+                account_id = int(row["id"])
+                spec = InstrumentSpecRepository(self.storage).get(account_id, symbol)
+                self.execution_quality_service.record_tick(
+                    account_id, symbol, bid, ask,
+                    float(spec.get("point_size") or 0), now,
+                )
                 result = self.matching_engine.process_account_tick(
-                    user_id, int(row["id"]), symbol, bid, ask, now, pivots or [], structures or {}
+                    user_id, account_id, symbol, bid, ask, now, pivots or [], structures or {}
                 )
                 for key in summary:
                     summary[key] += result[key]

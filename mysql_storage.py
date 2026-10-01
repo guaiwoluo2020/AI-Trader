@@ -381,6 +381,35 @@ class MySQLStorage:
                     KEY idx_sql_stats_updated (updated_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """)
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS market_execution_quality_samples (
+                    account_id BIGINT NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    window_start BIGINT NOT NULL,
+                    sample_count INT NOT NULL DEFAULT 0,
+                    spread_median_points DOUBLE NOT NULL DEFAULT 0,
+                    spread_p95_points DOUBLE NOT NULL DEFAULT 0,
+                    spread_max_points DOUBLE NOT NULL DEFAULT 0,
+                    buy_slippage_p95_points DOUBLE NOT NULL DEFAULT 0,
+                    sell_slippage_p95_points DOUBLE NOT NULL DEFAULT 0,
+                    created_at BIGINT NOT NULL,
+                    PRIMARY KEY (account_id, symbol, window_start),
+                    KEY idx_quality_samples_window (window_start)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """)
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS market_execution_quality_events (
+                    id BIGINT NOT NULL AUTO_INCREMENT,
+                    account_id BIGINT NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    reason VARCHAR(80) NOT NULL,
+                    details_json JSON NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    PRIMARY KEY (id),
+                    KEY idx_quality_events_lookup (account_id, symbol, created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """)
                 # Migrate installations created before hourly buckets existed.
                 # Existing cumulative rows are assigned to the hour containing
                 # their last update; new rows are isolated by (hash, hour).
