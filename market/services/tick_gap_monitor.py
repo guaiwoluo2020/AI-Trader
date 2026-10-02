@@ -31,12 +31,12 @@ class TickGapMonitor:
         if not isinstance(sessions, list):
             return False
         # MQL5 ENUM_DAY_OF_WEEK uses Sunday=0; Python datetime uses Monday=0.
-        weekday = (now.weekday() + 1) % 7
         for item in sessions:
-            if int(item.get('day', -1)) != weekday:
-                continue
             offset = int(item.get('offset', 0) or 0)
             broker_now = now.astimezone(timezone(timedelta(minutes=offset)))
+            weekday = (broker_now.weekday() + 1) % 7
+            if int(item.get('day', -1)) != weekday:
+                continue
             broker_minute = broker_now.hour * 60 + broker_now.minute
             start, end = int(item.get('from', 0)), int(item.get('to', 0))
             if start <= broker_minute < end or (end == 0 and broker_minute >= start):
