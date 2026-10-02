@@ -249,3 +249,12 @@ class MarketExecutionQualityService:
                         "message": "当前点差或滑点质量异常，暂停新开仓",
                         "details": dict(state.get("last_gate") or {})}
             return {"allowed": True, "reason_code": "execution_quality_ok"}
+
+    def estimated_slippage_points(self, account_id: int, symbol: str, direction: str) -> float:
+        """Return the latest observed adverse-slippage baseline for Paper fills."""
+        with self._lock:
+            state = self._state(int(account_id), str(symbol or ""), int(time.time()))
+            baseline = self._baseline(state) or {}
+            return max(0.0, float(baseline.get(
+                "buy_slippage_p95" if str(direction).lower() == "buy" else "sell_slippage_p95", 0
+            ) or 0))

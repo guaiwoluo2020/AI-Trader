@@ -174,8 +174,6 @@
             <v-select v-model="paperForm.currency" :items="currencies" label="账户币种" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
             <div class="paper-setting-grid">
               <v-text-field v-model.number="paperForm.leverage" label="杠杆" type="number" min="1" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
-              <v-text-field v-model.number="paperForm.spreadPoints" label="模拟点差（点）" type="number" min="0" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
-              <v-text-field v-model.number="paperForm.slippagePoints" label="滑点（点）" type="number" min="0" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
               <v-text-field v-model.number="paperForm.commissionPerLot" label="每手手续费" type="number" min="0" variant="outlined" density="comfortable" :disabled="Boolean(paperForm.referenceAccountId)" />
             </div>
             <div class="paper-note">
@@ -904,7 +902,7 @@ const messageType = ref('success')
 const currencies = ['USD', 'CNY', 'EUR', 'GBP', 'JPY']
 const paperForm = reactive({
   name: '', initialBalance: 100000, currency: 'USD', leverage: 100,
-  spreadPoints: 0, slippagePoints: 0, commissionPerLot: 0, referenceAccountId: null,
+  commissionPerLot: 0, referenceAccountId: null,
 })
 const paperReferencePreview = ref(null)
 
@@ -918,7 +916,6 @@ watch(() => paperForm.referenceAccountId, async (accountId) => {
     paperReferencePreview.value = response.settings || null
     if (response.settings?.currency) paperForm.currency = response.settings.currency
     if (response.settings?.leverage) paperForm.leverage = response.settings.leverage
-    paperForm.spreadPoints = 0
     paperForm.slippagePoints = response.settings?.slippage_points || 0
     paperForm.commissionPerLot = response.settings?.commission_per_lot || 0
   } catch {
@@ -1215,8 +1212,6 @@ async function createPaper() {
       initial_balance: paperForm.initialBalance,
       currency: paperForm.currency,
       leverage: paperForm.leverage,
-      spread_points: paperForm.spreadPoints,
-      slippage_points: paperForm.slippagePoints,
       commission_per_lot: paperForm.commissionPerLot,
       reference_account_id: paperForm.referenceAccountId,
     })

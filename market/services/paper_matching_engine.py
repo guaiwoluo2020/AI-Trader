@@ -50,12 +50,14 @@ class PaperMatchingEngine:
         )
         quote = TickQuote.create(bid, ask, now)
         settings = self.paper_service._settings(account_id)
-        slippage = settings["slippage_points"] * point_size
-        configured_spread = settings["spread_points"] * point_size
-        if ask - bid < configured_spread:
-            midpoint = (ask + bid) / 2
-            bid = midpoint - configured_spread / 2
-            ask = midpoint + configured_spread / 2
+        # Use the account/symbol historical execution-quality baseline.  New
+        # Paper accounts have no baseline and therefore start at zero.
+        buy_slippage = self.paper_service.execution_quality_service.estimated_slippage_points(
+            account_id, symbol, "buy"
+        )
+        sell_slippage = self.paper_service.execution_quality_service.estimated_slippage_points(
+            account_id, symbol, "sell"
+        )
         quote = TickQuote.create(bid, ask, now)
         # Paper market orders are created from this quote's signal snapshot.
         # The shared pending core forbids same-timestamp fills so backtests do
@@ -132,9 +134,10 @@ class PaperMatchingEngine:
                     )
                     result["rejected"] += 1
                     continue
-                fill_price = quote.entry_price(order["direction"]) + (
-                    slippage if order["direction"] == "buy" else -slippage
-                )
+                adverse_slippage = (
+                    buy_slippage if order["direction"] == "buy" else -sell_slippage
+                ) * point_size
+                fill_price = quote.entry_price(order["direction"]) + adverse_slippage
                 if not self.paper_service._valid_exits(
                     order["direction"], fill_price,
                     float(order["stop_loss"]), float(order["take_profit"]),
