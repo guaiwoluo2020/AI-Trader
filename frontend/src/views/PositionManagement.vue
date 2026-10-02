@@ -110,9 +110,18 @@ const ruleDescription = rule => {
   if (rule.type === 'profit_protection') return (rule.stages || []).map(item => `${item.activation_r}R → ${item.stop_r}R`).join('；') || '分阶段保护'
   if (rule.type === 'break_even') return `达到 ${rule.activation_r || 0}R，偏移 ${rule.offset_r || 0}R`
   if (rule.type === 'pivot_trailing') return `达到 ${rule.activation_r || 0}R后，使用 ${rule.period || 'M5'} Pivot${rule.buffer?.value ? `，缓冲 ${rule.buffer.value}` : ''}`
-  if (rule.type === 'structure_trailing') return `${rule.structure_layer || 'swing'} 保护位，${rule.buffer_value || 0}${rule.buffer_type === 'atr' ? ' ATR' : ''} 缓冲，最小改善 ${rule.min_improvement_atr || 0} ATR`
+  if (rule.type === 'structure_trailing') {
+    const layer = rule.structure_layer || 'swing'
+    const buffer = `${rule.buffer_value || 0.3}${rule.buffer_type === 'atr' || !rule.buffer_type ? ' ATR' : ''}`
+    return `用 INTERNAL / ${String(layer).toUpperCase()} 已确认支撑阻力做阶梯；越过前方阻力后收到突破点外侧 ${buffer} 加点差，最小改善 ${rule.min_improvement_atr || 0.1} ATR`
+  }
   if (rule.type === 'trailing_stop') return `达到 ${rule.activation_r || 0}R 后，距离最有利价格 ${rule.distance_r || 0}R`
-  if (rule.type === 'target_trailing') return `达到策略目标后跟踪，默认 ${rule.distance_r || 0}R，范围 ${rule.min_distance_r || 0}R–${rule.max_distance_r || 0}R`
+  if (rule.type === 'target_trailing') {
+    if (rule.distance_atr) {
+      return `前方结构点都被现价越过后启用，最有利价回撤 ${rule.distance_atr || 2} ATR，改善不足 ${rule.min_improvement_atr || 0.5} ATR 不调整`
+    }
+    return `达到策略目标后跟踪，默认 ${rule.distance_r || 0}R，范围 ${rule.min_distance_r || 0}R–${rule.max_distance_r || 0}R`
+  }
   if (rule.type === 'partial_take_profit') return (rule.levels || []).map(item => `${item.trigger_r}R 平 ${item.close_percent}%`).join('；')
   return JSON.stringify(rule)
 }
