@@ -190,6 +190,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
                     "currency_base": payload.get("currency_base"),
                     "currency_profit": payload.get("currency_profit"),
                     "currency_margin": payload.get("currency_margin"),
+                    "trade_sessions_json": payload.get("trade_sessions_json"),
                     "source": payload.get("source") or "mt5",
                 },
             )
@@ -259,6 +260,7 @@ def create_ea_routes(engine_manager: TradingEngineManager) -> APIRouter:
         server = engine_manager.get_engine_for_ea(identity)
         tick_price = float(bid if bid is not None and bid > 0 else (price or 0))
         tick_ask = float(ask if ask is not None and ask > 0 else tick_price)
+        engine_manager.tick_gap_monitor.record_tick(identity.account_id, symbol)
         if tick_price > 0 and tick_persistence_enabled():
             # Tick persistence is deliberately best-effort.  It must never
             # delay or block the EA trading response.

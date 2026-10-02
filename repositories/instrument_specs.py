@@ -30,6 +30,7 @@ DEFAULT_SPEC = {
     "currency_base": "",
     "currency_profit": "",
     "currency_margin": "",
+    "trade_sessions_json": "",
     "source": "default",
 }
 
@@ -38,7 +39,7 @@ SPEC_COLUMNS = (
     "price_digits,tick_size,point_size,tick_value,"
     "swap_long,swap_short,swap_mode,swap_rollover3days,"
     "stops_level,freeze_level,filling_mode,trade_calc_mode,"
-    "currency_base,currency_profit,currency_margin,source,updated_at"
+    "currency_base,currency_profit,currency_margin,trade_sessions_json,source,updated_at"
 )
 
 
@@ -99,6 +100,7 @@ class InstrumentSpecRepository:
         currency_base = str(spec.get("currency_base") or "")[:16]
         currency_profit = str(spec.get("currency_profit") or "")[:16]
         currency_margin = str(spec.get("currency_margin") or "")[:16]
+        trade_sessions_json = str(spec.get("trade_sessions_json") or "")[:12000]
         source = str(spec.get("source") or "broker")[:32]
         now = int(time.time())
         self.storage.execute(
@@ -106,8 +108,8 @@ class InstrumentSpecRepository:
             "(account_id,symbol,min_volume,volume_step,max_volume,volume_digits,contract_size,"
             "price_digits,tick_size,point_size,tick_value,swap_long,swap_short,swap_mode,"
             "swap_rollover3days,stops_level,freeze_level,filling_mode,trade_calc_mode,"
-            "currency_base,currency_profit,currency_margin,source,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "currency_base,currency_profit,currency_margin,trade_sessions_json,source,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON DUPLICATE KEY UPDATE min_volume=VALUES(min_volume),volume_step=VALUES(volume_step),"
             "max_volume=VALUES(max_volume),volume_digits=VALUES(volume_digits),"
             "contract_size=VALUES(contract_size),price_digits=VALUES(price_digits),"
@@ -118,11 +120,13 @@ class InstrumentSpecRepository:
             "freeze_level=VALUES(freeze_level),filling_mode=VALUES(filling_mode),"
             "trade_calc_mode=VALUES(trade_calc_mode),currency_base=VALUES(currency_base),"
             "currency_profit=VALUES(currency_profit),currency_margin=VALUES(currency_margin),"
+            "trade_sessions_json=VALUES(trade_sessions_json),"
             "source=VALUES(source),updated_at=VALUES(updated_at)",
             (account_id, symbol, min_volume, step, max_volume, digits, contract,
              price_digits, tick_size, point_size, tick_value, swap_long, swap_short,
              swap_mode, swap_rollover3days, stops_level, freeze_level, filling_mode,
-             trade_calc_mode, currency_base, currency_profit, currency_margin, source, now),
+             trade_calc_mode, currency_base, currency_profit, currency_margin,
+             trade_sessions_json, source, now),
         )
         return self.get(account_id, symbol)
 

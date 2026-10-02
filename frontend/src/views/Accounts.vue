@@ -707,6 +707,7 @@
             <v-text-field v-model.number="accountForm.dailyOrderLimit" label="每日订单上限" type="number" min="1" variant="outlined" />
           </div>
           <v-switch v-model="accountForm.autoFlattenEnabled" color="warning" inset label="开启定时全清仓" />
+          <v-switch v-if="managedAccount?.account_type === 'mt5'" v-model="accountForm.brokerTrailingStopEnabled" color="warning" inset label="向 MT5 下发跟踪止损" />
           <v-text-field v-model="accountForm.autoFlattenTime" label="北京时间全清仓时间" type="time" variant="outlined" :disabled="!accountForm.autoFlattenEnabled" hint="到达该时间后的 5 分钟内执行，每天最多一次" persistent-hint />
           <v-switch v-model="accountForm.singlePositionLossLimitEnabled" color="error" inset label="开启单笔持仓最大浮亏保护" />
           <v-text-field
@@ -842,6 +843,7 @@ const accountForm = reactive({
   singlePositionLossLimitEnabled: true, singlePositionLossLimitAmount: 30,
   manualOrderDailyLimitEnabled: true, manualOrderDailyLimit: 10,
   manualLosingOrderDailyLimit: 3,
+  brokerTrailingStopEnabled: false,
 })
 const strategyDialog = ref(false)
 const selectedAccount = ref(null)
@@ -1281,6 +1283,7 @@ function openAccountManager(account) {
     manualOrderDailyLimitEnabled: account.manual_order_daily_limit_enabled !== false,
     manualOrderDailyLimit: account.manual_order_daily_limit ?? 10,
     manualLosingOrderDailyLimit: account.manual_losing_order_daily_limit ?? 3,
+    brokerTrailingStopEnabled: account.broker_trailing_stop_enabled === true,
   })
   accountDialog.value = true
 }
@@ -1305,6 +1308,7 @@ async function saveAccountControls() {
       manual_order_daily_limit_enabled: accountForm.manualOrderDailyLimitEnabled,
       manual_order_daily_limit: accountForm.manualOrderDailyLimit,
       manual_losing_order_daily_limit: accountForm.manualLosingOrderDailyLimit,
+      broker_trailing_stop_enabled: accountForm.brokerTrailingStopEnabled,
     })
     messageType.value = 'success'
     message.value = data.message

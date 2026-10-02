@@ -101,6 +101,7 @@ class TradingAccountRecord:
     manual_order_daily_limit: int = 10
     manual_losing_order_daily_limit: int = 3
     single_order_risk_limit: float = 15.0
+    broker_trailing_stop_enabled: bool = False
 
 
 _STORAGE: Optional[MySQLStorage] = None
@@ -143,6 +144,7 @@ class TradingAccountRepository:
                COALESCE(a.manual_order_daily_limit, 10) AS manual_order_daily_limit,
                COALESCE(a.manual_losing_order_daily_limit, 3) AS manual_losing_order_daily_limit,
                COALESCE(a.single_order_risk_limit, 15) AS single_order_risk_limit,
+               COALESCE(a.broker_trailing_stop_enabled, 0) AS broker_trailing_stop_enabled,
                COALESCE(c.last_seen_at, a.last_seen_at) AS last_seen_at,
                COALESCE(c.mt5_login, a.mt5_login) AS mt5_login,
                COALESCE(c.mt5_server, a.mt5_server) AS mt5_server,
@@ -306,6 +308,7 @@ class TradingAccountRepository:
         manual_order_daily_limit: Optional[int] = None,
         manual_losing_order_daily_limit: Optional[int] = None,
         single_order_risk_limit: Optional[float] = None,
+        broker_trailing_stop_enabled: Optional[bool] = None,
     ) -> TradingAccountRecord:
         account = self.get_by_id(user_id, account_id)
         if account is None:
@@ -327,6 +330,7 @@ class TradingAccountRepository:
             "manual_order_daily_limit": account.manual_order_daily_limit,
             "manual_losing_order_daily_limit": account.manual_losing_order_daily_limit,
             "single_order_risk_limit": account.single_order_risk_limit,
+            "broker_trailing_stop_enabled": account.broker_trailing_stop_enabled,
         }
         if account_name is not None:
             name = str(account_name).strip()
@@ -374,6 +378,8 @@ class TradingAccountRepository:
             )
         if single_order_risk_limit is not None:
             values["single_order_risk_limit"] = float(single_order_risk_limit)
+        if broker_trailing_stop_enabled is not None:
+            values["broker_trailing_stop_enabled"] = bool(broker_trailing_stop_enabled)
         if values["auto_flatten_enabled"] and not values["auto_flatten_time"]:
             raise ValueError("开启自动清仓后必须填写北京时间")
         if not 1 <= values["max_total_positions"] <= 100:
@@ -409,7 +415,7 @@ class TradingAccountRepository:
                     manual_order_daily_limit_enabled = ?,
                     manual_order_daily_limit = ?,
                     manual_losing_order_daily_limit = ?,
-                    single_order_risk_limit = ?, updated_at = ?
+                    single_order_risk_limit = ?, broker_trailing_stop_enabled = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
                 """,
                 (
@@ -423,7 +429,7 @@ class TradingAccountRepository:
                     int(values["manual_order_daily_limit_enabled"]),
                     values["manual_order_daily_limit"],
                     values["manual_losing_order_daily_limit"],
-                    values["single_order_risk_limit"],
+                    values["single_order_risk_limit"], int(values["broker_trailing_stop_enabled"]),
                     now, account_id, user_id,
                 ),
             )
@@ -941,6 +947,7 @@ class TradingAccountRepository:
             single_order_risk_limit=float(
                 row.get("single_order_risk_limit", 15) or 15
             ),
+            broker_trailing_stop_enabled=bool(row.get("broker_trailing_stop_enabled", 0)),
             archived_at=(
                 int(row["archived_at"])
                 if row["archived_at"] is not None else None

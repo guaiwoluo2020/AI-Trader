@@ -25,6 +25,8 @@ from market.services.outbox_dispatcher import OutboxDispatcher
 from market.store.structure_plan_store import StructureTradePlanRepository
 from repositories.container import RepositoryContainer
 from account_auto_flatten_service import AccountAutoFlattenService
+from account_notification_service import AccountNotificationService
+from market.services.tick_gap_monitor import TickGapMonitor
 from market.services.tick_execution_context import TickExecutionContext
 from market.models import TradingStrategy
 
@@ -68,6 +70,7 @@ class TradingEngineManager:
         self.account_auto_flatten = AccountAutoFlattenService(
             self._account_repo, self.paper_trading, self, get_storage()
         )
+        self.tick_gap_monitor = TickGapMonitor(get_storage(), AccountNotificationService(get_storage()))
         self.data_retention = DataRetentionService()
         self.adaptive_signal_tuner = AdaptiveSignalTuner(
             refresh_callback=self.refresh_user_strategies,
@@ -478,6 +481,13 @@ class TradingEngineManager:
             scheduler.submit(
                 ("system", "account_auto_flatten"),
                 self.account_auto_flatten.run_due_accounts,
+                max_retries=1,
+            )
+        if now >= getattr(self, "_next_tick_gap_check_at", 0):
+            self._next_tick_gap_check_at = now + 30
+            scheduler.submit(
+                ("system", "tick_gap_monitor"),
+                self.tick_gap_monitor.check,
                 max_retries=1,
             )
 

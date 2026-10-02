@@ -90,3 +90,14 @@ class AccountNotificationService:
                    f"风控原因：{reason}\n北京时间业务日：{date}")
         return self._send(user_id, account_id, date, "risk_block", reason_key,
                           f"AI Trader 风控拦截提醒 - {account_name}", message)
+
+    def notify_tick_gap(self, user_id: int, account_id: int, account_name: str,
+                        symbol: str, gap_seconds: int) -> bool:
+        date = datetime.now(CHINA_TZ).date().isoformat()
+        reason = f"tick_gap:{symbol}"
+        message = (f"账户：{account_name}（ID {account_id}）\n"
+                   f"品种：{symbol}\n"
+                   f"连续无 Tick：{int(gap_seconds)} 秒\n"
+                   f"提醒阈值：300 秒\n北京时间业务日：{date}")
+        return self._send(user_id, account_id, date, "tick_gap", reason,
+                          f"AI Trader Tick 中断提醒 - {account_name} {symbol}", message)

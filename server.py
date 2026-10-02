@@ -79,6 +79,7 @@ from market.services.entry_guard_service import EntryGuardService
 from market.services.same_setup_repeat_guard import SameSetupRepeatGuard
 from instrument_price_store import get_instrument_price_store
 from account_notification_service import AccountNotificationService
+from market.services.tick_gap_monitor import TickGapMonitor
 
 
 class TradingServer:
@@ -121,6 +122,7 @@ class TradingServer:
         self.decision_audit_service = DecisionAuditService()
         self.runtime_status_query_service = RuntimeStatusQueryService()
         self.account_notifications = AccountNotificationService(self.repositories.storage)
+        self.tick_gap_monitor = TickGapMonitor(self.repositories.storage, self.account_notifications)
 
         # 线程锁
         self.lock = threading.RLock()
@@ -1243,6 +1245,23 @@ class TradingServer:
             active_config = snapshot_config or (policy.config if policy else {})
             if not active_config:
                 continue
+            account_settings = self.account_repository.get_by_id(
+                int(self.user_id or 0), int(self.account_id or 0)
+            )
+            broker_trailing_enabled = bool(
+                getattr(account_settings, "broker_trailing_stop_enabled", False)
+            )
+            virtual_stop = float(state.get("stop_loss") or 0)
+            stop_price = quote_bid if position.is_buy else quote_ask
+            if virtual_stop > 0 and (
+                (position.is_buy and stop_price <= virtual_stop)
+                or (not position.is_buy and stop_price >= virtual_stop)
+            ):
+                self.add_close_position_instruction(
+                    symbol, ticket, f"virtual-stop-{ticket}-{int(time.time())}"
+                )
+                state["virtual_stop_triggered"] = True
+                continue
             source_config = next((item for item in strategy.get_signal_sources() if str(item.get("signal_source_id") or "") == str(source_id)), {})
             structure_period = str(
                 attribution.get("signal_source_period")
@@ -1318,13 +1337,16 @@ class TradingServer:
                 partial_instructions=self._position_partial_instructions,
                 close_callback=self.add_close_position_instruction,
             )
-            if applied.get("stop_update"):
+            if applied.get("stop_update") and broker_trailing_enabled:
                 instruction = self._queue_position_update_instruction(
                     symbol, applied["stop_update"], events=action.events,
                 )
                 state["pending_stop_instruction_id"] = instruction["instruction_id"]
                 state["last_stop_update_at"] = int(time.time())
                 state["last_stop_update_price"] = float(instruction.get("sl") or 0)
+            elif applied.get("stop_update"):
+                state["stop_loss"] = float(applied["stop_update"].get("sl") or state.get("stop_loss") or 0)
+                state["pending_stop_loss"] = 0.0
             if applied["close"]:
                 self._managed_position_state.pop(ticket, None)
 

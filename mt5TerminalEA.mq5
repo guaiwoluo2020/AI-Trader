@@ -421,6 +421,32 @@ double NormalizeTradePrice(string symbol, double requested, int roundingMode=0)
       return NormalizeDouble(requested, digits);
   }
 
+string TradeSessionsJson(string symbol)
+  {
+   string result = "[";
+   bool first = true;
+   int brokerOffsetMinutes = (int)((TimeTradeServer() - TimeGMT()) / 60);
+   for(int day = 0; day < 7; day++)
+     {
+      for(uint index = 0; index < 32; index++)
+        {
+         datetime from = 0, to = 0;
+         if(!SymbolInfoSessionTrade(symbol, (ENUM_DAY_OF_WEEK)day, index, from, to))
+            break;
+         MqlDateTime f, t;
+         TimeToStruct(from, f); TimeToStruct(to, t);
+         if(!first) result += ",";
+         first = false;
+         result += "{\"day\":" + IntegerToString(day)
+            + ",\"from\":" + IntegerToString(f.hour * 60 + f.min)
+            + ",\"to\":" + IntegerToString(t.hour * 60 + t.min)
+            + ",\"offset\":" + IntegerToString(brokerOffsetMinutes) + "}";
+        }
+     }
+   result += "]";
+   return result;
+  }
+
 bool SendInstrumentSpec()
   {
       if(StringLen(g_eaToken) == 0 || StringLen(_Symbol) == 0)
@@ -470,6 +496,7 @@ bool SendInstrumentSpec()
       jsonBody += "\"currency_base\":\"" + EscapeJsonString(currencyBase) + "\",";
       jsonBody += "\"currency_profit\":\"" + EscapeJsonString(currencyProfit) + "\",";
       jsonBody += "\"currency_margin\":\"" + EscapeJsonString(currencyMargin) + "\",";
+      jsonBody += "\"trade_sessions_json\":\"" + EscapeJsonString(TradeSessionsJson(_Symbol)) + "\",";
       jsonBody += "\"source\":\"mt5\"}";
       uchar postData[];
       uchar responseData[];

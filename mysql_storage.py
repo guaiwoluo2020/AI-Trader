@@ -971,8 +971,10 @@ class MySQLStorage:
                         ("manual_order_daily_limit", "INT NOT NULL DEFAULT 10"),
                         ("manual_losing_order_daily_limit", "INT NOT NULL DEFAULT 3"),
                         ("single_order_risk_limit", "DOUBLE NOT NULL DEFAULT 15"),
+                        ("broker_trailing_stop_enabled", "TINYINT NOT NULL DEFAULT 0"),
                     ),
                     "account_instrument_specs": (
+                        ("trade_sessions_json", "TEXT NULL"),
                         ("price_digits", "INT NOT NULL DEFAULT 0"),
                         ("tick_size", "DECIMAL(24,10) NOT NULL DEFAULT 0"),
                         ("point_size", "DECIMAL(24,10) NOT NULL DEFAULT 0"),
