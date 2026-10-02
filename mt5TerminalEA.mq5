@@ -30,6 +30,10 @@ bool g_isAdmin = false;
 string g_activationCode = "";
 string g_credentialsFile = "AITrader_credentials.dat";
 uint g_lastPythonRequestTime = 0;
+datetime g_lastInstructionClaimAt = 0;
+uint g_lastInstructionClaimClock = 0;
+datetime g_lastMt5RequestAt = 0;
+uint g_lastMt5RequestClock = 0;
 uint g_pythonRequestInterval = 300;  // 毫秒；Tick驱动但避免请求过密
 const uint TRADE_POLL_FALLBACK_INTERVAL_MS = 3000; // 无Tick时仍领取已生成指令
 uint g_lastHistoryTaskPollTime = 0;
@@ -818,6 +822,8 @@ void ParseAndExecuteTrades(string jsonData)
       // EA只处理trades和close_tickets，pivot_alerts由Python推送到前端
 
       if(StringLen(jsonData) == 0) return;
+      g_lastInstructionClaimAt = TimeCurrent();
+      g_lastInstructionClaimClock = GetTickCount();
 
       bool hasTrades = false;
       bool hasCloseTickets = false;
@@ -1119,6 +1125,8 @@ bool ClosePositionByTicket(long ticket, string instructionId = "")
                               : SymbolInfoDouble(positionSymbol, SYMBOL_ASK);
 
       // 使用CTrade类平仓（更简单可靠）
+      g_lastMt5RequestAt = TimeCurrent();
+      g_lastMt5RequestClock = GetTickCount();
       if(trade.PositionClose(ticket))
         {
          Print("[平仓成功] Ticket: ", ticket);
@@ -1352,6 +1360,8 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
       bool succeeded = false;
       if(orderType == ORDER_TYPE_BUY)
         {
+         g_lastMt5RequestAt = TimeCurrent();
+         g_lastMt5RequestClock = GetTickCount();
          succeeded = trade.Buy(volume, _Symbol, 0, sl, tp, description);
          if(succeeded)
            {
@@ -1366,6 +1376,8 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double volume, double sl, double tp
         }
       else if(orderType == ORDER_TYPE_SELL)
         {
+         g_lastMt5RequestAt = TimeCurrent();
+         g_lastMt5RequestClock = GetTickCount();
          succeeded = trade.Sell(volume, _Symbol, 0, sl, tp, description);
          if(succeeded)
            {
@@ -1428,6 +1440,10 @@ void SendTradeExecutionReport(
       jsonBody += "\"reported_timestamp\":" + IntegerToString((long)TimeCurrent() - brokerOffset) + ",";
       jsonBody += "\"broker_server_time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\",";
       jsonBody += "\"broker_utc_offset_seconds\":" + IntegerToString(brokerOffset) + ",";
+      jsonBody += "\"ea_claimed_timestamp\":" + IntegerToString((long)g_lastInstructionClaimAt - brokerOffset) + ",";
+      jsonBody += "\"mt5_requested_timestamp\":" + IntegerToString((long)g_lastMt5RequestAt - brokerOffset) + ",";
+      jsonBody += "\"ea_claimed_monotonic_ms\":" + IntegerToString((int)g_lastInstructionClaimClock) + ",";
+      jsonBody += "\"mt5_requested_monotonic_ms\":" + IntegerToString((int)g_lastMt5RequestClock) + ",";
       jsonBody += "\"error_message\":\"" + EscapeJsonString(errorMessage) + "\"";
       jsonBody += "}";
 
