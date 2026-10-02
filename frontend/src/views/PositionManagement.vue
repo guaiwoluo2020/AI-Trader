@@ -59,7 +59,7 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import marketAPI from '../api/market'
+import { marketAPI } from '../api/market'
 
 const policies = ref([])
 const loading = ref(false)
