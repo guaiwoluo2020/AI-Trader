@@ -18,6 +18,7 @@ import BacktestTasks from '../views/BacktestTasks.vue'
 import Accounts from '../views/Accounts.vue'
 import AlphaResearch from '../views/AlphaResearch.vue'
 import StructureAnalysis from '../views/StructureAnalysis.vue'
+import PositionManagement from '../views/PositionManagement.vue'
 import { authState } from '../auth'
 
 const routes = [
@@ -95,11 +96,6 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
-    path: '/position-management',
-    redirect: '/accounts',
-    meta: { requiresAuth: true }
-  },
-  {
     path: '/news',
     name: 'News',
     component: News,
@@ -109,6 +105,12 @@ const routes = [
     path: '/strategy-settings',
     name: 'StrategySettings',
     component: StrategySettings,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/position-management',
+    name: 'PositionManagement',
+    component: PositionManagement,
     meta: { requiresAuth: true }
   },
   {
