@@ -28,7 +28,7 @@
           </div>
           <p class="muted">{{ policy.policy_id }} · {{ modeLabel(policy.config?.management_mode) }}</p>
         </div>
-        <v-chip size="small" color="primary" variant="tonal">{{ rules(policy).length }} 条运行规则</v-chip>
+        <v-btn size="small" color="primary" variant="tonal" prepend-icon="mdi-format-list-bulleted" @click="openRules(policy)">{{ rules(policy).length }} 条运行规则</v-btn>
       </div>
 
       <div class="summary-grid">
@@ -54,16 +54,47 @@
         <pre>{{ pretty(policy.config) }}</pre>
       </details>
     </section>
+
+    <v-dialog v-model="dialogOpen" max-width="900">
+      <v-card v-if="selectedPolicy">
+        <v-card-title class="d-flex align-center justify-space-between">
+          <span>{{ selectedPolicy.name }} · 规则与部署</span>
+          <v-btn icon="mdi-close" variant="text" @click="dialogOpen = false" />
+        </v-card-title>
+        <v-card-text>
+          <h3 class="dialog-heading">运行规则</h3>
+          <div class="dialog-rule-list">
+            <article v-for="(rule, index) in rules(selectedPolicy)" :key="`dialog-${index}`">
+              <div class="rule-index">{{ index + 1 }}</div>
+              <div><strong>{{ ruleLabel(rule) }}</strong><p>{{ ruleDescription(rule) }}</p><code>{{ pretty(rule) }}</code></div>
+            </article>
+          </div>
+          <h3 class="dialog-heading mt-6">部署情况</h3>
+          <div v-if="deploymentsFor(selectedPolicy).length" class="deployment-list">
+            <article v-for="item in deploymentsFor(selectedPolicy)" :key="item.key">
+              <div><strong>{{ item.strategy_name || item.strategy_id }}</strong><span>{{ item.symbol || '全部品种' }} · {{ item.account_name || `账户 #${item.account_id}` }}</span></div>
+              <v-chip size="small" :color="item.status === 'active' ? 'success' : 'grey'" variant="tonal">{{ item.status === 'active' ? '运行中' : item.status || '未运行' }}</v-chip>
+              <v-chip size="x-small" :color="item.execution_mode === 'live' ? 'error' : 'primary'" variant="outlined">{{ item.execution_mode === 'live' ? '实盘' : '模拟盘' }}</v-chip>
+            </article>
+          </div>
+          <div v-else class="runtime-empty compact">暂无已识别的策略部署</div>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
   </div>
 </template>
 
 <script setup>
 import { onMounted, ref } from 'vue'
 import { marketAPI } from '../api/market'
+import { accountAPI } from '../api/trading'
 
 const policies = ref([])
 const loading = ref(false)
 const errorMessage = ref('')
+const allDeployments = ref([])
+const selectedPolicy = ref(null)
+const dialogOpen = ref(false)
 
 const modeLabel = value => value === 'multi_level_exit' ? '多层结构退出' : '普通持仓管理'
 const ruleMap = {
@@ -86,11 +117,18 @@ const ruleDescription = rule => {
   return JSON.stringify(rule)
 }
 const pretty = value => JSON.stringify(value || {}, null, 2)
+const deploymentsFor = policy => allDeployments.value.filter(item => String(item.policy_id || item.position_management_policy_id || '') === String(policy.policy_id))
+const openRules = policy => { selectedPolicy.value = policy; dialogOpen.value = true }
 const loadPolicies = async () => {
   loading.value = true; errorMessage.value = ''
   try {
-    const data = await marketAPI.getPositionManagementPolicies()
+    const [data, accountsData, strategiesData] = await Promise.all([marketAPI.getPositionManagementPolicies(), accountAPI.list(), marketAPI.getStrategies(1, 100)])
     policies.value = data.policies || []
+    const strategyMap = new Map((strategiesData.strategies || []).map(strategy => [String(strategy.strategy_id), strategy]))
+    allDeployments.value = (accountsData.accounts || []).flatMap(account => (account.deployments || []).map(deployment => {
+      const strategy = strategyMap.get(String(deployment.strategy_id)) || {}
+      return { ...deployment, ...strategy, account_id: account.id, account_name: account.account_name, policy_id: strategy.position_management_policy_id }
+    }))
   } catch (error) {
     errorMessage.value = error?.response?.data?.detail || error.message || '持仓管理方案加载失败'
   } finally { loading.value = false }
@@ -120,5 +158,12 @@ h2 { margin: 0; font-size: 21px; }
 .raw-config summary { cursor: pointer; }
 pre { overflow: auto; background: #f5f8f6; border-radius: 10px; padding: 14px; margin-top: 10px; font-size: 11px; }
 .empty-state { text-align: center; padding: 70px 20px; color: #71817a; }
+.dialog-heading { color: #17352d; margin: 8px 0 12px; }
+.dialog-rule-list article, .deployment-list article { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-bottom: 1px solid #edf2ee; }
+.dialog-rule-list article p, .deployment-list article span { display: block; margin: 4px 0 0; color: #71817a; font-size: 13px; }
+.dialog-rule-list article > div:nth-child(2) { flex: 1; }
+.dialog-rule-list code { display: block; white-space: pre-wrap; word-break: break-word; color: #557068; font-size: 11px; margin-top: 6px; }
+.deployment-list article > div:first-child { flex: 1; }
+.runtime-empty { color: #71817a; padding: 20px 0; }
 @media (max-width: 760px) { .policy-page { padding: 22px 15px 48px; } .policy-hero, .policy-card-head { flex-direction: column; } .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

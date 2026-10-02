@@ -58,6 +58,11 @@ class PaperMatchingEngine:
         sell_slippage = self.paper_service.execution_quality_service.estimated_slippage_points(
             account_id, symbol, "sell"
         )
+        # Position management receives one symbol-level adverse-slippage
+        # buffer for exits.  Use the larger directional historical baseline so
+        # the maintenance loop never falls back to the removed account setting
+        # (and never references an undefined local ``slippage``).
+        slippage = max(buy_slippage, sell_slippage) * point_size
         quote = TickQuote.create(bid, ask, now)
         # Paper market orders are created from this quote's signal snapshot.
         # The shared pending core forbids same-timestamp fills so backtests do
