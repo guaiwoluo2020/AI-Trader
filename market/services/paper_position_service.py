@@ -1,6 +1,7 @@
 """Application boundary for Paper position marking and lifecycle."""
 
 import json
+import random
 import uuid
 
 from market.services.position_attribution import close_position_attribution
@@ -194,6 +195,8 @@ class PaperPositionService:
                 position_state["exit_levels"] = list(
                     attribution.get("exit_levels") or []
                 )
+                if random.randrange(5) != 0:
+                    continue
                 structure_period = str(attribution.get("signal_source_period") or "M5").upper()
                 structure = structures.get(structure_period) or {}
                 action = self.paper_service.position_manager.evaluate(

@@ -8,6 +8,7 @@
 from collections import deque, defaultdict
 from typing import List, Dict, Optional, Set
 from datetime import datetime
+import random
 import threading
 import asyncio
 import copy
@@ -1261,6 +1262,11 @@ class TradingServer:
                     symbol, ticket, f"virtual-stop-{ticket}-{int(time.time())}"
                 )
                 state["virtual_stop_triggered"] = True
+                continue
+            # Virtual stop hits stay on every Tick. Rule evaluation
+            # (profit protection / structure / target trailing) is sampled
+            # because most Ticks cannot improve the stop.
+            if random.randrange(5) != 0:
                 continue
             source_config = next((item for item in strategy.get_signal_sources() if str(item.get("signal_source_id") or "") == str(source_id)), {})
             structure_period = str(

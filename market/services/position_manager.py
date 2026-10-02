@@ -159,6 +159,186 @@ class PositionManager:
         return 0
 
     @staticmethod
+    def _structure_level_price(item) -> float:
+        if item is None:
+            return 0.0
+        if isinstance(item, (int, float)):
+            return float(item or 0)
+        if isinstance(item, dict):
+            try:
+                return float(item.get("price") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
+
+    @classmethod
+    def _confirmed_structure_points(cls, hierarchy: Dict, layers: Iterable[str]) -> List[Dict]:
+        """Collect already-confirmed protection and forward structure prices."""
+        points: List[Dict] = []
+        seen = set()
+        for layer_name in layers:
+            layer = (hierarchy or {}).get(layer_name) or {}
+            named = (
+                ("protected_low", "low", "protection"),
+                ("protected_high", "high", "protection"),
+                ("weak_low", "low", "weak"),
+                ("weak_high", "high", "weak"),
+            )
+            for key, kind, role in named:
+                raw = layer.get(key)
+                price = cls._structure_level_price(raw)
+                if price <= 0:
+                    continue
+                label = raw.get("label") if isinstance(raw, dict) else None
+                token = (layer_name, kind, round(price, 8))
+                if token in seen:
+                    continue
+                seen.add(token)
+                points.append({
+                    "layer": layer_name, "kind": kind, "role": role,
+                    "key": key, "price": price, "label": label,
+                })
+            for pivot in layer.get("pivots") or []:
+                try:
+                    price = float(pivot.get("price") or 0)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if price <= 0:
+                    continue
+                kind = "low" if str(pivot.get("kind") or pivot.get("direction") or "").lower() == "low" else "high"
+                token = (layer_name, kind, round(price, 8))
+                if token in seen:
+                    continue
+                seen.add(token)
+                points.append({
+                    "layer": layer_name, "kind": kind, "role": "pivot",
+                    "key": str(pivot.get("label") or kind),
+                    "price": price, "label": pivot.get("label"),
+                })
+        return points
+
+    @classmethod
+    def _structure_trailing_candidate(
+        cls, direction: str, entry: float, price: float, current_sl: float,
+        favorable: float, atr: float, rule: Dict, hierarchy: Dict,
+        spread: float = 0,
+    ) -> Tuple[Optional[float], Dict]:
+        """Trail using confirmed structure points instead of waiting for a new HL/LH.
+
+        Longs use the nearest valid HL / protected_low. After price clears the
+        nearest resistance ahead, the stop can move just beyond that broken
+        level. A newly confirmed higher HL replaces it only once it exists.
+        Shorts use the inverse.
+        """
+        primary = str(rule.get("structure_layer") or "swing").lower()
+        layers = ["internal", "swing"]
+        if primary == "external":
+            layers.append("external")
+        elif primary in {"internal", "swing"} and primary not in layers:
+            layers.insert(0, primary)
+        points = cls._confirmed_structure_points(hierarchy, layers)
+        buffer_type = rule.get("buffer_type", "atr")
+        value = float(rule.get("buffer_value", 0.30) or 0)
+        buffer = (
+            atr * value if buffer_type == "atr"
+            else (price * value / 100 if buffer_type == "fixed_percent" else value)
+        )
+        # Keep the stop beyond the structure print plus live spread so a
+        # bid/ask bounce around the broken level does not immediately stop out.
+        buffer += max(0.0, float(spread or 0))
+        protections, broken, ahead = [], [], []
+        for item in points:
+            level = float(item["price"])
+            if direction == "buy":
+                if item["kind"] == "low" and 0 < level < price:
+                    if item.get("role") == "protection" or item.get("label") in {None, "HL", "LL"}:
+                        protections.append((level, item))
+                if item["kind"] == "high" and level > price:
+                    ahead.append((level, item))
+                if (
+                    item["kind"] == "high" and level > entry
+                    and favorable >= level > 0 and (level - buffer) < price
+                ):
+                    broken.append((level, item))
+            else:
+                if item["kind"] == "high" and level > price:
+                    if item.get("role") == "protection" or item.get("label") in {None, "LH", "HH"}:
+                        protections.append((level, item))
+                if item["kind"] == "low" and 0 < level < price:
+                    ahead.append((level, item))
+                if (
+                    item["kind"] == "low" and 0 < level < entry
+                    and favorable <= level and (level + buffer) > price
+                ):
+                    broken.append((level, item))
+        source = None
+        reference = 0.0
+        if direction == "buy":
+            protection = max((item[0] for item in protections), default=0.0)
+            broken_level = max((item[0] for item in broken), default=0.0)
+            reference = max(protection, broken_level)
+            if broken_level > protection:
+                source = next(item[1] for item in broken if item[0] == broken_level)
+                source_kind = "broken_resistance"
+            elif protection > 0:
+                source = next(item[1] for item in protections if item[0] == protection)
+                source_kind = "protected_low"
+            else:
+                source_kind = ""
+            candidate = reference - buffer if reference > 0 else 0.0
+        else:
+            protection = min((item[0] for item in protections), default=0.0)
+            broken_level = min((item[0] for item in broken), default=0.0)
+            if protection > 0 and broken_level > 0:
+                reference = min(protection, broken_level)
+            else:
+                reference = protection or broken_level
+            if 0 < broken_level < (protection or broken_level + 1):
+                source = next(item[1] for item in broken if item[0] == broken_level)
+                source_kind = "broken_support"
+            elif protection > 0:
+                source = next(item[1] for item in protections if item[0] == protection)
+                source_kind = "protected_high"
+            else:
+                source_kind = ""
+            candidate = reference + buffer if reference > 0 else 0.0
+        if candidate <= 0:
+            return None, {
+                "reason": "暂无可用结构保护点",
+                "structure_ahead": bool(ahead),
+                "ahead_level": (
+                    max(ahead)[0] if direction == "buy" and ahead
+                    else min(ahead)[0] if ahead else 0.0
+                ),
+            }
+        valid_side = candidate < price if direction == "buy" else candidate > price
+        improves = candidate > current_sl if direction == "buy" else (
+            current_sl <= 0 or candidate < current_sl
+        )
+        improvement = candidate - current_sl if direction == "buy" else (
+            current_sl - candidate if current_sl > 0 else candidate
+        )
+        minimum_improvement = atr * float(rule.get("min_improvement_atr", 0.10) or 0)
+        payload = {
+            "protected_level": reference,
+            "candidate_stop_loss": candidate,
+            "minimum_improvement": minimum_improvement,
+            "structure_layer": (source or {}).get("layer") or primary,
+            "structure_source": source_kind,
+            "structure_point": (source or {}).get("key"),
+            "structure_ahead": bool(ahead),
+            "ahead_level": (max(ahead)[0] if direction == "buy" and ahead else min(ahead)[0] if ahead else 0.0),
+        }
+        if not valid_side or not improves or improvement < minimum_improvement:
+            payload["reason"] = "结构保护点未产生足够改善的止损"
+            return None, payload
+        payload["reason"] = (
+            f"结构保护点更新，候选止损 {candidate:.5f}"
+            + (f"（突破 {reference:.5f}）" if source_kind.startswith("broken") else "")
+        )
+        return candidate, payload
+
+    @staticmethod
     def _pivot_candidate(
         direction: str, entry_price: float, rule: Dict,
         pivots: Iterable[Dict], atr: float, for_stop: bool,
@@ -766,54 +946,65 @@ class PositionManager:
                         "浮盈尚未达到下一档盈利保护",
                     )
             if kind == "target_trailing" and risk > 0:
-                target = float(position.get("take_profit") or 0)
-                setup_type = str(
-                    position.get("setup_type")
-                    or (position.get("position_attribution") or {}).get("setup_type")
-                    or ""
-                ).strip().lower()
-                fixed_distance_r = float(
-                    (rule.get("distance_by_setup") or {}).get(
-                        setup_type, rule.get("distance_r", 0.3)
-                    ) or 0.3
-                )
-                min_distance_r = float(
-                    (rule.get("min_distance_by_setup") or {}).get(
-                        setup_type, rule.get("min_distance_r", fixed_distance_r)
-                    ) or fixed_distance_r
-                )
-                max_distance_r = max(
-                    min_distance_r, float(rule.get("max_distance_r", 1.0) or 1.0)
-                )
-                atr_multiple = float(
-                    (rule.get("atr_multiple_by_setup") or {}).get(setup_type, 0) or 0
-                )
                 atr = float(market.get("atr", 0) or 0)
-                if atr_multiple > 0 and atr > 0:
-                    distance_r = max(min_distance_r, min(max_distance_r, atr * atr_multiple / risk))
+                distance_atr = float(rule.get("distance_atr", 2.0) or 2.0)
+                min_improvement_atr = float(rule.get("min_improvement_atr", 0.5) or 0.5)
+                distance = atr * distance_atr if atr > 0 else 0.0
+                structure_rule = next((
+                    item for item in policy_config.get("management_rules", [])
+                    if item.get("type") == "structure_trailing"
+                    and item.get("enabled", True)
+                ), None)
+                structure_ahead = False
+                if structure_rule:
+                    _, structure_payload = self._structure_trailing_candidate(
+                        direction, entry, price, current_sl, favorable,
+                        atr, structure_rule,
+                        market.get("structure_hierarchy")
+                        or (market.get("structure") or {}).get("structure_hierarchy")
+                        or {},
+                        spread=spread,
+                    )
+                    structure_ahead = bool(structure_payload.get("structure_ahead"))
+                if structure_ahead:
+                    add_event(
+                        kind, "checked",
+                        "前方仍有未越过的结构参考点，目标跟踪不启用",
+                    )
+                elif profit <= 0:
+                    add_event(
+                        kind, "checked",
+                        "前方结构参考点已用尽，浮盈尚未形成，目标跟踪不启用",
+                    )
+                elif distance <= 0:
+                    add_event(kind, "checked", "缺少 ATR，目标跟踪不启用")
                 else:
-                    distance_r = max(min_distance_r, min(max_distance_r, fixed_distance_r))
-                distance = risk * distance_r
-                target_reached = (
-                    target > 0 and favorable <= target if direction == "sell"
-                    else target > 0 and favorable >= target if direction == "buy"
-                    else False
-                )
-                if target_reached:
                     candidate = favorable - distance if direction == "buy" else favorable + distance
+                    improvement = (
+                        candidate - current_sl if direction == "buy"
+                        else current_sl - candidate
+                    )
                     can_tighten = (
                         current_sl < candidate < price if direction == "buy"
                         else price < candidate < current_sl
                     )
-                    if can_tighten:
+                    if can_tighten and improvement >= atr * min_improvement_atr:
                         candidates.append(candidate)
                         add_event(
                             kind, "triggered",
-                            f"达到策略止盈，启用 {distance_r:g}R 目标跟踪",
+                            f"前方结构参考点均已被现价越过，启用 {distance_atr:g} ATR 目标跟踪",
                             candidate_stop_loss=candidate,
-                            distance_r=distance_r,
+                            distance_atr=distance_atr,
+                            min_improvement_atr=min_improvement_atr,
                             atr=atr,
-                            atr_multiple=atr_multiple,
+                        )
+                    else:
+                        add_event(
+                            kind, "checked",
+                            "前方结构参考点均已被现价越过，目标跟踪变动不足 0.5 ATR",
+                            candidate_stop_loss=candidate,
+                            distance_atr=distance_atr,
+                            min_improvement_atr=min_improvement_atr,
                         )
             if kind == "max_holding_bars":
                 holding_bars = int(position.get("holding_bars", 0))
@@ -990,26 +1181,23 @@ class PositionManager:
                     add_event(kind, "checked", "暂无可用转折点跟进止损")
             if kind == "structure_trailing":
                 hierarchy = market.get("structure_hierarchy") or (market.get("structure") or {}).get("structure_hierarchy") or {}
-                layer = hierarchy.get(rule.get("structure_layer", "swing")) or {}
-                level_key = "protected_low" if direction == "buy" else "protected_high"
-                protected = layer.get(level_key) or {}
-                level = float(protected.get("price") or 0)
-                if level > 0:
-                    buffer_type = rule.get("buffer_type", "atr")
-                    value = float(rule.get("buffer_value", 0.15) or 0)
-                    buffer = float(market.get("atr", 0) or 0) * value if buffer_type == "atr" else (price * value / 100 if buffer_type == "fixed_percent" else value)
-                    candidate = level - buffer if direction == "buy" else level + buffer
-                    valid_side = candidate < price if direction == "buy" else candidate > price
-                    improves = candidate > current_sl if direction == "buy" else candidate < current_sl
-                    improvement = candidate - current_sl if direction == "buy" else current_sl - candidate
-                    minimum_improvement = float(market.get("atr", 0) or 0) * float(rule.get("min_improvement_atr", 0.10) or 0)
-                    if valid_side and improves and improvement >= minimum_improvement:
-                        candidates.append(candidate)
-                        add_event(kind, "triggered", f"结构保护点更新，候选止损 {candidate:.5f}", candidate_stop_loss=candidate, protected_level=level, structure_layer=rule.get("structure_layer", "swing"))
-                    else:
-                        add_event(kind, "checked", "结构保护点未产生足够改善的止损", protected_level=level, candidate_stop_loss=candidate, minimum_improvement=minimum_improvement)
+                candidate, payload = self._structure_trailing_candidate(
+                    direction, entry, price, current_sl, favorable,
+                    float(market.get("atr", 0) or 0), rule, hierarchy,
+                    spread=spread,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+                    add_event(
+                        kind, "triggered", payload.get("reason") or "结构保护点更新",
+                        **{key: value for key, value in payload.items() if key != "reason"},
+                    )
                 else:
-                    add_event(kind, "checked", "暂无可用结构保护点")
+                    add_event(
+                        kind, "checked",
+                        payload.get("reason") or "暂无可用结构保护点",
+                        **{key: value for key, value in payload.items() if key != "reason"},
+                    )
         valid = []
         for candidate in candidates:
             can_tighten = (

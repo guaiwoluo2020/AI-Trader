@@ -798,23 +798,94 @@ class PositionManagerTests(unittest.TestCase):
         self.assertEqual(action.action, "none")
         self.assertFalse(any(event.get("status") == "triggered" for event in action.events))
 
-    def test_target_trailing_uses_atr_with_r_bounds(self):
+    def test_target_trailing_uses_two_atr_distance(self):
         action = PositionManager().evaluate({"management_rules": [{
-            "type": "target_trailing", "distance_r": 0.3,
-            "min_distance_r": 0.5, "max_distance_r": 1.0,
-            "atr_multiple_by_setup": {"range_breakout": 1.0},
+            "type": "target_trailing", "distance_atr": 2.0,
+            "min_improvement_atr": 0.5,
         }]}, {
             "direction": "buy", "entry_price": 100, "stop_loss": 95,
             "initial_risk": 5, "favorable_price": 112,
-            "take_profit": 110, "setup_type": "range_breakout",
         }, {"price": 111, "atr": 2})
 
         self.assertEqual(action.action, "modify_sl")
-        self.assertEqual(action.stop_loss, 109.5)
-        self.assertEqual(
-            next(e for e in action.events if e.get("rule_type") == "target_trailing")["distance_r"],
-            0.5,
-        )
+        self.assertEqual(action.stop_loss, 108)
+
+
+    def test_target_trailing_ignores_sub_half_atr_moves(self):
+        action = PositionManager().evaluate({"management_rules": [{
+            "type": "target_trailing", "distance_atr": 2.0,
+            "min_improvement_atr": 0.5,
+        }]}, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 107.2,
+            "initial_risk": 5, "favorable_price": 112,
+        }, {"price": 111, "atr": 2})
+        self.assertEqual(action.action, "none")
+
+    def test_target_trailing_skips_when_structure_level_exists(self):
+        action = PositionManager().evaluate({"management_rules": [
+            {
+                "type": "structure_trailing", "structure_layer": "swing",
+                "buffer_type": "atr", "buffer_value": 0.30,
+                "min_improvement_atr": 0.10,
+            },
+            {
+                "type": "target_trailing", "distance_atr": 2.0,
+                "min_improvement_atr": 0.5,
+            },
+        ]}, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5, "favorable_price": 112,
+        }, {
+            "price": 111, "atr": 2,
+            "structure_hierarchy": {
+                "swing": {
+                    "protected_low": {"price": 103},
+                    "protected_high": {"price": 120},
+                    "pivots": [
+                        {"kind": "low", "price": 103, "label": "HL"},
+                        {"kind": "high", "price": 120, "label": "HH"},
+                    ],
+                },
+            },
+        })
+        self.assertFalse(any(
+            event.get("rule_type") == "target_trailing"
+            and event.get("status") == "triggered"
+            for event in action.events
+        ))
+
+    def test_target_trailing_starts_after_forward_structure_is_cleared(self):
+        action = PositionManager().evaluate({"management_rules": [
+            {
+                "type": "structure_trailing", "structure_layer": "swing",
+                "buffer_type": "atr", "buffer_value": 0.30,
+                "min_improvement_atr": 0.10,
+            },
+            {
+                "type": "target_trailing", "distance_atr": 2.0,
+                "min_improvement_atr": 0.5,
+            },
+        ]}, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5, "favorable_price": 112,
+        }, {
+            "price": 111, "atr": 2,
+            "structure_hierarchy": {
+                "swing": {
+                    "protected_low": {"price": 103},
+                    "protected_high": {"price": 108},
+                    "pivots": [
+                        {"kind": "low", "price": 103, "label": "HL"},
+                        {"kind": "high", "price": 108, "label": "HH"},
+                    ],
+                },
+            },
+        })
+        self.assertTrue(any(
+            event.get("rule_type") == "target_trailing"
+            and event.get("status") == "triggered"
+            for event in action.events
+        ))
 
     def test_partial_take_profit_can_move_stop_to_break_even(self):
         manager = PositionManager()
@@ -897,7 +968,7 @@ class PositionManagerTests(unittest.TestCase):
         action = PositionManager().evaluate({
             "management_rules": [{
                 "type": "structure_trailing", "structure_layer": "swing",
-                "buffer_type": "atr", "buffer_value": 0.15,
+                "buffer_type": "atr", "buffer_value": 0.30,
                 "min_improvement_atr": 0.10,
             }],
         }, {
@@ -910,13 +981,40 @@ class PositionManagerTests(unittest.TestCase):
             },
         })
         self.assertEqual(action.action, "modify_sl")
-        self.assertAlmostEqual(action.stop_loss, 102.7)
+        self.assertAlmostEqual(action.stop_loss, 102.4)
+
+    def test_structure_trailing_moves_below_broken_resistance_with_spread(self):
+        action = PositionManager().evaluate({
+            "management_rules": [{
+                "type": "structure_trailing", "structure_layer": "swing",
+                "buffer_type": "atr", "buffer_value": 0.30,
+                "min_improvement_atr": 0.10,
+            }],
+        }, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5, "favorable_price": 108,
+        }, {
+            "price": 107, "atr": 2, "spread": 0.2,
+            "structure_hierarchy": {
+                "swing": {
+                    "protected_low": {"price": 98, "label": "HL"},
+                    "protected_high": {"price": 105, "label": "HH"},
+                    "pivots": [
+                        {"kind": "low", "price": 98, "label": "HL"},
+                        {"kind": "high", "price": 105, "label": "HH"},
+                    ],
+                },
+            },
+        })
+        self.assertEqual(action.action, "modify_sl")
+        # 105 - 0.30 ATR - spread 0.2 = 104.2
+        self.assertAlmostEqual(action.stop_loss, 104.2)
 
     def test_structure_trailing_never_loosens_stop(self):
         action = PositionManager().evaluate({
             "management_rules": [{
                 "type": "structure_trailing", "structure_layer": "swing",
-                "buffer_type": "atr", "buffer_value": 0.15,
+                "buffer_type": "atr", "buffer_value": 0.30,
                 "min_improvement_atr": 0.10,
             }],
         }, {

@@ -73,7 +73,7 @@ def default_position_management_config() -> Dict:
              "buffer": {"type": "fixed_points", "value": 0},
              "activation_r": 1.0},
             {"type": "structure_trailing", "structure_layer": "swing",
-             "buffer_type": "atr", "buffer_value": 0.15,
+             "buffer_type": "atr", "buffer_value": 0.30,
              "min_improvement_atr": 0.10, "confirm_bars": 1,
              "cooldown_seconds": 30},
             {"type": "trailing_stop", "activation_r": 1.0,
@@ -252,7 +252,7 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
             rule["buffer_type"] = str(rule.get("buffer_type") or "atr").lower()
             if rule["buffer_type"] not in {"atr", "fixed_points", "fixed_percent"}:
                 raise ValueError("结构移动止损缓冲类型无效")
-            rule["buffer_value"] = _positive(rule.get("buffer_value", 0.15), "结构止损缓冲")
+            rule["buffer_value"] = _positive(rule.get("buffer_value", 0.30), "结构止损缓冲")
             rule["min_improvement_atr"] = _positive(rule.get("min_improvement_atr", 0.10), "结构止损最小改善")
             rule["confirm_bars"] = max(1, min(10, int(rule.get("confirm_bars", 1))))
             rule["cooldown_seconds"] = max(0, min(86400, int(rule.get("cooldown_seconds", 30))))
@@ -270,30 +270,10 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
                 stages.append({"activation_r": activation_r, "stop_r": max(-5.0, min(-0.01, stop_r))})
             rule["stages"] = sorted(stages, key=lambda item: item["activation_r"])
         elif rule_type == "target_trailing":
-            rule["distance_r"] = _positive(rule.get("distance_r", 0.3), "目标跟踪距离R")
-            rule["min_distance_r"] = _positive(
-                rule.get("min_distance_r", rule["distance_r"]), "目标跟踪最小距离R"
+            rule["distance_atr"] = _positive(rule.get("distance_atr", 2.0), "目标跟踪距离ATR")
+            rule["min_improvement_atr"] = _positive(
+                rule.get("min_improvement_atr", 0.5), "目标跟踪最小改善ATR"
             )
-            rule["max_distance_r"] = max(
-                rule["min_distance_r"], _positive(
-                    rule.get("max_distance_r", 1.0), "目标跟踪最大距离R"
-                )
-            )
-            rule["distance_by_setup"] = {
-                str(key): _positive(value, f"{key}目标跟踪距离R")
-                for key, value in (rule.get("distance_by_setup") or {}).items()
-                if str(key).strip()
-            }
-            rule["atr_multiple_by_setup"] = {
-                str(key): _positive(value, f"{key}目标跟踪ATR倍数")
-                for key, value in (rule.get("atr_multiple_by_setup") or {}).items()
-                if str(key).strip()
-            }
-            rule["min_distance_by_setup"] = {
-                str(key): _positive(value, f"{key}目标跟踪最小距离R")
-                for key, value in (rule.get("min_distance_by_setup") or {}).items()
-                if str(key).strip()
-            }
         elif rule_type == "break_even":
             rule["activation_r"] = _positive(rule.get("activation_r", 1), "保本启动R")
             rule["offset_r"] = _positive(rule.get("offset_r", 0), "保本偏移R", True)
