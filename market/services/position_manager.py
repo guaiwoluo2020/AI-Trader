@@ -233,9 +233,18 @@ class PositionManager:
         primary = str(rule.get("structure_layer") or "swing").lower()
         if primary not in {"internal", "swing", "external"}:
             primary = "swing"
-        points = cls._confirmed_structure_points(hierarchy, [primary])
+        fill_layer = str(rule.get("gap_fill_layer") or "internal").lower()
+        if fill_layer not in {"internal", "swing", "external"}:
+            fill_layer = "internal"
         min_distance_atr = float(rule.get("min_distance_atr", 0.8) or 0)
         min_distance = atr * min_distance_atr if atr > 0 else 0.0
+        gap_fill_atr = float(rule.get("gap_fill_atr", 6.0) or 6.0)
+        gap_fill = atr * gap_fill_atr if atr > 0 else 0.0
+        primary_points = cls._confirmed_structure_points(hierarchy, [primary])
+        fill_points = (
+            cls._confirmed_structure_points(hierarchy, [fill_layer])
+            if fill_layer != primary else []
+        )
         buffer_type = rule.get("buffer_type", "atr")
         value = float(rule.get("buffer_value", 0.30) or 0)
         buffer = (
@@ -245,33 +254,78 @@ class PositionManager:
         # Keep the stop beyond the structure print plus live spread so a
         # bid/ask bounce around the broken level does not immediately stop out.
         buffer += max(0.0, float(spread or 0))
-        protections, broken, ahead = [], [], []
-        for item in points:
-            level = float(item["price"])
-            if direction == "buy":
-                if item["kind"] == "low" and 0 < level <= price - min_distance:
-                    if item.get("role") == "protection" or item.get("label") in {None, "HL", "LL"}:
-                        protections.append((level, item))
-                if item["kind"] == "high" and level >= price + min_distance:
-                    ahead.append((level, item))
-                if (
-                    item["kind"] == "high" and level > entry
-                    and favorable >= level > 0 and (level - buffer) < price
-                    and abs(price - level) >= min_distance
-                ):
-                    broken.append((level, item))
+
+        def collect(points, kind):
+            selected = []
+            for item in points:
+                level = float(item["price"])
+                if item.get("kind") != kind:
+                    continue
+                if kind == "low" and not (0 < level <= price - min_distance):
+                    continue
+                if kind == "high" and not (level >= price + min_distance):
+                    continue
+                selected.append((level, item))
+            return selected
+
+        def in_gaps(fill_items, anchors, below):
+            if not fill_items or gap_fill <= 0:
+                return []
+            extras = []
+            bounds = sorted({price, *(item[0] for item in anchors)})
+            if below:
+                bounds = sorted({0.0, *bounds}, reverse=True)
+                pairs = list(zip(bounds, bounds[1:]))
+                for higher, lower in pairs:
+                    if higher - lower < gap_fill:
+                        continue
+                    for level, item in fill_items:
+                        if lower < level < higher:
+                            extras.append((level, item))
             else:
-                if item["kind"] == "high" and level >= price + min_distance:
-                    if item.get("role") == "protection" or item.get("label") in {None, "LH", "HH"}:
-                        protections.append((level, item))
-                if item["kind"] == "low" and 0 < level <= price - min_distance:
-                    ahead.append((level, item))
-                if (
-                    item["kind"] == "low" and 0 < level < entry
-                    and favorable <= level and (level + buffer) > price
-                    and abs(price - level) >= min_distance
-                ):
-                    broken.append((level, item))
+                pairs = list(zip(bounds, bounds[1:]))
+                for lower, higher in pairs:
+                    if higher - lower < gap_fill:
+                        continue
+                    for level, item in fill_items:
+                        if lower < level < higher:
+                            extras.append((level, item))
+            return extras
+
+        if direction == "buy":
+            swing_supports = collect(primary_points, "low")
+            fill_supports = collect(fill_points, "low")
+            swing_ahead = collect(primary_points, "high")
+            fill_ahead = collect(fill_points, "high")
+            protections = swing_supports + in_gaps(fill_supports, swing_supports, True)
+            ahead = swing_ahead + in_gaps(fill_ahead, swing_ahead, False)
+            broken = []
+            for source in (primary_points, [extra[1] for extra in ahead if extra[1].get("layer") == fill_layer]):
+                for item in source:
+                    level = float(item["price"])
+                    if (
+                        item.get("kind") == "high" and level > entry
+                        and favorable >= level > 0 and (level - buffer) < price
+                        and abs(price - level) >= min_distance
+                    ):
+                        broken.append((level, item))
+        else:
+            swing_supports = collect(primary_points, "high")
+            fill_supports = collect(fill_points, "high")
+            swing_ahead = collect(primary_points, "low")
+            fill_ahead = collect(fill_points, "low")
+            protections = swing_supports + in_gaps(fill_supports, swing_supports, False)
+            ahead = swing_ahead + in_gaps(fill_ahead, swing_ahead, True)
+            broken = []
+            for source in (primary_points, [extra[1] for extra in ahead if extra[1].get("layer") == fill_layer]):
+                for item in source:
+                    level = float(item["price"])
+                    if (
+                        item.get("kind") == "low" and 0 < level < entry
+                        and favorable <= level and (level + buffer) > price
+                        and abs(price - level) >= min_distance
+                    ):
+                        broken.append((level, item))
         source = None
         reference = 0.0
         if direction == "buy":

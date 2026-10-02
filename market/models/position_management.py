@@ -74,7 +74,8 @@ def default_position_management_config() -> Dict:
              "activation_r": 1.0},
             {"type": "structure_trailing", "structure_layer": "swing",
              "buffer_type": "atr", "buffer_value": 0.30,
-             "min_distance_atr": 0.8, "min_improvement_atr": 0.10,
+             "min_distance_atr": 0.8, "gap_fill_atr": 6.0,
+             "gap_fill_layer": "internal", "min_improvement_atr": 0.10,
              "confirm_bars": 1, "cooldown_seconds": 30},
             {"type": "trailing_stop", "activation_r": 1.0,
              "distance_r": 0.6},
@@ -254,6 +255,10 @@ def normalize_position_management_config(config: Optional[Dict]) -> Dict:
                 raise ValueError("结构移动止损缓冲类型无效")
             rule["buffer_value"] = _positive(rule.get("buffer_value", 0.30), "结构止损缓冲")
             rule["min_distance_atr"] = _positive(rule.get("min_distance_atr", 0.8), "结构参考点最小距离ATR")
+            rule["gap_fill_atr"] = _positive(rule.get("gap_fill_atr", 6.0), "结构空档补点ATR")
+            rule["gap_fill_layer"] = str(rule.get("gap_fill_layer") or "internal").lower()
+            if rule["gap_fill_layer"] not in {"internal", "swing", "external"}:
+                raise ValueError("结构空档补点层级无效")
             rule["min_improvement_atr"] = _positive(rule.get("min_improvement_atr", 0.10), "结构止损最小改善")
             rule["confirm_bars"] = max(1, min(10, int(rule.get("confirm_bars", 1))))
             rule["cooldown_seconds"] = max(0, min(86400, int(rule.get("cooldown_seconds", 30))))

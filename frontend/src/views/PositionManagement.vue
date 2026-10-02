@@ -113,7 +113,7 @@ const ruleDescription = rule => {
   if (rule.type === 'structure_trailing') {
     const layer = rule.structure_layer || 'swing'
     const buffer = `${rule.buffer_value || 0.3}${rule.buffer_type === 'atr' || !rule.buffer_type ? ' ATR' : ''}`
-    return `只用 ${String(layer).toUpperCase()} 已确认点；离现价不足 ${rule.min_distance_atr || 0.8} ATR 的点不用。越过前方阻力后收到突破点外侧 ${buffer} 加点差，最小改善 ${rule.min_improvement_atr || 0.1} ATR`
+    return `只用 ${String(layer).toUpperCase()} 已确认点；离现价不足 ${rule.min_distance_atr || 0.8} ATR 的点不用。两点间隔超过 ${rule.gap_fill_atr || 6} ATR 时用 ${(rule.gap_fill_layer || 'internal').toUpperCase()} 补档。越过前方阻力后收到突破点外侧 ${buffer} 加点差，最小改善 ${rule.min_improvement_atr || 0.1} ATR`
   }
   if (rule.type === 'trailing_stop') return `达到 ${rule.activation_r || 0}R 后，距离最有利价格 ${rule.distance_r || 0}R`
   if (rule.type === 'target_trailing') {

@@ -1029,6 +1029,33 @@ class PositionManagerTests(unittest.TestCase):
         })
         self.assertEqual(action.action, "none")
 
+    def test_structure_trailing_fills_wide_swing_gaps_with_internal(self):
+        action = PositionManager().evaluate({
+            "management_rules": [{
+                "type": "structure_trailing", "structure_layer": "swing",
+                "buffer_type": "atr", "buffer_value": 0.30,
+                "min_improvement_atr": 0.10, "min_distance_atr": 0.8,
+                "gap_fill_atr": 6.0, "gap_fill_layer": "internal",
+            }],
+        }, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 70,
+            "initial_risk": 30, "favorable_price": 110,
+        }, {
+            "price": 110, "atr": 2,
+            "structure_hierarchy": {
+                "swing": {
+                    "protected_low": {"price": 80, "label": "HL"},
+                    "pivots": [{"kind": "low", "price": 80, "label": "HL"}],
+                },
+                "internal": {
+                    "protected_low": {"price": 96, "label": "HL"},
+                    "pivots": [{"kind": "low", "price": 96, "label": "HL"}],
+                },
+            },
+        })
+        self.assertEqual(action.action, "modify_sl")
+        self.assertAlmostEqual(action.stop_loss, 95.4)
+
     def test_structure_trailing_never_loosens_stop(self):
         action = PositionManager().evaluate({
             "management_rules": [{
