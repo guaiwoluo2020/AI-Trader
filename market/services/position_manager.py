@@ -231,12 +231,11 @@ class PositionManager:
         Shorts use the inverse.
         """
         primary = str(rule.get("structure_layer") or "swing").lower()
-        layers = ["internal", "swing"]
-        if primary == "external":
-            layers.append("external")
-        elif primary in {"internal", "swing"} and primary not in layers:
-            layers.insert(0, primary)
-        points = cls._confirmed_structure_points(hierarchy, layers)
+        if primary not in {"internal", "swing", "external"}:
+            primary = "swing"
+        points = cls._confirmed_structure_points(hierarchy, [primary])
+        min_distance_atr = float(rule.get("min_distance_atr", 0.8) or 0)
+        min_distance = atr * min_distance_atr if atr > 0 else 0.0
         buffer_type = rule.get("buffer_type", "atr")
         value = float(rule.get("buffer_value", 0.30) or 0)
         buffer = (
@@ -250,25 +249,27 @@ class PositionManager:
         for item in points:
             level = float(item["price"])
             if direction == "buy":
-                if item["kind"] == "low" and 0 < level < price:
+                if item["kind"] == "low" and 0 < level <= price - min_distance:
                     if item.get("role") == "protection" or item.get("label") in {None, "HL", "LL"}:
                         protections.append((level, item))
-                if item["kind"] == "high" and level > price:
+                if item["kind"] == "high" and level >= price + min_distance:
                     ahead.append((level, item))
                 if (
                     item["kind"] == "high" and level > entry
                     and favorable >= level > 0 and (level - buffer) < price
+                    and abs(price - level) >= min_distance
                 ):
                     broken.append((level, item))
             else:
-                if item["kind"] == "high" and level > price:
+                if item["kind"] == "high" and level >= price + min_distance:
                     if item.get("role") == "protection" or item.get("label") in {None, "LH", "HH"}:
                         protections.append((level, item))
-                if item["kind"] == "low" and 0 < level < price:
+                if item["kind"] == "low" and 0 < level <= price - min_distance:
                     ahead.append((level, item))
                 if (
                     item["kind"] == "low" and 0 < level < entry
                     and favorable <= level and (level + buffer) > price
+                    and abs(price - level) >= min_distance
                 ):
                     broken.append((level, item))
         source = None

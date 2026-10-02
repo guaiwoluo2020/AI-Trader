@@ -1010,6 +1010,25 @@ class PositionManagerTests(unittest.TestCase):
         # 105 - 0.30 ATR - spread 0.2 = 104.2
         self.assertAlmostEqual(action.stop_loss, 104.2)
 
+    def test_structure_trailing_ignores_near_price_levels(self):
+        action = PositionManager().evaluate({
+            "management_rules": [{
+                "type": "structure_trailing", "structure_layer": "swing",
+                "buffer_type": "atr", "buffer_value": 0.30,
+                "min_improvement_atr": 0.10, "min_distance_atr": 0.8,
+            }],
+        }, {
+            "direction": "buy", "entry_price": 100, "stop_loss": 95,
+            "initial_risk": 5, "favorable_price": 110,
+        }, {
+            "price": 109, "atr": 2,
+            "structure_hierarchy": {
+                "swing": {"protected_low": {"price": 108.5}},
+                "internal": {"protected_low": {"price": 108.2}},
+            },
+        })
+        self.assertEqual(action.action, "none")
+
     def test_structure_trailing_never_loosens_stop(self):
         action = PositionManager().evaluate({
             "management_rules": [{
