@@ -16,6 +16,29 @@ class StructureEventCatalogTests(unittest.TestCase):
         self.assertEqual(len({item["event_id"] for item in events}), 3)
         self.assertEqual(latest_event_for(events, layer="internal", event_type="bos")["level"], 101)
 
+    def test_event_id_stable_when_window_slides(self):
+        rows_a = [
+            {"timestamp": 1_700_000_000 + i * 60, "open": 1, "high": 2, "low": 0, "close": 1}
+            for i in range(10)
+        ]
+        rows_b = [
+            {"timestamp": 1_700_000_000 + i * 60, "open": 1, "high": 2, "low": 0, "close": 1}
+            for i in range(1, 11)
+        ]
+        first = collect_structure_events(
+            {"major_events": [{"type": "choch", "direction": "up", "level": 100.0,
+                               "confirmed_at": 8, "swing_index": 5}]},
+            "GOLD#", "M1", rows=rows_a,
+        )
+        second = collect_structure_events(
+            {"major_events": [{"type": "choch", "direction": "up", "level": 100.0,
+                               "confirmed_at": 7, "swing_index": 4}]},
+            "GOLD#", "M1", rows=rows_b,
+        )
+        self.assertEqual(first[0]["event_id"], second[0]["event_id"])
+        self.assertEqual(first[0]["confirmed_at"], 1_700_000_000 + 8 * 60)
+        self.assertEqual(second[0]["confirmed_at"], 1_700_000_000 + 8 * 60)
+
 
 if __name__ == "__main__":
     unittest.main()

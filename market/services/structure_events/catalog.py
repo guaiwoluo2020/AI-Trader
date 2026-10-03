@@ -21,25 +21,77 @@ def _number(value, default=0.0) -> float:
         return float(default)
 
 
-def _event_id(symbol: str, period: str, layer: str, event: Dict) -> str:
+def _bar_unix(rows: Optional[List[Dict]], index) -> int:
+    """Map a window-relative bar index to a stable unix timestamp."""
+    try:
+        index = int(index or 0)
+    except (TypeError, ValueError):
+        return 0
+    if not rows or index < 0 or index >= len(rows):
+        return index
+    row = rows[index] or {}
+    value = int(_number(row.get("timestamp_utc") or row.get("timestamp") or row.get("time") or 0))
+    if value > 10_000_000_000:
+        value //= 1000
+    return value if value > 0 else index
+
+
+def _confirmed_unix(rows: Optional[List[Dict]], event: Dict) -> int:
+    raw = event.get("confirmed_at", event.get("index", 0))
+    try:
+        value = int(raw or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value > 10_000_000_000:
+        return value // 1000
+    if value > 1_000_000_000:
+        return value
+    return _bar_unix(rows, value)
+
+
+def _event_id(symbol: str, period: str, layer: str, event: Dict, *, confirmed_at=None) -> str:
+    """Identity follows the confirming bar time, not a sliding window index."""
+    confirmed = confirmed_at if confirmed_at is not None else event.get("confirmed_at", event.get("index", 0))
     raw = json.dumps({
-        "symbol": str(symbol).upper(), "period": str(period).upper(),
-        "layer": layer, "type": event.get("type") or event.get("event_type"),
-        "direction": event.get("direction"),
-        "level": _number(event.get("level")),
-        "confirmed_at": event.get("confirmed_at", event.get("index", 0)),
-        "swing_index": event.get("swing_index", event.get("pivot_at", -1)),
+        "symbol": str(symbol).upper(),
+        "period": str(period).upper(),
+        "layer": layer,
+        "type": str(event.get("type") or event.get("event_type") or "").lower(),
+        "direction": str(event.get("direction") or "").lower(),
+        "level": round(_number(event.get("level")), 5),
+        "confirmed_at": int(confirmed or 0),
     }, sort_keys=True, default=str)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
 
 
 def collect_structure_events(
     structure: Dict, symbol: str, period: str, *, limit_per_layer: int = 20,
+    rows: Optional[List[Dict]] = None,
 ) -> List[Dict]:
     """Return normalized, independently identifiable events for all layers."""
     payload = structure or {}
     result: List[Dict] = []
     hierarchy = payload.get("structure_hierarchy") or {}
+
+    def _emit(layer: str, raw: Dict, extra: Optional[Dict] = None) -> Dict:
+        event_type = str(raw.get("type") or raw.get("event_type") or "").strip().lower()
+        confirmed_at = _confirmed_unix(rows, raw)
+        event = dict(raw)
+        event.update({
+            "event_id": _event_id(symbol, period, layer, raw, confirmed_at=confirmed_at),
+            "symbol": str(symbol).upper(),
+            "period": str(period).upper(),
+            "layer": layer,
+            "event_type": event_type,
+            "direction": str(raw.get("direction") or "").lower(),
+            "level": _number(raw.get("level")),
+            "confirmed_at": confirmed_at,
+        })
+        if extra:
+            event.update(extra)
+        result.append(event)
+        return event
+
     for layer in LAYERS:
         events = list(payload.get(EVENT_KEYS[layer]) or [])
         layer_state = hierarchy.get(layer) if isinstance(hierarchy, dict) else {}
@@ -49,28 +101,15 @@ def collect_structure_events(
             event_type = str(raw.get("type") or raw.get("event_type") or "").strip().lower()
             if not event_type:
                 continue
-            event = dict(raw)
-            event.update({
-                "event_id": _event_id(symbol, period, layer, raw),
-                "symbol": str(symbol).upper(),
-                "period": str(period).upper(),
-                "layer": layer,
-                "event_type": event_type,
-                "direction": str(raw.get("direction") or "").lower(),
-                "level": _number(raw.get("level")),
-                "confirmed_at": int(raw.get("confirmed_at", raw.get("index", 0)) or 0),
-            })
-            direction = event["direction"]
+            direction = str(raw.get("direction") or "").lower()
             protected_name = "protected_low" if direction == "up" else "protected_high"
             protected = (layer_state or {}).get(protected_name) or 0
             if isinstance(protected, dict):
                 protected = protected.get("price") or 0
-            event["protected_level"] = _number(raw.get("protected_level") or protected)
-            result.append(event)
+            _emit(layer, raw, {"protected_level": _number(raw.get("protected_level") or protected)})
     # Geometry events are deliberately synthesized here rather than treated
     # as a separate "location plan" or "range plan" family.  A confirmed
     # HL/LH is a structural event; the later price touch creates RETEST.
-    hierarchy = payload.get("structure_hierarchy") or {}
     swing = hierarchy.get("swing") if isinstance(hierarchy, dict) else {}
     internal = hierarchy.get("internal") if isinstance(hierarchy, dict) else {}
     for layer, state in (("swing", swing), ("internal", internal)):
@@ -85,19 +124,13 @@ def collect_structure_events(
                 "level": pivot.get("price"), "confirmed_at": pivot.get("index", 0),
                 "pivot_index": pivot.get("index", 0), "source": label,
             }
-            event = dict(raw)
-            event.update({
-                "event_id": _event_id(symbol, period, layer, raw),
-                "symbol": str(symbol).upper(), "period": str(period).upper(),
-                "layer": layer, "event_type": "hl_confirmed" if label == "HL" else "lh_confirmed",
-                "direction": direction, "level": _number(raw.get("level")),
-                "confirmed_at": int(raw.get("confirmed_at") or 0),
-                "protected_level": _number((state or {}).get(
-                    "protected_low" if direction == "up" else "protected_high"
-                )),
+            protected = (state or {}).get("protected_low" if direction == "up" else "protected_high")
+            if isinstance(protected, dict):
+                protected = protected.get("price") or 0
+            event = _emit(layer, raw, {
+                "protected_level": _number(protected),
                 "source": label,
             })
-            result.append(event)
             latest_close = _number(payload.get("latest_close") or payload.get("close"))
             atr = max(1e-9, _number(payload.get("atr")))
             proximity = atr * max(0.05, _number(payload.get("retest_proximity_atr", 0.4)))
@@ -107,18 +140,14 @@ def collect_structure_events(
                     "type": touched_type, "direction": direction,
                     "level": pivot.get("price"), "confirmed_at": pivot.get("index", 0),
                     "pivot_index": pivot.get("index", 0), "parent_event_id": event["event_id"],
+                    "source": label,
                 }
-                touched = dict(touched_raw)
-                touched.update({
-                    "event_id": _event_id(symbol, period, layer, touched_raw),
-                    "symbol": str(symbol).upper(), "period": str(period).upper(),
-                    "layer": layer, "event_type": touched_type, "direction": direction,
-                    "level": _number(touched_raw.get("level")),
-                    "confirmed_at": int(touched_raw.get("confirmed_at") or 0),
+                _emit(layer, touched_raw, {
                     "protected_level": event["protected_level"],
-                    "parent_event_id": event["event_id"], "source": label,
+                    "parent_event_id": event["event_id"],
+                    "source": label,
                 })
-                result.append(touched)
+
     def _append_box_event(layer: str, event_type: str, direction: str, level, confirmed_at, source: str) -> None:
         if direction not in {"up", "down"} or _number(level) <= 0:
             return
@@ -126,15 +155,7 @@ def collect_structure_events(
             "type": event_type, "direction": direction, "level": level,
             "confirmed_at": confirmed_at, "source": source,
         }
-        event = dict(raw)
-        event.update({
-            "event_id": _event_id(symbol, period, layer, raw),
-            "symbol": str(symbol).upper(), "period": str(period).upper(),
-            "layer": layer, "event_type": event_type, "direction": direction,
-            "level": _number(level), "confirmed_at": int(confirmed_at or 0),
-            "protected_level": _number(level), "source": source,
-        })
-        result.append(event)
+        _emit(layer, raw, {"protected_level": _number(level), "source": source})
 
     for layer in LAYERS:
         state = hierarchy.get(layer) if isinstance(hierarchy, dict) else {}

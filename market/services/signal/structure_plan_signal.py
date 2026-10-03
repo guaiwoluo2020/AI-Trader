@@ -335,8 +335,14 @@ class StructurePlanBuilder:
     def _plans_from_observations(
         self, source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
     ) -> List[Dict]:
-        """Create executable plans only from accepted observation records."""
-        ranked = []
+        """Create executable plans only from accepted observation records.
+
+        One layer can hold several families at once: CHOCH must not occupy the
+        only swing/internal slot and hide a same-bar BOS, sweep or pullback.
+        Within a family, keep the newest event of each type/direction.
+        """
+        events = snapshot.get("structure_events") or []
+        event_by_id = {str(item.get("event_id") or ""): item for item in events}
         rank = {
             "create_plan": 0,
             "confirm_signal": 1,
@@ -347,27 +353,38 @@ class StructurePlanBuilder:
             "reclaim": 3, "hl_confirmed": 4, "lh_confirmed": 4,
             "retest": 5, "hl_support_touched": 6, "lh_press_touched": 6,
         }
+
+        def confirmed_at(observation: Dict) -> int:
+            event = event_by_id.get(str(observation.get("source_event_id") or ""), {})
+            return int(event.get("confirmed_at") or event.get("index") or 0)
+
+        newest = {}
         for observation in snapshot.get("observation_plans") or []:
             action = str(observation.get("matrix_action") or "")
             if action not in rank:
                 continue
-            ranked.append((
+            key = (
+                str(observation.get("event_layer") or ""),
+                str(observation.get("event_type") or ""),
+                str(observation.get("direction") or ""),
+            )
+            candidate = (
                 rank[action],
                 event_rank.get(str(observation.get("event_type") or ""), 9),
                 0 if str(observation.get("event_layer") or "") == "swing" else 1,
+                confirmed_at(observation),
                 observation,
-            ))
+            )
+            previous = newest.get(key)
+            if previous is None or candidate[3] >= previous[3]:
+                newest[key] = candidate
         selected = []
         seen = set()
-        for _action, _event, _layer, observation in sorted(ranked, key=lambda item: item[:3]):
-            family = str(observation.get("plan_type") or "")
-            if family == "event_confirmation":
-                family = "pullback"
-            elif family.endswith("pullback"):
-                family = "pullback"
-            elif family in {"structure_reversal", "early_reversal"}:
-                family = "reversal"
-            key = str(observation.get("event_layer") or "")
+        for _action, _event, _layer, _when, observation in sorted(
+            newest.values(), key=lambda item: (item[0], item[1], item[2], -item[3])
+        ):
+            family = self._setup_family(str(observation.get("plan_type") or ""))
+            key = (str(observation.get("event_layer") or ""), family)
             if key in seen:
                 continue
             plan = self._price_from_observation(
@@ -1034,7 +1051,7 @@ class StructurePlanBuilder:
                 **structure,
                 "latest_close": _number(rows[-1].get("close") or rows[-1].get("close_price")),
                 "retest_proximity_atr": self._param("location_proximity_atr", 0.4),
-            }, symbol, period),
+            }, symbol, period, rows=rows),
             "structure_segment_id": structure.get("structure_segment_id") or "",
             "structure_revision": structure.get("structure_revision") or "",
             "active_segment": structure.get("active_segment") or {},
@@ -1126,7 +1143,7 @@ class StructurePlanSignalGenerator:
                 all_plans.extend(self._cache.get(key, []))
                 continue
             result = structure or analyze(symbol, period, rows[-600:], resolved_config)
-            structure_events = collect_structure_events(result, symbol, period)
+            structure_events = collect_structure_events(result, symbol, period, rows=rows[-600:])
             replace_events = getattr(self.repository, "replace_events", None)
             if replace_events:
                 replace_events(self.user_id, symbol, period, structure_events)

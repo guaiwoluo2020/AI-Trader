@@ -233,3 +233,19 @@ class StructurePlanTests(unittest.TestCase):
         self.assertTrue(tradable)
         self.assertEqual(tradable[0]["plan_type"], "swing_pullback")
         self.assertTrue(any("hl_confirmed" in " ".join(item.get("event_chain") or []) for item in tradable))
+
+    def test_choch_does_not_block_same_layer_sweep_and_bos(self):
+        structure = _trend_structure("up")
+        structure["major_events"] = [
+            {"type": "choch", "direction": "up", "level": 110.0, "confirmed_at": 39},
+            {"type": "liquidity_sweep", "direction": "down", "level": 108.0, "confirmed_at": 39},
+            {"type": "bos", "direction": "up", "level": 112.0, "confirmed_at": 39},
+        ]
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        types = {item.get("plan_type") for item in plans if item.get("plan_type") not in {"", "event", "no_trade"}}
+        self.assertIn("structure_reversal", types)
+        self.assertIn("swing_liquidity_reversal", types)
+        self.assertIn("trend_continuation", types)
+        self.assertIn("swing_pullback", types)
