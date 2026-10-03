@@ -150,13 +150,28 @@ def resolve_structure_plan_config(symbol: str, period: str, setup_type: str = ""
     )
 
 
+
+LEGACY_SETUP_NAMES = {
+    "structure_location_pullback", "range_lower_reversal", "range_upper_reversal",
+    "range_breakout", "range_false_breakout", "triangle_breakout",
+    "triangle_breakout_watch", "triangle_prebreakout_pullback", "choch_reversal",
+    "liquidity_sweep_reclaim", "trend_continuation", "structure_reversal",
+    "range_breakout_watch", "pressure_reversal", "pressure_zone_breakout",
+}
+
+
+def _allowed_plan_types(raw) -> set:
+    """Ignore retired SETUP whitelists so event-driven plan types can trade."""
+    allowed = {str(item).strip().lower() for item in (raw or []) if str(item).strip()}
+    if allowed and allowed <= LEGACY_SETUP_NAMES and len(allowed) >= 8:
+        return set()
+    return allowed
+
+
 def setup_is_allowed(symbol: str, period: str, setup_type: str) -> bool:
     """Return the effective symbol/period/setup trading gate."""
     config = resolve_structure_plan_config(symbol, period, setup_type)
-    allowed = {
-        str(item).strip().lower() for item in (config.get("allowed_setups") or [])
-        if str(item).strip()
-    }
+    allowed = _allowed_plan_types(config.get("allowed_setups"))
     setup = str(setup_type or "").strip().lower()
     if allowed and setup not in allowed:
         return False
@@ -201,11 +216,7 @@ class StructurePlanBuilder:
         return self.params.get(name, default)
 
     def _filter_allowed(self, plans: List[Dict]) -> List[Dict]:
-        allowed = {
-            str(item).strip().lower()
-            for item in (self._base_params.get("allowed_setups") or [])
-            if str(item).strip()
-        }
+        allowed = _allowed_plan_types(self._base_params.get("allowed_setups"))
         def enabled_for(setup: str) -> bool:
             for profile in self.setup_profiles:
                 if str(profile.get("setup_type") or "").strip().lower() == setup:
@@ -1705,7 +1716,7 @@ class StructurePlanSignalGenerator:
                 ) if direction in {"buy", "sell"} else {}
                 if direction in {"buy", "sell"}:
                     effective = effective_config
-                    allowed_setups = {str(item).strip().lower() for item in (effective.get("allowed_setups") or []) if str(item).strip()}
+                    allowed_setups = _allowed_plan_types(effective.get("allowed_setups"))
                     effective_dirs = {str(item).strip().lower() for item in (effective.get("allowed_directions") or ["buy", "sell"]) if str(item).strip().lower() in {"buy", "sell"}}
                     blocked_setups = {str(item).strip().lower() for item in (effective.get("blocked_setups") or []) if str(item).strip()}
                     binding = resolve_binding(setup_type, effective)
