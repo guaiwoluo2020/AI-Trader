@@ -525,7 +525,7 @@ class StructurePlanBuilder:
         phase = str(structure.get("trend_phase") or "").strip().lower()
         if setup in {
             "choch_reversal", "range_false_breakout", "liquidity_sweep_reclaim",
-            "early_reversal", "structure_reversal", "liquidity_reversal",
+            "early_reversal", "structure_reversal", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal",
         }:
             return ""
         layers = cls.structure_layers(structure)
@@ -721,7 +721,7 @@ class StructurePlanBuilder:
             "structure_location_pullback": "swing_pullback",
             "range_lower_reversal": "range_reclaim",
             "range_upper_reversal": "range_reclaim",
-            "range_false_breakout": "liquidity_reversal",
+            "range_false_breakout": "internal_liquidity_reversal",
             "triangle_prebreakout_pullback": "swing_pullback",
             "range_breakout": "trend_continuation",
             "triangle_breakout": "trend_continuation",
@@ -911,7 +911,7 @@ class StructurePlanBuilder:
             rules.append("range_structure_break")
         if setup_type in {
             "structure_location_pullback", "trend_continuation", "structure_reversal",
-            "early_reversal", "swing_pullback", "internal_pullback", "liquidity_reversal",
+            "early_reversal", "swing_pullback", "internal_pullback", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal",
             "internal_momentum",
         }:
             rules.append("protected_level_break")
@@ -951,7 +951,7 @@ class StructurePlanBuilder:
             return None
         expected_bias = "up" if direction == "buy" else "down" if direction == "sell" else ""
         skip_external = setup_type in {
-            "early_reversal", "structure_reversal", "liquidity_reversal",
+            "early_reversal", "structure_reversal", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal",
             "internal_momentum", "range_reclaim", "event_confirmation",
         }
         if expected_bias and not skip_external and not self._external_allows(snapshot, expected_bias, setup_type):
@@ -1472,7 +1472,7 @@ class StructurePlanSignalGenerator:
                 "retest_or_reclaim", "retest_or_sequence",
             } or plan_type in {
                 "swing_pullback", "internal_pullback", "early_reversal",
-                "structure_reversal", "liquidity_reversal", "event_confirmation",
+                "structure_reversal", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal", "event_confirmation",
                 "range_reclaim", "internal_momentum", "trend_continuation",
                 "range_breakout",
             } or setup_type in {
@@ -1534,7 +1534,7 @@ class StructurePlanSignalGenerator:
             "retest_or_reclaim", "retest_or_sequence",
         } or plan_type in {
             "swing_pullback", "internal_pullback", "early_reversal",
-            "structure_reversal", "liquidity_reversal", "event_confirmation",
+            "structure_reversal", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal", "event_confirmation",
             "range_reclaim", "internal_momentum", "trend_continuation",
             "range_breakout",
         } or setup_type in {
@@ -1807,7 +1807,7 @@ class StructurePlanSignalGenerator:
                     "retest_or_reclaim", "retest_or_sequence",
                 } or plan_type in {
                     "swing_pullback", "internal_pullback", "early_reversal",
-                    "structure_reversal", "liquidity_reversal", "event_confirmation",
+                    "structure_reversal", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal", "event_confirmation",
                     "range_reclaim", "internal_momentum", "trend_continuation",
                     "range_breakout",
                 } or setup_type in {

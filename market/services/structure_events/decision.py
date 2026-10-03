@@ -63,7 +63,7 @@ def _plan_for_event(layer: str, event_type: str, pattern: str, rule: Dict) -> st
     if event_type == "choch":
         return "early_reversal" if layer == "internal" else "structure_reversal"
     if event_type == "liquidity_sweep":
-        return "liquidity_reversal"
+        return "internal_liquidity_reversal" if layer == "internal" else "swing_liquidity_reversal"
     if event_type in {"hl_confirmed"}:
         return "internal_pullback" if layer == "internal" else "swing_pullback"
     if event_type in {"lh_confirmed"}:

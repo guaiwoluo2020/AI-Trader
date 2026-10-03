@@ -195,7 +195,7 @@ const planStageLabel=plan=>{
 }
 const layerLabel=value=>({internal:'INTERNAL',swing:'SWING',external:'EXTERNAL'}[String(value||'').toLowerCase()]||String(value||'--').toUpperCase())
 const planEventLabel=value=>({bos:'BOS',choch:'CHOCH',liquidity_sweep:'扫单',retest:'回测',reclaim:'收复',hl_confirmed:'HL确认',lh_confirmed:'LH确认',hl_support_touched:'HL触碰',lh_press_touched:'LH触碰',breakout_confirmed:'突破'}[String(value||'').toLowerCase()]||String(value||'事件'))
-const planTypeLabel=value=>({trend_continuation:'趋势延续',range_breakout:'箱体突破',internal_momentum:'内部动量',structure_reversal:'结构反转',early_reversal:'早期反转',liquidity_reversal:'扫单反转',swing_pullback:'Swing回撤',internal_pullback:'Internal回撤',event_confirmation:'事件确认',range_reclaim:'箱体收复'}[String(value||'').toLowerCase()]||String(value||'结构计划'))
+const planTypeLabel=value=>({trend_continuation:'趋势延续',range_breakout:'箱体突破',internal_momentum:'内部动量',structure_reversal:'结构反转',early_reversal:'早期反转',liquidity_reversal:'扫单反转',swing_liquidity_reversal:'Swing扫单反转',internal_liquidity_reversal:'Internal扫单反转',swing_pullback:'Swing回撤',internal_pullback:'Internal回撤',event_confirmation:'事件确认',range_reclaim:'箱体收复'}[String(value||'').toLowerCase()]||String(value||'结构计划'))
 const planLabel=plan=>{
   const setup=planTypeLabel(plan?.plan_type||plan?.setup_type)
   const layer=plan?.event_layer||plan?.entry_layer

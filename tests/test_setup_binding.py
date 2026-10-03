@@ -139,6 +139,8 @@ def test_event_plan_types_have_explicit_bindings():
     expected = {
         "early_reversal": "choch",
         "liquidity_reversal": "liquidity_sweep",
+        "internal_liquidity_reversal": "liquidity_sweep",
+        "swing_liquidity_reversal": "liquidity_sweep",
         "swing_pullback": "retest",
         "internal_pullback": "retest",
         "internal_momentum": "bos",
@@ -155,6 +157,8 @@ def test_new_plan_families():
     from market.services.signal.structure_plan_signal import StructurePlanBuilder
     assert StructurePlanBuilder._setup_family("early_reversal") == "reversal"
     assert StructurePlanBuilder._setup_family("liquidity_reversal") == "liquidity"
+    assert StructurePlanBuilder._setup_family("internal_liquidity_reversal") == "liquidity"
+    assert StructurePlanBuilder._setup_family("swing_liquidity_reversal") == "liquidity"
     assert StructurePlanBuilder._setup_family("swing_pullback") == "pullback"
     assert StructurePlanBuilder._setup_family("internal_pullback") == "pullback"
     assert StructurePlanBuilder._setup_family("internal_momentum") == "trend_follow"

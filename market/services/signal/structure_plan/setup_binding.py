@@ -89,6 +89,16 @@ DEFAULT_BINDINGS: Dict[str, Dict[str, Any]] = {
         "event_layer": "internal", "direction_layer": "swing", "entry_layer": "internal",
         "require_external_alignment": False,
     },
+    "internal_liquidity_reversal": {
+        "bind_pattern": "trend", "bind_event": "liquidity_sweep",
+        "event_layer": "internal", "direction_layer": "swing", "entry_layer": "internal",
+        "require_external_alignment": False,
+    },
+    "swing_liquidity_reversal": {
+        "bind_pattern": "trend", "bind_event": "liquidity_sweep",
+        "event_layer": "swing", "direction_layer": "swing", "entry_layer": "swing",
+        "require_external_alignment": False,
+    },
     "swing_pullback": {
         "bind_pattern": "trend", "bind_event": "retest",
         "event_layer": "swing", "direction_layer": "swing", "entry_layer": "swing",

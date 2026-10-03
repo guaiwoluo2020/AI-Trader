@@ -208,7 +208,7 @@ class StructurePlanTests(unittest.TestCase):
         plans = StructurePlanBuilder().build(
             "source-1", "BTCUSD", "M5", self.store.rows, structure,
         )
-        self.assertEqual(plans[0]["plan_type"], "liquidity_reversal")
+        self.assertEqual(plans[0]["plan_type"], "internal_liquidity_reversal")
         self.assertEqual(plans[0]["direction"], "buy")
         self.assertIn("internal:liquidity_sweep", plans[0].get("event_chain") or [])
 
