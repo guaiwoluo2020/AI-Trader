@@ -96,7 +96,7 @@ def _rows(storage, table: str, symbol: str, period: str, setup: str = ""):
 
 def resolve(symbol: str, period: str, setup_type: str, defaults: Dict,
             repository_factory: Callable[[], object] | None = None) -> Dict:
-    """Resolve public structure, symbol-period, public SETUP and SETUP layers.
+    """Resolve public structure then symbol/period overlays.
 
     ``repository_factory`` is retained for caller compatibility, but legacy
     runtime-state configuration is deliberately no longer consulted.
@@ -113,53 +113,27 @@ def resolve(symbol: str, period: str, setup_type: str, defaults: Dict,
             "SELECT config_json FROM structure_default_configs WHERE user_id=0 AND status='active'"
         )
         symbol_rows = _rows(storage, "structure_symbol_period_configs", wanted_symbol, wanted_period)
-        setup_rows = (_rows(storage, "structure_setup_configs", wanted_symbol, wanted_period, wanted_setup)
-                      if wanted_setup and wanted_setup != "__builder__" else [])
         base = decode(default_row)
         period_wide_row, symbol_wide_row, exact_row = select_overlay_rows(
             symbol_rows, wanted_symbol, wanted_period,
         )
-        setup_period_wide_row, setup_symbol_wide_row, setup_exact_row = select_overlay_rows(
-            setup_rows, wanted_symbol, wanted_period,
-        )
         period_wide, symbol_wide, profile = (
             decode(period_wide_row), decode(symbol_wide_row), decode(exact_row),
         )
-        setup_period_wide, setup_symbol_wide, setup_profile = (
-            decode(setup_period_wide_row), decode(setup_symbol_wide_row), decode(setup_exact_row),
-        )
         _merge(config, base, allowed)
-        if wanted_setup and wanted_setup != "__builder__":
-            _merge(config, _setup_defaults(base, wanted_setup), allowed, inherit_empty_lists=True)
         _merge(config, period_wide, allowed, inherit_empty_lists=True)
-        if wanted_setup and wanted_setup != "__builder__":
-            _merge(config, setup_period_wide, allowed, inherit_empty_lists=True)
         _merge(config, symbol_wide, allowed, inherit_empty_lists=True)
-        if wanted_setup and wanted_setup != "__builder__":
-            _merge(config, setup_symbol_wide, allowed, inherit_empty_lists=True)
         _merge(config, profile, allowed, inherit_empty_lists=True)
-        _merge(config, setup_profile, allowed, inherit_empty_lists=True)
         config["_structure_layers"] = {
             "default": base,
             "period_wide": period_wide,
             "symbol_wide": symbol_wide,
             "symbol_period": profile,
-            "setup_default": _setup_defaults(base, wanted_setup),
-            "setup": setup_period_wide | setup_symbol_wide | setup_profile,
+            "setup_default": {},
+            "setup": {},
         }
         if setup_type == "__builder__":
-            rows = storage.fetchall(
-                "SELECT symbol, setup_type, period, config_json FROM structure_setup_configs "
-                "WHERE user_id=0 AND status='active' AND symbol IN (?, '*') "
-                "AND period IN ('*', ?) ORDER BY (symbol='*'), (period='*')",
-                (wanted_symbol, wanted_period),
-            )
-            config["_setup_profiles"] = [
-                {"symbol": _norm_symbol(row.get("symbol") or wanted_symbol),
-                 "period": _norm_period(row.get("period") or wanted_period),
-                 "setup_type": str(row.get("setup_type") or "").lower(), **decode(row)}
-                for row in rows
-            ]
+            config["_setup_profiles"] = []
     except Exception as exc:
         print(f"[StructurePlan] 结构配置读取失败，使用公共默认值: {exc}")
         if setup_type == "__builder__":

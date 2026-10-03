@@ -118,11 +118,11 @@
           </v-card-title>
           <v-card-text>
             <div class="d-flex align-center justify-space-between flex-wrap ga-2 mb-3">
-              <div><div class="text-subtitle-1 font-weight-bold">结构配置总览矩阵</div><div class="text-caption text-medium-emphasis">公共默认 → 品种/周期 → SETUP，点击查看最终生效值与来源。</div></div>
+              <div><div class="text-subtitle-1 font-weight-bold">结构配置总览矩阵</div><div class="text-caption text-medium-emphasis">公共默认 → 品种/周期，点击查看最终生效值与来源。</div></div>
               <div class="d-flex ga-2"><v-btn size="small" variant="text" :loading="structureOverviewLoading" @click="loadStructureOverview">刷新</v-btn></div>
             </div>
             <v-alert v-if="structureOverview && !structureOverview.items?.length" type="info" variant="tonal" density="compact" class="mb-3">当前还没有品种/周期专属覆盖，所有配置均继承公共默认。</v-alert>
-            <v-table v-if="structureOverview?.items?.length" density="compact" class="mb-5"><thead><tr><th>品种</th><th>周期</th><th>专属覆盖</th><th>SETUP</th><th class="text-right">操作</th></tr></thead><tbody><tr v-for="row in structureOverview.items" :key="`${row.symbol}-${row.period}`"><td><strong>{{ row.symbol }}</strong></td><td>{{ row.period }}</td><td><v-chip size="x-small" :color="row.has_profile ? 'primary' : 'grey'" variant="tonal">{{ row.has_profile ? '品种/周期' : '仅 SETUP' }}</v-chip></td><td><v-chip v-for="setup in row.setups" :key="setup.setup_type" size="x-small" class="mr-1" variant="outlined">{{ setupTypeLabel(setup.setup_type) }}</v-chip><span v-if="!row.setups?.length">--</span></td><td class="text-right"><v-btn size="small" variant="text" @click="openEffectiveConfig(row.symbol,row.period)">查看最终配置</v-btn><v-btn size="small" variant="text" color="error" prepend-icon="mdi-delete-outline" :loading="structureOverviewDeleting === `${row.symbol}::${row.period}`" @click="deleteStructureOverviewRow(row)">删除专项</v-btn></td></tr></tbody></v-table>
+            <v-table v-if="structureOverviewRows.length" density="compact" class="mb-5"><thead><tr><th>品种</th><th>周期</th><th>专属覆盖</th><th class="text-right">操作</th></tr></thead><tbody><tr v-for="row in structureOverviewRows" :key="`${row.symbol}-${row.period}`"><td><strong>{{ row.symbol }}</strong></td><td>{{ row.period }}</td><td><v-chip size="x-small" :color="row.has_profile ? 'primary' : 'grey'" variant="tonal">{{ row.has_profile ? '品种/周期' : '继承公共默认' }}</v-chip></td><td class="text-right"><v-btn size="small" variant="text" @click="openEffectiveConfig(row.symbol,row.period)">查看最终配置</v-btn><v-btn size="small" variant="text" color="error" prepend-icon="mdi-delete-outline" :loading="structureOverviewDeleting === `${row.symbol}::${row.period}`" @click="deleteStructureOverviewRow(row)">删除专项</v-btn></td></tr></tbody></v-table>
             <div class="d-flex flex-wrap ga-2 align-center mb-3">
               <v-select v-model="structureConfigScope" :items="structureConfigScopes" item-title="label" item-value="value" label="当前查看的配置" density="compact" variant="outlined" hide-details style="max-width:300px" @update:model-value="switchStructureScope" />
               <v-btn v-if="structureConfigScope !== 'default'" size="small" variant="text" @click="switchStructureScope('default')">查看公共默认配置</v-btn>
@@ -148,7 +148,7 @@
                 <v-col cols="12" md="4"><strong>Swing</strong><div class="text-caption">中级别结构，决定趋势/箱体的主要方向和 BOS、CHOCH。</div></v-col>
                 <v-col cols="12" md="4"><strong>External</strong><div class="text-caption">大级别背景，用作方向过滤和突破质量约束。</div></v-col>
               </v-row>
-              <div class="text-caption mt-3">每个层级都会识别 pattern（trend、range、triangle 等）；pattern 决定可用的 phase/event，event 满足后才允许对应 SETUP 执行。</div>
+              <div class="text-caption mt-3">每个层级都会识别 pattern（trend、range、triangle 等）。pattern 是事件的上下文，事件矩阵决定要不要生成观察计划。</div>
             </v-card-text></v-card>
             <v-card variant="outlined" class="mb-4 event-matrix-editor"><v-card-text>
               <div class="d-flex align-center justify-space-between flex-wrap ga-2 mb-2"><div><div class="text-subtitle-2">事件矩阵 · 事件发生后做什么</div><div class="text-caption text-medium-emphasis">事件是唯一入口；计划类型、后续确认和是否允许直接产生信号都在这里配置。触碰事件只启动观察，连续 K 线确认在当前交易周期执行。</div></div><v-btn size="small" variant="tonal" @click="resetEventMatrix">恢复矩阵默认</v-btn></div>
@@ -217,7 +217,7 @@
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('location_reclaim_min_body_atr')" v-model.number="structureEngineConfig.location_reclaim_min_body_atr" type="number" min="0.1" max="3" step="0.1" label="回收最小实体（ATR）" hint="过滤十字星和弱反弹/反压" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('location_reclaim_min_close_extension_atr')" v-model.number="structureEngineConfig.location_reclaim_min_close_extension_atr" type="number" min="0" max="2" step="0.05" label="回收收盘越界（ATR）" hint="收盘必须明显重新站回结构位" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('location_reclaim_confirmation_bars')" v-model.number="structureEngineConfig.location_reclaim_confirmation_bars" type="number" min="1" max="10" step="1" label="回收连续确认K线" hint="默认 3 根：首根回收，后续收盘守住结构位，买入低点逐根抬高／卖出高点逐根降低" persistent-hint density="compact" variant="outlined" /></v-col>
-              <v-col cols="12"><div class="structure-zone-heading mt-2"><div class="text-subtitle-2">四、SETUP 执行 · 通用条件</div><div class="text-caption text-medium-emphasis">事件成立还不等于下单。这里管“值不值得做”：趋势是不是已经坏了、止损会不会太大、盈亏比够不够。账户风险仍在交易账户页。</div></div></v-col>
+              <v-col cols="12"><div class="structure-zone-heading mt-2"><div class="text-subtitle-2">四、公共风控 · 值不值得做</div><div class="text-caption text-medium-emphasis">事件成立还不等于下单。这里管“值不值得做”：趋势是不是已经坏了、止损会不会太大、盈亏比够不够。账户风险仍在交易账户页。</div></div></v-col>
               <v-col cols="12" sm="6" md="3"><v-switch :class="structureFieldClass('trend_require_healthy_phase')" v-model="structureEngineConfig.trend_require_healthy_phase" color="primary" inset hint="打开后：趋势阶段已经失败（保护点被打掉、推进明显衰减）时，不再做趋势延续。例如黄金上涨后跌破最近 HL，这时只等反转或箱体，不再顺着原趋势追单。" persistent-hint label="趋势延续要求健康阶段" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('trend_normal_stop_atr')" v-model.number="structureEngineConfig.trend_normal_stop_atr" type="number" min="0.5" max="10" step="0.1" label="趋势正常止损上限（ATR）" hint="低于此值可直接触发，默认 2.5" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('trend_retest_stop_atr')" v-model.number="structureEngineConfig.trend_retest_stop_atr" type="number" min="1" max="15" step="0.1" label="趋势回踩止损上限（ATR）" hint="超过正常上限后必须回踩，默认 4.0" persistent-hint density="compact" variant="outlined" /></v-col>
@@ -230,7 +230,7 @@
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('stop_buffer_atr')" v-model.number="structureEngineConfig.stop_buffer_atr" type="number" min="0" max="5" step="0.05" label="止损缓冲（ATR）" density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('min_real_risk_reward')" v-model.number="structureEngineConfig.min_real_risk_reward" type="number" min="1" max="10" step="0.1" label="最低真实盈亏比" hint="止损太大、目标太近的单直接放弃。小账户尤其不要放开。" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('trend_min_real_risk_reward')" v-model.number="structureEngineConfig.trend_min_real_risk_reward" type="number" min="0.1" max="10" step="0.1" label="趋势回踩最低盈亏比" hint="用于上涨回踩买入和下跌反弹卖出，默认 0.5" persistent-hint density="compact" variant="outlined" /></v-col>
-              <v-col cols="12"><div class="structure-zone-heading mt-2"><div class="text-subtitle-2">四、SETUP 执行 · 计划生命周期</div><div class="text-caption text-medium-emphasis">解决“计划挂太久怎么办”。突破后迟迟不回踩、三角形提前单一直等不到，就该取消，避免过期计划突然成交。</div></div></v-col>
+              <v-col cols="12"><div class="structure-zone-heading mt-2"><div class="text-subtitle-2">五、计划寿命</div><div class="text-caption text-medium-emphasis">解决“计划挂太久怎么办”。突破后迟迟不回踩、三角形提前单一直等不到，就该取消，避免过期计划突然成交。</div></div></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('max_plan_lifetime_bars')" v-model.number="structureEngineConfig.max_plan_lifetime_bars" type="number" min="10" max="1000" label="计划安全兜底（K线）" hint="结构事件未发生时的最长保留上限，默认 100 根" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('breakout_target_atr')" v-model.number="structureEngineConfig.breakout_target_atr" type="number" min="1" max="10" step="0.5" label="突破目标（ATR）" hint="突破单默认看多远。太大容易把能走的趋势单拖成长时间浮盈回吐。" persistent-hint density="compact" variant="outlined" /></v-col>
               <v-col cols="12" sm="6" md="3"><v-text-field :class="structureFieldClass('triangle_breakout_min_body_atr')" v-model.number="structureEngineConfig.triangle_breakout_min_body_atr" type="number" min="0.1" max="5" step="0.1" label="三角形突破最小实体（ATR）" hint="默认 0.5；实体过小视为无效突破" persistent-hint density="compact" variant="outlined" /></v-col>
@@ -238,70 +238,9 @@
               <v-col cols="12" sm="6" md="3"><v-switch :class="structureFieldClass('enable_triangle_prebreakout')" v-model="structureEngineConfig.enable_triangle_prebreakout" color="primary" inset hide-details label="启用三角形提前入场" /></v-col>
             </v-row>
             <v-alert type="info" variant="tonal" density="compact" class="mt-4 mb-3">
-              配置按多层生效：<strong>公共默认 → 全部品种/该周期（*/M5）→ 该品种/所有周期（GOLD/*）→ 品种+周期 → SETUP 同样叠加</strong>。越靠后优先级越高；没填的字段沿用上一层。账户风险仍在交易账户页配置，不在这里。
+              配置按多层生效：<strong>公共默认 → 全部品种/该周期（*/M5）→ 该品种/所有周期（GOLD/*）→ 品种+周期</strong>。越靠后优先级越高；没填的字段沿用上一层。账户风险仍在交易账户页配置，不在这里。
             </v-alert>
-            <div class="llm-section-head compact mt-4"><div><h3>五、SETUP 专项配置</h3><p>方向层级决定做多还是做空，入场层级决定什么时候进。两者可以不是同一层。例如 Swing 上涨、Internal 在箱体里震荡：方向仍看 Swing，入场看 Internal 的下沿回收或假突破，不会把 Internal 震荡当成新的方向。</p></div><div class="d-flex ga-2"><v-btn size="small" variant="tonal" color="secondary" :disabled="structureEngineSaving || !structureSetupScope" @click="openSaveAsStructureSetup">另存为当前范围 SETUP</v-btn></div></div>
-            <div class="d-flex flex-wrap ga-2 align-center mb-2">
-              <v-select v-model="structureSetupRange" :items="structureSetupRangeOptions" item-title="label" item-value="value" label="当前查看的 SETUP 配置范围" density="compact" variant="outlined" hide-details style="min-width:340px;max-width:520px" @update:model-value="selectStructureSetupRange" />
-              <v-chip v-if="structureSetupScope?.startsWith('default::')" color="primary" variant="tonal">公共默认</v-chip>
-              <v-chip v-else-if="structureSetupScope" color="warning" variant="tonal">专项覆盖</v-chip>
-              <v-btn
-                v-if="structureSetupScope && !structureSetupScope.startsWith('default::')"
-                size="small"
-                color="warning"
-                variant="tonal"
-                :loading="structureEngineSaving"
-                prepend-icon="mdi-delete-restore"
-                @click="clearCurrentStructureSetupOverride"
-              >
-                清除专项配置
-              </v-btn>
-            </div>
-            <div class="d-flex flex-wrap ga-2 mb-3">
-              <v-btn v-for="item in structureSetupRows" :key="item.setup_type" size="small" :variant="item.selected ? 'flat' : 'tonal'" :color="item.selected ? 'primary' : (item.overridden ? 'warning' : undefined)" @click="selectStructureSetupInRange(item.setup_type)">
-                {{ item.label }}<v-badge v-if="item.overridden" inline color="warning" content="已覆盖" class="ml-2" />
-              </v-btn>
-            </div>
-            <v-alert v-if="structureSetupScope && !structureSetupScope.startsWith('default::')" type="warning" variant="tonal" density="compact" class="mb-3">
-              <div class="d-flex flex-wrap align-center ga-2">
-                <span>当前专项相对公共默认的覆盖字段：</span>
-                <v-chip v-for="field in structureSetupOverrideFields" :key="field" size="x-small" color="warning">{{ field }}</v-chip>
-                <span v-if="!structureSetupOverrideFields.length">暂无覆盖，当前全部继承公共默认。</span>
-                <v-spacer />
-                <v-btn size="small" color="warning" variant="text" :loading="structureEngineSaving" @click="clearCurrentStructureSetupOverride">清除专项，恢复公共默认</v-btn>
-              </div>
-            </v-alert>
-            <v-alert type="info" variant="tonal" density="compact" class="mb-3">
-              <div><strong>{{ currentSetupSummary }}</strong></div>
-              <p class="text-body-2 mt-2 mb-0">{{ currentSetupGuide }}</p>
-            </v-alert>
-            <div class="d-flex flex-wrap ga-2 align-center">
-              <v-switch v-model="structureSetupProfileDraft.enabled" :class="setupFieldClass('enabled')" color="primary" inset hide-details label="允许交易" />
-              <v-select v-model="structureSetupProfileDraft.allowed_directions" :class="setupFieldClass('allowed_directions')" :items="[{title:'买入',value:'buy'},{title:'卖出',value:'sell'}]" item-title="title" item-value="value" label="允许方向" multiple chips density="compact" variant="outlined" hide-details style="max-width:190px" />
-              <v-select v-if="setupShowsField('entry_mode')" v-model="structureSetupProfileDraft.entry_mode" :class="setupFieldClass('entry_mode')" :items="[{title:'触碰或接近',value:'touch_or_near'},{title:'触碰并收回',value:'touch_and_reclaim'},{title:'突破回踩',value:'breakout_retest'},{title:'收盘突破',value:'close_breakout'}]" item-title="title" item-value="value" label="入场方式" density="compact" variant="outlined" hide-details style="max-width:190px" />
-              <v-select v-model="structureSetupProfileDraft.bind_pattern" :class="setupFieldClass('bind_pattern')" :items="[{title:'箱体',value:'range'},{title:'三角形',value:'triangle'},{title:'趋势',value:'trend'}]" item-title="title" item-value="value" label="绑定形态" hint="看入场层现在是什么几何" persistent-hint density="compact" variant="outlined" hide-details style="max-width:150px" />
-              <v-select v-model="structureSetupProfileDraft.bind_event" :class="setupFieldClass('bind_event')" :items="[{title:'BOS',value:'bos'},{title:'CHoCH',value:'choch'},{title:'回踩',value:'retest'},{title:'回收',value:'reclaim'},{title:'假突破',value:'false_breakout'},{title:'扫单',value:'liquidity_sweep'},{title:'突破确认',value:'breakout_confirmed'}]" item-title="title" item-value="value" label="绑定事件" hint="入场层要出现的事件" persistent-hint density="compact" variant="outlined" hide-details style="max-width:150px" />
-              <v-select v-model="structureSetupProfileDraft.direction_layer" :class="setupFieldClass('direction_layer')" :items="[{title:'Internal',value:'internal'},{title:'Swing',value:'swing'},{title:'External',value:'external'}]" item-title="title" item-value="value" label="方向层级" hint="谁决定做多还是做空，Internal 震荡时通常看 Swing" persistent-hint density="compact" variant="outlined" hide-details style="max-width:180px" />
-              <v-select v-model="structureSetupProfileDraft.entry_layer" :class="setupFieldClass('entry_layer')" :items="[{title:'Internal',value:'internal'},{title:'Swing',value:'swing'},{title:'External',value:'external'}]" item-title="title" item-value="value" label="入场层级" hint="谁给出入场时机，箱体回收通常看 Internal" persistent-hint density="compact" variant="outlined" hide-details style="max-width:180px" />
-              <v-switch v-model="structureSetupProfileDraft.require_external_alignment" :class="setupFieldClass('require_external_alignment')" color="primary" inset hint="打开后：External 必须和这笔单方向一致才做。例如 Swing 上涨、External 已转下跌时，结构位置回撤默认不会逆大级别硬买。关掉则只看方向层，不看 External。箱体类默认关，趋势回撤/三角形突破/CHOCH 默认开。" persistent-hint label="要求 External 同向" />
-              <v-text-field v-if="setupShowsField('confirmation_bars')" v-model.number="structureSetupProfileDraft.confirmation_bars" :class="setupFieldClass('confirmation_bars')" type="number" min="1" max="10" label="确认K线" density="compact" variant="outlined" hide-details style="max-width:110px" />
-              <v-text-field v-if="setupShowsField('min_displacement_atr')" v-model.number="structureSetupProfileDraft.min_displacement_atr" :class="setupFieldClass('min_displacement_atr')" type="number" min="0" step="0.1" label="最小位移 ATR" density="compact" variant="outlined" hide-details style="max-width:140px" />
-              <v-text-field v-if="setupShowsField('min_body_atr')" v-model.number="structureSetupProfileDraft.min_body_atr" :class="setupFieldClass('min_body_atr')" type="number" min="0" step="0.1" label="突破实体 ATR" density="compact" variant="outlined" hide-details style="max-width:130px" />
-              <v-switch v-if="setupShowsField('require_reclaim')" v-model="structureSetupProfileDraft.require_reclaim" :class="setupFieldClass('require_reclaim')" color="primary" inset hint="价格要先刺破结构位，再收回来才进。关掉则靠近结构位就能进。" persistent-hint label="入场需刺破后收回" />
-              <v-switch v-if="setupShowsField('require_retest')" v-model="structureSetupProfileDraft.require_retest" :class="setupFieldClass('require_retest')" color="primary" inset hint="突破后必须回到突破位附近再进，不直接追出去。" persistent-hint label="入场需回踩" />
-              <template v-if="setupShowsField('false_breakout_require_reclaim_close')">
-                <v-switch v-model="structureSetupProfileDraft.false_breakout_require_reclaim_close" :class="setupFieldClass('false_breakout_require_reclaim_close')" color="primary" inset hint="假突破入场本身就是收回。打开后，必须收盘站回箱内才算数，影线扫回来不算。" persistent-hint label="收回必须收盘确认" />
-                <v-text-field v-model.number="structureSetupProfileDraft.false_breakout_confirmation_bars" :class="setupFieldClass('false_breakout_confirmation_bars')" type="number" min="1" max="10" label="收盘确认K线" hint="站回箱内后，还要连续收盘这么多根。1 根是收盘回来即可，2 根更稳。" persistent-hint density="compact" variant="outlined" style="max-width:150px" />
-                <v-text-field v-model.number="structureSetupProfileDraft.false_breakout_min_reclaim_atr" :class="setupFieldClass('false_breakout_min_reclaim_atr')" type="number" min="0" max="2" step="0.05" label="最小回收 ATR" hint="收盘至少进到箱体里面这么远，避免只在边界上晃一下。" persistent-hint density="compact" variant="outlined" style="max-width:150px" />
-              </template>
-              <v-text-field v-if="setupShowsField('min_real_risk_reward')" v-model.number="structureSetupProfileDraft.min_real_risk_reward" :class="setupFieldClass('min_real_risk_reward')" type="number" min="0" step="0.1" label="最低盈亏比" density="compact" variant="outlined" hide-details style="max-width:130px" />
-              <v-text-field v-if="setupShowsField('entry_zone_atr')" v-model.number="structureSetupProfileDraft.entry_zone_atr" :class="setupFieldClass('entry_zone_atr')" type="number" min="0" step="0.05" label="入场 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
-              <v-text-field v-if="setupShowsField('stop_buffer_atr')" v-model.number="structureSetupProfileDraft.stop_buffer_atr" :class="setupFieldClass('stop_buffer_atr')" type="number" min="0" step="0.05" label="止损 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
-              <v-text-field v-if="setupShowsField('target_buffer_atr')" v-model.number="structureSetupProfileDraft.target_buffer_atr" :class="setupFieldClass('target_buffer_atr')" type="number" min="0" step="0.05" label="止盈 ATR" density="compact" variant="outlined" hide-details style="max-width:120px" />
-              <v-text-field v-if="setupShowsField('max_plan_lifetime_bars')" v-model.number="structureSetupProfileDraft.max_plan_lifetime_bars" :class="setupFieldClass('max_plan_lifetime_bars')" type="number" min="10" max="1000" label="计划安全兜底（K线）" hint="结构事件未发生时的最长保留上限" persistent-hint density="compact" variant="outlined" hide-details style="max-width:150px" />
-              <v-btn color="primary" variant="tonal" :loading="structureEngineSaving" @click="saveStructureSetupConfig">{{ structureSetupScope?.startsWith('default::') ? '保存公共 SETUP 默认' : '保存当前 SETUP 专项' }}</v-btn>
-            </div>
-                      </v-card-text>
+                                  </v-card-text>
         </v-card>
       </v-col>
     </v-row>
@@ -1539,20 +1478,7 @@
       </v-card>
     </v-dialog>
 
-    <v-dialog v-model="saveAsStructureSetupOpen" max-width="560">
-      <v-card>
-        <v-card-title>另存为品种 · 周期 · SETUP 专项</v-card-title>
-        <v-card-text>
-          <p class="text-body-2 mb-4">从当前公共默认或已有专项复制参数。保存后只记录相对公共默认的显式覆盖，未修改字段继续继承公共默认。</p>
-          <v-select v-model="saveAsStructureSetupDraft.symbol" :items="structureSaveAsSymbols" item-title="title" item-value="value" label="品种" density="compact" variant="outlined" :disabled="structureEngineSaving" />
-          <v-select v-model="saveAsStructureSetupDraft.period" :items="[{title:'所有周期',value:'*'},{title:'M1',value:'M1'},{title:'M5',value:'M5'},{title:'M15',value:'M15'},{title:'H1',value:'H1'},{title:'H4',value:'H4'}]" item-title="title" item-value="value" label="周期" density="compact" variant="outlined" :disabled="structureEngineSaving" />
-          <v-select v-model="saveAsStructureSetupDraft.setup_type" :items="structureSetupTypes" item-title="label" item-value="value" label="SETUP" density="compact" variant="outlined" :disabled="structureEngineSaving" />
-        </v-card-text>
-        <v-card-actions><v-spacer/><v-btn variant="text" @click="saveAsStructureSetupOpen=false">取消</v-btn><v-btn color="primary" :loading="structureEngineSaving" :disabled="!saveAsStructureSetupDraft.symbol || !saveAsStructureSetupDraft.setup_type || (saveAsStructureSetupDraft.symbol === '*' && saveAsStructureSetupDraft.period === '*')" @click="saveAsStructureSetup">保存专项</v-btn></v-card-actions>
-      </v-card>
-    </v-dialog>
-
-    <v-dialog v-model="structureEffectiveDialog" max-width="900"><v-card><v-card-title>最终生效配置 · {{ structureEffectiveTarget.symbol }} · {{ structureEffectiveTarget.period }}<span v-if="structureEffectiveTarget.setupType"> · {{ setupTypeLabel(structureEffectiveTarget.setupType) }}</span></v-card-title><v-card-text><v-progress-linear v-if="structureEffectiveLoading" indeterminate /><v-table v-else-if="structureEffective" density="compact"><thead><tr><th>字段</th><th>最终值</th><th>来源</th></tr></thead><tbody><tr v-for="(value,key) in structureEffective.config" :key="key" :class="{ 'bg-green-lighten-5': structureEffective.sources?.[key] !== 'default' }"><td>{{ structureFieldLabels[key] || key }}</td><td class="text-caption">{{ formatStructureValue(value) }}</td><td><v-chip size="x-small" :color="structureEffective.sources?.[key] !== 'default' ? 'primary' : 'grey'" variant="tonal">{{ structureSourceLabel(structureEffective.sources?.[key]) }}</v-chip></td></tr></tbody></v-table></v-card-text><v-card-actions><v-spacer/><v-btn variant="text" @click="structureEffectiveDialog=false">关闭</v-btn></v-card-actions></v-card></v-dialog>
+    <v-dialog v-model="structureEffectiveDialog" max-width="900"><v-card><v-card-title>最终生效配置 · {{ structureEffectiveTarget.symbol }} · {{ structureEffectiveTarget.period }}</v-card-title><v-card-text><v-progress-linear v-if="structureEffectiveLoading" indeterminate /><v-table v-else-if="structureEffective" density="compact"><thead><tr><th>字段</th><th>最终值</th><th>来源</th></tr></thead><tbody><tr v-for="(value,key) in structureEffective.config" :key="key" :class="{ 'bg-green-lighten-5': structureEffective.sources?.[key] !== 'default' }"><td>{{ structureFieldLabels[key] || key }}</td><td class="text-caption">{{ formatStructureValue(value) }}</td><td><v-chip size="x-small" :color="structureEffective.sources?.[key] !== 'default' ? 'primary' : 'grey'" variant="tonal">{{ structureSourceLabel(structureEffective.sources?.[key]) }}</v-chip></td></tr></tbody></v-table></v-card-text><v-card-actions><v-spacer/><v-btn variant="text" @click="structureEffectiveDialog=false">关闭</v-btn></v-card-actions></v-card></v-dialog>
 
     <!-- 错误提示 -->
     <v-snackbar v-model="showError" color="error" timeout="5000" location="top">
@@ -2339,6 +2265,7 @@ export default {
       }
     }
 
+    const structureOverviewRows = computed(() => (structureOverview.value?.items || []).filter(row => row.has_profile))
     const loadStructureOverview = async () => { structureOverviewLoading.value = true; try { structureOverview.value = await marketAPI.getMarketStructureConfigOverview() } finally { structureOverviewLoading.value = false } }
     const loadStructureHistory = async () => { structureHistoryLoading.value = true; try { const data = await marketAPI.getMarketStructureConfigHistory(100); structureHistory.value = data.items || [] } finally { structureHistoryLoading.value = false } }
     const openEffectiveConfig = async (symbol, period, setupType = '') => { structureEffectiveTarget.value = { symbol, period, setupType }; structureEffectiveDialog.value = true; structureEffectiveLoading.value = true; try { structureEffective.value = await marketAPI.getEffectiveMarketStructureConfig(symbol, period, setupType) } finally { structureEffectiveLoading.value = false } }
@@ -2346,7 +2273,7 @@ export default {
       const symbol = String(row?.symbol || '').trim().toUpperCase()
       const period = String(row?.period || '').trim().toUpperCase()
       if (!symbol || !period) return
-      const confirmed = window.confirm(`确认删除 ${symbol} · ${period} 的品种/周期专项配置及该周期下全部 SETUP 专项配置吗？\n删除后将恢复公共默认。`)
+      const confirmed = window.confirm(`确认删除 ${symbol} · ${period} 的品种/周期专项配置吗？\n删除后将恢复公共默认。`)
       if (!confirmed) return
       const key = `${symbol}::${period}`
       structureOverviewDeleting.value = key
@@ -2430,13 +2357,13 @@ export default {
       if (manageLoading) structureEngineSaving.value = true
       try {
         const sanitizedProfiles = structureProfiles.value.map(profile => ({ ...profile, allowed_setups: persistAllowedSetups(profile.allowed_setups) }))
-        let payload = { ...structureEngineConfig.value, profiles: sanitizedProfiles, setup_profiles: structureSetupProfiles.value, setup_defaults: structureSetupDefaults.value }
+        let payload = { ...structureEngineConfig.value, profiles: sanitizedProfiles, setup_profiles: [], setup_defaults: {} }
         if (!forceGlobalPayload && structureConfigScope.value !== 'default') {
           const [symbol, period] = structureConfigScope.value.split('::')
           const item = { symbol, period, ...structureEngineConfig.value, allowed_setups: persistAllowedSetups(structureEngineConfig.value.allowed_setups) }
           const index = structureProfiles.value.findIndex(x => x.symbol === symbol && x.period === period)
           if (index >= 0) structureProfiles.value.splice(index, 1, item); else structureProfiles.value.push(item)
-          payload = { ...structureGlobalConfig.value, profiles: structureProfiles.value, setup_profiles: structureSetupProfiles.value, setup_defaults: structureSetupDefaults.value }
+          payload = { ...structureGlobalConfig.value, profiles: structureProfiles.value, setup_profiles: [], setup_defaults: {} }
         }
         const data = await marketAPI.saveMarketStructureConfig(payload)
         if (structureConfigScope.value === 'default') {
@@ -4660,7 +4587,7 @@ export default {
       saveStructureSetupProfile,
       selectStructureSetupProfile,
       removeStructureSetupProfile,
-      structureOverview, structureOverviewLoading, structureOverviewDeleting, loadStructureOverview, deleteStructureOverviewRow,
+      structureOverview, structureOverviewRows, structureOverviewLoading, structureOverviewDeleting, loadStructureOverview, deleteStructureOverviewRow,
       structureEffective, structureEffectiveLoading, structureEffectiveDialog, structureEffectiveTarget, openEffectiveConfig,
       structureHistory, structureHistoryLoading, loadStructureHistory,
       structureFieldLabels, structureSourceLabel, formatStructureValue,

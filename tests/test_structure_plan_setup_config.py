@@ -13,27 +13,13 @@ class _Repository:
         return [self.stored]
 
 
-def test_symbol_and_setup_overrides_have_expected_precedence():
-    stored = {
-        "min_real_risk_reward": 1.2,
-        "profiles": [{
-            "symbol": "BTCUSD", "period": "M5",
-            "allowed_setups": ["trend_continuation"],
-            "min_real_risk_reward": 1.0,
-        }],
-        "setup_profiles": [{
-            "symbol": "BTCUSD", "period": "M5",
-            "setup_type": "trend_continuation",
-            "min_real_risk_reward": 0.8,
-            "enabled": True,
-        }],
-    }
+def test_setup_overlays_are_ignored():
     config = resolve(
         "btcusd", "m5", "trend_continuation",
-        STRUCTURE_PLAN_DEFAULT_CONFIG, lambda: _Repository(stored),
+        STRUCTURE_PLAN_DEFAULT_CONFIG, lambda: _Repository({}),
     )
-    assert config["allowed_setups"] == ["trend_continuation"]
-    assert config["min_real_risk_reward"] == 0.8
+    assert config["min_real_risk_reward"] == STRUCTURE_PLAN_DEFAULT_CONFIG["min_real_risk_reward"]
+    assert config.get("_structure_layers", {}).get("setup") in ({}, None)
 
 
 def test_setup_profile_common_controls_map_to_real_builder_gates():
