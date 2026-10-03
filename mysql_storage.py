@@ -389,7 +389,8 @@ class MySQLStorage:
                     symbol VARCHAR(64) NOT NULL, period VARCHAR(16) NOT NULL,
                     setup_type VARCHAR(64) NOT NULL, strategy_id VARCHAR(64) NOT NULL DEFAULT '',
                     strategy_name VARCHAR(160) NOT NULL DEFAULT '', strategy_status VARCHAR(24) NOT NULL DEFAULT '',
-                    trade_count INT NOT NULL DEFAULT 0,
+                    trade_count INT NOT NULL DEFAULT 0, win_count INT NOT NULL DEFAULT 0,
+                    loss_count INT NOT NULL DEFAULT 0,
                     gross_profit DOUBLE NOT NULL DEFAULT 0, gross_loss DOUBLE NOT NULL DEFAULT 0,
                     max_profit DOUBLE NULL, min_profit DOUBLE NULL,
                     max_loss DOUBLE NULL, min_loss DOUBLE NULL, net_profit DOUBLE NOT NULL DEFAULT 0,
@@ -971,6 +972,8 @@ class MySQLStorage:
                         ("position_attribution_json", "JSON NULL"),
                     ),
                     "daily_pnl_statistics": (
+                        ("win_count", "INT NOT NULL DEFAULT 0"),
+                        ("loss_count", "INT NOT NULL DEFAULT 0"),
                         ("strategy_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
                         ("strategy_name", "VARCHAR(160) NOT NULL DEFAULT ''"),
                         ("strategy_status", "VARCHAR(24) NOT NULL DEFAULT ''"),

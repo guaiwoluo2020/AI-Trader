@@ -13,7 +13,7 @@ def _metrics(values):
     values = [float(v or 0) for v in values]
     wins = [v for v in values if v > 0]
     losses = [v for v in values if v < 0]
-    return (len(values), round(sum(wins), 8), round(abs(sum(losses)), 8),
+    return (len(values), len(wins), len(losses), round(sum(wins), 8), round(abs(sum(losses)), 8),
             round(max(wins), 8) if wins else None, round(min(wins), 8) if wins else None,
             round(max(losses), 8) if losses else None, round(min(losses), 8) if losses else None)
 
@@ -52,15 +52,15 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
         buckets.setdefault(key, []).append(float(row.get("profit") or 0))
     storage.execute("DELETE FROM daily_pnl_statistics WHERE user_id=? AND account_id=? AND business_date=?", (int(user_id), int(account_id), day.isoformat()))
     for (symbol, period, setup, strategy_id), values in buckets.items():
-        count, gross_profit, gross_loss, max_win, min_win, max_loss, min_loss = _metrics(values)
+        count, win_count, loss_count, gross_profit, gross_loss, max_win, min_win, max_loss, min_loss = _metrics(values)
         strategy = storage.fetchone("""SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(config_json,'$.strategy_name')), strategy_id) AS strategy_name
             FROM user_strategy_configs WHERE user_id=? AND strategy_id=?""", (int(user_id), strategy_id)) or {}
         deployment = storage.fetchone("""SELECT status FROM strategy_deployments
             WHERE user_id=? AND account_id=? AND strategy_id=? ORDER BY updated_at DESC LIMIT 1""", (int(user_id), int(account_id), strategy_id)) or {}
         storage.execute("""INSERT INTO daily_pnl_statistics
             (user_id,account_id,execution_mode,business_date,symbol,period,setup,strategy_id,strategy_name,strategy_status,
-             trade_count,gross_profit,gross_loss,max_profit,min_profit,max_loss,min_loss,net_profit,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             trade_count,win_count,loss_count,gross_profit,gross_loss,max_profit,min_profit,max_loss,min_loss,net_profit,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (int(user_id), int(account_id), mode, day.isoformat(), symbol, period, setup, strategy_id,
              str(strategy.get("strategy_name") or strategy_id or "未归因策略"), str(deployment.get("status") or "未部署"), count,
              gross_profit, gross_loss, max_win, min_win, max_loss, min_loss, round(sum(values), 8), int(datetime.now(TZ).timestamp())))
