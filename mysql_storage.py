@@ -387,7 +387,7 @@ class MySQLStorage:
                     user_id BIGINT NOT NULL, account_id BIGINT NOT NULL,
                     execution_mode VARCHAR(16) NOT NULL, business_date DATE NOT NULL,
                     symbol VARCHAR(64) NOT NULL, period VARCHAR(16) NOT NULL,
-                    setup_type VARCHAR(64) NOT NULL, strategy_id VARCHAR(64) NOT NULL DEFAULT '',
+                    plan_type VARCHAR(64) NOT NULL, strategy_id VARCHAR(64) NOT NULL DEFAULT '',
                     strategy_name VARCHAR(160) NOT NULL DEFAULT '', strategy_status VARCHAR(24) NOT NULL DEFAULT '',
                     trade_count INT NOT NULL DEFAULT 0, win_count INT NOT NULL DEFAULT 0,
                     loss_count INT NOT NULL DEFAULT 0,
@@ -396,7 +396,7 @@ class MySQLStorage:
                     max_loss DOUBLE NULL, min_loss DOUBLE NULL, net_profit DOUBLE NOT NULL DEFAULT 0,
                     created_at BIGINT NOT NULL,
                     PRIMARY KEY (id),
-                    UNIQUE KEY uq_daily_pnl_bucket (user_id,account_id,business_date,symbol,period,setup_type,strategy_id),
+                    UNIQUE KEY uq_daily_pnl_bucket (user_id,account_id,business_date,symbol,period,plan_type,strategy_id),
                     KEY idx_daily_pnl_account_date (user_id,account_id,business_date)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """)
@@ -1087,8 +1087,12 @@ class MySQLStorage:
                         """
                     )
                 try:
+                    conn.execute("ALTER TABLE daily_pnl_statistics CHANGE setup_type plan_type VARCHAR(64) NOT NULL")
+                except Exception:
+                    pass
+                try:
                     conn.execute("ALTER TABLE daily_pnl_statistics DROP INDEX uq_daily_pnl_bucket")
-                    conn.execute("ALTER TABLE daily_pnl_statistics ADD UNIQUE KEY uq_daily_pnl_bucket (user_id,account_id,business_date,symbol,period,setup_type,strategy_id)")
+                    conn.execute("ALTER TABLE daily_pnl_statistics ADD UNIQUE KEY uq_daily_pnl_bucket (user_id,account_id,business_date,symbol,period,plan_type,strategy_id)")
                 except Exception:
                     pass
                 for index_sql in (

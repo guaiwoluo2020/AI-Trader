@@ -66,25 +66,30 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
         key = (str(row.get("symbol") or ""), _bucket(period, "未知"), _bucket(attr.get("plan_type") or attr.get("setup_type") or attr.get("selected_plan_type") or attr.get("selected_setup_type"), "未分类"), strategy_id)
         buckets.setdefault(key, []).append(float(row.get("profit") or 0))
     storage.execute("DELETE FROM daily_pnl_statistics WHERE user_id=? AND account_id=? AND business_date=?", (int(user_id), int(account_id), day.isoformat()))
-    for (symbol, period, setup, strategy_id), values in buckets.items():
+    for (symbol, period, plan_type, strategy_id), values in buckets.items():
         count, win_count, loss_count, gross_profit, gross_loss, max_win, min_win, max_loss, min_loss = _metrics(values)
         strategy = storage.fetchone("""SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(config_json,'$.strategy_name')), strategy_id) AS strategy_name
             FROM user_strategy_configs WHERE user_id=? AND strategy_id=?""", (int(user_id), strategy_id)) or {}
         deployment = storage.fetchone("""SELECT status FROM strategy_deployments
             WHERE user_id=? AND account_id=? AND strategy_id=? ORDER BY updated_at DESC LIMIT 1""", (int(user_id), int(account_id), strategy_id)) or {}
         storage.execute("""INSERT INTO daily_pnl_statistics
-            (user_id,account_id,execution_mode,business_date,symbol,period,setup_type,strategy_id,strategy_name,strategy_status,
+            (user_id,account_id,execution_mode,business_date,symbol,period,plan_type,strategy_id,strategy_name,strategy_status,
              trade_count,win_count,loss_count,gross_profit,gross_loss,max_profit,min_profit,max_loss,min_loss,net_profit,created_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (int(user_id), int(account_id), mode, day.isoformat(), symbol, period, setup, strategy_id,
+            (int(user_id), int(account_id), mode, day.isoformat(), symbol, period, plan_type, strategy_id,
              str(strategy.get("strategy_name") or strategy_id or "未归因策略"), str(deployment.get("status") or "未部署"), count,
              win_count, loss_count, gross_profit, gross_loss, max_win, min_win, max_loss, min_loss,
              round(sum(values), 8), int(datetime.now(TZ).timestamp())))
     return len(buckets)
 
 def query_daily_pnl_statistics(storage, user_id, account_id, day):
-    rows = storage.fetchall("SELECT * FROM daily_pnl_statistics WHERE user_id=? AND account_id=? AND business_date=? ORDER BY symbol,period,setup_type", (int(user_id), int(account_id), day.isoformat()))
-    return [dict(row) for row in rows or []]
+    rows = storage.fetchall("SELECT * FROM daily_pnl_statistics WHERE user_id=? AND account_id=? AND business_date=? ORDER BY symbol,period,plan_type", (int(user_id), int(account_id), day.isoformat()))
+    result = []
+    for row in rows or []:
+        item = dict(row)
+        item["plan_type"] = item.get("plan_type") or item.get("setup_type") or ""
+        result.append(item)
+    return result
 
 def rebuild_yesterday_for_all_accounts(storage):
     day = datetime.now(TZ).date() - timedelta(days=1)

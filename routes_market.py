@@ -2461,12 +2461,15 @@ def create_market_routes(
                         "closed_position_count", 0
                     ),
                     "attributed_positions": report.get("summary", {}).get(
-                        "setup_attributed_position_count", 0
+                        "plan_attributed_position_count",
+                        report.get("summary", {}).get("setup_attributed_position_count", 0),
                     ),
                     "unattributed_positions": report.get("summary", {}).get(
                         "setup_unattributed_position_count", 0
                     ),
                 },
+                "by_plan_type": report.get("by_plan_type") or report.get("by_setup", []),
+                "by_plan_direction": report.get("by_plan_direction") or report.get("by_setup_direction", []),
                 "by_setup": report.get("by_setup", []),
                 "by_setup_family": report.get("by_setup_family", []),
                 "by_setup_profile": report.get("by_setup_profile", []),

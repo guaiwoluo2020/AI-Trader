@@ -867,7 +867,8 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
             trade["order_source"] = (
                 "策略指令" if attribution else (trade.get("comment") or "MT5 成交")
             )
-            trade["setup_type"] = attribution.get("setup_type", "")
+            trade["plan_type"] = attribution.get("plan_type") or attribution.get("setup_type", "")
+            trade["setup_type"] = trade["plan_type"]
             trade["setup_profile_name"] = attribution.get("setup_profile_name", "")
             trade["open_reason"] = attribution.get("entry_reason", "")
             trade["close_reason"] = attribution.get("exit_reason", "")
@@ -896,7 +897,8 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
                 trade["strategy_triggered"] = False
         for report in execution_reports:
             attribution = report.get("position_attribution") or {}
-            report["setup_type"] = attribution.get("setup_type", "")
+            report["plan_type"] = attribution.get("plan_type") or attribution.get("setup_type", "")
+            report["setup_type"] = report["plan_type"]
             report["setup_profile_name"] = attribution.get("setup_profile_name", "")
             report["open_reason"] = attribution.get("entry_reason", "")
             report["initial_stop_loss"] = float(
@@ -951,7 +953,7 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         rows = query_daily_pnl_statistics(repository.storage, user.user_id, account_id, day)
         stale = any(
             str(row.get("period") or "") == "未知"
-            and str(row.get("setup_type") or "") == "未分类"
+            and str(row.get("plan_type") or row.get("setup_type") or "") == "未分类"
             and not str(row.get("strategy_id") or "").strip()
             for row in rows or []
         )

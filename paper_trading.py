@@ -1510,7 +1510,8 @@ class PaperTradingService:
                 position.get("position_attribution_json") or "{}"
             )
             attribution = position["position_attribution"]
-            position["setup_type"] = attribution.get("setup_type", "")
+            position["plan_type"] = attribution.get("plan_type") or attribution.get("setup_type", "")
+            position["setup_type"] = position["plan_type"]
             position["setup_profile_name"] = attribution.get(
                 "setup_profile_name", ""
             )
@@ -1585,7 +1586,8 @@ class PaperTradingService:
                     )
                 )
             )
-            order["setup_type"] = attribution.get("setup_type", "")
+            order["plan_type"] = attribution.get("plan_type") or attribution.get("setup_type", "")
+            order["setup_type"] = order["plan_type"]
             order["setup_profile_name"] = attribution.get("setup_profile_name", "")
             order["initial_stop_loss"] = float(
                 attribution.get("initial_stop_loss") or order.get("stop_loss") or 0
@@ -1605,7 +1607,8 @@ class PaperTradingService:
                     str(trade.get("open_decision_id") or ""), "策略信号触发开仓"
                 )
             )
-            trade["setup_type"] = attribution.get("setup_type", "")
+            trade["plan_type"] = attribution.get("plan_type") or attribution.get("setup_type", "")
+            trade["setup_type"] = trade["plan_type"]
             trade["setup_profile_name"] = attribution.get("setup_profile_name", "")
             trade["initial_stop_loss"] = float(
                 attribution.get("initial_stop_loss")
@@ -1755,10 +1758,10 @@ class PaperTradingService:
         by_symbol = self._group_trade_stats(trades, "symbol")
         by_exit = self._group_trade_stats(trades, "exit_reason")
         attributed_outcomes = [
-            item for item in position_outcomes if item.get("setup_type")
+            item for item in position_outcomes if item.get("plan_type") or item.get("setup_type")
         ]
         by_setup = self._group_position_outcomes(
-            attributed_outcomes, "setup_type"
+            attributed_outcomes, "plan_type"
         )
         by_setup_family = self._group_position_outcomes(
             attributed_outcomes, "setup_family"
@@ -1798,6 +1801,7 @@ class PaperTradingService:
             "average_position_r": round(
                 statistics.mean(position_r_values), 3
             ) if position_r_values else 0,
+            "plan_attributed_position_count": len(attributed_outcomes),
             "setup_attributed_position_count": len(attributed_outcomes),
             "setup_unattributed_position_count": (
                 len(position_outcomes) - len(attributed_outcomes)
@@ -1817,6 +1821,8 @@ class PaperTradingService:
             "by_strategy": by_strategy,
             "by_symbol": by_symbol,
             "by_exit_reason": by_exit,
+            "by_plan_type": by_setup,
+            "by_plan_direction": by_setup_direction,
             "by_setup": by_setup,
             "by_setup_family": by_setup_family,
             "by_setup_profile": by_setup_profile,
@@ -1938,19 +1944,20 @@ class PaperTradingService:
                 net_profit / risk_amount if risk_amount > 0
                 else float(attribution.get("realized_r") or 0)
             )
-            setup_type = str(attribution.get("setup_type") or "")
+            plan_type = str(attribution.get("plan_type") or attribution.get("setup_type") or "")
             direction = str(ordered[-1].get("direction") or "")
             outcomes.append({
                 "position_id": position_id,
                 "strategy_id": str(ordered[-1].get("strategy_id") or ""),
                 "symbol": symbol,
                 "direction": direction,
-                "setup_type": setup_type,
+                "plan_type": plan_type,
+                "setup_type": plan_type,
                 "setup_family": str(attribution.get("setup_family") or ""),
                 "setup_profile_id": str(attribution.get("setup_profile_id") or ""),
                 "setup_profile_name": str(attribution.get("setup_profile_name") or ""),
                 "setup_direction": (
-                    f"{setup_type}|{direction}" if setup_type else ""
+                    f"{plan_type}|{direction}" if plan_type else ""
                 ),
                 "entry_mode": str(attribution.get("entry_mode") or ""),
                 "exit_reason": str(

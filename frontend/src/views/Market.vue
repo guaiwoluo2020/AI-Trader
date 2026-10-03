@@ -89,7 +89,7 @@
           <p class="decision-reason">{{ selectedDecision.reason || '未提供策略决策理由' }}</p>
           <section v-if="selectedDecision.signal_summary?.position_management" class="ai-context-panel">
             <div class="ai-context-title"><strong>持仓管理场景匹配</strong><v-chip size="x-small" color="primary" variant="tonal">{{ selectedDecision.signal_summary.position_management.applied_setup_profile?.name || '默认方案' }}</v-chip></div>
-            <div class="plan-grid"><div><span>Setup</span><strong>{{ setupTypeLabel(selectedDecision.signal_summary.position_management.setup_context?.setup_type) }}</strong></div><div><span>通用场景族</span><strong>{{ setupFamilyLabel(selectedDecision.signal_summary.position_management.setup_context?.setup_family) }}</strong></div><div><span>信号来源</span><strong>{{ selectedDecision.signal_summary.position_management.setup_context?.signal_source || '--' }}</strong></div><div><span>入场模式</span><strong>{{ entryModeLabel(selectedDecision.signal_summary.position_management.setup_context?.entry_mode) }}</strong></div></div>
+            <div class="plan-grid"><div><span>计划类型</span><strong>{{ setupTypeLabel(selectedDecision.signal_summary.position_management.setup_context?.plan_type || selectedDecision.signal_summary.position_management.setup_context?.setup_type) }}</strong></div><div><span>通用场景族</span><strong>{{ setupFamilyLabel(selectedDecision.signal_summary.position_management.setup_context?.setup_family) }}</strong></div><div><span>信号来源</span><strong>{{ selectedDecision.signal_summary.position_management.setup_context?.signal_source || '--' }}</strong></div><div><span>入场模式</span><strong>{{ entryModeLabel(selectedDecision.signal_summary.position_management.setup_context?.entry_mode) }}</strong></div></div>
             <div class="combined-background"><span>实际采用规则</span><strong>{{ (selectedDecision.signal_summary.position_management.explanation || []).join('；') || '使用默认持仓管理方案' }}</strong></div>
           </section>
           <v-alert v-if="selectedDecision.signal_summary?.loss_streak_guard?.loss_streak >= 2" :type="selectedDecision.signal_summary.loss_streak_guard.allowed ? 'info' : 'warning'" variant="tonal" class="mt-3">连续止损 {{ selectedDecision.signal_summary.loss_streak_guard.loss_streak }} 次：{{ selectedDecision.signal_summary.loss_streak_guard.reason || '冷却已结束，本次允许重新评估' }}</v-alert>
@@ -340,6 +340,11 @@ export default {
     }[value] || value || '--')
     const setupTypeLabel = value => ({
       range_reversal: '箱体边界反转', range_breakout: '箱体突破',
+      swing_range_breakout: 'Swing箱体突破', internal_range_breakout: 'Internal箱体突破',
+      internal_momentum: '内部动量', trend_continuation: '趋势延续',
+      structure_reversal: '结构反转', early_reversal: '早期反转',
+      internal_liquidity_reversal: 'Internal扫单反转', swing_liquidity_reversal: 'Swing扫单反转',
+      swing_pullback: 'Swing回撤', internal_pullback: 'Internal回撤',
       trend_pullback: '上涨趋势回调', trend_rebound: '下跌趋势反抽',
       triangle_breakout: '三角形突破', pivot_reversal: '转折点反转',
       pivot_breakout: '转折点突破', key_level_reversal: '关键位反转',

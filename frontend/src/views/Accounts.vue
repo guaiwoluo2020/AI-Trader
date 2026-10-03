@@ -376,19 +376,19 @@
             </div>
             <div class="setup-performance-panel">
               <div class="benchmark-title">
-                <div><span>SETUP PERFORMANCE</span><h4>按交易形态评估</h4></div>
+                <div><span>PLAN PERFORMANCE</span><h4>按计划类型评估</h4></div>
                 <small>
-                  已归因 {{ paperReport.summary.setup_attributed_position_count || 0 }} / {{ paperReport.summary.closed_position_count || 0 }} 个已平仓持仓
+                  已归因 {{ paperReport.summary.plan_attributed_position_count || paperReport.summary.setup_attributed_position_count || 0 }} / {{ paperReport.summary.closed_position_count || 0 }} 个已平仓持仓
                 </small>
               </div>
-              <div v-if="!paperReport.by_setup?.length" class="setup-empty">
-                暂无带 Setup 归因的已平仓持仓。新订单完成平仓后将在这里开始统计。
+              <div v-if="!(paperReport.by_plan_type || paperReport.by_setup)?.length" class="setup-empty">
+                暂无带计划类型归因的已平仓持仓。新订单完成平仓后将在这里开始统计。
               </div>
               <div v-else class="setup-performance-table">
                 <article class="setup-performance-head">
-                  <span>Setup</span><span>样本</span><span>胜率</span><span>平均 R</span><span>收益因子</span><span>净收益</span><span>连续亏损</span>
+                  <span>计划类型</span><span>样本</span><span>胜率</span><span>平均 R</span><span>收益因子</span><span>净收益</span><span>连续亏损</span>
                 </article>
-                <article v-for="item in paperReport.by_setup" :key="item.name">
+                <article v-for="item in (paperReport.by_plan_type || paperReport.by_setup)" :key="item.name">
                   <strong>{{ setupLabel(item.name) }}</strong>
                   <span>{{ item.position_count }} 个 <v-chip size="x-small" :color="sampleColor(item.sample_status)" variant="tonal">{{ sampleLabel(item.sample_status) }}</v-chip></span>
                   <span>{{ item.win_rate }}%</span>
@@ -398,8 +398,8 @@
                   <span>{{ item.max_consecutive_losses }}</span>
                 </article>
               </div>
-              <div v-if="paperReport.by_setup_direction?.length" class="setup-direction-grid">
-                <div v-for="item in paperReport.by_setup_direction" :key="item.name">
+              <div v-if="(paperReport.by_plan_direction || paperReport.by_setup_direction)?.length" class="setup-direction-grid">
+                <div v-for="item in (paperReport.by_plan_direction || paperReport.by_setup_direction)" :key="item.name">
                   <b>{{ setupDirectionLabel(item.name) }}</b>
                   <span>{{ item.position_count }} 个 · 胜率 {{ item.win_rate }}% · 平均 {{ Number(item.average_r).toFixed(2) }}R</span>
                 </div>
@@ -421,7 +421,7 @@
                     <b :class="position.direction === 'buy' ? 'positive' : 'negative'">{{ position.direction === 'buy' ? '买入' : '卖出' }}</b>
                     <strong>{{ position.symbol }} · {{ position.remaining_volume || position.volume }} / {{ position.volume }} 手</strong>
                     <span>{{ strategyName(position.strategy_id) }}</span>
-                    <span v-if="position.setup_type">{{ setupLabel(position.setup_type) }} · {{ position.setup_profile_name || '默认持仓方案' }}</span>
+                    <span v-if="position.plan_type || position.setup_type">{{ setupLabel(position.plan_type || position.setup_type) }} · {{ position.setup_profile_name || '默认持仓方案' }}</span>
                   </div>
                   <div class="paper-position-actions">
                     <v-chip size="x-small" :color="Number(position.stop_loss) && Number(position.take_profit) ? 'success' : 'warning'" variant="tonal">{{ paperProtectionLabel(position) }}</v-chip>
@@ -459,7 +459,7 @@
                 <b>{{ trade.symbol }} · {{ trade.direction === 'buy' ? '买入' : '卖出' }}</b>
                 <span>持仓 {{ trade.position_id || '--' }}</span>
                 <span>开仓 {{ price(trade.entry_price) }} · 初始止损 {{ price(trade.initial_stop_loss) }} · 初始止盈 {{ price(trade.initial_take_profit) }}</span>
-                <span>{{ trade.setup_type ? `${setupLabel(trade.setup_type)} · ` : '' }}{{ trade.execution_reason || exitReasonLabel(trade.exit_reason) }}<template v-if="trade.realized_r"> · {{ Number(trade.realized_r).toFixed(2) }}R</template></span>
+                <span>{{ (trade.plan_type || trade.setup_type) ? `${setupLabel(trade.plan_type || trade.setup_type)} · ` : '' }}{{ trade.execution_reason || exitReasonLabel(trade.exit_reason) }}<template v-if="trade.realized_r"> · {{ Number(trade.realized_r).toFixed(2) }}R</template></span>
                 <small class="reject-reason">{{ trade.open_reason || '策略信号触发开仓' }}</small>
                 <strong :class="trade.net_profit >= 0 ? 'positive' : 'negative'">{{ signedMoney(trade.net_profit) }}</strong>
               </div>
@@ -472,7 +472,7 @@
               <b :class="order.direction === 'buy' ? 'positive' : 'negative'">{{ order.direction === 'buy' ? '买入' : '卖出' }}</b>
               <span>{{ order.symbol }} · {{ order.requested_volume }} 手 · 持仓 {{ order.position_id || '成交后生成' }}</span>
               <span>初始止损 {{ price(order.initial_stop_loss) }} · 初始止盈 {{ price(order.initial_take_profit) }}</span>
-              <span v-if="order.setup_type">{{ setupLabel(order.setup_type) }} · {{ order.setup_profile_name || '默认持仓方案' }}</span>
+              <span v-if="order.plan_type || order.setup_type">{{ setupLabel(order.plan_type || order.setup_type) }} · {{ order.setup_profile_name || '默认持仓方案' }}</span>
               <span>{{ order.filled_price ?? order.requested_price }}</span>
               <v-chip size="x-small" variant="tonal" :color="orderStatus(order.status).color">{{ orderStatus(order.status).label }}</v-chip>
               <span class="reject-reason">{{ order.open_reason || order.rejection_reason || '--' }}</span>
@@ -657,7 +657,7 @@
                 <span>{{ trade.time || '--' }}</span>
                 <b :class="trade.type === 0 ? 'positive' : 'negative'">{{ trade.type_text }} · {{ trade.symbol }}</b>
                 <span>Position {{ trade.mt5_position_id || '--' }} · {{ trade.entry_text }} · {{ trade.order_source }}</span>
-                <span v-if="trade.strategy_triggered">{{ trade.setup_type ? `${setupLabel(trade.setup_type)} · ` : '' }}{{ trade.execution_reason || '策略成交' }}</span>
+                <span v-if="trade.strategy_triggered">{{ (trade.plan_type || trade.setup_type) ? `${setupLabel(trade.plan_type || trade.setup_type)} · ` : '' }}{{ trade.execution_reason || '策略成交' }}</span>
                 <small v-if="trade.open_reason" class="reject-reason">{{ trade.open_reason }} · 初始 SL {{ price(trade.initial_stop_loss) }} · TP {{ price(trade.initial_take_profit) }}</small>
                 <strong :class="Number(trade.profit) >= 0 ? 'positive' : 'negative'">{{ signedMoney(trade.profit) }}</strong>
               </div>
@@ -672,7 +672,7 @@
               <span>{{ report.symbol }} · {{ report.executed_volume || report.requested_volume }} 手 · Position {{ report.mt5_position_id || '--' }}</span>
               <span>{{ price(report.executed_price || report.requested_price) }} · 初始 SL {{ price(report.initial_stop_loss) }} · TP {{ price(report.initial_take_profit) }}</span>
               <v-chip size="x-small" :color="report.success ? 'success' : 'error'" variant="tonal">{{ report.success ? '已成交' : '失败' }}</v-chip>
-              <span v-if="report.setup_type">{{ setupLabel(report.setup_type) }} · {{ report.setup_profile_name || '默认持仓方案' }}</span>
+              <span v-if="report.plan_type || report.setup_type">{{ setupLabel(report.plan_type || report.setup_type) }} · {{ report.setup_profile_name || '默认持仓方案' }}</span>
               <span class="reject-reason">{{ report.action === 'position_modify_sl' ? `实际 SL ${price(report.executed_price)}${report.retcode ? ` · retcode ${report.retcode}` : ''}` : (report.open_reason || report.error_message || `滑点 ${Number(report.slippage || 0).toFixed(5)}`) }}</span>
             </div>
             </div>
@@ -1149,11 +1149,13 @@ function setupLabel(value) {
     internal_liquidity_reversal: 'Internal扫单反转',
     swing_liquidity_reversal: 'Swing扫单反转',
     trend_continuation: '趋势延续',
+    internal_momentum: '内部动量',
     choch_reversal: 'CHOCH 反转',
     structure_reversal: '结构反转',
     early_reversal: '早期反转',
     swing_pullback: 'Swing回撤',
     internal_pullback: 'Internal回撤',
+    event_confirmation: '事件确认',
     reversal: '转折入场',
     generic_entry: '通用入场',
   }[value] || value || '通用入场'
