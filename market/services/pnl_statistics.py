@@ -58,7 +58,7 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
         deployment = storage.fetchone("""SELECT status FROM strategy_deployments
             WHERE user_id=? AND account_id=? AND strategy_id=? ORDER BY updated_at DESC LIMIT 1""", (int(user_id), int(account_id), strategy_id)) or {}
         storage.execute("""INSERT INTO daily_pnl_statistics
-            (user_id,account_id,execution_mode,business_date,symbol,period,setup,strategy_id,strategy_name,strategy_status,
+            (user_id,account_id,execution_mode,business_date,symbol,period,setup_type,strategy_id,strategy_name,strategy_status,
              trade_count,win_count,loss_count,gross_profit,gross_loss,max_profit,min_profit,max_loss,min_loss,net_profit,created_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (int(user_id), int(account_id), mode, day.isoformat(), symbol, period, setup, strategy_id,
