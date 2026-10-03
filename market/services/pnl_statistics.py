@@ -63,7 +63,8 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (int(user_id), int(account_id), mode, day.isoformat(), symbol, period, setup, strategy_id,
              str(strategy.get("strategy_name") or strategy_id or "未归因策略"), str(deployment.get("status") or "未部署"), count,
-             gross_profit, gross_loss, max_win, min_win, max_loss, min_loss, round(sum(values), 8), int(datetime.now(TZ).timestamp())))
+             win_count, loss_count, gross_profit, gross_loss, max_win, min_win, max_loss, min_loss,
+             round(sum(values), 8), int(datetime.now(TZ).timestamp())))
     return len(buckets)
 
 def query_daily_pnl_statistics(storage, user_id, account_id, day):
