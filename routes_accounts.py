@@ -949,8 +949,14 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD") from exc
         rows = query_daily_pnl_statistics(repository.storage, user.user_id, account_id, day)
-        # 任务刚部署或服务在统计时刻未运行时，首次查询补建该日快照。
-        if not rows and day < datetime.now(ZoneInfo("Asia/Shanghai")).date():
+        stale = any(
+            str(row.get("period") or "") == "未知"
+            and str(row.get("setup_type") or "") == "未分类"
+            and not str(row.get("strategy_id") or "").strip()
+            for row in rows or []
+        )
+        # 任务刚部署、服务在统计时刻未运行、或快照仍含手工单时，补建该日快照。
+        if day < datetime.now(ZoneInfo("Asia/Shanghai")).date() and (not rows or stale):
             build_daily_pnl_statistics(repository.storage, user.user_id, account_id, day)
             rows = query_daily_pnl_statistics(repository.storage, user.user_id, account_id, day)
         return {"status": "ok", "business_date": day.isoformat(), "rows": rows}

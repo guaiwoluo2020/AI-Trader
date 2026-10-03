@@ -9,6 +9,16 @@ def _bucket(value, fallback):
     value = str(value or fallback).strip()
     return value or fallback
 
+
+def _is_strategy_trade(row, attr):
+    """Keep strategy/AIT trades; empty-comment broker fills are manual."""
+    if str(row.get("strategy_id") or attr.get("strategy_id") or "").strip():
+        return True
+    if str(attr.get("plan_type") or attr.get("setup_type") or attr.get("selected_plan_type") or attr.get("selected_setup_type") or "").strip():
+        return True
+    comment = str(row.get("comments") or row.get("comment") or "").upper()
+    return "AIT|" in comment or comment.startswith("AIT")
+
 def _metrics(values):
     values = [float(v or 0) for v in values]
     wins = [v for v in values if v > 0]
@@ -35,13 +45,18 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
             GROUP BY p.position_id, p.symbol, t.strategy_id, p.position_attribution_json""", (int(user_id), int(account_id), start, end))
     else:
         rows = storage.fetchall("""SELECT symbol, strategy_id, mt5_position_id, SUM(profit+swap+commission) AS profit,
-            MAX(deal_timestamp) AS closed_at, MAX(position_attribution_json) AS attribution
+            MAX(deal_timestamp) AS closed_at, MAX(position_attribution_json) AS attribution,
+            GROUP_CONCAT(comment) AS comments
             FROM live_trade_deals WHERE user_id=? AND account_id=? AND deal_timestamp>=? AND deal_timestamp<?
             GROUP BY mt5_position_id, symbol, strategy_id""", (int(user_id), int(account_id), start, end))
     buckets = {}
     for row in rows or []:
         try: attr = json.loads(row.get("attribution") or "{}")
         except (TypeError, ValueError): attr = {}
+        if not isinstance(attr, dict):
+            attr = {}
+        if not _is_strategy_trade(row, attr):
+            continue
         period = (
             attr.get("period") or attr.get("source_period")
             or attr.get("signal_source_period") or attr.get("selected_signal_period")
