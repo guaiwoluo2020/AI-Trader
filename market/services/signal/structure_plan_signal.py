@@ -132,7 +132,7 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "trend_retest_stop_atr": 4.0,
     "trend_max_stop_atr": 6.0,
     "choch_max_stop_atr": 3.0,
-    "choch_retest_confirmation_bars": 2,
+    "choch_retest_confirmation_bars": 3,
     "choch_retest_min_body_atr": 0.2,
     "choch_retest_min_close_extension_atr": 0.05,
     "min_choch_displacement_atr": 0.2,
@@ -1289,8 +1289,6 @@ class StructurePlanSignalGenerator:
         self, plan: Dict, closed_bars: List[Dict], effective_config: Dict,
     ) -> bool:
         """Re-check the completed reclaim sequence at the actual entry."""
-        if str(plan.get("entry_mode") or "") != "touch_and_reclaim":
-            return True
         if not closed_bars:
             return False
         entry = _number(plan.get("entry_price"))
@@ -1301,9 +1299,11 @@ class StructurePlanSignalGenerator:
         bar_time = _bar_time(closed_bars[-1])
         if bar_time <= 0:
             return False
-        required_bars = max(1, int(effective_config.get(
-            "confirmation_bars", effective_config.get("location_reclaim_confirmation_bars", 3)
-        )))
+        required_bars = max(1, int(
+            plan.get("confirmation_bars_required")
+            or effective_config.get("confirmation_bars")
+            or effective_config.get("location_reclaim_confirmation_bars", 3)
+        ))
         last_bar = int(plan.get("location_entry_confirmation_bar") or 0)
         if (bar_time == last_bar and int(plan.get(
             "location_entry_confirmation_bars_required") or 0
@@ -1348,7 +1348,7 @@ class StructurePlanSignalGenerator:
         if entry <= 0 or atr <= 0 or direction not in {"buy", "sell"}:
             return False
         required = max(1, int(effective_config.get(
-            "choch_retest_confirmation_bars", 2
+            "choch_retest_confirmation_bars", 3
         )))
         bar_time = _bar_time(closed_bars[-1])
         if bar_time <= 0:
@@ -1446,6 +1446,24 @@ class StructurePlanSignalGenerator:
             if str(plan.get("setup_type") or "").startswith("range_") and str(plan.get("boundary_state") or "") != "triggered":
                 plan["boundary_state"] = "triggered"
                 self.repository.update_payload(plan.get("plan_id"), {"boundary_state": "triggered"})
+            confirmation = str(plan.get("required_confirmation") or plan.get("confirmation_type") or "")
+            plan_type = str(plan.get("plan_type") or setup_type)
+            needs_sequence = confirmation in {
+                "confirmation_sequence", "hl_retest", "lh_retest",
+                "retest_or_reclaim", "retest_or_sequence",
+            } or plan_type in {
+                "swing_pullback", "internal_pullback", "early_reversal",
+                "structure_reversal", "liquidity_reversal", "event_confirmation",
+                "range_reclaim", "internal_momentum", "trend_continuation",
+                "range_breakout",
+            } or setup_type in {
+                "range_false_breakout", "structure_location_pullback", "choch_reversal",
+            }
+            if not needs_sequence:
+                return True
+            bars = closed_bar if isinstance(closed_bar, list) else [closed_bar] if closed_bar else []
+            if not self._location_entry_reclaim_confirmed(plan, bars, effective_config or {}):
+                return False
             return True
         if mode not in {"touch_and_reclaim", "breakout_retest"}:
             return False

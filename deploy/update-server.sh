@@ -33,6 +33,8 @@ keys = {
     "location_reclaim_min_body_atr": (0.3, 0.5),
     "location_reclaim_min_close_extension_atr": (0.1, 0.2),
     "location_proximity_atr": (0.6, 0.4),
+    "confirmation_bars": (1, 3),
+    "choch_retest_confirmation_bars": (2, 3),
 }
 
 def update(layer):
