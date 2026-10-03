@@ -36,7 +36,12 @@ def should_supersede_live_plan(
     if live:
         if opportunity_key in incoming_active_keys:
             return False
-        return bool(incoming_active_keys)
+        # A new sweep/CHOCH/pullback must not retire a live TREND waiter
+        # of another family. Only the same setup and direction is a replacement.
+        return any(
+            str(item[1]) == str(semantic_key[0]) and str(item[2]) == str(semantic_key[1])
+            for item in incoming_active_keys
+        )
     if semantic_key in incoming_observation_keys:
         return False
     if opportunity_key in incoming_active_keys:

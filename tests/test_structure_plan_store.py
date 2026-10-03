@@ -272,10 +272,21 @@ class StructurePlanExecutionIdentityTests(unittest.TestCase):
             current_status="active",
             plan_id="choch-1",
             keep_ids=set(),
-            semantic_key=("choch_reversal", "buy", "breakout_retest"),
-            opportunity_key=("opp-1", "choch_reversal", "buy", "breakout_retest"),
+            semantic_key=("structure_reversal", "buy", "breakout_retest"),
+            opportunity_key=("opp-1", "structure_reversal", "buy", "breakout_retest"),
             incoming_observation_keys=set(),
-            incoming_active_keys={("opp-2", "range_breakout", "buy", "breakout_retest")},
+            incoming_active_keys={("opp-2", "structure_reversal", "buy", "breakout_retest")},
+        ))
+
+    def test_new_choch_does_not_supersede_live_trend_plan(self):
+        self.assertFalse(should_supersede_live_plan(
+            current_status="active",
+            plan_id="trend-1",
+            keep_ids=set(),
+            semantic_key=("trend_continuation", "buy", "breakout_retest"),
+            opportunity_key=("opp-trend", "trend_continuation", "buy", "breakout_retest"),
+            incoming_observation_keys=set(),
+            incoming_active_keys={("opp-choch", "structure_reversal", "sell", "breakout_retest")},
         ))
 
 

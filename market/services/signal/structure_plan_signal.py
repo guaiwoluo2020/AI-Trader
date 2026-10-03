@@ -30,7 +30,7 @@ from .structure_plan.setup_binding import (
 from ..market_event_risk_service import active_event
 from ..structure_events import (
     collect_structure_events, latest_event_for, decide_event_observations,
-    event_conflict_reason,
+    event_conflict_reason, event_is_recent, CREATE_PLAN_EVENTS,
 )
 from ..structure_observation import advance_observation_state, build_observation_plans
 
@@ -363,10 +363,20 @@ class StructurePlanBuilder:
             return int(event.get("confirmed_at") or event.get("index") or 0)
 
         newest = {}
+        last_index = (len(rows) - 1) if rows else None
+        max_bars = max(1, int(self._param("event_plan_fresh_bars", 2)))
         for observation in snapshot.get("observation_plans") or []:
             action = str(observation.get("matrix_action") or "")
             if action not in rank:
                 continue
+            event_type = str(observation.get("event_type") or "")
+            if event_type in CREATE_PLAN_EVENTS:
+                source = event_by_id.get(str(observation.get("source_event_id") or ""), {})
+                if not event_is_recent(
+                    source, bar_time=bar_time, seconds=seconds,
+                    last_index=last_index, max_bars=max_bars,
+                ):
+                    continue
             key = (
                 str(observation.get("event_layer") or ""),
                 str(observation.get("event_type") or ""),

@@ -1,6 +1,6 @@
 import unittest
 
-from market.services.structure_events import collect_structure_events, latest_event_for
+from market.services.structure_events import collect_structure_events, latest_event_for, event_is_recent
 
 
 class StructureEventCatalogTests(unittest.TestCase):
@@ -38,6 +38,16 @@ class StructureEventCatalogTests(unittest.TestCase):
         self.assertEqual(first[0]["event_id"], second[0]["event_id"])
         self.assertEqual(first[0]["confirmed_at"], 1_700_000_000 + 8 * 60)
         self.assertEqual(second[0]["confirmed_at"], 1_700_000_000 + 8 * 60)
+
+    def test_event_is_recent_for_unix_and_index(self):
+        self.assertTrue(event_is_recent(
+            {"confirmed_at": 1_700_000_120}, bar_time=1_700_000_120, seconds=60, max_bars=2,
+        ))
+        self.assertFalse(event_is_recent(
+            {"confirmed_at": 1_700_000_000}, bar_time=1_700_000_300, seconds=60, max_bars=2,
+        ))
+        self.assertTrue(event_is_recent({"confirmed_at": 38}, last_index=39, max_bars=2))
+        self.assertFalse(event_is_recent({"confirmed_at": 10}, last_index=39, max_bars=2))
 
 
 if __name__ == "__main__":

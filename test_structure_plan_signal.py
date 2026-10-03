@@ -101,11 +101,11 @@ def _triangle_structure(pattern="converging_triangle", major_state="sideways"):
 def _trend_structure(direction="down", close=110.0):
     if direction == "down":
         swing_pivots = [
-            {"kind": "high", "label": "LH", "price": 110.0, "index": 36},
+            {"kind": "high", "label": "LH", "price": 110.0, "index": 38, "confirmed_at": 39},
             {"kind": "low", "label": "LL", "price": 100.0, "index": 34},
         ]
         internal_pivots = [
-            {"kind": "high", "label": "LH", "price": 109.5, "index": 38},
+            {"kind": "high", "label": "LH", "price": 109.5, "index": 38, "confirmed_at": 39},
         ]
         levels = {
             "protected_high": {"price": 112.0, "index": 32},
@@ -114,11 +114,11 @@ def _trend_structure(direction="down", close=110.0):
         }
     else:
         swing_pivots = [
-            {"kind": "low", "label": "HL", "price": 110.0, "index": 36},
+            {"kind": "low", "label": "HL", "price": 110.0, "index": 38, "confirmed_at": 39},
             {"kind": "high", "label": "HH", "price": 120.0, "index": 34},
         ]
         internal_pivots = [
-            {"kind": "low", "label": "HL", "price": 110.5, "index": 38},
+            {"kind": "low", "label": "HL", "price": 110.5, "index": 38, "confirmed_at": 39},
         ]
         levels = {
             "protected_low": {"price": 108.0, "index": 32},
@@ -249,3 +249,18 @@ class StructurePlanTests(unittest.TestCase):
         self.assertIn("swing_liquidity_reversal", types)
         self.assertIn("swing_pullback", types)
         self.assertNotIn("trend_continuation", types)
+
+    def test_stale_catalog_sweep_does_not_create_plan(self):
+        structure = {
+            "atr": 2.0, "major_state": "up", "current_state": "up",
+            "range": {}, "structure_hierarchy": {},
+            "internal_events": [{
+                "type": "liquidity_sweep", "direction": "down",
+                "level": 108.0, "confirmed_at": 10,
+            }],
+        }
+        plans = StructurePlanBuilder().build(
+            "source-1", "BTCUSD", "M5", self.store.rows, structure,
+        )
+        types = {item.get("plan_type") for item in plans}
+        self.assertNotIn("internal_liquidity_reversal", types)

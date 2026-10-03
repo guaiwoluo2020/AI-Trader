@@ -49,6 +49,39 @@ def _confirmed_unix(rows: Optional[List[Dict]], event: Dict) -> int:
     return _bar_unix(rows, value)
 
 
+CREATE_PLAN_EVENTS = {
+    "choch", "bos", "liquidity_sweep", "hl_confirmed", "lh_confirmed",
+}
+
+
+def event_is_recent(
+    event: Dict,
+    *,
+    bar_time: int = 0,
+    seconds: int = 0,
+    last_index: int | None = None,
+    max_bars: int = 2,
+) -> bool:
+    """True when the event was confirmed on a recently closed bar."""
+    if not event:
+        return False
+    try:
+        confirmed = int(event.get("confirmed_at") or event.get("index") or 0)
+    except (TypeError, ValueError):
+        return False
+    if confirmed <= 0:
+        return False
+    max_bars = max(0, int(max_bars))
+    if confirmed > 1_000_000_000:
+        if bar_time <= 0 or seconds <= 0:
+            return True
+        age = (int(bar_time) - confirmed) / float(seconds)
+        return age <= max_bars + 0.05
+    if last_index is None:
+        return True
+    return (int(last_index) - confirmed) <= max_bars
+
+
 def _event_id(symbol: str, period: str, layer: str, event: Dict, *, confirmed_at=None) -> str:
     """Identity follows the confirming bar time, not a sliding window index."""
     confirmed = confirmed_at if confirmed_at is not None else event.get("confirmed_at", event.get("index", 0))
@@ -121,7 +154,8 @@ def collect_structure_events(
             direction = "up" if label == "HL" else "down"
             raw = {
                 "type": "hl_confirmed" if label == "HL" else "lh_confirmed", "direction": direction,
-                "level": pivot.get("price"), "confirmed_at": pivot.get("index", 0),
+                "level": pivot.get("price"),
+                "confirmed_at": pivot.get("confirmed_at", pivot.get("index", 0)),
                 "pivot_index": pivot.get("index", 0), "source": label,
             }
             protected = (state or {}).get("protected_low" if direction == "up" else "protected_high")
@@ -136,9 +170,10 @@ def collect_structure_events(
             proximity = atr * max(0.05, _number(payload.get("retest_proximity_atr", 0.4)))
             if latest_close > 0 and abs(latest_close - _number(raw.get("level"))) <= proximity:
                 touched_type = "hl_support_touched" if label == "HL" else "lh_press_touched"
+                touch_at = (len(rows) - 1) if rows else pivot.get("index", 0)
                 touched_raw = {
                     "type": touched_type, "direction": direction,
-                    "level": pivot.get("price"), "confirmed_at": pivot.get("index", 0),
+                    "level": pivot.get("price"), "confirmed_at": touch_at,
                     "pivot_index": pivot.get("index", 0), "parent_event_id": event["event_id"],
                     "source": label,
                 }
