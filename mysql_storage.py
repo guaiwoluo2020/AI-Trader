@@ -387,13 +387,15 @@ class MySQLStorage:
                     user_id BIGINT NOT NULL, account_id BIGINT NOT NULL,
                     execution_mode VARCHAR(16) NOT NULL, business_date DATE NOT NULL,
                     symbol VARCHAR(64) NOT NULL, period VARCHAR(16) NOT NULL,
-                    setup_type VARCHAR(64) NOT NULL, trade_count INT NOT NULL DEFAULT 0,
+                    setup_type VARCHAR(64) NOT NULL, strategy_id VARCHAR(64) NOT NULL DEFAULT '',
+                    strategy_name VARCHAR(160) NOT NULL DEFAULT '', strategy_status VARCHAR(24) NOT NULL DEFAULT '',
+                    trade_count INT NOT NULL DEFAULT 0,
                     gross_profit DOUBLE NOT NULL DEFAULT 0, gross_loss DOUBLE NOT NULL DEFAULT 0,
                     max_profit DOUBLE NULL, min_profit DOUBLE NULL,
                     max_loss DOUBLE NULL, min_loss DOUBLE NULL, net_profit DOUBLE NOT NULL DEFAULT 0,
                     created_at BIGINT NOT NULL,
                     PRIMARY KEY (id),
-                    UNIQUE KEY uq_daily_pnl_bucket (user_id,account_id,business_date,symbol,period,setup_type),
+                    UNIQUE KEY uq_daily_pnl_bucket (user_id,account_id,business_date,symbol,period,setup_type,strategy_id),
                     KEY idx_daily_pnl_account_date (user_id,account_id,business_date)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """)
@@ -968,6 +970,11 @@ class MySQLStorage:
                     "paper_trades": (
                         ("position_attribution_json", "JSON NULL"),
                     ),
+                    "daily_pnl_statistics": (
+                        ("strategy_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
+                        ("strategy_name", "VARCHAR(160) NOT NULL DEFAULT ''"),
+                        ("strategy_status", "VARCHAR(24) NOT NULL DEFAULT ''"),
+                    ),
                     "backtest_orders": (
                         ("position_attribution_json", "JSON NULL"),
                     ),
@@ -1051,6 +1058,11 @@ class MySQLStorage:
                           AND JSON_UNQUOTE(JSON_EXTRACT(position_attribution_json, '$.strategy_id')) <> ''
                         """
                     )
+                try:
+                    conn.execute("ALTER TABLE daily_pnl_statistics DROP INDEX uq_daily_pnl_bucket")
+                    conn.execute("ALTER TABLE daily_pnl_statistics ADD UNIQUE KEY uq_daily_pnl_bucket (user_id,account_id,business_date,symbol,period,setup_type,strategy_id)")
+                except Exception:
+                    pass
                 for index_sql in (
                     "ALTER TABLE live_trade_deals ADD KEY idx_live_trade_deals_strategy "
                     "(user_id, account_id, strategy_id, deal_timestamp)",

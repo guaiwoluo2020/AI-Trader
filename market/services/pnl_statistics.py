@@ -28,13 +28,13 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
     mode = "paper" if str(account.get("account_type") or "").lower() == "paper" else "live"
     rows = []
     if mode == "paper":
-        rows = storage.fetchall("""SELECT p.symbol, SUM(t.net_profit) AS profit,
+        rows = storage.fetchall("""SELECT p.symbol, t.strategy_id, SUM(t.net_profit) AS profit,
             MAX(t.closed_at) AS closed_at, p.position_attribution_json AS attribution
             FROM paper_trades t JOIN paper_positions p ON p.position_id=t.position_id
             WHERE t.user_id=? AND t.account_id=? AND t.closed_at>=? AND t.closed_at<?
             GROUP BY p.position_id, p.symbol, p.position_attribution_json""", (int(user_id), int(account_id), start, end))
     else:
-        rows = storage.fetchall("""SELECT symbol, mt5_position_id, SUM(profit+swap+commission) AS profit,
+        rows = storage.fetchall("""SELECT symbol, strategy_id, mt5_position_id, SUM(profit+swap+commission) AS profit,
             MAX(deal_timestamp) AS closed_at, MAX(position_attribution_json) AS attribution
             FROM live_trade_deals WHERE user_id=? AND account_id=? AND deal_timestamp>=? AND deal_timestamp<?
             GROUP BY mt5_position_id, symbol""", (int(user_id), int(account_id), start, end))
@@ -47,16 +47,22 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
             or attr.get("signal_source_period") or attr.get("selected_signal_period")
             or attr.get("plan_period")
         )
-        key = (str(row.get("symbol") or ""), _bucket(period, "未知"), _bucket(attr.get("setup_type") or attr.get("selected_setup_type"), "未分类"))
+        strategy_id = str(row.get("strategy_id") or attr.get("strategy_id") or "")
+        key = (str(row.get("symbol") or ""), _bucket(period, "未知"), _bucket(attr.get("setup_type") or attr.get("selected_setup_type"), "未分类"), strategy_id)
         buckets.setdefault(key, []).append(float(row.get("profit") or 0))
     storage.execute("DELETE FROM daily_pnl_statistics WHERE user_id=? AND account_id=? AND business_date=?", (int(user_id), int(account_id), day.isoformat()))
-    for (symbol, period, setup), values in buckets.items():
+    for (symbol, period, setup, strategy_id), values in buckets.items():
         count, gross_profit, gross_loss, max_win, min_win, max_loss, min_loss = _metrics(values)
+        strategy = storage.fetchone("""SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(config_json,'$.strategy_name')), strategy_id) AS strategy_name
+            FROM user_strategy_configs WHERE user_id=? AND strategy_id=?""", (int(user_id), strategy_id)) or {}
+        deployment = storage.fetchone("""SELECT status FROM strategy_deployments
+            WHERE user_id=? AND account_id=? AND strategy_id=? ORDER BY updated_at DESC LIMIT 1""", (int(user_id), int(account_id), strategy_id)) or {}
         storage.execute("""INSERT INTO daily_pnl_statistics
-            (user_id,account_id,execution_mode,business_date,symbol,period,setup_type,
+            (user_id,account_id,execution_mode,business_date,symbol,period,setup,strategy_id,strategy_name,strategy_status,
              trade_count,gross_profit,gross_loss,max_profit,min_profit,max_loss,min_loss,net_profit,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (int(user_id), int(account_id), mode, day.isoformat(), symbol, period, setup, count,
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (int(user_id), int(account_id), mode, day.isoformat(), symbol, period, setup, strategy_id,
+             str(strategy.get("strategy_name") or strategy_id or "未归因策略"), str(deployment.get("status") or "未部署"), count,
              gross_profit, gross_loss, max_win, min_win, max_loss, min_loss, round(sum(values), 8), int(datetime.now(TZ).timestamp())))
     return len(buckets)
 
