@@ -30,6 +30,7 @@ from .structure_plan.setup_binding import (
 from ..market_event_risk_service import active_event
 from ..structure_events import (
     collect_structure_events, latest_event_for, decide_event_observations,
+    event_conflict_reason,
 )
 from ..structure_observation import advance_observation_state, build_observation_plans
 
@@ -330,6 +331,9 @@ class StructurePlanBuilder:
         plan["required_confirmation"] = confirmation
         plan["confirmation_period"] = observation.get("confirmation_period")
         plan["source_event_id"] = observation.get("source_event_id")
+        plan["event_layer"] = layer
+        plan["event_type"] = event_type
+        plan["source_event"] = event or parent
         return plan
 
     def _plans_from_observations(
@@ -394,7 +398,10 @@ class StructurePlanBuilder:
                 continue
             seen.add(key)
             selected.append(plan)
-        return selected
+        return [
+            plan for plan in selected
+            if not event_conflict_reason(plan, events)
+        ]
 
     def _activate_setup(self, setup_type: str) -> None:
         """Apply the most specific setup override before deriving a plan."""
@@ -1158,6 +1165,7 @@ class StructurePlanSignalGenerator:
             atr = _number((result or {}).get("atr"))
             dead_opportunity_ids = self._invalidate_stale_closed_plans(
                 symbol, period, source_id, result, close_price, atr, plans,
+                events=structure_events,
             )
             if dead_opportunity_ids:
                 # A frozen same-opportunity waiter can fail closed-bar checks
@@ -1181,6 +1189,7 @@ class StructurePlanSignalGenerator:
     def _invalidate_stale_closed_plans(
         self, symbol: str, period: str, source_id: str, structure: Dict,
         close_price: float, atr: float, incoming_plans: List[Dict],
+        events: Optional[List[Dict]] = None,
     ) -> set:
         """Retire waiting plans whose entry thesis died on this closed bar.
 
@@ -1209,7 +1218,9 @@ class StructurePlanSignalGenerator:
             # Evaluate against the already-persisted outside streak, then decide
             # whether this close increments or clears it.
             probe = dict(plan)
-            reason = close_invalidate_reason(probe, structure, close_price, atr)
+            reason = event_conflict_reason(probe, events or [])
+            if not reason:
+                reason = close_invalidate_reason(probe, structure, close_price, atr)
             if not reason and not opportunity_still_valid(
                 probe, structure, close_price, atr,
             ):

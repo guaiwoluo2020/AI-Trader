@@ -168,7 +168,7 @@ def close_invalidate_reason(
     # plan was created.  A completed candle through that level kills the old
     # thesis immediately; a later rebound must wait for a new structure plan.
     # This intentionally ignores intrabar wicks.
-    if setup == "structure_location_pullback":
+    if setup == "structure_location_pullback" or "pullback" in setup:
         evidence = plan.get("validation_evidence") or {}
         location_level = _as_float(
             evidence.get("location_entry_level") or plan.get("entry_price")
