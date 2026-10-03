@@ -144,7 +144,18 @@ def create_structure_plan_routes(engine_manager, strategy_repo, structure_defaul
         assemble_structure_plan_execution(
             items, strategies, deployments, executions, gate_audits, symbol,
         )
-        return {"status": "ok", "symbol": symbol, "period": period, "plans": items}
+        list_events = getattr(repo, "list_events", None)
+        events = list_events(user.user_id, symbol, period) if list_events else []
+        decisions = []
+        for plan in items:
+            snapshot = plan.get("structure_snapshot") or {}
+            decisions.extend(snapshot.get("event_decisions") or [])
+        unique_decisions = {str(item.get("decision_id") or id(item)): item for item in decisions}
+        return {
+            "status": "ok", "symbol": symbol, "period": period,
+            "events": events, "event_decisions": list(unique_decisions.values()),
+            "plans": items,
+        }
 
     @router.get("/market/structure/{symbol}/opportunities/{opportunity_id}", dependencies=[Depends(require_auth)])
     async def get_structure_opportunity(
