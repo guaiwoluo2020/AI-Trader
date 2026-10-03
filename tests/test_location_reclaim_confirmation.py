@@ -31,6 +31,21 @@ class LocationReclaimConfirmationTests(unittest.TestCase):
         self.assertIn("高点未降低", check([rows[0], rows[1], {**rows[2], "high": 101.0}])[2])
         self.assertIn("收盘重新穿过", check([rows[0], rows[1], {**rows[2], "close": 100.1}])[2])
 
+    def test_rolling_window_can_confirm_after_an_earlier_sequence_failed(self):
+        rows = [
+            {"open": 99.0, "high": 100.7, "low": 98.8, "close": 100.6},
+            {"open": 100.3, "high": 100.9, "low": 99.2, "close": 100.9},
+            {"open": 100.4, "high": 100.8, "low": 99.1, "close": 100.8},
+            {"open": 100.6, "high": 101.0, "low": 99.3, "close": 101.0},
+            {"open": 100.8, "high": 101.2, "low": 99.5, "close": 101.2},
+            {"open": 101.0, "high": 101.4, "low": 99.8, "close": 101.4},
+        ]
+        accepted, evidence, rejection = location_reclaim_confirmation(
+            rows[-3:], 100, "buy", 2, confirmation_bars=3, require_touch=False,
+        )
+        self.assertTrue(accepted, rejection)
+        self.assertEqual(evidence["confirmation_extremes"], [99.3, 99.5, 99.8])
+
 
 if __name__ == "__main__":
     unittest.main()

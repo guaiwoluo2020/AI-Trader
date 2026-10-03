@@ -2414,6 +2414,7 @@ class StructurePlanSignalGenerator:
                 "location_reclaim_min_close_extension_atr", 0.2
             ))),
             confirmation_bars=required_bars,
+            require_touch=False,
         )
         changes = {
             "location_entry_confirmation_bar": bar_time,

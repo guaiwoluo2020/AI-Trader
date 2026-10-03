@@ -43,7 +43,7 @@ def protected_reference(hierarchy: Dict, direction: str, entry: float) -> float:
 def location_reclaim_confirmation(
     rows: List[Dict], entry: float, direction: str, atr: float,
     min_body_atr: float = 0.5, min_close_extension_atr: float = 0.2,
-    confirmation_bars: int = 1,
+    confirmation_bars: int = 1, require_touch: bool = True,
 ) -> Tuple[bool, Dict, str]:
     """Validate a reclaim candle followed by higher lows or lower highs.
 
@@ -82,23 +82,29 @@ def location_reclaim_confirmation(
         ),
         "directional_body": directional,
         "touched": touched,
+        "touch_required": bool(require_touch),
         "confirmation_bars_required": required,
         "confirmation_bars_seen": len(window),
     }
-    if not touched:
+    if require_touch and not touched:
         return False, evidence, "最近收盘K线尚未触碰 HL/LH 结构位"
-    if not directional:
-        return False, evidence, "回收K线实体方向与计划交易方向不一致"
-    if body_atr < max(0.0, float(min_body_atr or 0)):
-        return False, evidence, (
-            f"回收K线实体仅 {body_atr:.2f} ATR，低于最低要求 "
-            f"{float(min_body_atr):.2f} ATR"
-        )
-    if extension_atr < max(0.0, float(min_close_extension_atr or 0)):
-        return False, evidence, (
-            f"回收K线收盘仅越过 HL/LH {extension_atr:.2f} ATR，低于最低要求 "
-            f"{float(min_close_extension_atr):.2f} ATR"
-        )
+    if require_touch:
+        if not directional:
+            return False, evidence, "回收K线实体方向与计划交易方向不一致"
+        if body_atr < max(0.0, float(min_body_atr or 0)):
+            return False, evidence, (
+                f"回收K线实体仅 {body_atr:.2f} ATR，低于最低要求 "
+                f"{float(min_body_atr):.2f} ATR"
+            )
+        if extension_atr < max(0.0, float(min_close_extension_atr or 0)):
+            return False, evidence, (
+                f"回收K线收盘仅越过 HL/LH {extension_atr:.2f} ATR，低于最低要求 "
+                f"{float(min_close_extension_atr):.2f} ATR"
+            )
+    elif (direction == "buy" and close <= entry) or (
+        direction == "sell" and close >= entry
+    ):
+        return False, evidence, "滚动确认窗口第一根收盘未守住 HL/LH 结构位"
     previous_extreme = low if direction == "buy" else high
     for index, follow_up in enumerate(window[1:], start=2):
         follow_close = _number(follow_up.get("close") or follow_up.get("close_price"))
