@@ -28,7 +28,9 @@ from .structure_plan.setup_binding import (
     resolve_binding, setup_box,
 )
 from ..market_event_risk_service import active_event
-from ..structure_events import collect_structure_events, latest_event_for
+from ..structure_events import (
+    collect_structure_events, latest_event_for, decide_event_observations,
+)
 
 
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
@@ -1222,6 +1224,10 @@ class StructurePlanBuilder:
             "structure_revision": structure.get("structure_revision") or "",
             "active_segment": structure.get("active_segment") or {},
         }
+        snapshot["event_decisions"] = decide_event_observations(
+            snapshot, snapshot["structure_events"],
+            require_external_alignment=bool(self._param("require_external_alignment", True)),
+        )
         snapshot["structure_state"] = derive_structure_state(snapshot)
         # Evaluate range, event and location SETUPs independently. A watching
         # box breakout must not hide a valid HL pullback on another layer.
