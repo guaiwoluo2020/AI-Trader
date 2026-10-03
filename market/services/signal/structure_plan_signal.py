@@ -31,7 +31,7 @@ from ..market_event_risk_service import active_event
 from ..structure_events import (
     collect_structure_events, latest_event_for, decide_event_observations,
 )
-from ..structure_observation import advance_observation_state
+from ..structure_observation import advance_observation_state, build_observation_plans
 
 
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
@@ -53,7 +53,13 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "direction_layer": "swing",
     "entry_layer": "internal",
     "require_external_alignment": True,
-    "confirmation_bars": 1,
+    "confirmation_bars": 3,
+    "confirmation_include_first_bar": True,
+    "confirmation_higher_lows": True,
+    "confirmation_lower_highs": True,
+    "confirmation_min_body_atr": 0.5,
+    "confirmation_min_close_extension_atr": 0.2,
+    "confirmation_max_distance_atr": 0.6,
     "min_body_atr": 0.0,
     "min_displacement_atr": 0.0,
     "require_reclaim": False,
@@ -229,47 +235,138 @@ class StructurePlanBuilder:
             and direction_allowed(plan)
         ]
 
-    @staticmethod
-    def _actionable_plans(plans: List[Dict]) -> List[Dict]:
-        result = []
-        for plan in plans or []:
-            setup = str(plan.get("setup_type") or "").strip().lower()
-            if setup in {"", "no_trade"}:
-                continue
-            if str(plan.get("direction") or "") not in {"buy", "sell"}:
-                continue
-            if str(plan.get("status") or "") != "active":
-                continue
-            if _number(plan.get("entry_price")) <= 0:
-                continue
-            result.append(plan)
-        return result
+    def _trade_direction(self, direction: str) -> str:
+        value = str(direction or "").strip().lower()
+        if value in {"up", "buy", "long", "bullish"}:
+            return "buy"
+        if value in {"down", "sell", "short", "bearish"}:
+            return "sell"
+        return ""
 
-    @staticmethod
-    def _watch_plans(plans: List[Dict]) -> List[Dict]:
-        result = []
-        for plan in plans or []:
-            setup = str(plan.get("setup_type") or "").strip().lower()
-            if setup in {"", "no_trade"}:
-                continue
-            if str(plan.get("status") or "") == "watching":
-                result.append(plan)
-        return result
+    def _price_from_observation(
+        self, observation: Dict, source_id, symbol, period, rows, structure, snapshot,
+        bar_time, seconds,
+    ) -> Optional[Dict]:
+        """Price one accepted observation using the current structure snapshot."""
+        plan_type = str(observation.get("plan_type") or "")
+        event_type = str(observation.get("event_type") or "")
+        layer = str(observation.get("event_layer") or "")
+        direction = self._trade_direction(observation.get("direction"))
+        if direction not in {"buy", "sell"}:
+            return None
+        events = snapshot.get("structure_events") or []
+        event = next((item for item in events if str(item.get("event_id") or "") == str(observation.get("source_event_id") or "")), {})
+        parent = next((item for item in events if str(item.get("event_id") or "") == str(observation.get("parent_event_id") or "")), {})
+        level = _number(event.get("level") or parent.get("level"))
+        if level <= 0:
+            return None
+        atr = max(1e-9, _number(structure.get("atr") or snapshot.get("atr")))
+        hierarchy = structure.get("structure_hierarchy") or {}
+        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
+        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
+        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
+        protected = self._protected_reference(hierarchy, direction, level)
+        if direction == "buy":
+            sl = (min(level, protected) if protected else level) - stop_buffer
+        else:
+            sl = (max(level, protected) if protected else level) + stop_buffer
+        target = self._next_target(hierarchy, direction, level)
+        price_discovery = not bool(target)
+        risk = abs(level - sl)
+        if price_discovery:
+            target = level + risk if direction == "buy" else level - risk
+        else:
+            target = target - target_buffer if direction == "buy" else target + target_buffer
+        confirmation = str(observation.get("required_confirmation") or "none")
+        entry_mode = (
+            "touch_and_reclaim" if "reclaim" in confirmation or event_type in {"reclaim", "liquidity_sweep"}
+            else "breakout_retest" if event_type in {"bos", "choch"}
+            else "touch_or_near"
+        )
+        setup_type = plan_type or "swing_pullback"
+        self._activate_setup(setup_type)
+        valid_bars = max(1, int(self._param("event_plan_valid_bars", 6)))
+        plan = self._tradable_plan(
+            source_id=source_id, symbol=symbol, period=period, anchor=bar_time,
+            setup_type=setup_type, direction=direction, entry_mode=entry_mode,
+            status="active", entry=level,
+            zone_lower=level-entry_buffer, zone_upper=level+entry_buffer,
+            stop_loss=sl, take_profit=target,
+            min_risk_reward_override=self._param("trend_min_real_risk_reward", 0.5),
+            confidence=72 if layer == "swing" else 66,
+            reason=(
+                f"{period} {layer.upper()} {event_type.upper()} 观察计划："
+                f"{'买入' if direction == 'buy' else '卖出'} {level:.2f}，"
+                f"后续确认 {confirmation}"
+            ),
+            valid_from=bar_time, expires_at=bar_time + seconds * valid_bars,
+            invalidation_price=sl, structure_snapshot=snapshot,
+            price_discovery=price_discovery,
+            validation_evidence={
+                "observation_plan_id": observation.get("observation_plan_id"),
+                "event_chain": list(observation.get("event_chain") or []),
+                "event_type": event_type,
+                "event_layer": layer,
+                "required_confirmation": confirmation,
+            },
+        )
+        if not plan:
+            return None
+        plan["plan_type"] = plan_type
+        plan["observation_plan_id"] = observation.get("observation_plan_id")
+        plan["parent_event_id"] = observation.get("parent_event_id")
+        plan["event_chain"] = list(observation.get("event_chain") or [])
+        plan["required_confirmation"] = confirmation
+        plan["confirmation_period"] = observation.get("confirmation_period")
+        plan["source_event_id"] = observation.get("source_event_id")
+        return plan
 
-    def _select_structure_plans(
-        self, range_plans: List[Dict], event_plans: List[Dict], location_plans: List[Dict],
+    def _plans_from_observations(
+        self, source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
     ) -> List[Dict]:
-        """Keep every executable SETUP. Watching plans must not block them."""
-        groups = (event_plans, range_plans, location_plans)
-        chosen = []
-        for group in groups:
-            chosen.extend(self._actionable_plans(group))
-        if chosen:
-            return chosen
-        watches = []
-        for group in groups:
-            watches.extend(self._watch_plans(group))
-        return watches
+        """Create executable plans only from accepted observation records."""
+        ranked = []
+        rank = {
+            "create_plan": 0,
+            "confirm_signal": 1,
+            "update_plan": 2,
+        }
+        event_rank = {
+            "choch": 0, "liquidity_sweep": 1, "bos": 2,
+            "reclaim": 3, "hl_confirmed": 4, "lh_confirmed": 4,
+            "retest": 5, "hl_support_touched": 6, "lh_press_touched": 6,
+        }
+        for observation in snapshot.get("observation_plans") or []:
+            action = str(observation.get("matrix_action") or "")
+            if action not in rank:
+                continue
+            ranked.append((
+                rank[action],
+                event_rank.get(str(observation.get("event_type") or ""), 9),
+                0 if str(observation.get("event_layer") or "") == "swing" else 1,
+                observation,
+            ))
+        selected = []
+        seen = set()
+        for _action, _event, _layer, observation in sorted(ranked, key=lambda item: item[:3]):
+            family = str(observation.get("plan_type") or "")
+            if family == "event_confirmation":
+                family = "pullback"
+            elif family.endswith("pullback"):
+                family = "pullback"
+            elif family in {"structure_reversal", "early_reversal"}:
+                family = "reversal"
+            key = str(observation.get("event_layer") or "")
+            if key in seen:
+                continue
+            plan = self._price_from_observation(
+                observation, source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
+            )
+            if not plan:
+                continue
+            seen.add(key)
+            selected.append(plan)
+        return selected
 
     def _activate_setup(self, setup_type: str) -> None:
         """Apply the most specific setup override before deriving a plan."""
@@ -329,58 +426,6 @@ class StructurePlanBuilder:
             return True
         return bias == expected_bias
 
-    def _binding_context(self, structure: Dict, setup_type: str = "") -> dict:
-        binding = self._setup_binding(setup_type)
-        direction_layer = binding["direction_layer"]
-        entry_layer = binding["entry_layer"]
-        box, box_layer = setup_box(structure, binding)
-        return {
-            **binding,
-            "direction_pattern": layer_pattern(structure, direction_layer),
-            "entry_pattern": layer_pattern(structure, entry_layer),
-            "direction_event": layer_event(structure, direction_layer),
-            "entry_event": layer_event(structure, entry_layer),
-            "direction_state": layer_state(structure, direction_layer),
-            "entry_state": layer_state(structure, entry_layer),
-            "box": box,
-            "box_layer": box_layer,
-            "matched": binding_matches(structure, binding),
-        }
-
-    def _setup_owns_layer(self, setup_type: str, box_layer: str) -> bool:
-        binding = self._setup_binding(setup_type)
-        layer = str(box_layer or "").strip().lower()
-        return layer in {binding["entry_layer"], binding["direction_layer"]}
-
-    def _select_bound_event(self, structure: Dict):
-        ranked = []
-        for event_type, setup_type in (
-            ("choch", "choch_reversal"),
-            ("liquidity_sweep", "liquidity_sweep_reclaim"),
-            ("bos", "trend_continuation"),
-        ):
-            binding = self._setup_binding(setup_type)
-            if event_type != "choch" and not binding_matches(structure, binding):
-                continue
-            events = layer_events(structure, binding["entry_layer"])
-            for event in reversed(events):
-                if str(event.get("type") or "") != event_type:
-                    continue
-                index = int(event.get("confirmed_at", event.get("index", -1)) or -1)
-                ranked.append((index, event, setup_type))
-                break
-        if not ranked:
-            return None
-        _index, event, setup_type = max(ranked, key=lambda item: item[0])
-        return event, setup_type
-
-    def _range_entry_mode(self) -> str:
-        configured = str(self._param("entry_mode", "") or "").strip().lower()
-        if configured in {"touch_or_near", "touch_and_reclaim"}:
-            return configured
-        return "touch_or_near"
-
-    @staticmethod
     def _direction_bias(value) -> str:
         normalized = str(value or "").strip().lower()
         if normalized in {"up", "bullish", "buy", "long"}:
@@ -467,7 +512,10 @@ class StructurePlanBuilder:
         structure = structure or {}
         setup = str(setup_type or "").strip().lower()
         phase = str(structure.get("trend_phase") or "").strip().lower()
-        if setup in {"choch_reversal", "range_false_breakout"} and phase == "failed":
+        if setup in {
+            "choch_reversal", "range_false_breakout", "liquidity_sweep_reclaim",
+            "early_reversal", "structure_reversal", "liquidity_reversal",
+        }:
             return ""
         layers = cls.structure_layers(structure)
         binding = resolve_binding(setup, config)
@@ -490,98 +538,6 @@ class StructurePlanBuilder:
             return f"Swing 下跌，禁止开多（{detail}）"
         return ""
 
-    def _triangle_breakout_confirmation(
-        self, rows: List[Dict], structure: Dict, box: Dict,
-        direction: str, atr: float,
-    ) -> tuple[bool, Dict, str]:
-        """Validate a triangle break using price displacement and hierarchy.
-
-        The structure engine already distinguishes a close break from a wick
-        sweep.  This second gate is deliberately stricter for executable plans:
-        the breakout candle must have a meaningful body, close beyond the
-        projected boundary, and agree with both Swing and External structure.
-        """
-        event = box.get("lifecycle_event") or {}
-        index = int(event.get("confirmed_at", event.get("index", len(rows) - 1)) or 0)
-        index = min(len(rows) - 1, max(0, index))
-        bar = rows[index]
-        open_price = _number(bar.get("open") or bar.get("open_price"))
-        close_price = _number(bar.get("close") or bar.get("close_price"))
-        body_atr = abs(close_price - open_price) / max(atr, 1e-9)
-
-        if direction == "buy":
-            slope = _number(box.get("high_slope"))
-            intercept = _number(box.get("high_intercept"))
-            boundary = intercept + slope * index if intercept else _number(
-                box.get("breakout_level") or box.get("locked_top") or box.get("top")
-            )
-            extension = close_price - boundary
-            expected_bias = "up"
-        else:
-            slope = _number(box.get("low_slope"))
-            intercept = _number(box.get("low_intercept"))
-            boundary = intercept + slope * index if intercept else _number(
-                box.get("breakout_level") or box.get("locked_bottom") or box.get("bottom")
-            )
-            extension = boundary - close_price
-            expected_bias = "down"
-        extension_atr = extension / max(atr, 1e-9)
-
-        hierarchy = structure.get("structure_hierarchy") or {}
-        swing_bias = self._direction_bias(
-            (hierarchy.get("swing") or {}).get("bias")
-            or structure.get("major_state")
-        )
-        external_bias = self._direction_bias(
-            (hierarchy.get("external") or {}).get("bias")
-            or structure.get("external_state")
-        )
-        min_body = max(0.0, _number(
-            self._param("triangle_breakout_min_body_atr", 0.5)
-        ))
-        min_extension = max(0.0, _number(
-            self._param("triangle_breakout_min_close_extension_atr", 0.1)
-        ))
-        triangle_setup = (
-            self._active_setup
-            if self._active_setup in {"triangle_breakout", "triangle_breakout_watch"}
-            else "triangle_breakout"
-        )
-        evidence = {
-            "breakout_bar_index": index,
-            "breakout_bar_time": _bar_time(bar),
-            "open_price": round(open_price, 8),
-            "close_price": round(close_price, 8),
-            "boundary_price": round(boundary, 8),
-            "body_atr": round(body_atr, 3),
-            "minimum_body_atr": round(min_body, 3),
-            "close_extension_atr": round(extension_atr, 3),
-            "minimum_close_extension_atr": round(min_extension, 3),
-            "swing_bias": swing_bias,
-            "external_bias": external_bias,
-            "expected_bias": expected_bias,
-        }
-        if body_atr < min_body:
-            return False, evidence, (
-                f"三角形突破K线实体仅 {body_atr:.2f} ATR，低于最低要求 {min_body:.2f} ATR"
-            )
-        if boundary <= 0 or extension_atr < min_extension:
-            return False, evidence, (
-                f"三角形突破收盘仅越过边界 {extension_atr:.2f} ATR，"
-                f"低于最低要求 {min_extension:.2f} ATR"
-            )
-        if swing_bias != expected_bias:
-            return False, evidence, (
-                f"三角形突破方向与方向层不一致：突破={expected_bias}，Swing={swing_bias}"
-            )
-        if not self._external_allows(structure, expected_bias, triangle_setup):
-            return False, evidence, (
-                f"三角形突破方向与 External 不一致："
-                f"突破={expected_bias}，External={external_bias}"
-            )
-        return True, evidence, ""
-
-    @staticmethod
     def _layer_price(hierarchy: Dict, layer: str, name: str) -> float:
         return _number(((hierarchy.get(layer) or {}).get(name) or {}).get("price"))
 
@@ -597,190 +553,6 @@ class StructurePlanBuilder:
         cannot create an inverted stop.
         """
         return protected_reference(hierarchy, direction, entry)
-
-    def _trend_entry_confirmation(
-        self, rows: List[Dict], event: Dict, atr: float,
-    ) -> tuple[str, float, Dict]:
-        """Resolve a BOS entry as a retest or a sustained no-retest break."""
-        level = _number(event.get("level"))
-        direction = str(event.get("direction") or "")
-        event_index = int(event.get("confirmed_at", event.get("index", -1)) or -1)
-        evidence = {
-            "confirmation_mode": "",
-            "breakout_level": round(level, 8),
-            "required_hold_bars": max(
-                2, int(self._param("trend_continuation_hold_bars", 2))
-            ),
-        }
-        if level <= 0 or direction not in {"up", "down"} or event_index < 0:
-            return "", 0.0, evidence
-
-        confirmation = str(event.get("confirmation") or "")
-        retest_status = str(event.get("retest_status") or "")
-        confirmation_index = int(
-            event.get("confirmation_index", event_index) or event_index
-        )
-        confirmation_index = min(len(rows) - 1, max(0, confirmation_index))
-        if confirmation in {"retest_confirmed"} or retest_status in {
-            "touched_and_held", "retest_confirmed",
-        }:
-            evidence.update({
-                "confirmation_mode": "retest",
-                "confirmation_bar_index": confirmation_index,
-            })
-            return "breakout_retest", level, evidence
-        if confirmation in {"continuation_confirmed"} or retest_status in {
-            "held_without_touch", "continuation_confirmed",
-        }:
-            entry = _number(rows[confirmation_index].get("close") or rows[confirmation_index].get("close_price"))
-            evidence.update({
-                "confirmation_mode": "continuation_hold",
-                "confirmation_bar_index": confirmation_index,
-                "confirmation_close": round(entry, 8),
-            })
-            return "touch_or_near", entry, evidence
-
-        tolerance = max(
-            0.0, _number(self._param("trend_retest_tolerance_atr", 0.25))
-        ) * max(atr, 1e-9)
-        required_hold = evidence["required_hold_bars"]
-        start_index = int(event.get("break_confirmed_at", event_index) or event_index)
-        start_index = min(len(rows) - 1, max(0, start_index))
-        breakout_close = _number(
-            rows[start_index].get("close") or rows[start_index].get("close_price")
-        )
-        held_count = int(
-            (direction == "up" and breakout_close >= level)
-            or (direction == "down" and breakout_close <= level)
-        )
-        for index, row in enumerate(rows[start_index + 1:], start=start_index + 1):
-            high = _number(row.get("high") or row.get("high_price"))
-            low = _number(row.get("low") or row.get("low_price"))
-            close = _number(row.get("close") or row.get("close_price"))
-            touched_and_held = (
-                direction == "up" and low <= level + tolerance and close >= level
-            ) or (
-                direction == "down" and high >= level - tolerance and close <= level
-            )
-            if touched_and_held:
-                evidence.update({
-                    "confirmation_mode": "retest",
-                    "confirmation_bar_index": index,
-                    "confirmation_close": round(close, 8),
-                })
-                return "breakout_retest", level, evidence
-            held = (
-                direction == "up" and close >= level
-            ) or (
-                direction == "down" and close <= level
-            )
-            held_count = held_count + 1 if held else 0
-            if held_count >= required_hold:
-                evidence.update({
-                    "confirmation_mode": "continuation_hold",
-                    "confirmation_bar_index": index,
-                    "confirmation_close": round(close, 8),
-                    "held_bars": held_count,
-                })
-                return "touch_or_near", close, evidence
-        evidence["held_bars"] = held_count
-        return "", 0.0, evidence
-
-    def _higher_low_entry_confirmation(
-        self, rows: List[Dict], event: Dict, atr: float, direction: str,
-    ) -> tuple[str, float, Dict]:
-        """Wait for a post-BOS pullback structure before entering.
-
-        In mature or weakening trends the breakout level is only an
-        observation anchor.  The actual entry is the break of the pullback
-        swing high/low after a valid HL/LH has formed.
-        """
-        level = _number(event.get("level"))
-        event_index = int(event.get("confirmed_at", event.get("index", -1)) or -1)
-        if level <= 0 or event_index < 0 or event_index >= len(rows) - 1:
-            return "", 0.0, {"confirmation_mode": "higher_low_pending"}
-        minimum_pullback = max(0.25, _number(self._param("trend_hl_min_retrace_atr", 0.3))) * max(atr, 1e-9)
-        level_tolerance = max(0.15, _number(self._param("trend_hl_level_tolerance_atr", 0.35))) * max(atr, 1e-9)
-        confirmation_buffer = max(0.05, _number(self._param("trend_hl_confirmation_buffer_atr", 0.05))) * max(atr, 1e-9)
-        post = rows[event_index:]
-        extreme = _number(post[0].get("high") or post[0].get("high_price")) if direction == "up" else _number(post[0].get("low") or post[0].get("low_price"))
-        pullback = None
-        for offset, row in enumerate(post[1:], start=1):
-            high = _number(row.get("high") or row.get("high_price"))
-            low = _number(row.get("low") or row.get("low_price"))
-            close = _number(row.get("close") or row.get("close_price"))
-            if direction == "up":
-                extreme = max(extreme, high)
-                if pullback is None and extreme - low >= minimum_pullback and low >= level - level_tolerance:
-                    pullback = {"index": event_index + offset, "price": low, "trigger": extreme}
-                if pullback and close >= pullback["trigger"] + confirmation_buffer:
-                    return "higher_low_breakout", pullback["trigger"], {
-                        "confirmation_mode": "higher_low_breakout",
-                        "confirmation_bar_index": event_index + offset,
-                        "higher_low_index": pullback["index"],
-                        "higher_low": round(pullback["price"], 8),
-                        "pullback_trigger": round(pullback["trigger"], 8),
-                    }
-            else:
-                extreme = min(extreme, low)
-                if pullback is None and high - extreme >= minimum_pullback and high <= level + level_tolerance:
-                    pullback = {"index": event_index + offset, "price": high, "trigger": extreme}
-                if pullback and close <= pullback["trigger"] - confirmation_buffer:
-                    return "lower_high_breakout", pullback["trigger"], {
-                        "confirmation_mode": "lower_high_breakout",
-                        "confirmation_bar_index": event_index + offset,
-                        "lower_high_index": pullback["index"],
-                        "lower_high": round(pullback["price"], 8),
-                        "pullback_trigger": round(pullback["trigger"], 8),
-                    }
-        return "", 0.0, {"confirmation_mode": "higher_low_pending"}
-
-    def _ascending_pullback_confirmation(
-        self, rows: List[Dict], structure: Dict, atr: float, direction: str,
-    ) -> tuple[str, float, Dict]:
-        """Find a rising/falling structure pullback entry, not a new extreme."""
-        hierarchy = structure.get("structure_hierarchy") or {}
-        swing = hierarchy.get("swing") or {}
-        pivots = [p for p in swing.get("pivots") or [] if p.get("kind") == ("low" if direction == "up" else "high")]
-        expected_label = "HL" if direction == "up" else "LH"
-        pivots = [p for p in pivots if p.get("label") == expected_label]
-        if len(pivots) < 2 or not rows:
-            return "", 0.0, {"confirmation_mode": "trend_pullback_pending"}
-        previous, latest = pivots[-2], pivots[-1]
-        previous_price = _number(previous.get("price"))
-        latest_price = _number(latest.get("price"))
-        spacing = abs(latest_price - previous_price)
-        minimum_spacing = max(0.1, _number(self._param("trend_hl_min_spacing_atr", 0.5))) * max(atr, 1e-9)
-        rising = latest_price > previous_price if direction == "up" else latest_price < previous_price
-        if not rising or spacing < minimum_spacing:
-            return "", 0.0, {"confirmation_mode": "trend_pullback_pending", "hl_spacing": round(spacing, 8)}
-        current = _number(rows[-1].get("close") or rows[-1].get("close_price"))
-        zone = max(0.1, _number(self._param("trend_pullback_zone_atr", 0.45))) * max(atr, 1e-9)
-        # The entry is placed around the latest HL/LH. The tick gate later
-        # requires price to actually revisit this zone before execution.
-        near_support = (
-            abs(current - latest_price) <= zone if direction == "up"
-            else abs(current - latest_price) <= zone
-        )
-        internal = str(structure.get("internal_state") or "").lower()
-        latest_event = (structure.get("internal_events") or [])[-1:]
-        recovering = internal == direction or bool(
-            latest_event and str(latest_event[0].get("direction") or "") == direction
-        )
-        if not near_support or not recovering:
-            return "", 0.0, {
-                "confirmation_mode": "trend_pullback_pending",
-                "hl_spacing": round(spacing, 8),
-                "pullback_level": round(latest_price, 8),
-                "pullback_zone_atr": round(zone / max(atr, 1e-9), 3),
-            }
-        return "trend_pullback_reclaim", latest_price, {
-            "confirmation_mode": "trend_pullback_reclaim",
-            "pullback_level": round(latest_price, 8),
-            "previous_pullback_level": round(previous_price, 8),
-            "hl_spacing": round(spacing, 8),
-            "pullback_zone_atr": round(zone / max(atr, 1e-9), 3),
-        }
 
     def _location_reclaim_confirmation(
         self, rows: List[Dict], entry: float, direction: str, atr: float,
@@ -899,6 +671,18 @@ class StructurePlanBuilder:
             "opportunity_family_id": family_id,
             "opportunity_cycle": cycle,
         }
+        # RETEST and RECLAIM are the canonical observation categories.  The
+        # legacy setup label is retained only inside this execution adapter so
+        # existing position management can finish its migration without
+        # creating a second concept in the event model.
+        payload["observation_type"] = (
+            "reclaim" if setup_type in {
+                "range_false_breakout", "range_lower_reversal", "range_upper_reversal",
+            } else "retest" if setup_type in {
+                "structure_location_pullback", "triangle_prebreakout_pullback",
+                "range_breakout", "triangle_breakout",
+            } else "event"
+        )
         payload["observation_state"] = (
             "watching" if status in {"active", "watching", "event_suppressed"} else
             str(status or "watching")
@@ -910,14 +694,66 @@ class StructurePlanBuilder:
             (structure_snapshot or {}).get("structure_events") or [],
             layer=event_layer, event_type=event_type,
         )
+        source_event_id = str((source_event or {}).get("event_id") or "")
+        event_decision = next(
+            (item for item in (structure_snapshot or {}).get("event_decisions") or []
+             if str(item.get("event_id") or "") == source_event_id),
+            {},
+        )
+        observation_plan = next(
+            (item for item in (structure_snapshot or {}).get("observation_plans") or []
+             if str(item.get("plan_type") or "") == str(event_decision.get("plan_type") or "")
+             and str(item.get("direction") or "") in {"", str(direction or "")}),
+            {},
+        )
+        legacy_plan_types = {
+            "structure_location_pullback": "swing_pullback",
+            "range_lower_reversal": "range_reclaim",
+            "range_upper_reversal": "range_reclaim",
+            "range_false_breakout": "liquidity_reversal",
+            "triangle_prebreakout_pullback": "swing_pullback",
+            "range_breakout": "trend_continuation",
+            "triangle_breakout": "trend_continuation",
+            "choch_reversal": "structure_reversal",
+            "structure_reversal": "structure_reversal",
+            "trend_continuation": "trend_continuation",
+        }
+        canonical_plan_type = str(
+            event_decision.get("plan_type")
+            or legacy_plan_types.get(setup_type)
+            or payload.get("observation_type")
+            or setup_type
+        )
         payload.update({
             "event_layer": event_layer,
             "event_type": event_type,
             "direction_layer": str(binding.get("direction_layer") or "").lower(),
             "entry_layer": str(binding.get("entry_layer") or event_layer).lower(),
-            "source_event_id": str((source_event or {}).get("event_id") or ""),
+            "source_event_id": source_event_id,
             "source_event": source_event or {},
+            "plan_type": canonical_plan_type,
+            "matrix_action": str(event_decision.get("matrix_action") or "create_plan"),
+            "required_confirmation": str(event_decision.get("required_confirmation") or "none"),
+            "observation_plan_id": str(observation_plan.get("observation_plan_id") or ""),
+            "parent_event_id": str(observation_plan.get("parent_event_id") or ""),
+            "confirmation_type": str(observation_plan.get("required_confirmation") or event_decision.get("required_confirmation") or "none"),
+            "confirmation_period": str(observation_plan.get("confirmation_period") or period).upper(),
+            "confirmation_bars_required": max(1, int(self._param("confirmation_bars", 3))),
+            "confirmation_bars_seen": 0,
+            "event_chain": [
+                f"{event_layer}:{event_type}" if event_layer and event_type else setup_type,
+            ],
         })
+        if observation_plan.get("event_chain"):
+            payload["event_chain"] = list(observation_plan["event_chain"])
+        if setup_type in {"structure_location_pullback", "range_lower_reversal", "range_upper_reversal", "range_breakout", "triangle_breakout"}:
+            reference = str((evidence or {}).get("entry_level_type") or "").upper()
+            if reference in {"HL", "LH"}:
+                payload["event_chain"] = [
+                    f"{event_layer}:{'hl_confirmed' if reference == 'HL' else 'lh_confirmed'}",
+                    f"{event_layer}:{'hl_support_touched' if reference == 'HL' else 'lh_press_touched'}",
+                    f"{event_layer}:retest",
+                ]
         payload["structure_state"] = derive_structure_state(
             snapshot,
             setup_type=setup_type,
@@ -1095,7 +931,11 @@ class StructurePlanBuilder:
             self._reject(blocked)
             return None
         expected_bias = "up" if direction == "buy" else "down" if direction == "sell" else ""
-        if expected_bias and not self._external_allows(snapshot, expected_bias, setup_type):
+        skip_external = setup_type in {
+            "early_reversal", "structure_reversal", "liquidity_reversal",
+            "internal_momentum", "range_reclaim", "event_confirmation",
+        }
+        if expected_bias and not skip_external and not self._external_allows(snapshot, expected_bias, setup_type):
             layers = self.structure_layers(snapshot)
             self._reject(
                 f"{setup_type or 'SETUP'} 要求 External 同向："
@@ -1137,61 +977,6 @@ class StructurePlanBuilder:
     def _stop_risk_atr(self, entry: float, stop_loss: float, atr: float) -> float:
         return abs(_number(entry) - _number(stop_loss)) / max(_number(atr), 1e-9)
 
-    def _trend_stop_gate(
-        self, *, entry: float, stop_loss: float, atr: float,
-        entry_mode: str, breakout_level: float,
-    ) -> tuple[str, float, Dict]:
-        """Apply a graduated stop-distance gate without tightening structure SL.
-
-        ``normal`` entries can trigger immediately.  A moderately distant
-        continuation is converted to a breakout-retest plan at the original
-        breakout level.  Larger distances are rejected until a new HL/LH is
-        formed; the structural invalidation point is never moved closer just
-        to satisfy the risk gate.
-        """
-        ratio = self._stop_risk_atr(entry, stop_loss, atr)
-        normal = max(0.1, _number(self._param("trend_normal_stop_atr", 2.5)))
-        retest = max(normal, _number(self._param("trend_retest_stop_atr", 4.0)))
-        maximum = max(retest, _number(self._param("trend_max_stop_atr", 6.0)))
-        evidence = {
-            "stop_distance": round(abs(entry - stop_loss), 8),
-            "stop_distance_atr": round(ratio, 3),
-            "normal_stop_atr": round(normal, 3),
-            "retest_stop_atr": round(retest, 3),
-            "maximum_stop_atr": round(maximum, 3),
-            "risk_tier": "normal",
-        }
-        if ratio <= normal:
-            return entry_mode, entry, evidence
-        if ratio > maximum:
-            evidence["risk_tier"] = "rejected"
-            return "rejected", 0.0, evidence
-        if ratio > retest:
-            evidence["risk_tier"] = "new_structure_required"
-            return "new_structure_required", 0.0, evidence
-        if entry_mode == "trend_pullback_reclaim":
-            evidence["risk_tier"] = "trend_pullback"
-            return entry_mode, entry, evidence
-        if entry_mode == "breakout_retest":
-            evidence["risk_tier"] = "retest"
-            return entry_mode, entry, evidence
-        level = _number(breakout_level)
-        if level <= 0:
-            evidence["risk_tier"] = "new_structure_required"
-            return "new_structure_required", 0.0, evidence
-        retest_ratio = self._stop_risk_atr(level, stop_loss, atr)
-        evidence.update({
-            "risk_tier": "retest",
-            "original_entry": round(entry, 8),
-            "retest_entry": round(level, 8),
-            "retest_stop_distance": round(abs(level - stop_loss), 8),
-            "retest_stop_distance_atr": round(retest_ratio, 3),
-        })
-        if retest_ratio > retest:
-            evidence["risk_tier"] = "new_structure_required"
-            return "new_structure_required", 0.0, evidence
-        return "breakout_retest", level, evidence
-
     def build(
         self, source_id: str, symbol: str, period: str,
         rows: List[Dict], structure: Dict,
@@ -1224,28 +1009,31 @@ class StructurePlanBuilder:
             "internal_events": list(structure.get("internal_events") or [])[-3:],
             "major_events": list(structure.get("major_events") or [])[-3:],
             "external_events": list(structure.get("external_events") or [])[-3:],
-            "structure_events": collect_structure_events(structure, symbol, period),
+            "structure_events": collect_structure_events({
+                **structure,
+                "latest_close": _number(rows[-1].get("close") or rows[-1].get("close_price")),
+                "retest_proximity_atr": self._param("location_proximity_atr", 0.4),
+            }, symbol, period),
             "structure_segment_id": structure.get("structure_segment_id") or "",
             "structure_revision": structure.get("structure_revision") or "",
             "active_segment": structure.get("active_segment") or {},
+            "event_matrix": self._param("event_matrix", []),
         }
         snapshot["event_decisions"] = decide_event_observations(
             snapshot, snapshot["structure_events"],
             require_external_alignment=bool(self._param("require_external_alignment", True)),
+            matrix_overrides={
+                str(item.get("event_key")): item for item in snapshot.get("event_matrix") or []
+                if isinstance(item, dict) and item.get("event_key")
+            },
+        )
+        snapshot["observation_plans"] = build_observation_plans(
+            snapshot["structure_events"], snapshot["event_decisions"], period=period,
         )
         snapshot["structure_state"] = derive_structure_state(snapshot)
-        # Evaluate range, event and location SETUPs independently. A watching
-        # box breakout must not hide a valid HL pullback on another layer.
-        range_plans = self._filter_allowed(self._range_plans(
+        plans = self._filter_allowed(self._plans_from_observations(
             source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
         ))
-        event_plans = self._filter_allowed(self._event_plans(
-            source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
-        ))
-        location_plans = self._filter_allowed(self._location_plans(
-            source_id, symbol, period, rows, structure, snapshot, bar_time, seconds,
-        ))
-        plans = self._select_structure_plans(range_plans, event_plans, location_plans)
         if plans:
             return plans
         state = str(structure.get("major_state") or "undetermined")
@@ -1262,925 +1050,6 @@ class StructurePlanBuilder:
             valid_from=bar_time, expires_at=bar_time + seconds,
             structure_snapshot=snapshot,
         )]
-
-    @staticmethod
-    def _latest_labeled_pivot(hierarchy: Dict, labels, kind: str) -> Optional[Dict]:
-        candidates = []
-        for layer_rank, layer in enumerate(("swing", "internal")):
-            for pivot in (hierarchy.get(layer) or {}).get("pivots") or []:
-                if pivot.get("kind") == kind and pivot.get("label") in labels:
-                    item = dict(pivot)
-                    item["layer"] = layer
-                    item["layer_rank"] = layer_rank
-                    candidates.append(item)
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: (
-            int(item.get("index", -1)), -int(item.get("layer_rank", 0))
-        ))
-
-    @staticmethod
-    def _projected_trendline(structure: Dict, direction: str, latest_index: int,
-                             min_touches: int) -> Optional[Dict]:
-        kind = "support" if direction == "buy" else "resistance"
-        candidates = []
-        for line in structure.get("trendlines") or []:
-            if line.get("kind") != kind or line.get("broken_at") is not None:
-                continue
-            if int(line.get("touches") or 0) < min_touches:
-                continue
-            slope = _number(line.get("slope"))
-            if (direction == "buy" and slope <= 0) or (
-                direction == "sell" and slope >= 0
-            ):
-                continue
-            anchor_price = _number(line.get("anchor_price"))
-            anchor_index = int(line.get("anchor_index") or 0)
-            projected = anchor_price + slope * (latest_index - anchor_index)
-            if projected <= 0:
-                continue
-            item = dict(line)
-            item["projected_price"] = projected
-            candidates.append(item)
-        return max(candidates, key=lambda item: _number(item.get("score"))) if candidates else None
-
-    def _location_candidates(self, rows: List[Dict], structure: Dict,
-                             direction: str) -> List[Dict]:
-        hierarchy = structure.get("structure_hierarchy") or {}
-        result = []
-        pivot = self._latest_labeled_pivot(
-            hierarchy,
-            {"HL"} if direction == "buy" else {"LH"},
-            "low" if direction == "buy" else "high",
-        )
-        if pivot and _number(pivot.get("price")) > 0:
-            result.append({
-                "price": _number(pivot["price"]),
-                "source": f"{pivot.get('layer')} {pivot.get('label')}",
-                "confidence": 72 if pivot.get("layer") == "swing" else 66,
-                "anchor_index": int(pivot.get("index") or len(rows) - 1),
-            })
-        unique = {}
-        for item in result:
-            key = round(_number(item["price"]), 8)
-            if key not in unique or item["confidence"] > unique[key]["confidence"]:
-                unique[key] = item
-        return list(unique.values())
-
-    def _location_plans(
-        self, source_id, symbol, period, rows, structure, snapshot,
-        bar_time, seconds,
-    ) -> List[Dict]:
-        if not self._param("enable_structure_location", True):
-            return []
-        self._activate_setup("structure_location_pullback")
-        binding = self._setup_binding("structure_location_pullback")
-        if not binding_matches(structure, binding):
-            self._reject(
-                f"趋势回撤要求入场层 {binding['entry_layer']} 仍是趋势，"
-                f"当前为 {layer_pattern(structure, binding['entry_layer'])}"
-            )
-            return []
-        major = str(structure.get("major_state") or structure.get("current_state") or "")
-        layer_bias = self.structure_layers(structure).get(binding["direction_layer"])
-        if layer_bias in {"up", "down"}:
-            major = layer_bias
-        if major not in {"up", "down"}:
-            self._reject("当前不是已确认的上涨或下跌主结构")
-            return []
-        candidate = structure.get("active_candidate") or {}
-        if candidate and str(candidate.get("direction") or "") not in {"", major}:
-            self._reject("主结构正处于反转候选阶段，等待 CHOCH/BOS 确认")
-            return []
-
-        direction = "buy" if major == "up" else "sell"
-        latest = rows[-1]
-        close = _number(latest.get("close") or latest.get("close_price"))
-        atr = max(1e-9, _number(structure.get("atr")))
-        hierarchy = structure.get("structure_hierarchy") or {}
-        expected_bias = "up" if direction == "buy" else "down"
-        swing_bias = self._direction_bias(
-            (hierarchy.get("swing") or {}).get("bias")
-        )
-        external_bias = self._direction_bias(
-            (hierarchy.get("external") or {}).get("bias")
-        )
-        internal_bias = self._direction_bias(
-            (hierarchy.get("internal") or {}).get("bias")
-            or structure.get("internal_state")
-        )
-        if swing_bias != expected_bias:
-            self._reject(
-                f"趋势回撤要求方向层同向：计划={expected_bias}，Swing={swing_bias}"
-            )
-            return []
-        if not self._external_allows(structure, expected_bias):
-            self._reject(
-                f"趋势回撤要求 External 同向：计划={expected_bias}，"
-                f"External={external_bias}"
-            )
-            return []
-        if self._param("location_require_internal_confirmation", True) and (
-            internal_bias != expected_bias
-        ):
-            self._reject(
-                f"Internal 当前为 {internal_bias}，等待向 {expected_bias} 的 "
-                "CHOCH/BOS 确认回撤结束"
-            )
-            return []
-        protected_name = "protected_low" if direction == "buy" else "protected_high"
-        swing_protected = self._layer_price(hierarchy, "swing", protected_name)
-        if swing_protected and (
-            (direction == "buy" and close < swing_protected)
-            or (direction == "sell" and close > swing_protected)
-        ):
-            self._reject(
-                f"收盘价已{'跌破' if direction == 'buy' else '突破'} Swing "
-                f"{protected_name} {swing_protected:.2f}，原趋势位置计划失效"
-            )
-            return []
-        proximity = atr * max(0.05, _number(self._param("location_proximity_atr", 0.4)))
-        candidates = self._location_candidates(rows, structure, direction)
-        if not candidates:
-            self._reject("当前趋势没有可用的已确认 HL/LH，保护点仅用于止损和失效判断")
-            return []
-        nearby = [item for item in candidates if abs(item["price"] - close) <= proximity]
-        if not nearby:
-            nearest = min(candidates, key=lambda item: abs(item["price"] - close))
-            self._reject(
-                f"当前价距最近结构位 {nearest['price']:.2f} 为 "
-                f"{abs(nearest['price'] - close) / atr:.2f} ATR，尚未进入位置区域"
-            )
-            return []
-        level = min(
-            nearby,
-            key=lambda item: (abs(item["price"] - close), -int(item["confidence"])),
-        )
-        entry = _number(level["price"])
-        # Once a completed candle has closed through the selected HL/LH, this
-        # is no longer a valid pullback to that level.  Do not create a fresh
-        # waiter from an already-broken location; a later rebound must wait
-        # for a new structure plan.
-        if (direction == "buy" and close < entry) or (
-            direction == "sell" and close > entry
-        ):
-            self._reject(
-                f"最新收盘已{'跌破' if direction == 'buy' else '突破'} "
-                f"原始{'HL' if direction == 'buy' else 'LH'} {entry:.2f}，"
-                "等待新的结构位置"
-            )
-            return []
-        configured_entry_mode = str(self._param("entry_mode", "") or "").strip().lower()
-        entry_mode = configured_entry_mode if configured_entry_mode in {
-            "touch_or_near", "touch_and_reclaim"
-        } else (
-            "touch_and_reclaim"
-            if self._param("require_location_reclaim", True) else "touch_or_near"
-        )
-        validation_evidence = {
-            "expected_bias": expected_bias,
-            "swing_bias": swing_bias,
-            "external_bias": external_bias,
-            "internal_bias": internal_bias,
-            "entry_level_type": "HL" if direction == "buy" else "LH",
-            "entry_level_source": level["source"],
-            "location_entry_level": entry,
-        }
-        if entry_mode == "touch_and_reclaim":
-            accepted, reclaim_evidence, rejection = self._location_reclaim_confirmation(
-                rows, entry, direction, atr
-            )
-            validation_evidence["reclaim"] = reclaim_evidence
-            validation_evidence["initial_reclaim_confirmed"] = accepted
-            validation_evidence["initial_reclaim_rejection"] = rejection
-        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-        protected = self._protected_reference(hierarchy, direction, entry)
-        if direction == "buy":
-            sl = min(entry, protected) - stop_buffer if protected else entry - stop_buffer
-        else:
-            sl = max(entry, protected) + stop_buffer if protected else entry + stop_buffer
-        target = self._next_target(hierarchy, direction, entry)
-        price_discovery = not bool(target)
-        if price_discovery:
-            # A trending market at a new high/low has no historical resistance
-            # or support ahead. Keep the plan tradable with a 1R reference;
-            # multi-level management replaces it with configurable R exits and
-            # a trailing-stop runner.
-            risk = abs(entry - sl)
-            target = entry + risk if direction == "buy" else entry - risk
-        else:
-            target = target - target_buffer if direction == "buy" else target + target_buffer
-        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-        valid_bars = max(1, int(self._param("location_plan_valid_bars", 6)))
-        entry_text = (
-            f"{entry:.5f}" if entry < 10 else f"{entry:.3f}" if entry < 1000 else f"{entry:.2f}"
-        )
-        plan = self._tradable_plan(
-            source_id=source_id, symbol=symbol, period=period,
-            anchor=_bar_time(rows[min(len(rows) - 1, max(0, level["anchor_index"]))]),
-            setup_type="structure_location_pullback", direction=direction,
-            entry_mode=entry_mode, status="active", entry=entry,
-            zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
-            stop_loss=sl, take_profit=target,
-            min_risk_reward_override=self._param(
-                "trend_min_real_risk_reward", 0.5
-            ),
-            confidence=int(level["confidence"]),
-            reason=(
-                f"{period} {'上涨' if direction == 'buy' else '下跌'}结构回撤："
-                f"Swing/External 仍{'向上' if direction == 'buy' else '向下'}；"
-                f"Internal 上次确认也还是{'上涨' if internal_bias == 'up' else '下跌' if internal_bias == 'down' else internal_bias}，"
-                f"当前回踩 {level['source']} "
-                f"{entry_text}，"
-                f"收盘未破保护位所以还不算转{'空' if direction == 'buy' else '多'}；"
-                f"等待收回后顺势{'买入' if direction == 'buy' else '卖出'}"
-            ),
-            valid_from=bar_time, expires_at=bar_time + seconds * valid_bars,
-            invalidation_price=sl, structure_snapshot=snapshot,
-            price_discovery=price_discovery,
-            validation_evidence=validation_evidence,
-        )
-        return [plan] if plan else []
-
-    def _range_plans(
-        self, source_id, symbol, period, rows, structure, snapshot,
-        bar_time, seconds,
-    ) -> List[Dict]:
-        box, box_layer = {}, ""
-        false_box, false_layer = setup_box(structure, self._setup_binding("range_false_breakout"))
-        if str(false_box.get("status") or "") == "failed_breakout":
-            box, box_layer = false_box, false_layer
-        else:
-            for setup_type in (
-                "range_breakout", "triangle_breakout",
-                "range_lower_reversal", "triangle_prebreakout_pullback",
-            ):
-                candidate, layer = setup_box(structure, self._setup_binding(setup_type))
-                if candidate:
-                    box, box_layer = candidate, layer
-                    break
-        if not box:
-            box = dict(structure.get("range") or {})
-            box_layer = "swing" if box else ""
-        if not box or not self._param("enable_range", True):
-            return []
-        top, bottom = _number(box.get("top")), _number(box.get("bottom"))
-        if top <= bottom or bottom <= 0:
-            return []
-        atr = max(1e-9, _number(structure.get("atr")))
-        start_index = max(0, int(box.get("start_index") or 0))
-        anchor = _bar_time(rows[start_index]) if start_index < len(rows) else bar_time
-        pattern = str(box.get("pattern") or "range")
-        status = str(box.get("status") or "candidate")
-        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-        valid_bars = max(1, int(self._param("range_plan_valid_bars", 12)))
-        expires = bar_time + seconds * valid_bars
-        confidence = max(50, min(95, int(_number(box.get("score"), 60))))
-        plans = []
-
-        if status == "failed_breakout" and self._param("enable_false_breakout", True) and self._setup_owns_layer("range_false_breakout", box_layer):
-            self._activate_setup("range_false_breakout")
-            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-            failed = str(box.get("breakout_direction") or "")
-            direction = "sell" if failed == "up" else "buy"
-            entry = top if direction == "sell" else bottom
-            sl = top + stop_buffer if direction == "sell" else bottom - stop_buffer
-            tp = bottom + target_buffer if direction == "sell" else top - target_buffer
-            plan = self._tradable_plan(
-                source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                setup_type="range_false_breakout", direction=direction,
-                entry_mode="touch_and_reclaim", status="active", entry=entry,
-                zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
-                stop_loss=sl, take_profit=tp, confidence=confidence,
-                reason=f"{period} 箱体{('上沿' if failed == 'up' else '下沿')}假突破后收盘回到区间",
-                valid_from=bar_time, expires_at=expires,
-                invalidation_price=sl, structure_snapshot=snapshot,
-                validation_evidence={
-                    "false_breakout_require_reclaim_close": bool(
-                        self._param("false_breakout_require_reclaim_close", True)
-                    ),
-                    "false_breakout_confirmation_bars": max(
-                        1, min(10, int(self._param("false_breakout_confirmation_bars", 1)))
-                    ),
-                    "false_breakout_min_reclaim_atr": max(
-                        0.0, _number(self._param("false_breakout_min_reclaim_atr", 0.1))
-                    ),
-                },
-            )
-            return [plan] if plan else []
-
-        if status == "breakout_confirmed" and self._param("enable_range_breakout", True) and (
-            self._setup_owns_layer("range_breakout", box_layer)
-            or self._setup_owns_layer("triangle_breakout", box_layer)
-        ):
-            direction = "buy" if box.get("breakout_direction") == "up" else "sell"
-            is_triangle = "triangle" in pattern
-            setup_type = "triangle_breakout" if is_triangle else "range_breakout"
-            self._activate_setup(setup_type)
-            validation_evidence = {}
-            if is_triangle:
-                accepted, validation_evidence, rejection = self._triangle_breakout_confirmation(
-                    rows, structure, box, direction, atr,
-                )
-                if not accepted:
-                    self._reject(rejection)
-                    return []
-            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-            entry = top if direction == "buy" else bottom
-            stop_inside = atr * max(0.1, _number(self._param("breakout_stop_inside_atr", 0.3)))
-            # A breakout-retest order is entered after the market has tested
-            # the boundary. Protect the retest structure, not the original
-            # breakout line, so a normal retest wick does not stop the trade.
-            retest_bars = max(1, int(self._param("breakout_retest_valid_bars", 6)))
-            retest_rows = rows[max(0, len(rows) - retest_bars):]
-            retest_lows = [_number(item.get("low") or item.get("low_price")) for item in retest_rows]
-            retest_highs = [_number(item.get("high") or item.get("high_price")) for item in retest_rows]
-            retest_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-            if direction == "buy" and any(value > 0 for value in retest_lows):
-                sl = min(value for value in retest_lows if value > 0) - retest_buffer
-            elif direction == "sell" and any(value > 0 for value in retest_highs):
-                sl = max(value for value in retest_highs if value > 0) + retest_buffer
-            else:
-                sl = entry - stop_inside if direction == "buy" else entry + stop_inside
-            measured = top + (top-bottom) if direction == "buy" else bottom - (top-bottom)
-            obstacle = self._next_target(
-                structure.get("structure_hierarchy") or {}, direction, entry
-            )
-            tp = measured
-            if obstacle:
-                tp = min(measured, obstacle-target_buffer) if direction == "buy" else max(measured, obstacle+target_buffer)
-            plan = self._tradable_plan(
-                source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                setup_type=setup_type,
-                direction=direction, entry_mode="breakout_retest", status="active",
-                entry=entry, zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
-                stop_loss=sl, take_profit=tp, confidence=min(95, confidence+5),
-                reason=(
-                    f"{period} {pattern}收盘确认向{('上' if direction == 'buy' else '下')}突破，"
-                    + (
-                        f"实体 {validation_evidence['body_atr']:.2f} ATR、"
-                        f"收盘越界 {validation_evidence['close_extension_atr']:.2f} ATR，"
-                        f"Swing/External 同向，等待回踩结构边界"
-                        if is_triangle else "等待回踩结构边界"
-                    )
-                ),
-                valid_from=bar_time,
-                expires_at=bar_time + seconds * max(1, int(self._param("breakout_retest_valid_bars", 6))),
-                invalidation_price=sl, structure_snapshot=snapshot,
-                validation_evidence=validation_evidence,
-            )
-            return [plan] if plan else []
-
-        if not box.get("active"):
-            return []
-        # 局部三角形不能覆盖已确认的主箱体边界交易。价格已经贴近
-        # 箱体下沿/上沿时，优先给出边界回收计划，避免把下沿机会误标
-        # 为等待突破，更不能在下沿附近生成反向卖出。
-        # A confirmed sideways box is tradable at both boundaries even when
-        # the latest close is still in the middle.  Plans are evaluated by
-        # Tick against their entry zones, so persisting both sides here lets
-        # the strategy enter when price subsequently reaches the boundary.
-        # This also prevents a local triangle watcher from hiding the major
-        # box's lower-boundary buy opportunity.
-        if pattern != "range" and str(structure.get("major_state") or structure.get("current_state")) in {"sideways", "range"} and self._param("enable_range_boundary", True) and self._setup_owns_layer("range_lower_reversal", box_layer):
-            boundary_plans = []
-            if bottom < top:
-                lower = self._tradable_plan(
-                    source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                    setup_type="range_lower_reversal", direction="buy",
-                    entry_mode=self._range_entry_mode(), status="active", entry=bottom,
-                    zone_lower=bottom-entry_buffer, zone_upper=bottom+entry_buffer,
-                    stop_loss=bottom-stop_buffer, take_profit=top-target_buffer,
-                    confidence=confidence,
-                    reason=f"{period} 主箱体下沿附近，三角形内部回收后优先按下沿支撑买入",
-                    valid_from=bar_time, expires_at=expires,
-                    invalidation_price=bottom-stop_buffer, structure_snapshot=snapshot,
-                )
-                if lower:
-                    boundary_plans.append(lower)
-            if bottom < top:
-                upper = self._tradable_plan(
-                    source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                    setup_type="range_upper_reversal", direction="sell",
-                    entry_mode=self._range_entry_mode(), status="active", entry=top,
-                    zone_lower=top-entry_buffer, zone_upper=top+entry_buffer,
-                    stop_loss=top+stop_buffer, take_profit=bottom+target_buffer,
-                    confidence=confidence,
-                    reason=f"{period} 主箱体上沿附近，三角形内部回收后优先按上沿压力卖出",
-                    valid_from=bar_time, expires_at=expires,
-                    invalidation_price=top+stop_buffer, structure_snapshot=snapshot,
-                )
-                if upper:
-                    boundary_plans.append(upper)
-            if boundary_plans:
-                latest_close = _number(rows[-1].get("close") or rows[-1].get("close_price"))
-                if latest_close > 0:
-                    # Only expose the boundary with the highest immediate
-                    # likelihood.  When price is at the lower edge, an upper
-                    # sell plan is still technically valid but misleading
-                    # and far from execution, so do not publish it.
-                    return [min(
-                        boundary_plans,
-                        key=lambda item: abs(_number(item.get("entry_price")) - latest_close),
-                    )]
-                return boundary_plans
-        # Triangles wait for a close-confirmed breakout; broadening structures
-        # remain observation-only by default because boundary risk expands.
-        if pattern != "range":
-            setup = "diverging_no_trade" if pattern == "broadening" else "triangle_breakout_watch"
-            self._activate_setup(setup)
-            # A directional triangle carries a structural bias.  Do not expose
-            # the opposite breakout as an equally likely trade: an ascending
-            # triangle watches only the upper-boundary break, while a
-            # descending triangle watches only the lower-boundary break.
-            # Only a neutral/converging triangle remains two-sided until its
-            # closing-bar confirmation.
-            if pattern == "broadening":
-                directions = ("none",)
-            elif pattern in {"ascending_triangle", "ascending"}:
-                directions = ("buy",)
-            elif pattern in {"descending_triangle", "descending"}:
-                directions = ("sell",)
-            else:
-                directions = ("buy", "sell")
-            result = []
-
-            # An ascending triangle can be entered once at the late-stage
-            # rising support before the breakout, then entered a second time
-            # after the upper-boundary close confirmation.  The early entry is
-            # deliberately limited to the convergence end and requires the
-            # price to be near the projected lower trendline; otherwise only
-            # the breakout watcher is exposed.
-            if (pattern in {"ascending_triangle", "ascending", "descending_triangle", "descending"}
-                    and self._param("enable_triangle_prebreakout", True)):
-                close = _number(rows[-1].get("close") or rows[-1].get("close_price"))
-                low_slope = _number(box.get("low_slope"))
-                low_intercept = _number(box.get("low_intercept"))
-                high_slope = _number(box.get("high_slope"))
-                high_intercept = _number(box.get("high_intercept"))
-                is_ascending = pattern in {"ascending_triangle", "ascending"}
-                direction = "buy" if is_ascending else "sell"
-                level = (
-                    low_intercept + low_slope * (len(rows) - 1)
-                    if is_ascending else
-                    high_intercept + high_slope * (len(rows) - 1)
-                )
-                width_atr = _number(box.get("width_atr"))
-                late_convergence = width_atr > 0 and width_atr <= 2.5
-                near_entry_level = level > 0 and close > 0 and abs(close - level) <= entry_buffer
-                if late_convergence and near_entry_level:
-                    self._activate_setup("triangle_prebreakout_pullback")
-                    entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-                    stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-                    target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-                    protected = self._protected_reference(
-                        structure.get("structure_hierarchy") or {}, direction, level
-                    )
-                    if direction == "buy":
-                        sl = min(level, protected) - stop_buffer if protected else level - stop_buffer
-                        tp = top - target_buffer
-                        setup_reason = "价格接近抬升支撑线"
-                    else:
-                        sl = max(level, protected) + stop_buffer if protected else level + stop_buffer
-                        tp = bottom + target_buffer
-                        setup_reason = "价格接近下降压力线"
-                    early = self._tradable_plan(
-                        source_id=source_id, symbol=symbol, period=period,
-                        anchor=anchor, setup_type="triangle_prebreakout_pullback",
-                        direction=direction, entry_mode="touch_or_near", status="active",
-                        entry=level, zone_lower=level-entry_buffer,
-                        zone_upper=level+entry_buffer, stop_loss=sl,
-                        take_profit=tp, confidence=min(90, confidence + 3),
-                        reason=(f"{period} {'上升' if is_ascending else '下降'}三角形收敛末端，"
-                                f"{setup_reason}，先布局{'买入' if is_ascending else '卖出'}；"
-                                f"止损置于最近{'HL/保护低点' if is_ascending else 'LH/保护高点'}外侧，"
-                                f"突破{'上沿' if is_ascending else '下沿'}后可再次{'买入' if is_ascending else '卖出'}"),
-                        valid_from=bar_time, expires_at=expires,
-                        invalidation_price=sl, structure_snapshot=snapshot,
-                    )
-                    if early:
-                        result.append(early)
-            for direction in directions:
-                if direction == "none":
-                    result.append(self._plan(
-                        source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                        setup_type=setup, direction=direction, entry_mode="close_breakout",
-                        status="watching", confidence=confidence,
-                        reason="扩散结构边界持续放大，等待更明确事件",
-                        valid_from=bar_time, expires_at=expires, structure_snapshot=snapshot,
-                    ))
-                    continue
-                entry = top if direction == "buy" else bottom
-                breakout_buffer = max(
-                    stop_buffer,
-                    atr * max(0.1, _number(self._param("breakout_stop_buffer_atr", 0.8))),
-                    (top - bottom) * max(0.05, _number(self._param("breakout_stop_width_ratio", 0.15))),
-                )
-                target_distance = max(
-                    top - bottom,
-                    atr * max(1.0, _number(self._param("breakout_target_atr", 3.0))),
-                )
-                stop = entry - breakout_buffer if direction == "buy" else entry + breakout_buffer
-                target = entry + target_distance if direction == "buy" else entry - target_distance
-                result.append(self._plan(
-                    source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                    setup_type=setup, direction=direction, entry_mode="close_breakout",
-                    status="watching", entry=entry,
-                    zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
-                    stop_loss=stop, take_profit=target, confidence=confidence,
-                    reason=f"{period} {pattern}等待收盘确认{('上破' if direction == 'buy' else '下破')}；突破价 {entry:.2f}",
-                    valid_from=bar_time, expires_at=expires,
-                    invalidation_price=stop, structure_snapshot=snapshot,
-                ))
-            return result
-
-        if self._param("enable_range_boundary", True) and self._setup_owns_layer("range_lower_reversal", box_layer):
-            self._activate_setup("range_lower_reversal")
-            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-            lower = self._tradable_plan(
-                source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                setup_type="range_lower_reversal", direction="buy",
-                entry_mode=self._range_entry_mode(), status="active", entry=bottom,
-                zone_lower=bottom-entry_buffer, zone_upper=bottom+entry_buffer,
-                stop_loss=bottom-stop_buffer, take_profit=top-target_buffer,
-                confidence=confidence,
-                reason=f"{period} 箱体下沿回收买入计划，上下沿确认 {box.get('low_touches',0)}/{box.get('high_touches',0)} 次",
-                valid_from=bar_time, expires_at=expires,
-                invalidation_price=bottom-stop_buffer, structure_snapshot=snapshot,
-            )
-            self._activate_setup("range_upper_reversal")
-            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-            upper = self._tradable_plan(
-                source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                setup_type="range_upper_reversal", direction="sell",
-                entry_mode=self._range_entry_mode(), status="active", entry=top,
-                zone_lower=top-entry_buffer, zone_upper=top+entry_buffer,
-                stop_loss=top+stop_buffer, take_profit=bottom+target_buffer,
-                confidence=confidence,
-                reason=f"{period} 箱体上沿回落卖出计划，上下沿确认 {box.get('low_touches',0)}/{box.get('high_touches',0)} 次",
-                valid_from=bar_time, expires_at=expires,
-                invalidation_price=top+stop_buffer, structure_snapshot=snapshot,
-            )
-            boundary_plans = [item for item in (lower, upper) if item]
-            if boundary_plans:
-                latest_close = _number(rows[-1].get("close") or rows[-1].get("close_price"))
-                if latest_close > 0:
-                    boundary_plans = [min(
-                        boundary_plans,
-                        key=lambda item: abs(_number(item.get("entry_price")) - latest_close),
-                    )]
-                plans.extend(boundary_plans)
-        if self._param("enable_range_breakout", True) and self._setup_owns_layer("range_breakout_watch", box_layer):
-            self._activate_setup("range_breakout_watch")
-            for direction in ("buy", "sell"):
-                expected_bias = "up" if direction == "buy" else "down"
-                if self.counter_trend_reason(
-                    direction, structure, "range_breakout_watch",
-                    self._setup_overlay("range_breakout_watch"),
-                ):
-                    continue
-                if not self._external_allows(structure, expected_bias, "range_breakout_watch"):
-                    continue
-                plans.append(self._plan(
-                    source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                    setup_type="range_breakout_watch", direction=direction,
-                    entry_mode="close_breakout", status="watching",
-                    confidence=confidence,
-                    reason=f"{period} 箱体等待收盘确认{('上破' if direction == 'buy' else '下破')}",
-                    valid_from=bar_time, expires_at=expires, structure_snapshot=snapshot,
-                ))
-        return plans
-
-    def _event_plans(
-        self, source_id, symbol, period, rows, structure, snapshot,
-        bar_time, seconds,
-    ) -> List[Dict]:
-        atr = max(1e-9, _number(structure.get("atr")))
-        hierarchy = structure.get("structure_hierarchy") or {}
-        swing = hierarchy.get("swing") or {}
-        selected = self._select_bound_event(structure)
-        if not selected:
-            return []
-        latest, event_setup = selected
-        event_type = str(latest.get("type") or "")
-        event_index = int(latest.get("confirmed_at", latest.get("index", -1)) or -1)
-        age = len(rows)-1-event_index
-        if event_type == "bos":
-            swing_phase = str(swing.get("phase") or "")
-            setup = (
-                "structure_reversal"
-                if swing_phase == "reversal_confirmed"
-                else "trend_continuation"
-            )
-            self._activate_setup(setup)
-            max_age_key = (
-                "trend_max_event_age_bars_m1"
-                if str(period).upper() == "M1"
-                else "trend_max_event_age_bars_other"
-            )
-            max_age = max(1, int(self._param(
-                max_age_key, 5 if str(period).upper() == "M1" else 3,
-            )))
-        else:
-            setup = ""
-            max_age = max(0, int(self._param("max_event_age_bars", 2)))
-        if event_index < 0 or age < 0 or age > max_age:
-            return []
-        anchor = _bar_time(rows[event_index]) if event_index < len(rows) else bar_time
-
-        if event_type == "choch" and self._param("enable_choch", True):
-            self._activate_setup("choch_reversal")
-            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-            expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
-            direction_state = str(latest.get("direction") or "")
-            if direction_state not in {"up", "down"}:
-                self._reject("CHOCH 事件没有明确的反转方向")
-                return []
-            # A short-lived internal CHOCH inside a healthy higher-level up
-            # trend is a pullback, not a tradable short reversal.  Requiring
-            # the trend to fail (or the external structure to agree) avoids
-            # selling every M1 retracement in an otherwise rising market.
-            major_state = str(structure.get("major_state") or "").lower()
-            trend_phase = str(structure.get("trend_phase") or "").lower()
-            if (
-                major_state in {"up", "down"}
-                and direction_state != major_state
-                and trend_phase in {"strong", "mature", "weakening"}
-                and not self._external_allows(structure, direction_state, "choch_reversal")
-            ):
-                self._reject(
-                    f"主结构仍为 {major_state}，当前 CHOCH={direction_state} 仅视为趋势内回撤，"
-                    "等待主结构失效或更高层级确认后再做反转"
-                )
-                return []
-            displacement = _number(latest.get("displacement_atr"))
-            minimum = max(0.0, _number(
-                self._param("min_choch_displacement_atr", 0.2)
-            ))
-            if displacement < minimum:
-                self._reject(
-                    f"CHOCH 位移 {displacement:.2f} ATR 低于最低确认要求 {minimum:.2f} ATR"
-                )
-                return []
-            direction = "buy" if direction_state == "up" else "sell"
-            entry = _number(latest.get("level"))
-            if entry <= 0:
-                self._reject("CHOCH 没有有效的突破结构位")
-                return []
-            protected = self._protected_reference(hierarchy, direction, entry)
-            sl = (
-                protected - stop_buffer if direction == "buy" else protected + stop_buffer
-            ) if protected else (
-                entry - stop_buffer if direction == "buy" else entry + stop_buffer
-            )
-            stop_ratio = self._stop_risk_atr(entry, sl, atr)
-            max_stop_ratio = max(0.1, _number(
-                self._param("choch_max_stop_atr", 3.0)
-            ))
-            if stop_ratio > max_stop_ratio:
-                self._reject(
-                    f"CHOCH 止损距离 {stop_ratio:.2f} ATR 超过上限 "
-                    f"{max_stop_ratio:.2f} ATR，等待新的结构回踩"
-                )
-                return []
-            target = self._next_target(hierarchy, direction, entry)
-            risk = abs(entry - sl)
-            price_discovery = not bool(target)
-            if price_discovery:
-                target = entry + risk * 2 if direction == "buy" else entry - risk * 2
-            elif direction == "buy":
-                target -= target_buffer
-            else:
-                target += target_buffer
-            plan = self._tradable_plan(
-                source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                setup_type="choch_reversal", direction=direction,
-                entry_mode="breakout_retest", status="active", entry=entry,
-                zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
-                stop_loss=sl, take_profit=target,
-                confidence=max(65, min(95, int(65 + displacement * 20))),
-                reason=(
-                    f"{period} {('向上' if direction == 'buy' else '向下')} CHOCH 收盘确认，"
-                    f"等待反转位 {entry:.2f} 回踩后"
-                    f"{'买入' if direction == 'buy' else '卖出'}"
-                ),
-                valid_from=bar_time, expires_at=expires,
-                invalidation_price=sl, structure_snapshot=snapshot,
-                price_discovery=price_discovery,
-                validation_evidence={
-                    "stop_distance": round(abs(entry - sl), 8),
-                    "stop_distance_atr": round(stop_ratio, 3),
-                    "maximum_stop_atr": round(max_stop_ratio, 3),
-                    "risk_tier": "normal",
-                },
-            )
-            return [plan] if plan else []
-
-        if event_type == "liquidity_sweep" and self._param("enable_liquidity_sweep", True):
-            self._activate_setup("liquidity_sweep_reclaim")
-            entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-            stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-            target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-            expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
-            swept = str(latest.get("direction") or "")
-            direction = "sell" if swept == "up" else "buy"
-            major = str(
-                structure.get("major_state")
-                or structure.get("current_state") or "undetermined"
-            )
-            box = structure.get("range") or {}
-            # 横盘只是方向状态，不代表箱体上下沿已经达到可交易标准。
-            # 未确认边界时，内部 Pivot 扫单只能作为证据，不能单独下单。
-            if major in {"sideways", "range"} and not bool(box.get("active")):
-                return []
-            # 趋势和仍在抬高/走低的震荡通道里，扫单只做顺势回收：
-            # 上涨或震荡上升只许扫低点买，下跌或震荡下降只许扫高点卖。
-            blocked = self.counter_trend_reason(
-                direction, structure, "liquidity_sweep_reclaim",
-            )
-            if blocked:
-                self._reject(blocked)
-                return []
-            entry = _number(latest.get("level"))
-            protected = self._protected_reference(hierarchy, direction, entry)
-            sl = (
-                protected + stop_buffer if direction == "sell" else protected - stop_buffer
-            ) if protected else (
-                entry + stop_buffer if direction == "sell" else entry - stop_buffer
-            )
-            target = self._next_target(hierarchy, direction, entry)
-            price_discovery = not bool(target)
-            if price_discovery:
-                target = entry - abs(entry-sl)*2 if direction == "sell" else entry + abs(entry-sl)*2
-            if direction == "sell": target += target_buffer
-            else: target -= target_buffer
-            plan = self._tradable_plan(
-                source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-                setup_type="liquidity_sweep_reclaim", direction=direction,
-                entry_mode="touch_and_reclaim", status="active", entry=entry,
-                zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
-                stop_loss=sl, take_profit=target, confidence=70,
-                reason=(
-                    f"{period} {'扫过上方高点后回落' if swept == 'up' else '扫过下方低点后回收'}，"
-                    f"与{('上涨' if major == 'up' else '下跌' if major == 'down' else '已确认箱体')}结构一致"
-                ),
-                valid_from=bar_time, expires_at=expires,
-                invalidation_price=sl, structure_snapshot=snapshot,
-                price_discovery=price_discovery,
-            )
-            return [plan] if plan else []
-
-        if event_type != "bos" or not self._param("enable_trend", True):
-            return []
-        direction_state = str(latest.get("direction") or "")
-        major = str(structure.get("major_state") or "")
-        trend_phase = str(structure.get("trend_phase") or "strong").lower()
-        if self._param("trend_require_healthy_phase", True) and trend_phase == "failed":
-            self._reject(
-                f"趋势阶段为 {trend_phase}，推进力度衰减或保护点已失效，"
-                "暂停趋势延续计划"
-            )
-            return []
-        swing_bias = self._direction_bias(swing.get("bias") or major)
-        if direction_state != major or swing_bias != major or major not in {"up", "down"}:
-            self._reject("趋势延续要求主结构、Swing 与突破方向一致")
-            return []
-        displacement = _number(latest.get("displacement_atr"))
-        period_key = "trend_min_breakout_displacement_atr_m1" if str(period).upper() == "M1" else "trend_min_breakout_displacement_atr_other"
-        minimum = max(0.0, _number(self._param(
-            period_key,
-            self._param("min_breakout_displacement_atr", 0.6),
-        )))
-        if displacement < minimum:
-            self._reject(f"趋势突破位移 {displacement:.2f} ATR 低于最低要求 {minimum:.2f} ATR")
-            return []
-        if str(latest.get("confirmation") or "") not in {
-            "close_confirmed", "retest_confirmed", "continuation_confirmed",
-        }:
-            self._reject("趋势延续必须经过收盘突破确认")
-            return []
-        swing_pivots = [
-            p for p in (swing.get("pivots") or [])
-            if p.get("kind") == ("low" if direction_state == "up" else "high")
-            and p.get("label") == ("HL" if direction_state == "up" else "LH")
-        ]
-        ascending_context = str(structure.get("trend_regime") or "").lower() == "ascending_range"
-        if len(swing_pivots) >= 2:
-            spacing = abs(
-                _number(swing_pivots[-1].get("price"))
-                - _number(swing_pivots[-2].get("price"))
-            )
-            pivot_ascending_context = (
-                (
-                    _number(swing_pivots[-1].get("price"))
-                    > _number(swing_pivots[-2].get("price"))
-                    if direction_state == "up" else
-                    _number(swing_pivots[-1].get("price"))
-                    < _number(swing_pivots[-2].get("price"))
-                )
-                and spacing >= max(0.1, _number(self._param("trend_hl_min_spacing_atr", 0.5))) * atr
-            )
-            ascending_context = ascending_context and pivot_ascending_context
-        if trend_phase in {"mature", "weakening"} and ascending_context:
-            entry_mode, entry, confirmation_evidence = self._ascending_pullback_confirmation(
-                rows, structure, atr, direction_state,
-            )
-        else:
-            # Flat/range background keeps the simpler BOS -> retest entry.
-            entry_mode, entry, confirmation_evidence = self._trend_entry_confirmation(
-                rows, latest, atr,
-            )
-        if not entry_mode or entry <= 0:
-            self._reject("趋势延续尚未完成回踩确认或连续收盘站稳")
-            return []
-        mature_retest_only = bool(self._param("trend_mature_retest_only", True))
-        chase_entry = entry_mode not in {"breakout_retest", "trend_pullback_reclaim"}
-        if mature_retest_only and trend_phase in {"mature", "weakening"} and chase_entry:
-            self._reject(
-                f"趋势阶段为 {trend_phase}，已开启成熟趋势仅允许回踩，禁止突破后直接追入"
-            )
-            return []
-        direction = "buy" if major == "up" else "sell"
-        entry_buffer = atr * max(0.0, _number(self._param("entry_zone_atr", 0.35)))
-        stop_buffer = atr * max(0.0, _number(self._param("stop_buffer_atr", 0.25)))
-        expires = bar_time + seconds * max(1, int(self._param("event_plan_valid_bars", 6)))
-        protected = self._protected_reference(hierarchy, direction, entry)
-        if entry_mode == "trend_pullback_reclaim":
-            if direction == "buy":
-                protected = float(confirmation_evidence.get("pullback_level") or protected or 0)
-            else:
-                protected = float(confirmation_evidence.get("pullback_level") or protected or 0)
-        if not protected or not entry:
-            return []
-        sl = protected-stop_buffer if direction == "buy" else protected+stop_buffer
-        risk_entry_mode, risk_entry, risk_evidence = self._trend_stop_gate(
-            entry=entry, stop_loss=sl, atr=atr, entry_mode=entry_mode,
-            breakout_level=_number(latest.get("level")),
-        )
-        if risk_entry_mode == "rejected":
-            self._reject(
-                f"趋势延续止损距离 {risk_evidence['stop_distance_atr']:.2f} ATR "
-                f"超过上限 {risk_evidence['maximum_stop_atr']:.2f} ATR，取消追价计划"
-            )
-            return []
-        if risk_entry_mode == "new_structure_required":
-            self._reject(
-                f"趋势延续止损距离 {risk_evidence['stop_distance_atr']:.2f} ATR "
-                f"过大，等待新的 HL/LH 后再生成计划"
-            )
-            return []
-        if risk_entry_mode == "breakout_retest":
-            entry_mode = risk_entry_mode
-            entry = risk_entry
-            entry_buffer = atr * max(
-                0.0, _number(self._param("entry_zone_atr", 0.35))
-            )
-        target_buffer = atr * max(0.0, _number(self._param("target_buffer_atr", 0.1)))
-        target = self._next_target(hierarchy, direction, entry)
-        risk = abs(entry-sl)
-        price_discovery = not bool(target)
-        if price_discovery:
-            target = entry+risk*2 if direction == "buy" else entry-risk*2
-        elif direction == "buy":
-            target -= target_buffer
-        else:
-            target += target_buffer
-        confirmation_text = (
-            "回踩突破位并守住"
-            if entry_mode == "breakout_retest"
-            else "回到上升/下降结构的 HL/LH 支撑区并完成方向回收"
-            if entry_mode == "trend_pullback_reclaim"
-            else f"连续 {confirmation_evidence.get('held_bars') or confirmation_evidence.get('required_hold_bars')} 根K线收在突破位外"
-        )
-        confirmation_evidence = dict(confirmation_evidence)
-        confirmation_evidence["risk_gate"] = risk_evidence
-        plan = self._tradable_plan(
-            source_id=source_id, symbol=symbol, period=period, anchor=anchor,
-            setup_type=setup, direction=direction, entry_mode=entry_mode,
-            status="active", entry=entry,
-            zone_lower=entry-entry_buffer, zone_upper=entry+entry_buffer,
-            stop_loss=sl, take_profit=target,
-            confidence=max(60, min(95, int(60+displacement*20))),
-            reason=f"{period} {setup} BOS 已收盘确认，{confirmation_text}",
-            valid_from=bar_time, expires_at=expires,
-            invalidation_price=sl, structure_snapshot=snapshot,
-            price_discovery=price_discovery,
-            validation_evidence=confirmation_evidence,
-        )
-        return [plan] if plan else []
 
 
 class StructurePlanSignalGenerator:
@@ -2433,7 +1302,7 @@ class StructurePlanSignalGenerator:
         if bar_time <= 0:
             return False
         required_bars = max(1, int(effective_config.get(
-            "location_reclaim_confirmation_bars", 3
+            "confirmation_bars", effective_config.get("location_reclaim_confirmation_bars", 3)
         )))
         last_bar = int(plan.get("location_entry_confirmation_bar") or 0)
         if (bar_time == last_bar and int(plan.get(
@@ -2443,10 +1312,10 @@ class StructurePlanSignalGenerator:
         accepted, evidence, rejection = location_reclaim_confirmation(
             closed_bars, entry, direction, atr,
             min_body_atr=max(0.0, _number(effective_config.get(
-                "location_reclaim_min_body_atr", 0.5
+                "confirmation_min_body_atr", effective_config.get("location_reclaim_min_body_atr", 0.5)
             ))),
             min_close_extension_atr=max(0.0, _number(effective_config.get(
-                "location_reclaim_min_close_extension_atr", 0.2
+                "confirmation_min_close_extension_atr", effective_config.get("location_reclaim_min_close_extension_atr", 0.2)
             ))),
             confirmation_bars=required_bars,
             require_touch=False,
@@ -2457,6 +1326,11 @@ class StructurePlanSignalGenerator:
             "location_entry_reclaim_confirmed": accepted,
             "location_entry_reclaim_evidence": evidence,
             "location_entry_reclaim_rejection": rejection,
+            "confirmation_type": "confirmation_sequence",
+            "confirmation_bars_required": required_bars,
+            "confirmation_bars_seen": int(evidence.get("confirmation_bars_seen") or 0),
+            "confirmation_evidence": evidence,
+            "confirmation_rejection": rejection,
         }
         plan.update(changes)
         self.repository.update_payload(plan.get("plan_id"), changes)
@@ -2616,23 +1490,25 @@ class StructurePlanSignalGenerator:
             (direction == "buy" and price >= entry)
             or (direction == "sell" and price <= entry)
         ))
-        if result and setup_type == "range_false_breakout":
-            if not self._false_breakout_reclaim_confirmed(
-                plan, closed_bar, effective_config or {},
-            ):
-                return False
-        if result and setup_type == "structure_location_pullback":
-            if not self._location_entry_reclaim_confirmed(
-                plan, closed_bar if isinstance(closed_bar, list) else [closed_bar] if closed_bar else [],
-                effective_config or {},
-            ):
-                return False
-        if result and setup_type == "choch_reversal":
-            if not self._choch_entry_retest_confirmed(
-                plan,
-                closed_bar if isinstance(closed_bar, list) else [closed_bar] if closed_bar else [],
-                effective_config or {},
-            ):
+        plan_type = str(plan.get("plan_type") or setup_type)
+        confirmation = str(plan.get("required_confirmation") or plan.get("confirmation_type") or "")
+        needs_sequence = confirmation in {
+            "confirmation_sequence", "hl_retest", "lh_retest",
+            "retest_or_reclaim", "retest_or_sequence",
+        } or plan_type in {
+            "swing_pullback", "internal_pullback", "early_reversal",
+            "structure_reversal", "liquidity_reversal", "event_confirmation",
+            "range_reclaim", "internal_momentum", "trend_continuation",
+            "range_breakout",
+        } or setup_type in {
+            "range_false_breakout", "structure_location_pullback", "choch_reversal",
+        }
+        if result and needs_sequence:
+            bars = closed_bar if isinstance(closed_bar, list) else [closed_bar] if closed_bar else []
+            if plan_type == "range_reclaim" or setup_type == "range_false_breakout":
+                if not self._false_breakout_reclaim_confirmed(plan, bars[-1] if bars else None, effective_config or {}):
+                    return False
+            elif not self._location_entry_reclaim_confirmed(plan, bars, effective_config or {}):
                 return False
         if result:
             changes = {
@@ -2881,20 +1757,25 @@ class StructurePlanSignalGenerator:
                         waiting.append(plan)
                     continue
                 closed_bar = None
-                if setup_type in {"structure_location_pullback", "choch_reversal"}:
-                    confirmation_key = (
-                        "location_reclaim_confirmation_bars"
-                        if setup_type == "structure_location_pullback"
-                        else "choch_retest_confirmation_bars"
-                    )
-                    confirmation_default = 3 if setup_type == "structure_location_pullback" else 2
-                    closed_bar = self._latest_closed_bars(
-                        symbol, period, max(1, int(effective_config.get(
-                            confirmation_key, confirmation_default
-                        ))),
-                    )
-                elif setup_type == "range_false_breakout":
-                    closed_bar = self._latest_closed_bar(symbol, period)
+                confirmation = str(plan.get("required_confirmation") or plan.get("confirmation_type") or "")
+                plan_type = str(plan.get("plan_type") or setup_type)
+                needs_sequence = confirmation in {
+                    "confirmation_sequence", "hl_retest", "lh_retest",
+                    "retest_or_reclaim", "retest_or_sequence",
+                } or plan_type in {
+                    "swing_pullback", "internal_pullback", "early_reversal",
+                    "structure_reversal", "liquidity_reversal", "event_confirmation",
+                    "range_reclaim", "internal_momentum", "trend_continuation",
+                    "range_breakout",
+                } or setup_type in {
+                    "structure_location_pullback", "choch_reversal",
+                    "range_false_breakout",
+                }
+                if needs_sequence:
+                    required = max(1, int(plan.get("confirmation_bars_required") or effective_config.get(
+                        "confirmation_bars", effective_config.get("location_reclaim_confirmation_bars", 3)
+                    )))
+                    closed_bar = self._latest_closed_bars(symbol, period, required)
                 if self._triggered(
                     plan, float(current_price), effective_config, closed_bar,
                 ):
@@ -2915,7 +1796,12 @@ class StructurePlanSignalGenerator:
                 source_period=str(config.get("period") or "M5").upper(),
                 signal_source_id=str(config.get("signal_source_id") or ""),
                 setup_family=str(plan.get("setup_family") or "structure"),
-                setup_type=str(plan.get("setup_type") or "structure_plan"),
+                setup_type=str(plan.get("plan_type") or plan.get("setup_type") or "structure_plan"),
+                plan_type=str(plan.get("plan_type") or plan.get("setup_type") or ""),
+                event_chain=list(plan.get("event_chain") or []),
+                event_layer=str(plan.get("event_layer") or ""),
+                event_type=str(plan.get("event_type") or ""),
+                pattern=str(((plan.get("structure_snapshot") or {}).get("event_decisions") or [{}])[-1].get("pattern") or ((plan.get("validation_evidence") or {}).get("pattern") or "")),
                 entry_mode=str(plan.get("entry_mode") or "touch_or_near"),
                 trigger_price=float(current_price),
                 suggested_entry=float(current_price),

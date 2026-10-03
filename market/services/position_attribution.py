@@ -42,9 +42,21 @@ def build_position_attribution(
         "signal_source_id": str(summary.get("selected_signal_source_id") or ""),
         "signal_source_period": str(summary.get("selected_signal_period") or ""),
         "setup_type": str(
-            setup.get("setup_type")
+            setup.get("plan_type")
+            or setup.get("setup_type")
+            or summary.get("selected_plan_type")
             or summary.get("selected_setup_type") or "generic_entry"
         ),
+        "plan_type": str(
+            setup.get("plan_type")
+            or summary.get("selected_plan_type")
+            or setup.get("setup_type")
+            or summary.get("selected_setup_type") or "generic_entry"
+        ),
+        "event_chain": list(setup.get("event_chain") or summary.get("selected_event_chain") or []),
+        "event_layer": str(setup.get("event_layer") or summary.get("selected_event_layer") or ""),
+        "event_type": str(setup.get("event_type") or summary.get("selected_event_type") or ""),
+        "pattern": str(setup.get("pattern") or summary.get("selected_pattern") or ""),
         "setup_family": str(
             setup.get("setup_family")
             or summary.get("selected_setup_family") or "generic"

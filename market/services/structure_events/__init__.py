@@ -7,5 +7,9 @@ decision code decides whether it deserves an observation plan.
 
 from .catalog import collect_structure_events, latest_event_for
 from .decision import decide_event_observations
+from .matrix import event_matrix, matrix_rule, apply_matrix_overrides
 
-__all__ = ["collect_structure_events", "latest_event_for", "decide_event_observations"]
+__all__ = [
+    "collect_structure_events", "latest_event_for", "decide_event_observations",
+    "event_matrix", "matrix_rule", "apply_matrix_overrides",
+]

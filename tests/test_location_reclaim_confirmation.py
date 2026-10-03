@@ -46,6 +46,26 @@ class LocationReclaimConfirmationTests(unittest.TestCase):
         self.assertTrue(accepted, rejection)
         self.assertEqual(evidence["confirmation_extremes"], [99.3, 99.5, 99.8])
 
+    def test_middle_break_restarts_from_the_following_closed_bar(self):
+        rows = [
+            {"open": 99.0, "high": 100.7, "low": 98.8, "close": 100.6},
+            {"open": 100.3, "high": 100.9, "low": 99.2, "close": 100.9},
+            # The third bar closes through the level: this sequence fails.
+            {"open": 100.4, "high": 100.8, "low": 99.1, "close": 99.9},
+            {"open": 100.0, "high": 101.0, "low": 99.3, "close": 100.8},
+            {"open": 100.6, "high": 101.2, "low": 99.5, "close": 101.0},
+            {"open": 100.8, "high": 101.4, "low": 99.8, "close": 101.2},
+        ]
+        failed, _, _ = location_reclaim_confirmation(
+            rows[:3], 100, "buy", 2, confirmation_bars=3,
+        )
+        accepted, evidence, rejection = location_reclaim_confirmation(
+            rows[-3:], 100, "buy", 2, confirmation_bars=3, require_touch=False,
+        )
+        self.assertFalse(failed)
+        self.assertTrue(accepted, rejection)
+        self.assertEqual(evidence["confirmation_extremes"], [99.3, 99.5, 99.8])
+
 
 if __name__ == "__main__":
     unittest.main()

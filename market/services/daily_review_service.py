@@ -259,6 +259,8 @@ class DailyReviewCoordinator:
                 "plan_status": str(row["status"] or ""),
                 "valid_from": int(row["valid_from"] or 0),
                 "expires_at": int(row["expires_at"] or 0),
+                "plan_type": str(payload.get("plan_type") or ""),
+                "event_chain": payload.get("event_chain") or [],
             })
             plans.append(payload)
         bar_rows = self.storage.fetchall(
@@ -280,10 +282,14 @@ class DailyReviewCoordinator:
             user_id, [plan["plan_id"] for plan in plans]
         )
         setup_stats = defaultdict(lambda: Counter())
+        plan_type_stats = defaultdict(lambda: Counter())
         for item in outcomes:
             stats = setup_stats[item["setup_type"]]
             stats["plans"] += 1
             stats[item["outcome"]] += 1
+            plan_stats = plan_type_stats[item.get("plan_type") or item["setup_type"]]
+            plan_stats["plans"] += 1
+            plan_stats[item["outcome"]] += 1
         execution_stats = Counter(str(item.get("status") or "unknown") for item in executions)
         tradable = [item for item in outcomes if item["direction"] in {"buy", "sell"}]
         return {
@@ -300,6 +306,7 @@ class DailyReviewCoordinator:
                 "execution_status_counts": dict(execution_stats),
             },
             "by_setup": [{"setup_type": key, **dict(value)} for key, value in setup_stats.items()],
+            "by_plan_type": [{"plan_type": key, **dict(value)} for key, value in plan_type_stats.items()],
             "plans": outcomes[-120:],
         }
 
@@ -309,6 +316,8 @@ class DailyReviewCoordinator:
         result = {
             "plan_id": plan.get("plan_id"), "plan_group_id": plan.get("plan_group_id"),
             "setup_type": plan.get("setup_type"), "direction": direction,
+            "plan_type": plan.get("plan_type") or plan.get("setup_type"),
+            "event_chain": plan.get("event_chain") or [],
             "entry_mode": plan.get("entry_mode"), "status": plan.get("plan_status"),
             "entry_price": float(plan.get("entry_price") or 0),
             "stop_loss": float(plan.get("stop_loss") or 0),
@@ -554,6 +563,8 @@ class DailyReviewCoordinator:
                 "plan_group_id": str(row["plan_group_id"] or ""),
                 "period": str(row["period"] or ""),
                 "setup_type": str(row["setup_type"] or ""),
+                "plan_type": str(payload.get("plan_type") or row["setup_type"] or ""),
+                "event_chain": payload.get("event_chain") or [],
                 "direction": str(row["direction"] or ""),
                 "entry_mode": str(row["entry_mode"] or ""),
                 "plan_status": str(row["status"] or ""),

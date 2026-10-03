@@ -48,7 +48,7 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
             or attr.get("plan_period")
         )
         strategy_id = str(row.get("strategy_id") or attr.get("strategy_id") or "")
-        key = (str(row.get("symbol") or ""), _bucket(period, "未知"), _bucket(attr.get("setup_type") or attr.get("selected_setup_type"), "未分类"), strategy_id)
+        key = (str(row.get("symbol") or ""), _bucket(period, "未知"), _bucket(attr.get("plan_type") or attr.get("setup_type") or attr.get("selected_plan_type") or attr.get("selected_setup_type"), "未分类"), strategy_id)
         buckets.setdefault(key, []).append(float(row.get("profit") or 0))
     storage.execute("DELETE FROM daily_pnl_statistics WHERE user_id=? AND account_id=? AND business_date=?", (int(user_id), int(account_id), day.isoformat()))
     for (symbol, period, setup, strategy_id), values in buckets.items():

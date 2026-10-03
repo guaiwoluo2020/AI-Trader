@@ -7,6 +7,36 @@
     <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
     <v-alert v-if="structureResult" type="info" variant="tonal" density="compact" class="mb-4"><strong>主结构：</strong>{{ primaryStructureLabel(structureResult.primary_structure) }}。主结构由 Swing 与 External 汇总；每个选项卡只看该层自己的形态、阶段、事件和计划。</v-alert>
 
+    <v-row v-if="eventDecisions.length || eventMatrix.length" class="mb-4">
+      <v-col cols="12" md="7">
+        <v-card class="decision-card h-100">
+          <v-card-title class="d-flex align-center justify-space-between"><span>事件决策</span><v-chip size="x-small" color="primary" variant="tonal">事件 → 动作 → 计划</v-chip></v-card-title>
+          <v-card-text>
+            <div v-if="eventDecisions.length" class="decision-list">
+              <article v-for="item in eventDecisions.slice(-8).reverse()" :key="item.decision_id" class="decision-item">
+                <div><v-chip size="x-small" :color="item.status==='accepted'?'success':'warning'" variant="tonal">{{ item.status==='accepted'?'已接受':'已拒绝' }}</v-chip><strong>{{ layerLabel(item.event_layer) }} · {{ eventLabel(item.event_type) }}</strong><span>{{ item.direction==='up'?'向上':item.direction==='down'?'向下':'--' }}</span></div>
+                <p>{{ item.reason }}</p><small>{{ item.matrix_action || 'ignore' }} · {{ item.plan_type || item.setup_type || '--' }}<span v-if="item.required_confirmation"> · 后续 {{ item.required_confirmation }}</span></small>
+              </article>
+            </div>
+            <div v-else class="empty">当前没有事件决策</div>
+            <div v-if="observationPlans.length" class="observation-summary"><span>观察计划 {{ observationPlans.length }} 个</span><span v-for="item in observationPlans.slice(-3)" :key="item.observation_plan_id">{{ item.event_chain?.join(' → ') }} · {{ item.status }}</span></div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+      <v-col cols="12" md="5">
+        <v-card class="decision-card h-100">
+          <v-card-title>当前确认规则</v-card-title>
+          <v-card-text>
+            <div class="matrix-summary"><span>矩阵规则</span><strong>{{ eventMatrix.length }} 条</strong></div>
+            <div class="matrix-summary"><span>确认 K 线</span><strong>当前周期 · 3 根</strong></div>
+            <div class="matrix-summary"><span>多头确认</span><strong>收盘守位 · 低点抬高</strong></div>
+            <div class="matrix-summary"><span>空头确认</span><strong>收盘守位 · 高点降低</strong></div>
+            <p class="matrix-help">确认序列包含第一根 RETEST 或 RECLAIM K 线。INTERNAL 事件可以创建计划，但不是 SWING 回测的必选条件。</p>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+
     <v-tabs v-model="activeLayer" color="primary" class="mb-4" show-arrows>
       <v-tab value="internal">Internal</v-tab>
       <v-tab value="swing">Swing</v-tab>
@@ -44,6 +74,8 @@
                     <article v-for="plan in layerPlans(layer)" :key="plan.plan_id">
                       <div class="card-head"><v-chip size="x-small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ planLabel(plan) }}</strong><span>{{ planConsumptionLabel(plan) }}</span></div>
                       <div class="plan-values"><span>入场 {{ formatPlanPrice(plan.entry_price) }}</span><span>止损 {{ formatPlanPrice(plan.stop_loss) }}</span><span>止盈 {{ formatPlanPrice(plan.take_profit) }}</span></div>
+                      <div class="plan-chain" v-if="(plan.event_chain||[]).length">{{ (plan.event_chain||[]).join(' → ') }}</div>
+                      <div class="plan-confirm">确认 {{ plan.confirmation_bars_seen || 0 }} / {{ plan.confirmation_bars_required || 3 }} · {{ plan.required_confirmation || 'confirmation_sequence' }}</div>
                       <p>{{ plan.reason || '结构条件尚未满足' }}</p>
                     </article>
                   </div>
@@ -133,7 +165,7 @@ function build(rows){
   const merged=[]; for(const s of corrected){const last=merged.at(-1);if(last&&last.type!==s.type&&s.endIndex-s.startIndex+1<step*3)last.endIndex=s.endIndex;else if(last&&last.type===s.type)last.endIndex=s.endIndex;else merged.push(s)}
   return merged.slice(-5).map((s,i,arr)=>{const part=rows.slice(s.startIndex,s.endIndex+1);return {...s,id:`s-${s.startIndex}`,bars:part.length,start:stamp(part[0]),end:stamp(part.at(-1)),support:Math.min(...part.map(x=>Number(x.low??x.low_price??closeOf(x)))),resistance:Math.max(...part.map(x=>Number(x.high??x.high_price??closeOf(x)))),confidence:s.type==='transition'?50:70,status:i===arr.length-1?'当前已确认':'已结束',reason:s.type==='up'?'高低点和收盘结构持续抬升（允许中途震荡/回撤）':s.type==='down'?'高低点和收盘结构持续下移（允许中途震荡/反弹）':s.type==='sideways'?'价格在区间内反复运行':'趋势证据发生冲突，等待确认'}})
 }
-const current=computed(()=>layerSegments(activeLayer.value).at(-1)); async function loadTradePlans(){try{const response=await marketAPI.getStructureTradePlans(symbol.value,period.value);tradePlans.value=Array.isArray(response?.plans)?response.plans:[]}catch(e){tradePlans.value=[]}}
+const current=computed(()=>layerSegments(activeLayer.value).at(-1)); const eventDecisions=ref([]); const eventMatrix=ref([]); const observationPlans=ref([]); async function loadTradePlans(){try{const response=await marketAPI.getStructureTradePlans(symbol.value,period.value);tradePlans.value=Array.isArray(response?.plans)?response.plans:[];eventDecisions.value=Array.isArray(response?.event_decisions)?response.event_decisions:[];eventMatrix.value=Array.isArray(response?.event_matrix)?response.event_matrix:[];observationPlans.value=Array.isArray(response?.observation_plans)?response.observation_plans:[]}catch(e){tradePlans.value=[];eventDecisions.value=[];eventMatrix.value=[];observationPlans.value=[]}}
 const layerState=layer=>(structureResult.value?.structure_hierarchy||{})[layer]||{}
 const mapSegments=list=>{
   const rows=bars.value
@@ -162,9 +194,10 @@ const planStageLabel=plan=>{
   return String(plan?.status||'')==='active'?'等待价格':'等待确认'
 }
 const layerLabel=value=>({internal:'INTERNAL',swing:'SWING',external:'EXTERNAL'}[String(value||'').toLowerCase()]||String(value||'--').toUpperCase())
-const planEventLabel=value=>({bos:'BOS',choch:'CHOCH',liquidity_sweep:'扫单',retest:'回踩',reclaim:'回收',breakout_confirmed:'突破'}[String(value||'').toLowerCase()]||String(value||'事件'))
+const planEventLabel=value=>({bos:'BOS',choch:'CHOCH',liquidity_sweep:'扫单',retest:'回测',reclaim:'收复',hl_confirmed:'HL确认',lh_confirmed:'LH确认',hl_support_touched:'HL触碰',lh_press_touched:'LH触碰',breakout_confirmed:'突破'}[String(value||'').toLowerCase()]||String(value||'事件'))
+const planTypeLabel=value=>({trend_continuation:'趋势延续',range_breakout:'箱体突破',internal_momentum:'内部动量',structure_reversal:'结构反转',early_reversal:'早期反转',liquidity_reversal:'扫单反转',swing_pullback:'Swing回撤',internal_pullback:'Internal回撤',event_confirmation:'事件确认',range_reclaim:'箱体收复'}[String(value||'').toLowerCase()]||String(value||'结构计划'))
 const planLabel=plan=>{
-  const setup=String(plan?.setup_type||'结构计划')
+  const setup=planTypeLabel(plan?.plan_type||plan?.setup_type)
   const layer=plan?.event_layer||plan?.entry_layer
   const event=plan?.event_type
   return layer && event ? `${setup} · ${layerLabel(layer)} ${planEventLabel(event)}` : setup
@@ -218,7 +251,7 @@ const patternPhaseLabel=(pattern,value)=>{
   }
   return {forming:'形成中',continuation:'延续',pullback:'回撤中',mature:'成熟',breakout_confirmed:'突破已确认'}[phase]||phase||'--'
 }
-const eventLabel=value=>{const event=typeof value==='string'?value:(value?.type||value?.event_type||'');return {bos:'BOS 延续突破',choch:'CHoCH 结构转向',retest:'回踩确认',reclaim:'回收确认',false_breakout:'假突破',liquidity_sweep:'流动性扫过',breakout_confirmed:'突破已确认',none:'无新事件'}[event]||event||'无新事件'}
+const eventLabel=value=>{const event=typeof value==='string'?value:(value?.type||value?.event_type||'');return {bos:'BOS 延续突破',choch:'CHoCH 结构转向',retest:'回测确认',reclaim:'重新收复',hl_confirmed:'HL 已确认',lh_confirmed:'LH 已确认',hl_support_touched:'HL 支撑已触碰',lh_press_touched:'LH 压力已触碰',liquidity_sweep:'扫单回收',breakout_confirmed:'突破已确认',none:'无新事件'}[event]||event||'无新事件'}
 const eventColor=value=>{const event=typeof value==='string'?value:(value?.type||value?.event_type||'');return event==='choch'||event==='false_breakout'?'warning':event==='bos'||event==='breakout_confirmed'?'success':event==='liquidity_sweep'?'secondary':'grey'}
 const patternDetail=value=>{
   if(typeof value==='string') return value
@@ -423,7 +456,8 @@ watch(period,()=>{resetZoomOnNextRender=true;if(symbol.value){load();loadTradePl
 .event-time,.event-count{color:#71837b}
 .compact-plans{grid-template-columns:1fr;gap:8px}
 .compact-plans article{padding:10px 12px}
-.compact-plans p{margin:6px 0 0;font-size:.78rem}
+.compact-plans p{margin:6px 0 0;font-size:.78rem}.plan-chain,.plan-confirm{margin-top:4px;color:#6b8178;font-size:.7rem}
 .h-100{height:100%}
 .event-meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px;color:#71837b;font-size:.78rem}
+.decision-card{border:1px solid #dbe8e1;background:#fbfdfb}.decision-list{display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto}.decision-item{padding:9px 10px;border:1px solid #e0eae4;border-radius:9px;background:#fff}.decision-item>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:#31564b;font-size:.78rem}.decision-item p{margin:5px 0;color:#60736b;font-size:.72rem;line-height:1.4}.decision-item small{color:#84918b;font-size:.66rem}.matrix-summary{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #edf2ef;color:#718078;font-size:.76rem}.matrix-summary strong{color:#31564b}.matrix-help{margin:10px 0 0;color:#74827c;font-size:.7rem;line-height:1.5}.observation-summary{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;padding-top:9px;border-top:1px dashed #d7e3dd;color:#718078;font-size:.68rem}.observation-summary span{padding:4px 7px;border-radius:6px;background:#f1f6f3}
 </style>

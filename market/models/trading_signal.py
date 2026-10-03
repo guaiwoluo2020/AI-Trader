@@ -48,6 +48,11 @@ class TradingSignal:
     signal_source_id: str = ""        # 归属信号源实例ID
     setup_family: str = "generic"      # 通用持仓管理场景族
     setup_type: str = "generic_entry"  # 具体交易形态
+    plan_type: str = ""
+    event_chain: List[str] = field(default_factory=list)
+    event_layer: str = ""
+    event_type: str = ""
+    pattern: str = ""
     entry_mode: str = "touch_or_near"  # touch_or_near/breakout/confirmation
 
     # ==================== 触发信息 ====================
@@ -182,6 +187,11 @@ class TradingSignal:
             "signal_source_id": self.signal_source_id,
             "setup_family": self.setup_family,
             "setup_type": self.setup_type,
+            "plan_type": self.plan_type,
+            "event_chain": list(self.event_chain or []),
+            "event_layer": self.event_layer,
+            "event_type": self.event_type,
+            "pattern": self.pattern,
             "entry_mode": self.entry_mode,
             "trigger_price": self.trigger_price,
             "trigger_time": self.trigger_time.isoformat() if self.trigger_time else None,
@@ -260,7 +270,12 @@ class TradingSignal:
             strategy_name=data.get('strategy_name', ''),
             signal_source_id=data.get('signal_source_id', ''),
             setup_family=str(data.get('setup_family') or 'generic'),
-            setup_type=str(data.get('setup_type') or 'generic_entry'),
+            setup_type=str(data.get('setup_type') or data.get('plan_type') or 'generic_entry'),
+            plan_type=str(data.get('plan_type') or data.get('setup_type') or ''),
+            event_chain=list(data.get('event_chain') or []),
+            event_layer=str(data.get('event_layer') or ''),
+            event_type=str(data.get('event_type') or ''),
+            pattern=str(data.get('pattern') or ''),
             entry_mode=str(data.get('entry_mode') or 'touch_or_near'),
             trigger_price=data.get('trigger_price', 0.0),
             trigger_time=trigger_time,

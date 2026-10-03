@@ -490,8 +490,17 @@ class StrategyService:
             "selected_signal_period": best_signal.source_period,
             "selected_signal_source_id": best_signal.signal_source_id,
             "selected_setup_type": str(
-                getattr(best_signal, "setup_type", "") or "generic_entry"
+                getattr(best_signal, "plan_type", "")
+                or getattr(best_signal, "setup_type", "") or "generic_entry"
             ),
+            "selected_plan_type": str(
+                getattr(best_signal, "plan_type", "")
+                or getattr(best_signal, "setup_type", "") or "generic_entry"
+            ),
+            "selected_event_chain": list(getattr(best_signal, "event_chain", None) or []),
+            "selected_event_layer": str(getattr(best_signal, "event_layer", "") or ""),
+            "selected_event_type": str(getattr(best_signal, "event_type", "") or ""),
+            "selected_pattern": str(getattr(best_signal, "pattern", "") or ""),
             "selected_setup_family": str(
                 getattr(best_signal, "setup_family", "") or "generic"
             ),
@@ -622,7 +631,12 @@ class StrategyService:
             setup_context = {
                 "signal_source": str(best_signal.source or ""),
                 "setup_family": str(getattr(best_signal, "setup_family", "") or "generic"),
-                "setup_type": str(getattr(best_signal, "setup_type", "") or "generic_entry"),
+                "setup_type": str(getattr(best_signal, "plan_type", "") or getattr(best_signal, "setup_type", "") or "generic_entry"),
+                "plan_type": str(getattr(best_signal, "plan_type", "") or getattr(best_signal, "setup_type", "") or "generic_entry"),
+                "event_chain": list(getattr(best_signal, "event_chain", None) or []),
+                "event_layer": str(getattr(best_signal, "event_layer", "") or ""),
+                "event_type": str(getattr(best_signal, "event_type", "") or ""),
+                "pattern": str(getattr(best_signal, "pattern", "") or ""),
                 "entry_mode": str(getattr(best_signal, "entry_mode", "") or "touch_or_near"),
                 "symbol": str(getattr(best_signal, "symbol", "") or symbol or ""),
                 "key_level": float(key_level_value or 0),

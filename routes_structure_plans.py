@@ -11,6 +11,7 @@ from market.services.signal.structure_plan_signal import StructurePlanBuilder, M
 from market.services.market_structure_engine_v2 import analyze_incremental
 from repositories.execution_gate_audits import ExecutionGateAuditRepository
 from market.services.execution_divergence_monitor import ExecutionDivergenceMonitor
+from market.services.structure_events import event_matrix
 
 
 def assemble_structure_plan_execution(
@@ -154,6 +155,11 @@ def create_structure_plan_routes(engine_manager, strategy_repo, structure_defaul
         return {
             "status": "ok", "symbol": symbol, "period": period,
             "events": events, "event_decisions": list(unique_decisions.values()),
+            "event_matrix": event_matrix(),
+            "observation_plans": [
+                plan for item in items
+                for plan in (item.get("structure_snapshot") or {}).get("observation_plans") or []
+            ],
             "plans": items,
         }
 
