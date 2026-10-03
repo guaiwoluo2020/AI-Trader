@@ -1359,14 +1359,16 @@ class StructureTradePlanRepository:
             placeholders = ",".join("?" for _ in incoming)
             self.storage.execute(
                 f"UPDATE structure_events SET status='superseded',updated_at=? "
-                f"WHERE user_id=? AND symbol=? AND period=? AND status='active' "
+                f"WHERE user_id=? AND symbol=? AND period=? "
+                f"AND status IN ('active','break_confirmed') "
                 f"AND event_id NOT IN ({placeholders})",
                 (now, int(user_id), symbol, period, *incoming),
             )
         else:
             self.storage.execute(
                 "UPDATE structure_events SET status='superseded',updated_at=? "
-                "WHERE user_id=? AND symbol=? AND period=? AND status='active'",
+                "WHERE user_id=? AND symbol=? AND period=? "
+                "AND status IN ('active','break_confirmed')",
                 (now, int(user_id), symbol, period),
             )
         for event in events or []:
