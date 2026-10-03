@@ -122,7 +122,7 @@
               <div class="d-flex ga-2"><v-btn size="small" variant="text" :loading="structureOverviewLoading" @click="loadStructureOverview">刷新</v-btn></div>
             </div>
             <v-alert v-if="structureOverview && !structureOverview.items?.length" type="info" variant="tonal" density="compact" class="mb-3">当前还没有品种/周期专属覆盖，所有配置均继承公共默认。</v-alert>
-            <v-table v-if="structureOverviewRows.length" density="compact" class="mb-5"><thead><tr><th>品种</th><th>周期</th><th>专属覆盖</th><th class="text-right">操作</th></tr></thead><tbody><tr v-for="row in structureOverviewRows" :key="`${row.symbol}-${row.period}`"><td><strong>{{ row.symbol }}</strong></td><td>{{ row.period }}</td><td><v-chip size="x-small" :color="row.has_profile ? 'primary' : 'grey'" variant="tonal">{{ row.has_profile ? '品种/周期' : '继承公共默认' }}</v-chip></td><td class="text-right"><v-btn size="small" variant="text" @click="openEffectiveConfig(row.symbol,row.period)">查看最终配置</v-btn><v-btn size="small" variant="text" color="error" prepend-icon="mdi-delete-outline" :loading="structureOverviewDeleting === `${row.symbol}::${row.period}`" @click="deleteStructureOverviewRow(row)">删除专项</v-btn></td></tr></tbody></v-table>
+            <v-table v-if="structureOverviewRows.length" density="compact" class="mb-5"><thead><tr><th>品种</th><th>周期</th><th>专属覆盖</th><th class="text-right">操作</th></tr></thead><tbody><tr v-for="row in structureOverviewRows" :key="`${row.symbol}-${row.period}`"><td><strong>{{ structureScopeLabel(row.symbol, row.period) }}</strong></td><td>{{ row.period === '*' ? '所有周期' : row.period }}</td><td><v-chip size="x-small" :color="row.has_profile ? 'primary' : 'grey'" variant="tonal">{{ row.has_profile ? '品种/周期' : '继承公共默认' }}</v-chip></td><td class="text-right"><v-btn size="small" variant="text" @click="openEffectiveConfig(row.symbol,row.period)">查看最终配置</v-btn><v-btn size="small" variant="text" color="error" prepend-icon="mdi-delete-outline" :loading="structureOverviewDeleting === `${row.symbol}::${row.period}`" @click="deleteStructureOverviewRow(row)">删除专项</v-btn></td></tr></tbody></v-table>
             <div class="d-flex flex-wrap ga-2 align-center mb-3">
               <v-select v-model="structureConfigScope" :items="structureConfigScopes" item-title="label" item-value="value" label="当前查看的配置" density="compact" variant="outlined" hide-details style="max-width:300px" @update:model-value="switchStructureScope" />
               <v-btn v-if="structureConfigScope !== 'default'" size="small" variant="text" @click="switchStructureScope('default')">查看公共默认配置</v-btn>
@@ -1478,7 +1478,7 @@
       </v-card>
     </v-dialog>
 
-    <v-dialog v-model="structureEffectiveDialog" max-width="900"><v-card><v-card-title>最终生效配置 · {{ structureEffectiveTarget.symbol }} · {{ structureEffectiveTarget.period }}</v-card-title><v-card-text><v-progress-linear v-if="structureEffectiveLoading" indeterminate /><v-table v-else-if="structureEffective" density="compact"><thead><tr><th>字段</th><th>最终值</th><th>来源</th></tr></thead><tbody><tr v-for="(value,key) in structureEffective.config" :key="key" :class="{ 'bg-green-lighten-5': structureEffective.sources?.[key] !== 'default' }"><td>{{ structureFieldLabels[key] || key }}</td><td class="text-caption">{{ formatStructureValue(value) }}</td><td><v-chip size="x-small" :color="structureEffective.sources?.[key] !== 'default' ? 'primary' : 'grey'" variant="tonal">{{ structureSourceLabel(structureEffective.sources?.[key]) }}</v-chip></td></tr></tbody></v-table></v-card-text><v-card-actions><v-spacer/><v-btn variant="text" @click="structureEffectiveDialog=false">关闭</v-btn></v-card-actions></v-card></v-dialog>
+    <v-dialog v-model="structureEffectiveDialog" max-width="900"><v-card><v-card-title>最终生效配置 · {{ structureScopeLabel(structureEffectiveTarget.symbol, structureEffectiveTarget.period) }}</v-card-title><v-card-text><v-progress-linear v-if="structureEffectiveLoading" indeterminate /><v-table v-else-if="structureEffectiveRows.length" density="compact"><thead><tr><th>字段</th><th>最终值</th><th>来源</th></tr></thead><tbody><tr v-for="row in structureEffectiveRows" :key="row.key" :class="{ 'bg-green-lighten-5': row.source !== 'default' }"><td>{{ row.label }}</td><td class="text-caption">{{ row.value }}</td><td><v-chip size="x-small" :color="row.source !== 'default' ? 'primary' : 'grey'" variant="tonal">{{ structureSourceLabel(row.source) }}</v-chip></td></tr></tbody></v-table></v-card-text><v-card-actions><v-spacer/><v-btn variant="text" @click="structureEffectiveDialog=false">关闭</v-btn></v-card-actions></v-card></v-dialog>
 
     <!-- 错误提示 -->
     <v-snackbar v-model="showError" color="error" timeout="5000" location="top">
@@ -1688,7 +1688,7 @@ export default {
       if (p === '*') return `${s} · 所有周期`
       return `${s} · ${p}`
     }
-    const structureSourceLabel = value => ({ default: '公共默认', setup_default: '公共 SETUP 默认', symbol_period: '品种/周期', period_wide: '全部品种/周期', symbol_wide: '品种/所有周期', setup: '品种/周期/SETUP' }[value] || value || '--')
+    const structureSourceLabel = value => ({ default: '公共默认', symbol_period: '品种/周期', period_wide: '全部品种 · 该周期', symbol_wide: '该品种 · 所有周期' }[value] || value || '--')
     const formatStructureValue = value => {
       if (value === null || value === undefined) return '--'
       if (typeof value === 'boolean') return value ? '是' : '否'
@@ -2268,7 +2268,27 @@ export default {
     const structureOverviewRows = computed(() => (structureOverview.value?.items || []).filter(row => row.has_profile))
     const loadStructureOverview = async () => { structureOverviewLoading.value = true; try { structureOverview.value = await marketAPI.getMarketStructureConfigOverview() } finally { structureOverviewLoading.value = false } }
     const loadStructureHistory = async () => { structureHistoryLoading.value = true; try { const data = await marketAPI.getMarketStructureConfigHistory(100); structureHistory.value = data.items || [] } finally { structureHistoryLoading.value = false } }
-    const openEffectiveConfig = async (symbol, period, setupType = '') => { structureEffectiveTarget.value = { symbol, period, setupType }; structureEffectiveDialog.value = true; structureEffectiveLoading.value = true; try { structureEffective.value = await marketAPI.getEffectiveMarketStructureConfig(symbol, period, setupType) } finally { structureEffectiveLoading.value = false } }
+    const structureEffectiveSkipKeys = new Set([
+      'allowed_setups', 'blocked_setups', 'setup_defaults', 'setup_profiles',
+      'enable_structure_location', 'enable_range_boundary', 'enable_range_breakout',
+      'enable_triangle_prebreakout', 'enable_choch', 'enable_liquidity_sweep', 'enable_trend',
+      'bind_pattern', 'bind_event', 'direction_layer', 'entry_layer',
+      'enabled', 'entry_mode',
+    ])
+    const structureEffectiveRows = computed(() => {
+      const payload = structureEffective.value || {}
+      const config = payload.config || {}
+      const sources = payload.sources || {}
+      return Object.keys(config)
+        .filter(key => !key.startsWith('_') && !structureEffectiveSkipKeys.has(key) && (typeof config[key] !== 'object' || Array.isArray(config[key])))
+        .map(key => ({
+          key,
+          label: structureFieldLabels[key] || key,
+          value: formatStructureValue(config[key]),
+          source: sources[key] === 'setup' || sources[key] === 'setup_default' ? 'default' : (sources[key] || 'default'),
+        }))
+    })
+    const openEffectiveConfig = async (symbol, period) => { structureEffectiveTarget.value = { symbol, period }; structureEffectiveDialog.value = true; structureEffectiveLoading.value = true; try { structureEffective.value = await marketAPI.getEffectiveMarketStructureConfig(symbol, period) } finally { structureEffectiveLoading.value = false } }
     const deleteStructureOverviewRow = async row => {
       const symbol = String(row?.symbol || '').trim().toUpperCase()
       const period = String(row?.period || '').trim().toUpperCase()
@@ -4588,7 +4608,7 @@ export default {
       selectStructureSetupProfile,
       removeStructureSetupProfile,
       structureOverview, structureOverviewRows, structureOverviewLoading, structureOverviewDeleting, loadStructureOverview, deleteStructureOverviewRow,
-      structureEffective, structureEffectiveLoading, structureEffectiveDialog, structureEffectiveTarget, openEffectiveConfig,
+      structureEffective, structureEffectiveRows, structureEffectiveLoading, structureEffectiveDialog, structureEffectiveTarget, openEffectiveConfig,
       structureHistory, structureHistoryLoading, loadStructureHistory,
       structureFieldLabels, structureSourceLabel, formatStructureValue,
       tradeConfig,

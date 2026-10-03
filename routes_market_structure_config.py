@@ -181,31 +181,53 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
         }
 
     @router.get("/admin/market-structure/config/effective", dependencies=[Depends(require_admin)])
-    async def get_effective_config(symbol: str, period: str, setup_type: str = "", user: AuthUser = Depends(require_admin)):
+    async def get_effective_config(symbol: str, period: str, user: AuthUser = Depends(require_admin)):
+        from market.services.signal.structure_plan.config_resolver import select_overlay_rows
         from market.services.signal.structure_plan_signal import resolve_structure_plan_config
-        effective = resolve_structure_plan_config(symbol, period, setup_type)
-        source = {}
+        skip_keys = {
+            "allowed_setups", "blocked_setups", "setup_defaults", "setup_profiles",
+            "enable_structure_location", "enable_range_boundary", "enable_range_breakout",
+            "enable_triangle_prebreakout", "enable_choch", "enable_liquidity_sweep", "enable_trend",
+            "bind_pattern", "bind_event", "direction_layer", "entry_layer",
+            "enabled", "entry_mode",
+        }
+        effective = resolve_structure_plan_config(symbol, period)
         storage = get_storage()
-        default_row, profiles, setups, decode = read_normalized(storage)
-        profile_row = next((x for x in profiles if str(x.get('symbol')).upper()==symbol.upper() and str(x.get('period')).upper()==period.upper()), None)
-        setup_row = next((x for x in setups if str(x.get('symbol')).upper()==symbol.upper() and str(x.get('period')).upper()==period.upper() and str(x.get('setup_type')).lower()==setup_type.lower()), None)
-        public_default = decode(default_row)
-        setup_defaults = public_default.get("setup_defaults") if isinstance(public_default.get("setup_defaults"), dict) else {}
-        setup_default = setup_defaults.get(setup_type, {}) if setup_type else {}
-        profile, setup = decode(profile_row), decode(setup_row)
+        default_row, profiles, _setups, decode = read_normalized(storage)
+        period_wide_row, symbol_wide_row, exact_row = select_overlay_rows(
+            profiles, symbol, period,
+        )
+        # "*" / M1 is a period-wide overlay, not a per-symbol profile.
+        if str(symbol or "").strip() == "*":
+            exact_row = None
+        period_wide, symbol_wide, profile = (
+            decode(period_wide_row), decode(symbol_wide_row), decode(exact_row),
+        )
         def has_override(layer, key):
-            if key not in layer:
+            if not isinstance(layer, dict) or key not in layer:
                 return False
             value = layer.get(key)
             return not (key in inherit_empty_list_keys and isinstance(value, list) and not value)
-        for key in effective:
+        config, source = {}, {}
+        for key, value in effective.items():
+            if str(key).startswith("_") or key in skip_keys:
+                continue
+            if isinstance(value, dict):
+                continue
+            config[key] = value
             source[key] = (
-                "setup" if has_override(setup, key)
-                else "symbol_period" if has_override(profile, key)
-                else "setup_default" if has_override(setup_default, key)
+                "symbol_period" if has_override(profile, key)
+                else "symbol_wide" if has_override(symbol_wide, key)
+                else "period_wide" if has_override(period_wide, key)
                 else "default"
             )
-        return {"status": "ok", "symbol": symbol.upper(), "period": period.upper(), "setup_type": setup_type.lower(), "config": effective, "sources": source}
+        return {
+            "status": "ok",
+            "symbol": str(symbol or "").upper(),
+            "period": str(period or "").upper(),
+            "config": config,
+            "sources": source,
+        }
 
     @router.get("/admin/market-structure/config/overview", dependencies=[Depends(require_admin)])
     async def get_config_overview(user: AuthUser = Depends(require_admin)):
