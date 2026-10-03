@@ -368,6 +368,13 @@ export const accountAPI = {
     return response.data
   },
 
+  async getPnlStatistics(accountId, businessDate = null) {
+    const response = await api.get(`/accounts/${encodeURIComponent(accountId)}/pnl-statistics`, {
+      params: businessDate ? { business_date: businessDate } : {}, timeout: 30000,
+    })
+    return response.data
+  },
+
   async getLiveMonitoring(accountId, equityFrom = null, equityTo = null) {
     const params = {}
     if (equityFrom != null) params.equity_from = equityFrom

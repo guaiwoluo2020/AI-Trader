@@ -14,6 +14,7 @@ from membership import MembershipService
 from market.services.decision_brief import build_decision_brief
 from market.services.account_strategy_performance import build_live_performance, build_paper_performance
 from market.services.today_trade_stats import today_trade_stats
+from market.services.pnl_statistics import build_daily_pnl_statistics, query_daily_pnl_statistics
 from market.models.trading_strategy import StrategyLifecycle
 from market.services.live_strategy_promotion import promotion_candidate_accounts
 from mysql_repositories import (
@@ -931,6 +932,28 @@ def create_account_routes(engine_manager: TradingEngineManager) -> APIRouter:
         return {"status": "ok", **_runtime_stats_payload(
             repository.storage, user.user_id, account,
         )}
+
+    @router.get("/accounts/{account_id}/pnl-statistics")
+    async def get_account_pnl_statistics(
+        account_id: int, business_date: Optional[str] = Query(None),
+        user: AuthUser = Depends(require_auth),
+    ) -> Dict:
+        account = repository.get_by_id(user.user_id, account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="交易账户不存在")
+        try:
+            day = datetime.strptime(business_date, "%Y-%m-%d").date() if business_date else (datetime.now(ZoneInfo("Asia/Shanghai")).date())
+            if not business_date:
+                from datetime import timedelta
+                day -= timedelta(days=1)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD") from exc
+        rows = query_daily_pnl_statistics(repository.storage, user.user_id, account_id, day)
+        # 任务刚部署或服务在统计时刻未运行时，首次查询补建该日快照。
+        if not rows and day < datetime.now(ZoneInfo("Asia/Shanghai")).date():
+            build_daily_pnl_statistics(repository.storage, user.user_id, account_id, day)
+            rows = query_daily_pnl_statistics(repository.storage, user.user_id, account_id, day)
+        return {"status": "ok", "business_date": day.isoformat(), "rows": rows}
 
     @router.get("/accounts/{account_id}/live-monitoring/equity-curve")
     async def get_live_equity_curve(

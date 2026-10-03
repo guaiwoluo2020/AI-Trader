@@ -19,6 +19,7 @@ import Accounts from '../views/Accounts.vue'
 import AlphaResearch from '../views/AlphaResearch.vue'
 import StructureAnalysis from '../views/StructureAnalysis.vue'
 import PositionManagement from '../views/PositionManagement.vue'
+import PnlStatistics from '../views/PnlStatistics.vue'
 import { authState } from '../auth'
 
 const routes = [
@@ -51,6 +52,12 @@ const routes = [
     name: 'Accounts',
     component: Accounts,
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/pnl-statistics',
+    name: 'PnlStatistics',
+    component: PnlStatistics,
+    meta: { requiresAuth: true },
   },
   {
     path: '/ai-market',

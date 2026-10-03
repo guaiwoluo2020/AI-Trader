@@ -382,6 +382,22 @@ class MySQLStorage:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """)
                 conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_pnl_statistics (
+                    id BIGINT NOT NULL AUTO_INCREMENT,
+                    user_id BIGINT NOT NULL, account_id BIGINT NOT NULL,
+                    execution_mode VARCHAR(16) NOT NULL, business_date DATE NOT NULL,
+                    symbol VARCHAR(64) NOT NULL, period VARCHAR(16) NOT NULL,
+                    setup_type VARCHAR(64) NOT NULL, trade_count INT NOT NULL DEFAULT 0,
+                    gross_profit DOUBLE NOT NULL DEFAULT 0, gross_loss DOUBLE NOT NULL DEFAULT 0,
+                    max_profit DOUBLE NULL, min_profit DOUBLE NULL,
+                    max_loss DOUBLE NULL, min_loss DOUBLE NULL, net_profit DOUBLE NOT NULL DEFAULT 0,
+                    created_at BIGINT NOT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uq_daily_pnl_bucket (user_id,account_id,business_date,symbol,period,setup_type),
+                    KEY idx_daily_pnl_account_date (user_id,account_id,business_date)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """)
+                conn.execute("""
                 CREATE TABLE IF NOT EXISTS market_execution_quality_samples (
                     account_id BIGINT NOT NULL,
                     symbol VARCHAR(64) NOT NULL,

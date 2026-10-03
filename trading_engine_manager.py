@@ -28,6 +28,7 @@ from account_auto_flatten_service import AccountAutoFlattenService
 from account_notification_service import AccountNotificationService
 from market.services.tick_gap_monitor import TickGapMonitor
 from market.services.tick_execution_context import TickExecutionContext
+from market.services.pnl_statistics import rebuild_yesterday_for_all_accounts
 from market.models import TradingStrategy
 
 
@@ -111,6 +112,7 @@ class TradingEngineManager:
         self._last_data_retention_date = ""
         self._last_major_us_calendar_date = ""
         self._last_ibkr_kline_maintenance_date = ""
+        self._last_pnl_statistics_date = ""
 
     def _create_engine(self, user_id: int, account_id: int) -> TradingServer:
         market_source = (
@@ -421,6 +423,9 @@ class TradingEngineManager:
                 self.data_retention.run_maintenance,
             )
         review_date = current_wall.date().isoformat()
+        if current_wall.hour == 0 and current_wall.minute >= 10 and self._last_pnl_statistics_date != review_date:
+            self._last_pnl_statistics_date = review_date
+            scheduler.submit(("system", "daily_pnl_statistics"), lambda: rebuild_yesterday_for_all_accounts(self.repositories.storage), max_retries=1)
         # Daily official refresh means NFP/FOMC are available even when the
         # administrative MT5 EA is offline.  05:10 Beijing leaves time for the
         # calendar to be ready before the 06:00 review and the trading day.

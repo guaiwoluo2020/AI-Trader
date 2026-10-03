@@ -1266,10 +1266,27 @@ class PositionManager:
         if not valid:
             return PositionAction(events=events)
         new_stop = max(valid) if direction == "buy" else min(valid)
+        # A structure candidate is an internal proposal for this evaluation.
+        # Once it wins validation and becomes the effective stop, keep the
+        # timeline to one actionable event; otherwise the UI shows a
+        # structure_trailing row followed by an identical stop_loss_update.
+        applied_structure = [
+            event for event in events
+            if event.get("rule_type") == "structure_trailing"
+            and event.get("status") == "triggered"
+            and abs(float(event.get("candidate_stop_loss") or 0) - new_stop)
+            <= max(abs(new_stop) * 1e-9, 1e-10)
+        ]
+        if applied_structure:
+            events = [
+                event for event in events
+                if event not in applied_structure
+            ]
         add_event(
             "stop_loss_update", "triggered",
             f"止损从 {current_sl:.5f} 调整为 {new_stop:.5f}",
             new_stop_loss=new_stop,
+            source_rule="structure_trailing" if applied_structure else "",
         )
         return PositionAction(
             "modify_sl", stop_loss=new_stop,
