@@ -58,11 +58,11 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "enable_structure_location": True, "enable_range_boundary": True,
     "enable_range_breakout": True, "enable_triangle_prebreakout": True,
     "enable_choch": True, "enable_liquidity_sweep": True, "enable_trend": True,
-    "entry_zone_atr": 0.35, "location_proximity_atr": 0.6,
+    "entry_zone_atr": 0.35, "location_proximity_atr": 0.4,
     "location_require_swing_external_alignment": True,
     "location_require_internal_confirmation": True,
-    "location_reclaim_min_body_atr": 0.3,
-    "location_reclaim_min_close_extension_atr": 0.1,
+    "location_reclaim_min_body_atr": 0.5,
+    "location_reclaim_min_close_extension_atr": 0.2,
     "stop_buffer_atr": 0.25, "target_buffer_atr": 0.1,
     "max_entry_distance_pct": 0.8,
     # Waiting plans retire once price drifts too far from the frozen entry.
@@ -781,10 +781,10 @@ class StructurePlanBuilder:
         return location_reclaim_confirmation(
             rows, entry, direction, atr,
             min_body_atr=max(0.0, _number(
-                self._param("location_reclaim_min_body_atr", 0.3)
+                self._param("location_reclaim_min_body_atr", 0.5)
             )),
             min_close_extension_atr=max(0.0, _number(
-                self._param("location_reclaim_min_close_extension_atr", 0.1)
+                self._param("location_reclaim_min_close_extension_atr", 0.2)
             )),
         )
 
@@ -1366,7 +1366,7 @@ class StructurePlanBuilder:
                 f"{protected_name} {swing_protected:.2f}，原趋势位置计划失效"
             )
             return []
-        proximity = atr * max(0.05, _number(self._param("location_proximity_atr", 0.6)))
+        proximity = atr * max(0.05, _number(self._param("location_proximity_atr", 0.4)))
         candidates = self._location_candidates(rows, structure, direction)
         if not candidates:
             self._reject("当前趋势没有可用的已确认 HL/LH，保护点仅用于止损和失效判断")
@@ -2392,10 +2392,10 @@ class StructurePlanSignalGenerator:
         accepted, evidence, rejection = location_reclaim_confirmation(
             [closed_bar], entry, direction, atr,
             min_body_atr=max(0.0, _number(effective_config.get(
-                "location_reclaim_min_body_atr", 0.3
+                "location_reclaim_min_body_atr", 0.5
             ))),
             min_close_extension_atr=max(0.0, _number(effective_config.get(
-                "location_reclaim_min_close_extension_atr", 0.1
+                "location_reclaim_min_close_extension_atr", 0.2
             ))),
         )
         changes = {
