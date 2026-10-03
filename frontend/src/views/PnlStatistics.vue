@@ -8,7 +8,7 @@
     </div>
     <v-alert v-if="!rows.length && !loading" type="info" variant="tonal">当天暂无已平仓交易统计</v-alert>
     <v-table v-else density="comfortable"><thead><tr><th>品种</th><th>周期</th><th>SETUP</th><th>策略</th><th>运行状态</th><th>交易笔数</th><th>盈利</th><th>亏损</th><th>单笔盈利最大/最小</th><th>单笔亏损最大/最小</th><th>净盈亏</th></tr></thead>
-      <tbody><tr v-for="row in rows" :key="`${row.symbol}-${row.period}-${row.setup_type}-${row.strategy_id}`"><td>{{ row.symbol }}</td><td>{{ row.period }}</td><td>{{ row.setup_type }}</td><td>{{ row.strategy_name || row.strategy_id || '未归因策略' }}</td><td>{{ strategyStatus(row.strategy_status) }}</td><td>{{ row.trade_count }}</td><td class="profit">{{ money(row.gross_profit) }}</td><td class="loss">{{ money(row.gross_loss) }}</td><td>{{ money(row.max_profit) }} / {{ money(row.min_profit) }}</td><td>{{ money(row.max_loss) }} / {{ money(row.min_loss) }}</td><td :class="Number(row.net_profit)>=0?'profit':'loss'">{{ money(row.net_profit) }}</td></tr></tbody>
+      <tbody><tr v-for="row in rows" :key="`${row.symbol}-${row.period}-${row.setup_type}-${row.strategy_id}`" :class="pnlRowClass(row)"><td>{{ row.symbol }}</td><td>{{ row.period }}</td><td>{{ row.setup_type }}</td><td>{{ row.strategy_name || row.strategy_id || '未归因策略' }}</td><td>{{ strategyStatus(row.strategy_status) }}</td><td>{{ row.trade_count }}</td><td class="profit">{{ money(row.gross_profit) }}</td><td class="loss">{{ money(row.gross_loss) }}</td><td>{{ money(row.max_profit) }} / {{ money(row.min_profit) }}</td><td>{{ money(row.max_loss) }} / {{ money(row.min_loss) }}</td><td :class="Number(row.net_profit)>=0?'profit':'loss'">{{ money(row.net_profit) }}</td></tr></tbody>
     </v-table>
   </div>
 </template>
@@ -22,6 +22,7 @@ async function loadAccounts() { const data = await accountAPI.list(); accounts.v
 async function load() { if (!accountId.value) return; loading.value = true; try { const data = await accountAPI.getPnlStatistics(accountId.value, date.value); rows.value = data.rows || [] } finally { loading.value = false } }
 const money = value => value == null ? '--' : Number(value).toFixed(2)
 const strategyStatus = value => ({ active: '运行中', paused: '已暂停', ended: '已结束', pending: '待启动' }[value] || value || '未部署')
+const pnlRowClass = row => Number(row.net_profit) > 0 ? 'pnl-profit-row' : Number(row.net_profit) < 0 ? 'pnl-loss-row' : ''
 onMounted(async () => { await loadAccounts(); await load() })
 </script>
-<style scoped>.page{max-width:1500px;margin:auto}.profit{color:#16824b}.loss{color:#c0392b}</style>
+<style scoped>.page{max-width:1500px;margin:auto}.profit{color:#16824b}.loss{color:#c0392b}.pnl-profit-row{background:#effaf2}.pnl-loss-row{background:#fff1f0}.pnl-profit-row:hover{background:#e2f5e8}.pnl-loss-row:hover{background:#ffe4e1}</style>
