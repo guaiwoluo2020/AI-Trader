@@ -31,6 +31,7 @@ from ..market_event_risk_service import active_event
 from ..structure_events import (
     collect_structure_events, latest_event_for, decide_event_observations,
 )
+from ..structure_observation import advance_observation_state
 
 
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
@@ -898,6 +899,10 @@ class StructurePlanBuilder:
             "opportunity_family_id": family_id,
             "opportunity_cycle": cycle,
         }
+        payload["observation_state"] = (
+            "watching" if status in {"active", "watching", "event_suppressed"} else
+            str(status or "watching")
+        )
         binding = self._setup_binding(setup_type)
         event_layer = str(binding.get("event_layer") or binding.get("entry_layer") or "").lower()
         event_type = str(binding.get("bind_event") or "").lower()
@@ -2523,6 +2528,7 @@ class StructurePlanSignalGenerator:
                         "touch_seen": False,
                         "touch_state": "unvisited",
                         "boundary_state": "left_boundary",
+                        "observation_state": "watching",
                     }
                     if setup_type == "range_false_breakout":
                         changes.update({
@@ -2598,6 +2604,8 @@ class StructurePlanSignalGenerator:
                 "touched_price": float(price),
                 "boundary_state": "touched",
             }
+            advance_observation_state(plan, touched=True)
+            changes["observation_state"] = plan["observation_state"]
             plan.update(changes)
             memory["touched"] = True
             self.repository.update_payload(plan_id, changes)
@@ -2632,6 +2640,8 @@ class StructurePlanSignalGenerator:
                 "touch_state": "reclaimed",
                 "boundary_state": "triggered",
             }
+            advance_observation_state(plan, confirmed=True, triggered=True)
+            changes["observation_state"] = plan["observation_state"]
             plan.update(changes)
             memory["touched"] = True
             self.repository.update_payload(plan_id, changes)
