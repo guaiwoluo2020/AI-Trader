@@ -2,7 +2,7 @@
   <div class="page pa-6">
     <h1 class="text-h5 mb-4">每日盈亏统计</h1>
     <div class="controls d-flex ga-3 align-center mb-4">
-      <v-select v-model="accountId" :items="accounts" item-title="label" item-value="id" label="交易账户" density="compact" hide-details style="max-width:260px" />
+      <v-select v-model="accountId" :items="accountItems" item-title="label" item-value="id" label="交易账户" density="compact" hide-details style="max-width:260px" />
       <v-text-field v-model="date" type="date" label="日期" density="compact" hide-details style="max-width:190px" />
       <v-btn color="primary" :loading="loading" @click="load">查询</v-btn>
     </div>

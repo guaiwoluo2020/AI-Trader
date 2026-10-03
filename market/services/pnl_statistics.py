@@ -42,7 +42,12 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
     for row in rows or []:
         try: attr = json.loads(row.get("attribution") or "{}")
         except (TypeError, ValueError): attr = {}
-        key = (str(row.get("symbol") or ""), _bucket(attr.get("period") or attr.get("source_period"), "未知"), _bucket(attr.get("setup_type") or attr.get("selected_setup_type"), "未分类"))
+        period = (
+            attr.get("period") or attr.get("source_period")
+            or attr.get("signal_source_period") or attr.get("selected_signal_period")
+            or attr.get("plan_period")
+        )
+        key = (str(row.get("symbol") or ""), _bucket(period, "未知"), _bucket(attr.get("setup_type") or attr.get("selected_setup_type"), "未分类"))
         buckets.setdefault(key, []).append(float(row.get("profit") or 0))
     storage.execute("DELETE FROM daily_pnl_statistics WHERE user_id=? AND account_id=? AND business_date=?", (int(user_id), int(account_id), day.isoformat()))
     for (symbol, period, setup), values in buckets.items():
