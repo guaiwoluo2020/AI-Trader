@@ -195,18 +195,32 @@ class StructurePlanTriggerLatchTests(unittest.TestCase):
             "structure_snapshot": {"atr": 2.0},
         }
         config = {
-            "location_reclaim_min_body_atr": 0.3,
-            "location_reclaim_min_close_extension_atr": 0.1,
+            "location_reclaim_min_body_atr": 0.5,
+            "location_reclaim_min_close_extension_atr": 0.2,
+            "location_reclaim_confirmation_bars": 3,
         }
         self.assertFalse(self.gen._triggered(
             plan, 100.0, config,
-            {"timestamp": 1000, "open": 100.1, "high": 100.4,
-             "low": 99.8, "close": 100.1},
+            [{"timestamp": 1000, "open": 99.0, "high": 100.6,
+              "low": 98.8, "close": 100.5}],
         ))
+        first = {"timestamp": 1060, "open": 99.0, "high": 100.7,
+                 "low": 98.8, "close": 100.5}
+        second = {"timestamp": 1120, "open": 100.3, "high": 100.9,
+                  "low": 99.0, "close": 100.6}
+        third = {"timestamp": 1180, "open": 100.4, "high": 101.0,
+                 "low": 99.2, "close": 100.7}
+        self.assertFalse(self.gen._triggered(plan, 100.0, config, [first, second]))
         self.assertTrue(self.gen._triggered(
-            plan, 100.0, config,
-            {"timestamp": 1060, "open": 99.6, "high": 100.4,
-             "low": 99.5, "close": 100.3},
+            plan, 100.0, config, [first, second, third],
+        ))
+        self.assertEqual(plan["location_entry_reclaim_evidence"]["confirmation_extremes"], [98.8, 99.0, 99.2])
+        # The small outside-zone overshoot path must still recheck the latest
+        # completed bar instead of reusing a stale confirmed state.
+        fourth = {"timestamp": 1240, "open": 100.3, "high": 101.0,
+                  "low": 99.3, "close": 99.9}
+        self.assertFalse(self.gen._triggered(
+            plan, 101.2, config, [second, third, fourth],
         ))
 
 

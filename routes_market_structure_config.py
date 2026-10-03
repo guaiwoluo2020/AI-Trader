@@ -30,6 +30,7 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
         "confirmation_bars", "max_plan_lifetime_bars",
         "max_entries_per_opportunity", "cooldown_minutes",
         "false_breakout_confirmation_bars",
+        "location_reclaim_confirmation_bars",
     }
     list_keys = {"allowed_setups", "blocked_setups", "allowed_directions", "blocked_hours"}
     bool_keys = {

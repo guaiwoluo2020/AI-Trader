@@ -63,6 +63,7 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "location_require_internal_confirmation": True,
     "location_reclaim_min_body_atr": 0.5,
     "location_reclaim_min_close_extension_atr": 0.2,
+    "location_reclaim_confirmation_bars": 3,
     "stop_buffer_atr": 0.25, "target_buffer_atr": 0.1,
     "max_entry_distance_pct": 0.8,
     # Waiting plans retire once price drifts too far from the frozen entry.
@@ -786,6 +787,7 @@ class StructurePlanBuilder:
             min_close_extension_atr=max(0.0, _number(
                 self._param("location_reclaim_min_close_extension_atr", 0.2)
             )),
+            confirmation_bars=max(1, int(self._param("location_reclaim_confirmation_bars", 3))),
         )
 
     @staticmethod
@@ -2306,18 +2308,27 @@ class StructurePlanSignalGenerator:
         self._cache[key] = plans
         return plans
 
-    def _latest_closed_bar(self, symbol: str, period: str, now: Optional[int] = None) -> Optional[Dict]:
-        """Return the latest completed bar, never the currently forming bar."""
+    def _latest_closed_bars(
+        self, symbol: str, period: str, count: int, now: Optional[int] = None,
+    ) -> List[Dict]:
+        """Return completed bars in chronological order, excluding the forming bar."""
         rows = self.kline_store.get_all_klines(symbol, str(period or "M5").upper())
         if not rows:
-            return None
+            return []
         now = int(now or time.time())
         interval = PERIOD_SECONDS.get(str(period or "M5").upper(), 300)
+        completed = []
         for row in reversed(rows):
             bar_time = _bar_time(row)
             if bar_time > 0 and bar_time + interval <= now:
-                return row
-        return None
+                completed.append(row)
+                if len(completed) >= count:
+                    break
+        return list(reversed(completed))
+
+    def _latest_closed_bar(self, symbol: str, period: str, now: Optional[int] = None) -> Optional[Dict]:
+        rows = self._latest_closed_bars(symbol, period, 1, now)
+        return rows[-1] if rows else None
 
     def _false_breakout_reclaim_confirmed(
         self, plan: Dict, closed_bar: Optional[Dict], effective_config: Dict,
@@ -2371,35 +2382,42 @@ class StructurePlanSignalGenerator:
         return bool(plan.get("false_breakout_reclaim_confirmed"))
 
     def _location_entry_reclaim_confirmed(
-        self, plan: Dict, closed_bar: Optional[Dict], effective_config: Dict,
+        self, plan: Dict, closed_bars: List[Dict], effective_config: Dict,
     ) -> bool:
-        """Re-check the latest completed reclaim candle at the actual entry."""
+        """Re-check the completed reclaim sequence at the actual entry."""
         if str(plan.get("entry_mode") or "") != "touch_and_reclaim":
             return True
-        if not closed_bar:
+        if not closed_bars:
             return False
         entry = _number(plan.get("entry_price"))
         direction = str(plan.get("direction") or "")
         atr = _number((plan.get("structure_snapshot") or {}).get("atr"))
         if entry <= 0 or atr <= 0 or direction not in {"buy", "sell"}:
             return False
-        bar_time = _bar_time(closed_bar)
+        bar_time = _bar_time(closed_bars[-1])
         if bar_time <= 0:
             return False
+        required_bars = max(1, int(effective_config.get(
+            "location_reclaim_confirmation_bars", 3
+        )))
         last_bar = int(plan.get("location_entry_confirmation_bar") or 0)
-        if bar_time == last_bar:
+        if (bar_time == last_bar and int(plan.get(
+            "location_entry_confirmation_bars_required") or 0
+        ) == required_bars):
             return bool(plan.get("location_entry_reclaim_confirmed"))
         accepted, evidence, rejection = location_reclaim_confirmation(
-            [closed_bar], entry, direction, atr,
+            closed_bars, entry, direction, atr,
             min_body_atr=max(0.0, _number(effective_config.get(
                 "location_reclaim_min_body_atr", 0.5
             ))),
             min_close_extension_atr=max(0.0, _number(effective_config.get(
                 "location_reclaim_min_close_extension_atr", 0.2
             ))),
+            confirmation_bars=required_bars,
         )
         changes = {
             "location_entry_confirmation_bar": bar_time,
+            "location_entry_confirmation_bars_required": required_bars,
             "location_entry_reclaim_confirmed": accepted,
             "location_entry_reclaim_evidence": evidence,
             "location_entry_reclaim_rejection": rejection,
@@ -2410,7 +2428,7 @@ class StructurePlanSignalGenerator:
 
     def _triggered(
         self, plan: Dict, price: float, effective_config: Optional[Dict] = None,
-        closed_bar: Optional[Dict] = None,
+        closed_bar: Optional[Dict | List[Dict]] = None,
     ) -> bool:
         setup_type = str(plan.get("setup_type") or "")
         zone = plan.get("entry_zone") or {}
@@ -2440,6 +2458,7 @@ class StructurePlanSignalGenerator:
                     elif setup_type == "structure_location_pullback":
                         changes.update({
                             "location_entry_confirmation_bar": 0,
+                            "location_entry_confirmation_bars_required": 0,
                             "location_entry_reclaim_confirmed": False,
                             "location_entry_reclaim_evidence": {},
                             "location_entry_reclaim_rejection": "等待重新收盘确认",
@@ -2451,6 +2470,11 @@ class StructurePlanSignalGenerator:
                     # Same-Tick reclaim may step just outside the zone.  Allow
                     # that overshoot only while price is still within 1 ATR of
                     # the sweep level; never chase a finished bounce.
+                    if setup_type == "structure_location_pullback" and not self._location_entry_reclaim_confirmed(
+                        plan, closed_bar if isinstance(closed_bar, list) else [closed_bar] if closed_bar else [],
+                        effective_config or {},
+                    ):
+                        return False
                     return True
             if str(plan.get("setup_type") or "").startswith("range_") and str(plan.get("boundary_state") or "") in {"touched", "reclaimed", "triggered"}:
                 if price < lower or price > upper:
@@ -2516,7 +2540,8 @@ class StructurePlanSignalGenerator:
                 return False
         if result and setup_type == "structure_location_pullback":
             if not self._location_entry_reclaim_confirmed(
-                plan, closed_bar, effective_config or {},
+                plan, closed_bar if isinstance(closed_bar, list) else [closed_bar] if closed_bar else [],
+                effective_config or {},
             ):
                 return False
         if result:
@@ -2763,11 +2788,15 @@ class StructurePlanSignalGenerator:
                     else:
                         waiting.append(plan)
                     continue
-                closed_bar = (
-                    self._latest_closed_bar(symbol, period)
-                    if setup_type in {"range_false_breakout", "structure_location_pullback"}
-                    else None
-                )
+                closed_bar = None
+                if setup_type == "structure_location_pullback":
+                    closed_bar = self._latest_closed_bars(
+                        symbol, period, max(1, int(effective_config.get(
+                            "location_reclaim_confirmation_bars", 3
+                        ))),
+                    )
+                elif setup_type == "range_false_breakout":
+                    closed_bar = self._latest_closed_bar(symbol, period)
                 if self._triggered(
                     plan, float(current_price), effective_config, closed_bar,
                 ):

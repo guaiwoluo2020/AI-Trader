@@ -42,17 +42,20 @@ def protected_reference(hierarchy: Dict, direction: str, entry: float) -> float:
 
 def location_reclaim_confirmation(
     rows: List[Dict], entry: float, direction: str, atr: float,
-    min_body_atr: float = 0.3, min_close_extension_atr: float = 0.1,
+    min_body_atr: float = 0.5, min_close_extension_atr: float = 0.2,
+    confirmation_bars: int = 1,
 ) -> Tuple[bool, Dict, str]:
-    """Validate that the latest closed bar decisively reclaimed an HL/LH.
+    """Validate a reclaim candle followed by higher lows or lower highs.
 
-    A wick touching a level is not enough.  The reclaim candle must point in
-    the trade direction, have a meaningful body and close clearly back beyond
-    the structural level.
+    Only the first bar must touch and decisively reclaim the structural level.
+    Every later bar must close beyond it and move its low/high in the trade
+    direction. ``rows`` contains completed bars in chronological order.
     """
-    if not rows or entry <= 0:
+    required = max(1, int(confirmation_bars or 1))
+    if len(rows) < required or entry <= 0 or direction not in {"buy", "sell"}:
         return False, {}, "缺少可验证的收盘K线或结构入场位"
-    row = rows[-1]
+    window = rows[-required:]
+    row = window[0]
     open_price = _number(row.get("open") or row.get("open_price"))
     high = _number(row.get("high") or row.get("high_price"))
     low = _number(row.get("low") or row.get("low_price"))
@@ -79,6 +82,8 @@ def location_reclaim_confirmation(
         ),
         "directional_body": directional,
         "touched": touched,
+        "confirmation_bars_required": required,
+        "confirmation_bars_seen": len(window),
     }
     if not touched:
         return False, evidence, "最近收盘K线尚未触碰 HL/LH 结构位"
@@ -94,6 +99,31 @@ def location_reclaim_confirmation(
             f"回收K线收盘仅越过 HL/LH {extension_atr:.2f} ATR，低于最低要求 "
             f"{float(min_close_extension_atr):.2f} ATR"
         )
+    previous_extreme = low if direction == "buy" else high
+    for index, follow_up in enumerate(window[1:], start=2):
+        follow_close = _number(follow_up.get("close") or follow_up.get("close_price"))
+        follow_extreme = _number(
+            (follow_up.get("low") or follow_up.get("low_price")) if direction == "buy"
+            else (follow_up.get("high") or follow_up.get("high_price"))
+        )
+        if (direction == "buy" and follow_close <= entry) or (
+            direction == "sell" and follow_close >= entry
+        ):
+            evidence["confirmation_bars_seen"] = index - 1
+            return False, evidence, f"第 {index} 根确认K线收盘重新穿过 HL/LH 结构位"
+        if (direction == "buy" and follow_extreme <= previous_extreme) or (
+            direction == "sell" and follow_extreme >= previous_extreme
+        ):
+            evidence["confirmation_bars_seen"] = index - 1
+            return False, evidence, (
+                f"第 {index} 根确认K线{'低点未抬高' if direction == 'buy' else '高点未降低'}"
+            )
+        previous_extreme = follow_extreme
+    evidence["confirmation_extremes"] = [
+        round(_number((bar.get("low") or bar.get("low_price")) if direction == "buy"
+                      else (bar.get("high") or bar.get("high_price"))), 8)
+        for bar in window
+    ]
     return True, evidence, ""
 
 
