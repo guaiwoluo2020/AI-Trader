@@ -28,6 +28,7 @@ from .structure_plan.setup_binding import (
     resolve_binding, setup_box,
 )
 from ..market_event_risk_service import active_event
+from ..structure_events import collect_structure_events, latest_event_for
 
 
 PERIOD_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
@@ -895,6 +896,21 @@ class StructurePlanBuilder:
             "opportunity_family_id": family_id,
             "opportunity_cycle": cycle,
         }
+        binding = self._setup_binding(setup_type)
+        event_layer = str(binding.get("event_layer") or binding.get("entry_layer") or "").lower()
+        event_type = str(binding.get("bind_event") or "").lower()
+        source_event = latest_event_for(
+            (structure_snapshot or {}).get("structure_events") or [],
+            layer=event_layer, event_type=event_type,
+        )
+        payload.update({
+            "event_layer": event_layer,
+            "event_type": event_type,
+            "direction_layer": str(binding.get("direction_layer") or "").lower(),
+            "entry_layer": str(binding.get("entry_layer") or event_layer).lower(),
+            "source_event_id": str((source_event or {}).get("event_id") or ""),
+            "source_event": source_event or {},
+        })
         payload["structure_state"] = derive_structure_state(
             snapshot,
             setup_type=setup_type,
@@ -1201,6 +1217,7 @@ class StructurePlanBuilder:
             "internal_events": list(structure.get("internal_events") or [])[-3:],
             "major_events": list(structure.get("major_events") or [])[-3:],
             "external_events": list(structure.get("external_events") or [])[-3:],
+            "structure_events": collect_structure_events(structure, symbol, period),
             "structure_segment_id": structure.get("structure_segment_id") or "",
             "structure_revision": structure.get("structure_revision") or "",
             "active_segment": structure.get("active_segment") or {},
@@ -2208,6 +2225,10 @@ class StructurePlanSignalGenerator:
                 all_plans.extend(self._cache.get(key, []))
                 continue
             result = structure or analyze(symbol, period, rows[-600:], resolved_config)
+            structure_events = collect_structure_events(result, symbol, period)
+            replace_events = getattr(self.repository, "replace_events", None)
+            if replace_events:
+                replace_events(self.user_id, symbol, period, structure_events)
             plans = StructurePlanBuilder(
                 resolved_config, setup_profiles=setup_profiles
             ).build(

@@ -42,7 +42,7 @@
                 <v-card-text>
                   <div v-if="layerPlans(layer).length" class="plan-grid compact-plans">
                     <article v-for="plan in layerPlans(layer)" :key="plan.plan_id">
-                      <div class="card-head"><v-chip size="x-small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ plan.setup_type }}</strong><span>{{ planConsumptionLabel(plan) }}</span></div>
+                      <div class="card-head"><v-chip size="x-small" :color="plan.direction==='buy'?'success':plan.direction==='sell'?'error':'info'" variant="tonal">{{ plan.direction==='buy'?'买入':plan.direction==='sell'?'卖出':'观察' }}</v-chip><strong>{{ planLabel(plan) }}</strong><span>{{ planConsumptionLabel(plan) }}</span></div>
                       <div class="plan-values"><span>入场 {{ formatPlanPrice(plan.entry_price) }}</span><span>止损 {{ formatPlanPrice(plan.stop_loss) }}</span><span>止盈 {{ formatPlanPrice(plan.take_profit) }}</span></div>
                       <p>{{ plan.reason || '结构条件尚未满足' }}</p>
                     </article>
@@ -160,6 +160,14 @@ const layerPlans=layer=>{
 const planStageLabel=plan=>{
   if(String(plan?.status||'')==='event_suppressed') return '暂停触发'
   return String(plan?.status||'')==='active'?'等待价格':'等待确认'
+}
+const layerLabel=value=>({internal:'INTERNAL',swing:'SWING',external:'EXTERNAL'}[String(value||'').toLowerCase()]||String(value||'--').toUpperCase())
+const planEventLabel=value=>({bos:'BOS',choch:'CHOCH',liquidity_sweep:'扫单',retest:'回踩',reclaim:'回收',breakout_confirmed:'突破'}[String(value||'').toLowerCase()]||String(value||'事件'))
+const planLabel=plan=>{
+  const setup=String(plan?.setup_type||'结构计划')
+  const layer=plan?.event_layer||plan?.entry_layer
+  const event=plan?.event_type
+  return layer && event ? `${setup} · ${layerLabel(layer)} ${planEventLabel(event)}` : setup
 }
 const planConsumptionLabel=plan=>{
   const summary=plan?.subscription_summary||{}

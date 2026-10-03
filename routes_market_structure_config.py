@@ -47,7 +47,7 @@ def create_market_structure_config_routes(market_defaults: Dict, plan_defaults: 
         "require_external_alignment",
         "event_risk_enabled",
     }
-    string_keys = {"entry_mode", "bind_pattern", "bind_event", "direction_layer", "entry_layer"}
+    string_keys = {"entry_mode", "bind_pattern", "bind_event", "event_layer", "direction_layer", "entry_layer"}
     inherit_empty_list_keys = {"allowed_setups", "blocked_setups", "allowed_directions", "blocked_hours"}
 
     ratio_keys = set()

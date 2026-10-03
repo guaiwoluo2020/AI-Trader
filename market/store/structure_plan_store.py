@@ -1347,3 +1347,68 @@ class StructureTradePlanRepository:
             (int(user_id), int(account_id), *ids),
         )
         return [int(row["mt5_position_id"]) for row in rows]
+
+    def replace_events(
+        self, user_id: int, symbol: str, period: str, events: List[Dict],
+    ) -> List[Dict]:
+        """Persist the current layer event catalog without touching plans."""
+        now = int(time.time())
+        symbol, period = str(symbol).upper(), str(period).upper()
+        incoming = {str(item.get("event_id") or "") for item in events or [] if item.get("event_id")}
+        if incoming:
+            placeholders = ",".join("?" for _ in incoming)
+            self.storage.execute(
+                f"UPDATE structure_events SET status='superseded',updated_at=? "
+                f"WHERE user_id=? AND symbol=? AND period=? AND status='active' "
+                f"AND event_id NOT IN ({placeholders})",
+                (now, int(user_id), symbol, period, *incoming),
+            )
+        else:
+            self.storage.execute(
+                "UPDATE structure_events SET status='superseded',updated_at=? "
+                "WHERE user_id=? AND symbol=? AND period=? AND status='active'",
+                (now, int(user_id), symbol, period),
+            )
+        for event in events or []:
+            event_id = str(event.get("event_id") or "")
+            if not event_id:
+                continue
+            payload = dict(event)
+            self.storage.execute(
+                "INSERT INTO structure_events(event_id,user_id,symbol,period,layer,event_type,"
+                "direction,level,protected_level,status,confirmed_at,expires_at,payload_json,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(event_id) DO UPDATE SET status=excluded.status,"
+                "level=excluded.level,direction=excluded.direction,confirmed_at=excluded.confirmed_at,"
+                "expires_at=excluded.expires_at,payload_json=excluded.payload_json,updated_at=excluded.updated_at",
+                (
+                    event_id, int(user_id), symbol, period,
+                    str(event.get("layer") or ""), str(event.get("event_type") or event.get("type") or ""),
+                    str(event.get("direction") or ""), float(event.get("level") or 0),
+                    float(event.get("protected_level") or 0), str(event.get("status") or "active"),
+                    int(event.get("confirmed_at") or 0), int(event.get("expires_at") or 0),
+                    json.dumps(payload, ensure_ascii=False), now, now,
+                ),
+            )
+        return self.list_events(user_id, symbol, period)
+
+    def list_events(
+        self, user_id: int, symbol: str, period: str, *, active_only: bool = False,
+    ) -> List[Dict]:
+        conditions = " AND status='active'" if active_only else ""
+        rows = self.storage.fetchall(
+            "SELECT event_id,user_id,symbol,period,layer,event_type,direction,level,"
+            "protected_level,status,confirmed_at,expires_at,payload_json,created_at,updated_at "
+            f"FROM structure_events WHERE user_id=? AND symbol=? AND period=?{conditions} "
+            "ORDER BY confirmed_at ASC, layer ASC",
+            (int(user_id), str(symbol).upper(), str(period).upper()),
+        )
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item.update(json.loads(item.get("payload_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            result.append(item)
+        return result

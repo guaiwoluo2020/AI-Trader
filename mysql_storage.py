@@ -593,6 +593,31 @@ class MySQLStorage:
                 )
                 conn.execute(
                     """
+                CREATE TABLE IF NOT EXISTS structure_events (
+                    event_id VARCHAR(64) NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    symbol VARCHAR(64) NOT NULL,
+                    period VARCHAR(16) NOT NULL,
+                    layer VARCHAR(16) NOT NULL,
+                    event_type VARCHAR(40) NOT NULL,
+                    direction VARCHAR(16) NOT NULL,
+                    level DOUBLE NOT NULL DEFAULT 0,
+                    protected_level DOUBLE NOT NULL DEFAULT 0,
+                    status VARCHAR(24) NOT NULL DEFAULT 'active',
+                    confirmed_at BIGINT NOT NULL DEFAULT 0,
+                    expires_at BIGINT NOT NULL DEFAULT 0,
+                    payload_json LONGTEXT NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (event_id),
+                    KEY idx_structure_events_scope (
+                        user_id, symbol, period, layer, status, confirmed_at
+                    )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                conn.execute(
+                    """
                 CREATE TABLE IF NOT EXISTS market_data_sources (
                     user_id BIGINT NOT NULL,
                     canonical_symbol VARCHAR(64) NOT NULL,
