@@ -144,6 +144,8 @@ def test_event_plan_types_have_explicit_bindings():
         "swing_pullback": "retest",
         "internal_pullback": "retest",
         "internal_momentum": "bos",
+        "swing_range_breakout": "breakout_confirmed",
+        "internal_range_breakout": "breakout_confirmed",
         "event_confirmation": "retest",
         "range_reclaim": "reclaim",
     }
@@ -162,3 +164,5 @@ def test_new_plan_families():
     assert StructurePlanBuilder._setup_family("swing_pullback") == "pullback"
     assert StructurePlanBuilder._setup_family("internal_pullback") == "pullback"
     assert StructurePlanBuilder._setup_family("internal_momentum") == "trend_follow"
+    assert StructurePlanBuilder._setup_family("swing_range_breakout") == "breakout"
+    assert StructurePlanBuilder._setup_family("internal_range_breakout") == "breakout"

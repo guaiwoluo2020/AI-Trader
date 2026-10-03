@@ -150,7 +150,7 @@ class StructurePlanTests(unittest.TestCase):
             "source-1", "BTCUSD", "M5", self.store.rows,
             _range_structure("breakout_confirmed", "up"),
         )
-        self.assertEqual(plans[0]["plan_type"], "range_breakout")
+        self.assertEqual(plans[0]["plan_type"], "swing_range_breakout")
         self.assertIn("swing:bos", plans[0].get("event_chain") or [])
 
     def test_active_range_creates_boundary_retest_plan(self):

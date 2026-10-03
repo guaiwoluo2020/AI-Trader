@@ -91,7 +91,7 @@ class StructureEventDecisionTests(unittest.TestCase):
         self.assertEqual(len(bos), 1)
         decision = decide_event_observations(structure, bos)[0]
         self.assertEqual(decision["status"], "accepted")
-        self.assertEqual(decision["plan_type"], "internal_momentum")
+        self.assertEqual(decision["plan_type"], "internal_range_breakout")
         self.assertEqual(decision["event_layer"], "internal")
 
     def test_failed_range_breakout_is_catalogued_as_reclaim_event(self):

@@ -757,7 +757,7 @@ class StructurePlanBuilder:
         })
         if observation_plan.get("event_chain"):
             payload["event_chain"] = list(observation_plan["event_chain"])
-        if setup_type in {"structure_location_pullback", "range_lower_reversal", "range_upper_reversal", "range_breakout", "triangle_breakout"}:
+        if setup_type in {"structure_location_pullback", "range_lower_reversal", "range_upper_reversal", "range_breakout", "swing_range_breakout", "internal_range_breakout", "triangle_breakout"}:
             reference = str((evidence or {}).get("entry_level_type") or "").upper()
             if reference in {"HL", "LH"}:
                 payload["event_chain"] = [
@@ -884,6 +884,8 @@ class StructurePlanBuilder:
 
     @staticmethod
     def _setup_family(setup_type: str) -> str:
+        if "range_breakout" in setup_type:
+            return "breakout"
         if setup_type.startswith("range_"):
             return "range"
         if "triangle" in setup_type:
@@ -903,7 +905,7 @@ class StructurePlanBuilder:
     @staticmethod
     def _invalidation_rules(setup_type: str) -> List[str]:
         rules = ["same_structure_new_plan"]
-        if setup_type in {"range_breakout", "triangle_breakout", "triangle_breakout_watch"}:
+        if setup_type in {"range_breakout", "swing_range_breakout", "internal_range_breakout", "triangle_breakout", "triangle_breakout_watch"}:
             rules.append("close_return_to_invalid_boundary")
         if "triangle" in setup_type:
             rules.append("triangle_pattern_break")
@@ -1474,7 +1476,7 @@ class StructurePlanSignalGenerator:
                 "swing_pullback", "internal_pullback", "early_reversal",
                 "structure_reversal", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal", "event_confirmation",
                 "range_reclaim", "internal_momentum", "trend_continuation",
-                "range_breakout",
+                "range_breakout", "swing_range_breakout", "internal_range_breakout",
             } or setup_type in {
                 "range_false_breakout", "structure_location_pullback", "choch_reversal",
             }
@@ -1536,7 +1538,7 @@ class StructurePlanSignalGenerator:
             "swing_pullback", "internal_pullback", "early_reversal",
             "structure_reversal", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal", "event_confirmation",
             "range_reclaim", "internal_momentum", "trend_continuation",
-            "range_breakout",
+            "range_breakout", "swing_range_breakout", "internal_range_breakout",
         } or setup_type in {
             "range_false_breakout", "structure_location_pullback", "choch_reversal",
         }
@@ -1809,7 +1811,7 @@ class StructurePlanSignalGenerator:
                     "swing_pullback", "internal_pullback", "early_reversal",
                     "structure_reversal", "liquidity_reversal", "internal_liquidity_reversal", "swing_liquidity_reversal", "event_confirmation",
                     "range_reclaim", "internal_momentum", "trend_continuation",
-                    "range_breakout",
+                    "range_breakout", "swing_range_breakout", "internal_range_breakout",
                 } or setup_type in {
                     "structure_location_pullback", "choch_reversal",
                     "range_false_breakout",

@@ -19,6 +19,16 @@ DEFAULT_BINDINGS: Dict[str, Dict[str, Any]] = {
         "event_layer": "swing", "direction_layer": "swing", "entry_layer": "swing",
         "require_external_alignment": False,
     },
+    "swing_range_breakout": {
+        "bind_pattern": "range", "bind_event": "breakout_confirmed",
+        "event_layer": "swing", "direction_layer": "swing", "entry_layer": "swing",
+        "require_external_alignment": False,
+    },
+    "internal_range_breakout": {
+        "bind_pattern": "range", "bind_event": "breakout_confirmed",
+        "event_layer": "internal", "direction_layer": "internal", "entry_layer": "internal",
+        "require_external_alignment": False,
+    },
     "range_breakout_watch": {
         "bind_pattern": "range", "bind_event": "breakout_confirmed",
         "event_layer": "swing", "direction_layer": "swing", "entry_layer": "swing",

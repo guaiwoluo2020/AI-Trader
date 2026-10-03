@@ -1135,6 +1135,8 @@ function setupLabel(value) {
   return {
     range_reversal: '箱体反转',
     range_breakout: '箱体突破',
+    swing_range_breakout: 'Swing箱体突破',
+    internal_range_breakout: 'Internal箱体突破',
     range_false_breakout: '箱体假突破',
     range_lower_reversal: '箱体下沿反转',
     range_upper_reversal: '箱体上沿反转',

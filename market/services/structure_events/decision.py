@@ -37,6 +37,11 @@ def _layer_pattern(structure: Dict, layer: str) -> str:
         return "triangle"
     if raw in {"range", "box", "rectangle", "sideways"}:
         return "range"
+    try:
+        if float(detail.get("top") or 0) > float(detail.get("bottom") or 0) > 0 and "triangle" not in raw:
+            return "range"
+    except (TypeError, ValueError):
+        pass
     if raw in {"trend", "up", "down", "trend_up", "trend_down"}:
         return "trend"
     major = str((structure or {}).get("major_state") or (structure or {}).get("primary_structure") or "").lower()
@@ -54,9 +59,11 @@ def _plan_for_event(layer: str, event_type: str, pattern: str, rule: Dict) -> st
     default = str(rule.get("plan_type") or "")
     if event_type == "bos":
         if layer == "internal":
+            if pattern == "range":
+                return "internal_range_breakout"
             return "internal_momentum"
         if pattern == "range":
-            return "range_breakout"
+            return "swing_range_breakout"
         if pattern == "triangle":
             return "triangle_breakout"
         return "trend_continuation"
