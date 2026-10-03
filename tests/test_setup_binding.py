@@ -133,3 +133,28 @@ def test_observation_plans_price_hl_pullback():
     assert tradable[0]["plan_type"] == "swing_pullback"
     assert tradable[0]["event_chain"][0].endswith("hl_confirmed")
     assert tradable[0]["observation_plan_id"]
+
+
+def test_event_plan_types_have_explicit_bindings():
+    expected = {
+        "early_reversal": "choch",
+        "liquidity_reversal": "liquidity_sweep",
+        "swing_pullback": "retest",
+        "internal_pullback": "retest",
+        "internal_momentum": "bos",
+        "event_confirmation": "retest",
+        "range_reclaim": "reclaim",
+    }
+    for name, event in expected.items():
+        binding = resolve_binding(name)
+        assert binding["bind_event"] == event, name
+        assert binding["setup_type"] == name
+
+
+def test_new_plan_families():
+    from market.services.signal.structure_plan_signal import StructurePlanBuilder
+    assert StructurePlanBuilder._setup_family("early_reversal") == "reversal"
+    assert StructurePlanBuilder._setup_family("liquidity_reversal") == "liquidity"
+    assert StructurePlanBuilder._setup_family("swing_pullback") == "pullback"
+    assert StructurePlanBuilder._setup_family("internal_pullback") == "pullback"
+    assert StructurePlanBuilder._setup_family("internal_momentum") == "trend_follow"

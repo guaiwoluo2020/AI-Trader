@@ -79,6 +79,41 @@ DEFAULT_BINDINGS: Dict[str, Dict[str, Any]] = {
         "event_layer": "internal", "direction_layer": "swing", "entry_layer": "internal",
         "require_external_alignment": False,
     },
+    "early_reversal": {
+        "bind_pattern": "trend", "bind_event": "choch",
+        "event_layer": "internal", "direction_layer": "internal", "entry_layer": "internal",
+        "require_external_alignment": False,
+    },
+    "liquidity_reversal": {
+        "bind_pattern": "trend", "bind_event": "liquidity_sweep",
+        "event_layer": "internal", "direction_layer": "swing", "entry_layer": "internal",
+        "require_external_alignment": False,
+    },
+    "swing_pullback": {
+        "bind_pattern": "trend", "bind_event": "retest",
+        "event_layer": "swing", "direction_layer": "swing", "entry_layer": "swing",
+        "require_external_alignment": False,
+    },
+    "internal_pullback": {
+        "bind_pattern": "trend", "bind_event": "retest",
+        "event_layer": "internal", "direction_layer": "internal", "entry_layer": "internal",
+        "require_external_alignment": False,
+    },
+    "internal_momentum": {
+        "bind_pattern": "trend", "bind_event": "bos",
+        "event_layer": "internal", "direction_layer": "internal", "entry_layer": "internal",
+        "require_external_alignment": False,
+    },
+    "event_confirmation": {
+        "bind_pattern": "trend", "bind_event": "retest",
+        "event_layer": "internal", "direction_layer": "swing", "entry_layer": "internal",
+        "require_external_alignment": False,
+    },
+    "range_reclaim": {
+        "bind_pattern": "range", "bind_event": "reclaim",
+        "event_layer": "internal", "direction_layer": "swing", "entry_layer": "internal",
+        "require_external_alignment": False,
+    },
 }
 
 

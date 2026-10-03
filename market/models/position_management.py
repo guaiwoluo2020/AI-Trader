@@ -22,7 +22,7 @@ MANAGEMENT_RULE_TYPES = {
 PERIODS = {"M1", "M5", "M15", "H1", "H4"}
 SETUP_FAMILIES = {
     "range", "reversal", "breakout", "trend", "trend_follow",
-    "pullback", "mean_reversion", "factor", "manual", "generic",
+    "pullback", "liquidity", "mean_reversion", "factor", "manual", "generic",
 }
 SIGNAL_SOURCES = {
     "ai_entry", "pivot", "key_level", "moving_average",

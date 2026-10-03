@@ -888,10 +888,14 @@ class StructurePlanBuilder:
             return "range"
         if "triangle" in setup_type:
             return "triangle"
-        if "sweep" in setup_type:
+        if "liquidity" in setup_type or "sweep" in setup_type:
             return "liquidity"
         if "reversal" in setup_type:
             return "reversal"
+        if "pullback" in setup_type:
+            return "pullback"
+        if setup_type == "event_confirmation":
+            return "pullback"
         if setup_type == "no_trade":
             return "observation"
         return "trend_follow"
@@ -905,7 +909,11 @@ class StructurePlanBuilder:
             rules.append("triangle_pattern_break")
         if setup_type.startswith("range_"):
             rules.append("range_structure_break")
-        if setup_type in {"structure_location_pullback", "trend_continuation", "structure_reversal"}:
+        if setup_type in {
+            "structure_location_pullback", "trend_continuation", "structure_reversal",
+            "early_reversal", "swing_pullback", "internal_pullback", "liquidity_reversal",
+            "internal_momentum",
+        }:
             rules.append("protected_level_break")
         return rules
 
@@ -1721,7 +1729,13 @@ class StructurePlanSignalGenerator:
                     blocked_setups = {str(item).strip().lower() for item in (effective.get("blocked_setups") or []) if str(item).strip()}
                     binding = resolve_binding(setup_type, effective)
                     snapshot = plan.get("structure_snapshot") or {}
-                    if snapshot.get("structure_hierarchy") and not binding_matches(snapshot, binding):
+                    event_driven = bool(
+                        plan.get("event_chain")
+                        or plan.get("observation_plan_id")
+                        or plan.get("required_confirmation")
+                    )
+                    if (not event_driven and snapshot.get("structure_hierarchy")
+                            and not binding_matches(snapshot, binding)):
                         continue
                     if (allowed_setups and setup_type not in allowed_setups) or setup_type in blocked_setups or not bool(effective.get("enabled", True)):
                         continue
