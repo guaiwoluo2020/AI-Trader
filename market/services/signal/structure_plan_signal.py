@@ -122,6 +122,9 @@ STRUCTURE_PLAN_DEFAULT_CONFIG = {
     "trend_retest_stop_atr": 4.0,
     "trend_max_stop_atr": 6.0,
     "choch_max_stop_atr": 3.0,
+    "choch_retest_confirmation_bars": 2,
+    "choch_retest_min_body_atr": 0.2,
+    "choch_retest_min_close_extension_atr": 0.05,
     "min_choch_displacement_atr": 0.2,
     "min_trendline_touches": 2,
     # Reversal setups are paused around regular market opens and manually
@@ -2427,6 +2430,50 @@ class StructurePlanSignalGenerator:
         self.repository.update_payload(plan.get("plan_id"), changes)
         return accepted
 
+    def _choch_entry_retest_confirmed(
+        self, plan: Dict, closed_bars: List[Dict], effective_config: Dict,
+    ) -> bool:
+        """Require a CHOCH retest and two directional closes before entry."""
+        if not closed_bars:
+            return False
+        entry = _number(plan.get("entry_price"))
+        direction = str(plan.get("direction") or "")
+        atr = _number((plan.get("structure_snapshot") or {}).get("atr"))
+        if entry <= 0 or atr <= 0 or direction not in {"buy", "sell"}:
+            return False
+        required = max(1, int(effective_config.get(
+            "choch_retest_confirmation_bars", 2
+        )))
+        bar_time = _bar_time(closed_bars[-1])
+        if bar_time <= 0:
+            return False
+        last_bar = int(plan.get("choch_retest_confirmation_bar") or 0)
+        if (bar_time == last_bar and int(plan.get(
+            "choch_retest_confirmation_bars_required") or 0
+        ) == required):
+            return bool(plan.get("choch_retest_confirmed"))
+        accepted, evidence, rejection = location_reclaim_confirmation(
+            closed_bars, entry, direction, atr,
+            min_body_atr=max(0.0, _number(effective_config.get(
+                "choch_retest_min_body_atr", 0.2
+            ))),
+            min_close_extension_atr=max(0.0, _number(effective_config.get(
+                "choch_retest_min_close_extension_atr", 0.05
+            ))),
+            confirmation_bars=required,
+            require_touch=True,
+        )
+        changes = {
+            "choch_retest_confirmation_bar": bar_time,
+            "choch_retest_confirmation_bars_required": required,
+            "choch_retest_confirmed": accepted,
+            "choch_retest_evidence": evidence,
+            "choch_retest_rejection": rejection,
+        }
+        plan.update(changes)
+        self.repository.update_payload(plan.get("plan_id"), changes)
+        return accepted
+
     def _triggered(
         self, plan: Dict, price: float, effective_config: Optional[Dict] = None,
         closed_bar: Optional[Dict | List[Dict]] = None,
@@ -2483,7 +2530,7 @@ class StructurePlanSignalGenerator:
                     self.repository.update_payload(plan.get("plan_id"), {"boundary_state": "left_boundary"})
             return False
         mode = str(plan.get("entry_mode") or "")
-        if mode in {"breakout_retest", "touch_or_near", "trend_pullback_reclaim"}:
+        if mode in {"breakout_retest", "touch_or_near", "trend_pullback_reclaim"} and setup_type != "choch_reversal":
             # Boundary state is progress metadata for the UI/lifecycle, not a
             # one-shot latch. A range plan must keep triggering while price
             # remains inside the entry zone until an account successfully
@@ -2493,7 +2540,7 @@ class StructurePlanSignalGenerator:
                 plan["boundary_state"] = "triggered"
                 self.repository.update_payload(plan.get("plan_id"), {"boundary_state": "triggered"})
             return True
-        if mode != "touch_and_reclaim":
+        if mode not in {"touch_and_reclaim", "breakout_retest"}:
             return False
         plan_id = str(plan.get("plan_id") or "")
         entry = _number(plan.get("entry_price"))
@@ -2542,6 +2589,13 @@ class StructurePlanSignalGenerator:
         if result and setup_type == "structure_location_pullback":
             if not self._location_entry_reclaim_confirmed(
                 plan, closed_bar if isinstance(closed_bar, list) else [closed_bar] if closed_bar else [],
+                effective_config or {},
+            ):
+                return False
+        if result and setup_type == "choch_reversal":
+            if not self._choch_entry_retest_confirmed(
+                plan,
+                closed_bar if isinstance(closed_bar, list) else [closed_bar] if closed_bar else [],
                 effective_config or {},
             ):
                 return False
@@ -2790,10 +2844,16 @@ class StructurePlanSignalGenerator:
                         waiting.append(plan)
                     continue
                 closed_bar = None
-                if setup_type == "structure_location_pullback":
+                if setup_type in {"structure_location_pullback", "choch_reversal"}:
+                    confirmation_key = (
+                        "location_reclaim_confirmation_bars"
+                        if setup_type == "structure_location_pullback"
+                        else "choch_retest_confirmation_bars"
+                    )
+                    confirmation_default = 3 if setup_type == "structure_location_pullback" else 2
                     closed_bar = self._latest_closed_bars(
                         symbol, period, max(1, int(effective_config.get(
-                            "location_reclaim_confirmation_bars", 3
+                            confirmation_key, confirmation_default
                         ))),
                     )
                 elif setup_type == "range_false_breakout":
