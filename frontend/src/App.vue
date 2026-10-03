@@ -98,7 +98,7 @@ export default {
         icon: 'mdi-flask-outline',
         items: [
           { title: '策略配置', path: '/strategy-settings', icon: 'mdi-tune-variant' },
-          { title: '持仓管理方案', path: '/position-management', icon: 'mdi-shield-crown-outline' },
+          { title: '持仓管理方案', path: '/position-management', icon: 'mdi-shield-check-outline' },
           { title: 'AI 信号源', path: '/ai-signal-sources', icon: 'mdi-access-point' },
           { title: '回测数据集', path: '/backtest-datasets', icon: 'mdi-database-clock-outline' },
           { title: 'Alpha 研究', path: '/alpha-research', icon: 'mdi-atom-variant' },
