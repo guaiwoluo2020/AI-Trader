@@ -37,7 +37,7 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
         rows = storage.fetchall("""SELECT symbol, strategy_id, mt5_position_id, SUM(profit+swap+commission) AS profit,
             MAX(deal_timestamp) AS closed_at, MAX(position_attribution_json) AS attribution
             FROM live_trade_deals WHERE user_id=? AND account_id=? AND deal_timestamp>=? AND deal_timestamp<?
-            GROUP BY mt5_position_id, symbol""", (int(user_id), int(account_id), start, end))
+            GROUP BY mt5_position_id, symbol, strategy_id""", (int(user_id), int(account_id), start, end))
     buckets = {}
     for row in rows or []:
         try: attr = json.loads(row.get("attribution") or "{}")
