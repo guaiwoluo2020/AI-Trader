@@ -32,7 +32,7 @@ def build_daily_pnl_statistics(storage, user_id, account_id, day):
             MAX(t.closed_at) AS closed_at, p.position_attribution_json AS attribution
             FROM paper_trades t JOIN paper_positions p ON p.position_id=t.position_id
             WHERE t.user_id=? AND t.account_id=? AND t.closed_at>=? AND t.closed_at<?
-            GROUP BY p.position_id, p.symbol, p.position_attribution_json""", (int(user_id), int(account_id), start, end))
+            GROUP BY p.position_id, p.symbol, t.strategy_id, p.position_attribution_json""", (int(user_id), int(account_id), start, end))
     else:
         rows = storage.fetchall("""SELECT symbol, strategy_id, mt5_position_id, SUM(profit+swap+commission) AS profit,
             MAX(deal_timestamp) AS closed_at, MAX(position_attribution_json) AS attribution
